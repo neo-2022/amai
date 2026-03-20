@@ -1,23 +1,56 @@
+[auto_detection]
+fallback_client = "vscode"
+
 [clients.vscode]
+display_name = "VS Code"
 default_output = "${repo_root}/.vscode/mcp.json"
 install_scope = "workspace_local"
+priority = 100
+detect_env_vars = ["VSCODE_IPC_HOOK_CLI"]
+detect_workspace_markers = [".vscode"]
+detect_home_markers = [".config/Code", ".config/Code/User"]
 
 [clients.cursor]
+display_name = "Cursor"
 default_output = "${home}/.cursor/mcp.json"
 install_scope = "user_global"
+priority = 90
+detect_env_vars = ["CURSOR_TRACE_ID"]
+detect_workspace_markers = [".cursor"]
+detect_home_markers = [".cursor"]
 
 [clients.claude-code]
+display_name = "Claude Code"
 default_output = "${repo_root}/.mcp.json"
 install_scope = "workspace_local"
+priority = 70
+detect_env_vars = ["CLAUDECODE"]
+detect_workspace_markers = [".mcp.json"]
+detect_home_markers = []
 
 [clients.codex]
+display_name = "Codex"
 default_output = "${home}/.codex/config.toml"
 install_scope = "user_global"
+priority = 80
+detect_env_vars = ["CODEX_HOME"]
+detect_workspace_markers = []
+detect_home_markers = [".codex", ".codex/config.toml"]
 
 [clients.claude-desktop]
+display_name = "Claude Desktop"
 default_output = "${repo_root}/tmp/onboarding/claude-desktop-mcp.json"
 install_scope = "manual_generated"
+priority = 20
+detect_env_vars = []
+detect_workspace_markers = []
+detect_home_markers = []
 
 [clients.generic]
+display_name = "Generic"
 default_output = "${repo_root}/tmp/onboarding/generic-mcp.json"
 install_scope = "manual_generated"
+priority = 10
+detect_env_vars = []
+detect_workspace_markers = []
+detect_home_markers = []

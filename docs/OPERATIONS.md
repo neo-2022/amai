@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 21:04 MSK
-Ручная сверка guide/docs: 2026-03-20 21:04 MSK
+modified_at: 2026-03-20 21:06 MSK
+Ручная сверка guide/docs: 2026-03-20 21:06 MSK
 
 # Operations
 
@@ -14,6 +14,7 @@ modified_at: 2026-03-20 21:04 MSK
 
 ```bash
 cd /home/art/agent-memory-index
+./scripts/install_amai.sh
 ./scripts/onboard_local.sh --client vscode
 ```
 
@@ -23,6 +24,11 @@ cd /home/art/agent-memory-index
 - materialize-ит bootstrap;
 - собирает release binary;
 - пишет готовый MCP config для клиента.
+
+`install_amai.sh` делает ещё один шаг поверх этого:
+- по умолчанию использует `client = auto`;
+- пытается определить, какой клиент наиболее вероятен;
+- работает как более человеческое имя для product install path.
 
 Если нужен cheap remote/smoke contour под слабый VPS:
 
@@ -35,6 +41,13 @@ cd /home/art/agent-memory-index
 - использует `stack_profile = lite_vps`;
 - сначала делает Rust preflight;
 - потом поднимает тот же baseline stack, но честно объясняет, что это не профиль для рекордных benchmark-цифр.
+
+Симметричное удаление:
+
+```bash
+./scripts/remove_amai.sh
+./scripts/remove_amai.sh --client codex
+```
 
 Если `Amai` уже живёт на удалённом Linux/VPS-host, а локально нужен только клиентский config:
 
@@ -301,6 +314,7 @@ cargo run -- mcp config --client vscode --cwd /path/to/art-memory-agent-index
 Proof:
 
 ```bash
+./scripts/proof_install_auto.sh
 ./scripts/proof_onboarding.sh
 ./scripts/proof_remote_onboarding.sh
 ./scripts/proof_client_lifecycle.sh

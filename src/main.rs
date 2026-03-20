@@ -49,7 +49,9 @@ async fn main() -> Result<()> {
                     std::env::current_dir().map_err(|error| anyhow::anyhow!(error.to_string()))?;
                 profiles::print_preflight(&cwd, &args.stack_profile)?;
             }
+            BootstrapCommand::Install(args) => onboarding::run(&args).await?,
             BootstrapCommand::Onboarding(args) => onboarding::run(&args).await?,
+            BootstrapCommand::Remove(args) => onboarding::disconnect(&args).await?,
             BootstrapCommand::Disconnect(args) => onboarding::disconnect(&args).await?,
         },
         Command::Compat { command } => match command {

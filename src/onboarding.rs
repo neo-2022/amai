@@ -4,6 +4,7 @@ use crate::profiles;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -13,6 +14,7 @@ use tokio::process::Command;
 pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     let repo_root = discover_repo_root(args.cwd.as_deref())?;
     let remote_mode = args.ssh_destination.is_some();
+    let client_resolution = resolve_client_target(&repo_root, &args.client)?;
 
     if !remote_mode {
         profiles::print_preflight(&repo_root, &args.stack_profile)?;
@@ -44,12 +46,12 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         }
     }
 
-    let target = load_client_target(&repo_root, &args.client)?;
+    let target = client_resolution.target.clone();
     let output = resolve_output_path(&repo_root, &target, args.output.as_ref())?;
     let backup = maybe_backup_user_global(&output, &target.install_scope)?;
 
     let config_args = McpConfigArgs {
-        client: args.client.clone(),
+        client: client_resolution.client_key.clone(),
         server_name: "amai".to_string(),
         launcher_platform: args.launcher_platform.clone(),
         ssh_destination: args.ssh_destination.clone(),
@@ -82,7 +84,17 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         println!("launcher_mode: local");
         println!("env_file: {}", repo_root.join(".env").display());
     }
-    println!("client: {}", args.client);
+    println!("client: {}", client_resolution.client_key);
+    println!("client_display_name: {}", target.display_name);
+    println!(
+        "client_resolution_mode: {}",
+        if client_resolution.auto_selected {
+            "auto_detected"
+        } else {
+            "explicit"
+        }
+    );
+    println!("client_detection_reason: {}", client_resolution.reason);
     println!("stack_profile: {}", args.stack_profile);
     println!("client_config: {}", output.display());
     println!(
@@ -107,13 +119,14 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
 
 pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
     let repo_root = discover_repo_root(args.cwd.as_deref())?;
-    let target = load_client_target(&repo_root, &args.client)?;
+    let client_resolution = resolve_client_target(&repo_root, &args.client)?;
+    let target = client_resolution.target.clone();
     let output = resolve_output_path(&repo_root, &target, args.output.as_ref())?;
     let backup = maybe_backup_user_global(&output, &target.install_scope)?;
 
     let result = mcp::remove_client_config(
         &McpConfigArgs {
-            client: args.client.clone(),
+            client: client_resolution.client_key.clone(),
             server_name: "amai".to_string(),
             launcher_platform: "auto".to_string(),
             ssh_destination: None,
@@ -126,7 +139,17 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
     )?;
 
     println!("disconnect completed");
-    println!("client: {}", args.client);
+    println!("client: {}", client_resolution.client_key);
+    println!("client_display_name: {}", target.display_name);
+    println!(
+        "client_resolution_mode: {}",
+        if client_resolution.auto_selected {
+            "auto_detected"
+        } else {
+            "explicit"
+        }
+    );
+    println!("client_detection_reason: {}", client_resolution.reason);
     println!("client_config: {}", output.display());
     println!("server_removed: {}", result.removed);
     println!("file_purged: {}", result.purged_file);
@@ -279,26 +302,101 @@ async fn run_command(label: &str, mut command: Command) -> Result<()> {
 
 #[derive(Debug, Deserialize)]
 struct ClientTargetsManifest {
+    auto_detection: AutoDetectionConfig,
     clients: BTreeMap<String, ClientTarget>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ClientTarget {
-    default_output: String,
-    install_scope: String,
+struct AutoDetectionConfig {
+    fallback_client: String,
 }
 
-fn load_client_target(repo_root: &Path, client: &str) -> Result<ClientTarget> {
+#[derive(Debug, Clone, Deserialize)]
+struct ClientTarget {
+    display_name: String,
+    default_output: String,
+    install_scope: String,
+    priority: i64,
+    detect_env_vars: Vec<String>,
+    detect_workspace_markers: Vec<String>,
+    detect_home_markers: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ClientResolution {
+    client_key: String,
+    target: ClientTarget,
+    auto_selected: bool,
+    reason: String,
+}
+
+fn load_client_targets_manifest(repo_root: &Path) -> Result<ClientTargetsManifest> {
     let manifest_path = repo_root.join("config/client_targets.toml");
     let content = fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let manifest: ClientTargetsManifest =
-        toml::from_str(&content).context("failed to parse config/client_targets.toml")?;
-    let client_key = client.trim().to_ascii_lowercase();
-    manifest.clients.get(&client_key).cloned().ok_or_else(|| {
+    toml::from_str(&content).context("failed to parse config/client_targets.toml")
+}
+
+fn resolve_client_target(repo_root: &Path, requested_client: &str) -> Result<ClientResolution> {
+    let manifest = load_client_targets_manifest(repo_root)?;
+    let requested_key = requested_client.trim().to_ascii_lowercase();
+    if requested_key != "auto" {
+        let target = manifest
+            .clients
+            .get(&requested_key)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "unsupported onboarding client target: {requested_key}; register it in config/client_targets.toml"
+                )
+            })?;
+        return Ok(ClientResolution {
+            client_key: requested_key,
+            target,
+            auto_selected: false,
+            reason: "explicit_client".to_string(),
+        });
+    }
+
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("failed to resolve user home directory"))?;
+    let mut best: Option<(String, ClientTarget, i64, String)> = None;
+    for (client_key, target) in &manifest.clients {
+        if let Some(score) = detection_score(repo_root, &home, target) {
+            let reason = detection_reason(repo_root, &home, target)
+                .unwrap_or_else(|| "auto_detected".to_string());
+            match &best {
+                Some((_, _, best_score, _)) if score <= *best_score => {}
+                _ => {
+                    best = Some((client_key.clone(), target.clone(), score, reason));
+                }
+            }
+        }
+    }
+
+    if let Some((client_key, target, _, reason)) = best {
+        return Ok(ClientResolution {
+            client_key,
+            target,
+            auto_selected: true,
+            reason,
+        });
+    }
+
+    let fallback_key = manifest
+        .auto_detection
+        .fallback_client
+        .trim()
+        .to_ascii_lowercase();
+    let target = manifest.clients.get(&fallback_key).cloned().ok_or_else(|| {
         anyhow!(
-            "unsupported onboarding client target: {client_key}; register it in config/client_targets.toml"
+            "fallback onboarding client target is missing from config/client_targets.toml: {fallback_key}"
         )
+    })?;
+    Ok(ClientResolution {
+        client_key: fallback_key,
+        target,
+        auto_selected: true,
+        reason: "fallback_client".to_string(),
     })
 }
 
@@ -341,6 +439,60 @@ fn install_scope_status(scope: &str) -> &'static str {
     }
 }
 
+fn detection_score(repo_root: &Path, home: &Path, target: &ClientTarget) -> Option<i64> {
+    let mut score = 0_i64;
+    if target
+        .detect_env_vars
+        .iter()
+        .any(|key| env::var_os(key).is_some())
+    {
+        score += 1000;
+    }
+    if target
+        .detect_workspace_markers
+        .iter()
+        .any(|marker| repo_root.join(marker).exists())
+    {
+        score += 100;
+    }
+    if target
+        .detect_home_markers
+        .iter()
+        .any(|marker| home.join(marker).exists())
+    {
+        score += 10;
+    }
+    if score == 0 {
+        return None;
+    }
+    Some(score + target.priority)
+}
+
+fn detection_reason(repo_root: &Path, home: &Path, target: &ClientTarget) -> Option<String> {
+    if let Some(env_key) = target
+        .detect_env_vars
+        .iter()
+        .find(|key| env::var_os(key).is_some())
+    {
+        return Some(format!("env_var:{env_key}"));
+    }
+    if let Some(marker) = target
+        .detect_workspace_markers
+        .iter()
+        .find(|marker| repo_root.join(marker).exists())
+    {
+        return Some(format!("workspace_marker:{marker}"));
+    }
+    if let Some(marker) = target
+        .detect_home_markers
+        .iter()
+        .find(|marker| home.join(marker).exists())
+    {
+        return Some(format!("home_marker:{marker}"));
+    }
+    None
+}
+
 fn maybe_backup_user_global(path: &Path, install_scope: &str) -> Result<Option<PathBuf>> {
     if install_scope != "user_global" || !path.is_file() {
         return Ok(None);
@@ -367,10 +519,10 @@ fn maybe_backup_user_global(path: &Path, install_scope: &str) -> Result<Option<P
 #[cfg(test)]
 mod tests {
     use super::{
-        env_keys, expand_target_template, install_scope_status, load_client_target,
-        resolve_output_path,
+        detection_score, env_keys, expand_target_template, install_scope_status,
+        resolve_client_target, resolve_output_path,
     };
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn env_keys_ignore_comments_and_blanks() {
@@ -390,8 +542,11 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
     #[test]
     fn load_client_targets_manifest() {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let target = load_client_target(repo, "vscode").expect("vscode target must exist");
+        let target = resolve_client_target(repo, "vscode")
+            .expect("vscode target must exist")
+            .target;
         assert_eq!(target.install_scope, "workspace_local");
+        assert_eq!(target.display_name, "VS Code");
     }
 
     #[test]
@@ -424,11 +579,36 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
     #[test]
     fn resolve_output_path_prefers_explicit_path() {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let target = load_client_target(repo, "vscode").unwrap();
+        let target = resolve_client_target(repo, "vscode").unwrap().target;
         let explicit = repo.join("custom/mcp.json");
         assert_eq!(
             resolve_output_path(repo, &target, Some(&explicit)).unwrap(),
             explicit
         );
+    }
+
+    #[test]
+    fn resolve_client_target_auto_prefers_workspace_marker() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let resolution = resolve_client_target(repo, "auto").unwrap();
+        assert_eq!(resolution.client_key, "vscode");
+        assert!(resolution.auto_selected);
+        assert!(resolution.reason.starts_with("workspace_marker:"));
+    }
+
+    #[test]
+    fn detection_score_requires_some_signal() {
+        let target = super::ClientTarget {
+            display_name: "Example".to_string(),
+            default_output: "${repo_root}/tmp/example.json".to_string(),
+            install_scope: "workspace_local".to_string(),
+            priority: 50,
+            detect_env_vars: Vec::new(),
+            detect_workspace_markers: vec!["missing-marker".to_string()],
+            detect_home_markers: Vec::new(),
+        };
+        let repo = PathBuf::from("/tmp/amai-nonexistent");
+        let home = PathBuf::from("/tmp/amai-home-nonexistent");
+        assert!(detection_score(&repo, &home, &target).is_none());
     }
 }

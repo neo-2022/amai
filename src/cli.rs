@@ -61,7 +61,9 @@ pub enum Command {
 pub enum BootstrapCommand {
     Stack(BootstrapStackArgs),
     Preflight(BootstrapPreflightArgs),
+    Install(BootstrapOnboardingArgs),
     Onboarding(BootstrapOnboardingArgs),
+    Remove(BootstrapDisconnectArgs),
     Disconnect(BootstrapDisconnectArgs),
 }
 
@@ -412,7 +414,7 @@ pub struct McpConfigArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct BootstrapOnboardingArgs {
-    #[arg(long, default_value = "vscode")]
+    #[arg(long, default_value = "auto")]
     pub client: String,
     #[arg(long, default_value = "default")]
     pub stack_profile: String,
@@ -434,7 +436,7 @@ pub struct BootstrapOnboardingArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct BootstrapDisconnectArgs {
-    #[arg(long, default_value = "vscode")]
+    #[arg(long, default_value = "auto")]
     pub client: String,
     #[arg(long)]
     pub output: Option<PathBuf>,

@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 21:04 MSK
-Ручная сверка guide/docs: 2026-03-20 21:04 MSK
+modified_at: 2026-03-20 21:06 MSK
+Ручная сверка guide/docs: 2026-03-20 21:06 MSK
 
 # Tests
 
@@ -18,6 +18,7 @@ modified_at: 2026-03-20 21:04 MSK
 ./scripts/proof_load.sh
 ./scripts/proof_stress_scale.sh
 ./scripts/proof_profiles.sh
+./scripts/proof_install_auto.sh
 ./scripts/proof_token_benchmark.sh
 ./scripts/proof_token_benchmark_suite.sh
 ./scripts/proof_observability.sh

@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 21:04 MSK
-Ручная сверка guide/docs: 2026-03-20 21:04 MSK
+modified_at: 2026-03-20 21:06 MSK
+Ручная сверка guide/docs: 2026-03-20 21:06 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -183,7 +183,23 @@ Brand-pack проекта теперь хранится прямо в repo:
 
 ```bash
 cd /home/art/agent-memory-index
+./scripts/install_amai.sh
 ./scripts/onboard_local.sh --client vscode
+```
+
+Самый короткий product path теперь такой:
+- `./scripts/install_amai.sh`
+  - `Amai` сам пытается определить подходящий клиент;
+  - потом делает install path под него.
+- `./scripts/remove_amai.sh`
+  - симметрично убирает `Amai` из client config.
+
+Если auto-detect выбрал не тот клиент, всегда можно указать явно:
+
+```bash
+./scripts/install_amai.sh --client vscode
+./scripts/install_amai.sh --client cursor
+./scripts/remove_amai.sh --client codex
 ```
 
 Если нужен дешёвый удалённый smoke/demo режим на маленьком VPS, используйте явный профиль:
@@ -257,6 +273,29 @@ cargo run -- bootstrap preflight --stack-profile lite_vps
 
 То есть обычному человеку не нужно гадать, “потянет или нет”.
 `Amai` сам объясняет это понятным текстом.
+
+## Как теперь выглядит путь для обычного человека
+
+Самый простой сценарий теперь такой:
+
+1. скачать `Amai`
+2. перейти в каталог проекта
+3. выполнить:
+
+```bash
+./scripts/install_amai.sh
+```
+
+Что происходит дальше:
+- `Amai` пытается понять, какой клиент у вас наиболее вероятен;
+- проверяет, подходит ли машина под выбранный deployment profile;
+- если это локальный path, дособирает `.env`, stack и client config;
+- если всё в порядке, остаётся только перезагрузить окно IDE.
+
+То есть путь уже ближе не к “инженер собери всё руками”, а к:
+- “скачал”
+- “запустил одну команду”
+- “перезагрузил клиент”
 
 Если нужен не Linux-style runner, а другой launcher target:
 - `Amai` теперь умеет генерировать MCP config с учётом платформы launcher'а;

@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 21:04 MSK
-Ручная сверка guide/docs: 2026-03-20 21:04 MSK
+modified_at: 2026-03-20 21:06 MSK
+Ручная сверка guide/docs: 2026-03-20 21:06 MSK
 
 # MCP Integration
 
@@ -28,7 +28,23 @@ modified_at: 2026-03-20 21:04 MSK
 Для `VS Code` путь теперь максимально короткий:
 
 ```bash
+./scripts/install_amai.sh
 ./scripts/onboard_local.sh --client vscode
+```
+
+Самый человеческий путь теперь:
+- `./scripts/install_amai.sh`
+  - пытается сам определить подходящий клиент;
+  - дальше делает install path под него.
+- `./scripts/remove_amai.sh`
+  - убирает `Amai` обратно.
+
+Если auto-detect промахнулся, всегда можно явно указать клиента:
+
+```bash
+./scripts/install_amai.sh --client vscode
+./scripts/install_amai.sh --client cursor
+./scripts/remove_amai.sh --client codex
 ```
 
 Если клиент должен работать через дешёвый удалённый VPS, появился отдельный короткий путь:
@@ -233,4 +249,10 @@ cargo build --release
 
 ```bash
 ./scripts/proof_profiles.sh
+```
+
+Для короткого auto-install path:
+
+```bash
+./scripts/proof_install_auto.sh
 ```
