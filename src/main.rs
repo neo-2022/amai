@@ -2,6 +2,7 @@ mod bootstrap;
 mod cli;
 mod compatibility;
 mod config;
+mod deployment;
 mod edge_cache;
 mod indexer;
 mod language;
@@ -22,8 +23,8 @@ mod warmup;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    BootstrapCommand, Cli, Command, CompatCommand, ContextCommand, IndexCommand, McpCommand,
-    NamespaceCommand, ObserveCommand, ProjectCommand, RelationCommand, VerifyCommand,
+    BootstrapCommand, Cli, Command, CompatCommand, ContextCommand, DeploymentCommand, IndexCommand,
+    McpCommand, NamespaceCommand, ObserveCommand, ProjectCommand, RelationCommand, VerifyCommand,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -39,6 +40,18 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Deployment { command } => {
+            let repo_root = config::discover_repo_root(None)?;
+            match command {
+                DeploymentCommand::List => deployment::print_targets(&repo_root)?,
+                DeploymentCommand::Explain(args) => {
+                    deployment::print_target_explainer(&repo_root, &args.target)?
+                }
+                DeploymentCommand::Preflight(args) => {
+                    deployment::print_target_preflight(&repo_root, &args.target)?
+                }
+            }
+        }
         Command::Bootstrap { command } => match command {
             BootstrapCommand::Stack(_args) => {
                 let cfg = config::AppConfig::from_env()?;

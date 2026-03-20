@@ -14,6 +14,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Deployment {
+        #[command(subcommand)]
+        command: DeploymentCommand,
+    },
     Bootstrap {
         #[command(subcommand)]
         command: BootstrapCommand,
@@ -55,6 +59,13 @@ pub enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DeploymentCommand {
+    List,
+    Explain(DeploymentTargetArgs),
+    Preflight(DeploymentTargetArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -122,6 +133,12 @@ pub enum ObserveCommand {
 pub enum McpCommand {
     Serve,
     Config(McpConfigArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DeploymentTargetArgs {
+    #[arg(long)]
+    pub target: String,
 }
 
 #[derive(Debug, Args)]

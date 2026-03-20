@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 23:59 MSK
-Ручная сверка guide/docs: 2026-03-20 23:59 MSK
+modified_at: 2026-03-21 00:09 MSK
+Ручная сверка guide/docs: 2026-03-21 00:09 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -299,6 +299,41 @@ scripts\install_amai.cmd --client codex
 - клиент запускает удалённый `Amai` через `ssh`;
 - наружу не нужно выставлять `PostgreSQL`, `Qdrant`, `NATS` и `S3`.
 
+## Способы развёртывания
+
+Если не хотите гадать, какой deployment path вообще существует у `Amai`, используйте:
+
+```bash
+./scripts/deployment_targets.sh
+```
+
+Эта команда покажет канонические режимы простыми словами.
+
+Сейчас логика такая:
+- `local_docker`
+  - главный режим прямо сейчас;
+  - именно он считается обычным baseline для локальной машины или одного Linux-хоста;
+- `remote_ssh`
+  - уже готовый путь, когда `Amai` живёт на Linux/VPS, а клиент работает удалённо;
+- `kubernetes_server`
+  - не обязательный путь для обычного пользователя;
+  - это следующий server/team deployment layer;
+- `windows_vm_lab`
+  - не “ещё один install path”;
+  - это отдельный контур для честной проверки Windows-пути через виртуальную машину.
+
+Если хотите разобрать конкретный режим подробнее:
+
+```bash
+cargo run -- deployment explain --target kubernetes_server
+```
+
+Если хотите проверить, готова ли именно эта машина к конкретному режиму:
+
+```bash
+./scripts/deployment_preflight.sh --target windows_vm_lab
+```
+
 ## Два режима установки
 
 У `Amai` сейчас есть два понятных профиля.
@@ -553,6 +588,8 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
   - [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)
 - инженерный lifecycle:
   - [docs/OPERATIONS.md](docs/OPERATIONS.md)
+- deployment-режимы простым языком:
+  - [docs/DEPLOYMENT_TARGETS.md](docs/DEPLOYMENT_TARGETS.md)
 - архитектурная глубина:
   - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - branding:
