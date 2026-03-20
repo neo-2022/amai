@@ -25,53 +25,126 @@ pub async fn run_benchmark(
     }
 
     let mut samples_ms = Vec::with_capacity(args.iterations);
+    let mut resolve_scope_samples = Vec::with_capacity(args.iterations);
+    let mut cache_lookup_samples = Vec::with_capacity(args.iterations);
+    let mut exact_lookup_samples = Vec::with_capacity(args.iterations);
+    let mut symbol_lookup_samples = Vec::with_capacity(args.iterations);
+    let mut lexical_lookup_samples = Vec::with_capacity(args.iterations);
+    let mut query_embed_samples = Vec::with_capacity(args.iterations);
+    let mut semantic_search_samples = Vec::with_capacity(args.iterations);
+    let mut semantic_hydrate_samples = Vec::with_capacity(args.iterations);
+    let mut serialize_samples = Vec::with_capacity(args.iterations);
+    let mut persist_samples = Vec::with_capacity(args.iterations);
     let mut last_stats = None;
     for _ in 0..args.iterations {
         let started = Instant::now();
         let stats = retrieval::execute_context_pack(cfg, db, &args.context, args.persist).await?;
         samples_ms.push(started.elapsed().as_millis());
+        resolve_scope_samples.push(stats.timings.resolve_scope_ms);
+        cache_lookup_samples.push(stats.timings.cache_lookup_ms);
+        exact_lookup_samples.push(stats.timings.exact_lookup_ms);
+        symbol_lookup_samples.push(stats.timings.symbol_lookup_ms);
+        lexical_lookup_samples.push(stats.timings.lexical_lookup_ms);
+        query_embed_samples.push(stats.timings.query_embed_ms);
+        semantic_search_samples.push(stats.timings.semantic_search_ms);
+        semantic_hydrate_samples.push(stats.timings.semantic_hydrate_ms);
+        serialize_samples.push(stats.timings.serialize_ms);
+        persist_samples.push(stats.timings.persist_ms);
         last_stats = Some(stats);
     }
 
     let last_stats = last_stats.ok_or_else(|| anyhow!("benchmark produced no samples"))?;
     let mut sorted = samples_ms.clone();
     sorted.sort_unstable();
+    let resolve_scope_p95_ms = sort_and_percentile(resolve_scope_samples, 95);
+    let cache_lookup_p95_ms = sort_and_percentile(cache_lookup_samples, 95);
+    let exact_lookup_p95_ms = sort_and_percentile(exact_lookup_samples, 95);
+    let symbol_lookup_p95_ms = sort_and_percentile(symbol_lookup_samples, 95);
+    let lexical_lookup_p95_ms = sort_and_percentile(lexical_lookup_samples, 95);
+    let query_embed_p95_ms = sort_and_percentile(query_embed_samples, 95);
+    let semantic_search_p95_ms = sort_and_percentile(semantic_search_samples, 95);
+    let semantic_hydrate_p95_ms = sort_and_percentile(semantic_hydrate_samples, 95);
+    let serialize_p95_ms = sort_and_percentile(serialize_samples, 95);
+    let persist_p95_ms = sort_and_percentile(persist_samples, 95);
 
     let mean_ms = samples_ms.iter().sum::<u128>() as f64 / samples_ms.len() as f64;
     let p50_ms = percentile_ms(&sorted, 50);
     let p95_ms = percentile_ms(&sorted, 95);
+    let p99_ms = percentile_ms(&sorted, 99);
     let max_ms = *sorted
         .last()
         .ok_or_else(|| anyhow!("benchmark sample set is unexpectedly empty"))?;
+    let total_elapsed_ms = samples_ms.iter().sum::<u128>();
+    let qps = if total_elapsed_ms == 0 {
+        args.iterations as f64 * 1000.0
+    } else {
+        args.iterations as f64 * 1000.0 / total_elapsed_ms as f64
+    };
 
-    enforce_benchmark_thresholds(args, mean_ms, p95_ms, max_ms)?;
+    enforce_benchmark_thresholds(args, mean_ms, p95_ms, p99_ms, max_ms)?;
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "benchmark": {
-                "project": args.context.project,
-                "namespace": args.context.namespace,
-                "query": args.context.query,
-                "retrieval_mode": args.context.retrieval_mode,
-                "persist": args.persist,
-                "warmup": args.warmup,
-                "iterations": args.iterations,
-                "samples_ms": samples_ms,
-                "mean_ms": mean_ms,
-                "p50_ms": p50_ms,
-                "p95_ms": p95_ms,
-                "max_ms": max_ms,
+    let payload = json!({
+        "benchmark": {
+            "project": args.context.project,
+            "namespace": args.context.namespace,
+            "query": args.context.query,
+            "retrieval_mode": args.context.retrieval_mode,
+            "disable_cache": args.context.disable_cache,
+            "persist": args.persist,
+            "warmup": args.warmup,
+            "iterations": args.iterations,
+            "samples_ms": samples_ms,
+            "mean_ms": mean_ms,
+            "p50_ms": p50_ms,
+            "p95_ms": p95_ms,
+            "p99_ms": p99_ms,
+            "max_ms": max_ms,
+            "qps": qps,
+        },
+        "retrieval_counts": {
+            "exact_documents": last_stats.exact_documents,
+            "symbol_hits": last_stats.symbol_hits,
+            "lexical_chunks": last_stats.lexical_chunks,
+            "semantic_chunks": last_stats.semantic_chunks,
+        },
+        "retrieval_runtime": {
+            "cache_hit": last_stats.cache_hit,
+            "scope_signature": last_stats.scope_signature,
+            "last_stage_timings_ms": {
+                "resolve_scope_ms": last_stats.timings.resolve_scope_ms,
+                "cache_lookup_ms": last_stats.timings.cache_lookup_ms,
+                "exact_lookup_ms": last_stats.timings.exact_lookup_ms,
+                "symbol_lookup_ms": last_stats.timings.symbol_lookup_ms,
+                "lexical_lookup_ms": last_stats.timings.lexical_lookup_ms,
+                "query_embed_ms": last_stats.timings.query_embed_ms,
+                "semantic_search_ms": last_stats.timings.semantic_search_ms,
+                "semantic_hydrate_ms": last_stats.timings.semantic_hydrate_ms,
+                "serialize_ms": last_stats.timings.serialize_ms,
+                "persist_ms": last_stats.timings.persist_ms,
             },
-            "retrieval_counts": {
-                "exact_documents": last_stats.exact_documents,
-                "symbol_hits": last_stats.symbol_hits,
-                "lexical_chunks": last_stats.lexical_chunks,
-                "semantic_chunks": last_stats.semantic_chunks,
-            },
-            "context_pack_id": last_stats.context_pack_id,
-        }))?
-    );
+            "stage_p95_ms": {
+                "resolve_scope_ms": resolve_scope_p95_ms,
+                "cache_lookup_ms": cache_lookup_p95_ms,
+                "exact_lookup_ms": exact_lookup_p95_ms,
+                "symbol_lookup_ms": symbol_lookup_p95_ms,
+                "lexical_lookup_ms": lexical_lookup_p95_ms,
+                "query_embed_ms": query_embed_p95_ms,
+                "semantic_search_ms": semantic_search_p95_ms,
+                "semantic_hydrate_ms": semantic_hydrate_p95_ms,
+                "serialize_ms": serialize_p95_ms,
+                "persist_ms": persist_p95_ms,
+            }
+        },
+        "context_pack_id": last_stats.context_pack_id,
+    });
+
+    let snapshot_kind = if args.context.disable_cache {
+        "retrieval_benchmark_cold"
+    } else {
+        "retrieval_benchmark_hot"
+    };
+    let _ = postgres::insert_observability_snapshot(db, snapshot_kind, &payload).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
 
     Ok(())
 }
@@ -205,10 +278,16 @@ fn percentile_ms(sorted_samples: &[u128], percentile: usize) -> u128 {
     sorted_samples[index]
 }
 
+fn sort_and_percentile(mut samples: Vec<u128>, percentile: usize) -> u128 {
+    samples.sort_unstable();
+    percentile_ms(&samples, percentile)
+}
+
 fn enforce_benchmark_thresholds(
     args: &VerifyBenchmarkArgs,
     mean_ms: f64,
     p95_ms: u128,
+    p99_ms: u128,
     max_ms: u128,
 ) -> Result<()> {
     let mut violations = Vec::new();
@@ -221,6 +300,11 @@ fn enforce_benchmark_thresholds(
         && p95_ms > limit
     {
         violations.push(format!("p95_ms={p95_ms} exceeds {limit}"));
+    }
+    if let Some(limit) = args.max_p99_ms
+        && p99_ms > limit
+    {
+        violations.push(format!("p99_ms={p99_ms} exceeds {limit}"));
     }
     if let Some(limit) = args.max_max_ms
         && max_ms > limit

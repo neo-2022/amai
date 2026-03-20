@@ -47,6 +47,10 @@ pub enum Command {
         #[command(subcommand)]
         command: VerifyCommand,
     },
+    Observe {
+        #[command(subcommand)]
+        command: ObserveCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -89,6 +93,12 @@ pub enum IndexCommand {
 pub enum VerifyCommand {
     Benchmark(Box<VerifyBenchmarkArgs>),
     Hostile(VerifyHostileArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ObserveCommand {
+    Snapshot,
+    SlaCheck,
 }
 
 #[derive(Debug, Args)]
@@ -139,6 +149,8 @@ pub struct ContextPackArgs {
     pub query: String,
     #[arg(long)]
     pub retrieval_mode: Option<String>,
+    #[arg(long, default_value_t = false)]
+    pub disable_cache: bool,
     #[arg(long, default_value_t = 5)]
     pub limit_documents: usize,
     #[arg(long, default_value_t = 8)]
@@ -177,6 +189,8 @@ pub struct VerifyBenchmarkArgs {
     pub max_mean_ms: Option<u128>,
     #[arg(long)]
     pub max_p95_ms: Option<u128>,
+    #[arg(long)]
+    pub max_p99_ms: Option<u128>,
     #[arg(long)]
     pub max_max_ms: Option<u128>,
 }

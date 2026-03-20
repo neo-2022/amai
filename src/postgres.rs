@@ -10,6 +10,7 @@ pub struct ProjectRecord {
     pub code: String,
     pub display_name: String,
     pub repo_root: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -222,7 +223,12 @@ pub async fn upsert_project(
                 repo_root = EXCLUDED.repo_root,
                 default_branch = EXCLUDED.default_branch,
                 updated_at = now()
-            RETURNING project_id, code, display_name, repo_root
+            RETURNING
+                project_id,
+                code,
+                display_name,
+                repo_root,
+                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
             "#,
             &[&code, &display_name, &repo_root, &default_branch],
         )
@@ -234,6 +240,7 @@ pub async fn upsert_project(
         code: row.get(1),
         display_name: row.get(2),
         repo_root: row.get(3),
+        updated_at: row.get(4),
     };
 
     ensure_namespace(
@@ -251,7 +258,16 @@ pub async fn upsert_project(
 pub async fn list_projects(client: &Client) -> Result<Vec<ProjectRecord>> {
     let rows = client
         .query(
-            "SELECT project_id, code, display_name, repo_root FROM ami.projects ORDER BY code",
+            r#"
+            SELECT
+                project_id,
+                code,
+                display_name,
+                repo_root,
+                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+            FROM ami.projects
+            ORDER BY code
+            "#,
             &[],
         )
         .await?;
@@ -262,6 +278,7 @@ pub async fn list_projects(client: &Client) -> Result<Vec<ProjectRecord>> {
             code: row.get(1),
             display_name: row.get(2),
             repo_root: row.get(3),
+            updated_at: row.get(4),
         })
         .collect())
 }
@@ -269,7 +286,16 @@ pub async fn list_projects(client: &Client) -> Result<Vec<ProjectRecord>> {
 pub async fn get_project_by_code(client: &Client, code: &str) -> Result<ProjectRecord> {
     let row = client
         .query_opt(
-            "SELECT project_id, code, display_name, repo_root FROM ami.projects WHERE code = $1",
+            r#"
+            SELECT
+                project_id,
+                code,
+                display_name,
+                repo_root,
+                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+            FROM ami.projects
+            WHERE code = $1
+            "#,
             &[&code],
         )
         .await?
@@ -279,6 +305,7 @@ pub async fn get_project_by_code(client: &Client, code: &str) -> Result<ProjectR
         code: row.get(1),
         display_name: row.get(2),
         repo_root: row.get(3),
+        updated_at: row.get(4),
     })
 }
 
@@ -374,6 +401,7 @@ pub async fn list_related_projects(
                 p.code,
                 p.display_name,
                 p.repo_root,
+                to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
                 r.relation_type,
                 r.shared_contour,
                 r.access_mode
@@ -393,10 +421,11 @@ pub async fn list_related_projects(
                 code: row.get(1),
                 display_name: row.get(2),
                 repo_root: row.get(3),
+                updated_at: row.get(4),
             },
-            relation_type: row.get(4),
-            shared_contour: row.get(5),
-            access_mode: row.get(6),
+            relation_type: row.get(5),
+            shared_contour: row.get(6),
+            access_mode: row.get(7),
         })
         .collect())
 }
@@ -551,14 +580,19 @@ pub async fn search_chunks_for_project(
         .collect())
 }
 
-pub async fn get_chunk_by_qdrant_point_id(
+pub async fn list_chunks_by_qdrant_point_ids(
     client: &Client,
-    point_id: Uuid,
-) -> Result<Option<ChunkHit>> {
-    let row = client
-        .query_opt(
+    point_ids: &[Uuid],
+) -> Result<Vec<(Uuid, ChunkHit)>> {
+    if point_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = client
+        .query(
             r#"
             SELECT
+                c.qdrant_point_id,
                 p.code,
                 n.code,
                 d.repo_root,
@@ -573,24 +607,34 @@ pub async fn get_chunk_by_qdrant_point_id(
             JOIN ami.code_documents d ON d.document_id = c.document_id
             JOIN ami.projects p ON p.project_id = c.project_id
             JOIN ami.namespaces n ON n.namespace_id = c.namespace_id
-            WHERE c.qdrant_point_id = $1
+            WHERE c.qdrant_point_id = ANY($1)
             "#,
-            &[&point_id],
+            &[&point_ids],
         )
         .await?;
-    Ok(row.map(|row| ChunkHit {
-        project_code: row.get(0),
-        namespace_code: row.get(1),
-        repo_root: row.get(2),
-        relative_path: row.get(3),
-        chunk_id: row.get(4),
-        chunk_index: row.get(5),
-        start_line: row.get(6),
-        end_line: row.get(7),
-        score: 0.0,
-        content: row.get(8),
-        metadata: row.get(9),
-    }))
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let point_id = row.get::<_, Option<Uuid>>(0)?;
+            Some((
+                point_id,
+                ChunkHit {
+                    project_code: row.get(1),
+                    namespace_code: row.get(2),
+                    repo_root: row.get(3),
+                    relative_path: row.get(4),
+                    chunk_id: row.get(5),
+                    chunk_index: row.get(6),
+                    start_line: row.get(7),
+                    end_line: row.get(8),
+                    score: 0.0,
+                    content: row.get(9),
+                    metadata: row.get(10),
+                },
+            ))
+        })
+        .collect())
 }
 
 pub async fn insert_artifact_ref(client: &Client, record: &ArtifactRefInsert<'_>) -> Result<Uuid> {
@@ -777,6 +821,17 @@ pub async fn status_counts(client: &Client) -> Result<(i64, i64, i64)> {
     Ok((row.get(0), row.get(1), row.get(2)))
 }
 
+pub async fn touch_project_updated_at(client: &Client, project_id: Uuid) -> Result<()> {
+    client
+        .execute(
+            "UPDATE ami.projects SET updated_at = now() WHERE project_id = $1",
+            &[&project_id],
+        )
+        .await
+        .context("failed to touch project updated_at")?;
+    Ok(())
+}
+
 pub async fn upsert_stack_meta(client: &Client, key: &str, value: &Value) -> Result<()> {
     client
         .execute(
@@ -799,6 +854,44 @@ pub async fn get_stack_meta(client: &Client, key: &str) -> Result<Option<Value>>
         .query_opt(
             "SELECT meta_value FROM ami.stack_meta WHERE meta_key = $1",
             &[&key],
+        )
+        .await?;
+    Ok(row.map(|row| row.get(0)))
+}
+
+pub async fn insert_observability_snapshot(
+    client: &Client,
+    snapshot_kind: &str,
+    payload: &Value,
+) -> Result<Uuid> {
+    let row = client
+        .query_one(
+            r#"
+            INSERT INTO ami.observability_snapshots(snapshot_kind, payload)
+            VALUES ($1, $2)
+            RETURNING snapshot_id
+            "#,
+            &[&snapshot_kind, payload],
+        )
+        .await
+        .context("failed to insert observability snapshot")?;
+    Ok(row.get(0))
+}
+
+pub async fn latest_observability_snapshot(
+    client: &Client,
+    snapshot_kind: &str,
+) -> Result<Option<Value>> {
+    let row = client
+        .query_opt(
+            r#"
+            SELECT payload
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+            &[&snapshot_kind],
         )
         .await?;
     Ok(row.map(|row| row.get(0)))

@@ -11,10 +11,27 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use ignore::WalkBuilder;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tokio_postgres::Client;
 use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+pub struct IndexingStats {
+    pub files_indexed: usize,
+    pub files_with_ast: usize,
+    pub files_with_lexical_fallback: usize,
+    pub symbols_written: usize,
+    pub chunks_written: usize,
+    pub vector_points_written: usize,
+    pub total_bytes: i64,
+    pub elapsed_ms: u128,
+    pub files_per_min: f64,
+    pub parser_coverage_ratio: f64,
+    pub language_breakdown: Value,
+}
 
 #[derive(Debug, Clone)]
 struct AnalyzedFile {
@@ -26,6 +43,7 @@ struct AnalyzedFile {
     line_count: i32,
     byte_count: i64,
     content: String,
+    analysis_mode: String,
     metrics: Value,
     structure: Value,
     imports: Value,
@@ -56,13 +74,15 @@ type TreeSitterAnalysis = (
     Vec<SymbolRecord>,
     Vec<ChunkBlueprint>,
     Value,
+    String,
 );
 
 pub async fn index_project(
     cfg: &AppConfig,
     db: &mut Client,
     args: &crate::cli::IndexProjectArgs,
-) -> Result<()> {
+) -> Result<IndexingStats> {
+    let started = Instant::now();
     let project = postgres::get_project_by_code(db, &args.code).await?;
     let namespace = postgres::ensure_namespace(
         db,
@@ -87,15 +107,37 @@ pub async fn index_project(
     };
 
     let edge_cache_path = edge_cache::ensure(&cfg.edge_cache_path)?;
+    let mut files_with_ast = 0usize;
+    let mut files_with_lexical_fallback = 0usize;
+    let mut symbols_written = 0usize;
+    let mut chunks_written = 0usize;
+    let mut vector_points_written = 0usize;
+    let mut total_bytes = 0_i64;
+    let mut language_breakdown = BTreeMap::<String, usize>::new();
 
     for file in files {
         let analyzed = analyze_file(cfg, &project, &file, git_commit_sha.as_deref())?;
         let document_id = Uuid::new_v4();
+        total_bytes += analyzed.byte_count;
+        *language_breakdown
+            .entry(
+                analyzed
+                    .language
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            )
+            .or_default() += 1;
+        if analyzed.analysis_mode == "ast" {
+            files_with_ast += 1;
+        } else {
+            files_with_lexical_fallback += 1;
+        }
 
         let chunk_records = if let (Some(qdrant_client), Some(embedder)) =
             (qdrant_client.as_ref(), embedder.as_mut())
         {
             let points = embed_chunks(cfg, document_id, &project, &namespace, &analyzed, embedder)?;
+            vector_points_written += points.len();
             qdrant::replace_document_points(
                 qdrant_client,
                 &cfg.qdrant_alias_code,
@@ -107,6 +149,8 @@ pub async fn index_project(
         } else {
             to_chunk_records_without_vectors(&analyzed.chunk_blueprints)
         };
+        symbols_written += analyzed.symbols.len();
+        chunks_written += chunk_records.len();
 
         let document_record = DocumentRecord {
             project_id: project.project_id,
@@ -146,7 +190,34 @@ pub async fn index_project(
         tracing::info!(path = %analyzed.relative_path, "indexed file");
     }
 
-    Ok(())
+    postgres::touch_project_updated_at(db, project.project_id).await?;
+
+    let elapsed_ms = started.elapsed().as_millis();
+    let files_indexed = files_with_ast + files_with_lexical_fallback;
+    let files_per_min = if elapsed_ms == 0 {
+        files_indexed as f64 * 60_000.0
+    } else {
+        files_indexed as f64 * 60_000.0 / elapsed_ms as f64
+    };
+    let parser_coverage_ratio = if files_indexed == 0 {
+        0.0
+    } else {
+        files_with_ast as f64 / files_indexed as f64
+    };
+
+    Ok(IndexingStats {
+        files_indexed,
+        files_with_ast,
+        files_with_lexical_fallback,
+        symbols_written,
+        chunks_written,
+        vector_points_written,
+        total_bytes,
+        elapsed_ms,
+        files_per_min,
+        parser_coverage_ratio,
+        language_breakdown: json!(language_breakdown),
+    })
 }
 
 fn build_code_embedder(cfg: &AppConfig) -> Result<TextEmbedding> {
@@ -156,7 +227,7 @@ fn build_code_embedder(cfg: &AppConfig) -> Result<TextEmbedding> {
         "multilingual_e5_base" => EmbeddingModel::MultilingualE5Base,
         other => return Err(anyhow!("unsupported code embedding model: {other}")),
     };
-    TextEmbedding::try_new(InitOptions::new(model).with_show_download_progress(true))
+    TextEmbedding::try_new(InitOptions::new(model).with_show_download_progress(false))
 }
 
 fn collect_files(root: &Path, limit: Option<usize>) -> Result<Vec<PathBuf>> {
@@ -202,27 +273,35 @@ fn analyze_file(
     let line_count = content.lines().count() as i32;
     let byte_count = bytes.len() as i64;
 
-    let (structure, imports, exports, diagnostics, symbols, chunk_blueprints, metrics) =
-        if let Some(language) = descriptor.parser_language {
-            if syntax::supports(language) {
-                match parse_with_tree_sitter(cfg, language, &content) {
-                    Ok(parsed) => parsed,
-                    Err(error) => {
-                        tracing::warn!(
-                            path = %absolute_path.display(),
-                            language,
-                            error = %error,
-                            "tree-sitter analysis unavailable, falling back to lexical-only analysis"
-                        );
-                        fallback_analysis(cfg, &content)
-                    }
+    let (
+        structure,
+        imports,
+        exports,
+        diagnostics,
+        symbols,
+        chunk_blueprints,
+        metrics,
+        analysis_mode,
+    ) = if let Some(language) = descriptor.parser_language {
+        if syntax::supports(language) {
+            match parse_with_tree_sitter(cfg, language, &content) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %absolute_path.display(),
+                        language,
+                        error = %error,
+                        "tree-sitter analysis unavailable, falling back to lexical-only analysis"
+                    );
+                    fallback_analysis(cfg, &content)
                 }
-            } else {
-                fallback_analysis(cfg, &content)
             }
         } else {
             fallback_analysis(cfg, &content)
-        };
+        }
+    } else {
+        fallback_analysis(cfg, &content)
+    };
 
     Ok(AnalyzedFile {
         absolute_path: absolute_path.to_path_buf(),
@@ -233,6 +312,7 @@ fn analyze_file(
         line_count,
         byte_count,
         content,
+        analysis_mode: analysis_mode.clone(),
         metrics,
         structure,
         imports,
@@ -241,7 +321,8 @@ fn analyze_file(
         metadata: json!({
             "git_commit_sha": git_commit_sha,
             "source_kind": descriptor.source_kind,
-            "parser_language": descriptor.parser_language
+            "parser_language": descriptor.parser_language,
+            "analysis_mode": analysis_mode
         }),
         symbols,
         chunk_blueprints,
@@ -281,6 +362,7 @@ fn parse_with_tree_sitter(
         analysis.symbols,
         chunk_blueprints,
         analysis.metrics,
+        "ast".to_string(),
     ))
 }
 
@@ -295,6 +377,7 @@ fn fallback_analysis(
     Vec<SymbolRecord>,
     Vec<ChunkBlueprint>,
     Value,
+    String,
 ) {
     let total_lines = content.lines().count();
     let blank_lines = content
@@ -319,6 +402,7 @@ fn fallback_analysis(
         Vec::new(),
         fallback_chunks(cfg, content),
         metrics,
+        "lexical_fallback".to_string(),
     )
 }
 

@@ -212,6 +212,13 @@ CREATE TABLE IF NOT EXISTS ami.context_packs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS ami.observability_snapshots (
+    snapshot_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    snapshot_kind TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_ami_namespaces_project ON ami.namespaces(project_id);
 CREATE INDEX IF NOT EXISTS idx_ami_relations_source_target ON ami.project_relations(source_project_id, target_project_id);
 CREATE INDEX IF NOT EXISTS idx_ami_documents_project_namespace ON ami.code_documents(project_id, namespace_id);
@@ -224,3 +231,5 @@ CREATE INDEX IF NOT EXISTS idx_ami_chunks_document ON ami.code_chunks(document_i
 CREATE INDEX IF NOT EXISTS idx_ami_chunks_search ON ami.code_chunks USING GIN (search_vector);
 CREATE INDEX IF NOT EXISTS idx_ami_memory_search ON ami.memory_cards USING GIN (search_vector);
 CREATE INDEX IF NOT EXISTS idx_ami_context_packs_project_namespace ON ami.context_packs(project_id, namespace_id);
+CREATE INDEX IF NOT EXISTS idx_ami_observability_snapshots_kind_created
+    ON ami.observability_snapshots(snapshot_kind, created_at DESC);

@@ -6,6 +6,7 @@ mod edge_cache;
 mod indexer;
 mod language;
 mod nats;
+mod observe;
 mod postgres;
 mod qdrant;
 mod retrieval;
@@ -18,7 +19,7 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{
     BootstrapCommand, Cli, Command, CompatCommand, ContextCommand, IndexCommand, NamespaceCommand,
-    ProjectCommand, RelationCommand, VerifyCommand,
+    ObserveCommand, ProjectCommand, RelationCommand, VerifyCommand,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -124,7 +125,30 @@ async fn main() -> Result<()> {
             IndexCommand::Project(args) => {
                 compatibility::assert_supported(&cfg).await?;
                 let mut db = postgres::connect_admin(&cfg).await?;
-                indexer::index_project(&cfg, &mut db, &args).await?;
+                let stats = indexer::index_project(&cfg, &mut db, &args).await?;
+                let payload = serde_json::json!({
+                    "index_project": {
+                        "code": args.code,
+                        "namespace": args.namespace,
+                        "path": args.path.display().to_string(),
+                        "skip_embeddings": args.skip_embeddings,
+                        "limit_files": args.limit_files,
+                        "files_indexed": stats.files_indexed,
+                        "files_with_ast": stats.files_with_ast,
+                        "files_with_lexical_fallback": stats.files_with_lexical_fallback,
+                        "symbols_written": stats.symbols_written,
+                        "chunks_written": stats.chunks_written,
+                        "vector_points_written": stats.vector_points_written,
+                        "total_bytes": stats.total_bytes,
+                        "elapsed_ms": stats.elapsed_ms,
+                        "files_per_min": stats.files_per_min,
+                        "parser_coverage_ratio": stats.parser_coverage_ratio,
+                        "language_breakdown": stats.language_breakdown
+                    }
+                });
+                let _ =
+                    postgres::insert_observability_snapshot(&db, "index_project", &payload).await?;
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             }
         },
         Command::Verify { command } => match command {
@@ -135,6 +159,16 @@ async fn main() -> Result<()> {
             }
             VerifyCommand::Hostile(args) => {
                 verify::run_hostile(&cfg, &args).await?;
+            }
+        },
+        Command::Observe { command } => match command {
+            ObserveCommand::Snapshot => {
+                compatibility::assert_supported(&cfg).await?;
+                observe::print_snapshot(&cfg).await?;
+            }
+            ObserveCommand::SlaCheck => {
+                compatibility::assert_supported(&cfg).await?;
+                observe::run_sla_check(&cfg).await?;
             }
         },
     }

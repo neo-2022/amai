@@ -1,0 +1,44 @@
+modified_at = "2026-03-20 15:20 MSK"
+"Ручная сверка guide/docs" = "2026-03-20 15:20 MSK"
+
+[snapshot]
+postgres_query_probe_iterations = 20
+nats_publish_probe_iterations = 20
+
+[postgres]
+target_connection_usage_ratio = 0.80
+alert_connection_usage_ratio = 0.90
+critical_connection_usage_ratio = 0.95
+target_query_probe_p95_ms = 50.0
+alert_query_probe_p95_ms = 100.0
+critical_query_probe_p95_ms = 250.0
+
+[qdrant]
+target_search_p95_ms = 100.0
+alert_search_p95_ms = 250.0
+critical_search_p95_ms = 500.0
+target_update_queue_length = 0.0
+alert_update_queue_length = 100.0
+critical_update_queue_length = 1000.0
+
+[nats]
+target_publish_p95_ms = 10.0
+alert_publish_p95_ms = 25.0
+critical_publish_p95_ms = 100.0
+target_consumer_lag_msgs = 1000.0
+alert_consumer_lag_msgs = 10000.0
+critical_consumer_lag_msgs = 50000.0
+target_jetstream_disk_usage_ratio = 0.80
+alert_jetstream_disk_usage_ratio = 0.90
+critical_jetstream_disk_usage_ratio = 0.95
+
+[retrieval]
+target_p95_ms = 500.0
+alert_p95_ms = 1000.0
+critical_p95_ms = 2000.0
+stretch_hot_p95_ms = 10.0
+
+[parser]
+target_coverage_ratio = 0.95
+alert_coverage_ratio = 0.80
+critical_coverage_ratio = 0.50
