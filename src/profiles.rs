@@ -111,10 +111,12 @@ pub fn print_preflight_report(report: &PreflightReport) {
     for item in &report.profile.suitable_for {
         println!("- {}", item);
     }
-    println!();
-    println!("На что не стоит рассчитывать:");
-    for item in &report.profile.not_for {
-        println!("- {}", item);
+    if !report.profile.not_for.is_empty() {
+        println!();
+        println!("Когда лучше выбрать другой режим:");
+        for item in &report.profile.not_for {
+            println!("- {}", item);
+        }
     }
     if !report.unmet_minimums.is_empty() {
         println!();
@@ -136,20 +138,22 @@ pub fn print_preflight_report(report: &PreflightReport) {
         println!("- {}", item);
     }
     println!();
-    println!("Техническая сводка:");
-    println!("- profile_code: {}", report.profile_code);
-    println!("- verdict: {}", report.verdict);
+    println!("Что эта машина реально потянет:");
     println!(
-        "- supports_peak_benchmarks: {}",
-        report.profile.supports_peak_benchmarks
+        "- Жёсткие proof и benchmark-контуры: {}",
+        yes_no(report.profile.supports_peak_benchmarks)
     );
     println!(
-        "- monitoring_by_default: {}",
-        report.profile.start_monitoring_by_default
+        "- Monitoring можно включать сразу: {}",
+        yes_no(report.profile.start_monitoring_by_default)
     );
     println!(
-        "- remote_mode_recommended: {}",
-        report.profile.remote_mode_recommended
+        "- Удалённый режим здесь уместен: {}",
+        yes_no(report.profile.remote_mode_recommended)
+    );
+    println!(
+        "- Подходящий профиль в этом запуске: {}",
+        report.profile.display_name
     );
 }
 
@@ -312,22 +316,30 @@ fn resource_status_f64(actual: f64, minimum: f64, recommended: f64) -> &'static 
 fn next_steps(report: &PreflightReport) -> Vec<String> {
     match report.verdict {
         "pass" => vec![
+            format!("Машина подходит для профиля \"{}\".", report.profile_code),
+            "Если хотите сравнить оба режима и выбрать между ними, запустите ./scripts/preflight.sh без параметров."
+                .to_string(),
             format!(
-                "Можно продолжать с профилем \"{}\".",
+                "Если хотите установить именно этот профиль сразу, используйте ./scripts/install_amai.sh --stack-profile {}.",
                 report.profile_code
             ),
-            "Если хотите просто посмотреть продукт, следующий шаг обычно: ./scripts/install_amai.sh".to_string(),
         ],
         "warn" => {
             let mut steps = vec![
                 format!(
-                    "Запуск возможен, но лучше не обещать тяжёлые сценарии в профиле \"{}\".",
+                    "Запуск возможен, но без запаса прочности в профиле \"{}\".",
+                    report.profile_code
+                ),
+                "Если хотите сравнить оба режима и выбрать спокойнее, запустите ./scripts/preflight.sh без параметров."
+                    .to_string(),
+                format!(
+                    "Если ограничения вас устраивают, установить именно этот профиль можно так: ./scripts/install_amai.sh --stack-profile {}.",
                     report.profile_code
                 ),
             ];
             if report.profile_code == "default" {
                 steps.push(
-                    "Если нужен более дешёвый и лёгкий режим, проверьте ещё профиль \"lite_vps\"."
+                    "Если хотите более лёгкий и дешёвый режим, сначала проверьте профиль \"lite_vps\"."
                         .to_string(),
                 );
             }
@@ -336,6 +348,8 @@ fn next_steps(report: &PreflightReport) -> Vec<String> {
         "fail" => {
             let mut steps = vec![
                 "Сначала устраните блокирующие ограничения по CPU, памяти или диску."
+                    .to_string(),
+                "Для быстрого сравнения доступных режимов запустите ./scripts/preflight.sh без параметров."
                     .to_string(),
             ];
             if report.profile_code == "default" {
@@ -348,6 +362,10 @@ fn next_steps(report: &PreflightReport) -> Vec<String> {
         }
         _ => vec!["Перезапустите проверку.".to_string()],
     }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "да" } else { "нет" }
 }
 
 #[cfg(test)]

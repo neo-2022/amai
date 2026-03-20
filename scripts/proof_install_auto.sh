@@ -10,15 +10,24 @@ install_out="$tmp_dir/install.out"
 remove_out="$tmp_dir/remove.out"
 target_file="$tmp_dir/mcp.json"
 
-./scripts/install_amai.sh \
-  --yes \
+printf '1\nДА\n' | AMAI_FORCE_INTERACTIVE_PROMPT=1 ./scripts/install_amai.sh \
+  --client vscode \
   --skip-stack \
   --skip-release-build \
   --output "$target_file" \
   >"$install_out"
 
 test -f "$target_file"
-rg '^client_resolution_mode: auto_detected$' "$install_out" >/dev/null
+rg '^client: vscode$' "$install_out" >/dev/null
+rg '^stack_profile: default$' "$install_out" >/dev/null
+rg '^repeat_install_note: если запустить установку ещё раз, Amai не создаст вторую запись, а аккуратно пересинхронизирует текущую\.$' "$install_out" >/dev/null
+printf '1\nДА\n' | AMAI_FORCE_INTERACTIVE_PROMPT=1 ./scripts/install_amai.sh \
+  --client vscode \
+  --skip-stack \
+  --skip-release-build \
+  --output "$target_file" \
+  >>"$install_out"
+test "$(rg -o '"amai"' "$target_file" | wc -l | tr -d ' ')" = "1"
 rg '^client: vscode$' "$install_out" >/dev/null
 
 ./scripts/remove_amai.sh \

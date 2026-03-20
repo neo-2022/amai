@@ -136,6 +136,9 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
                 report.profile.remote_mode_recommended
             );
         }
+        println!(
+            "repeat_install_note: если запустить установку ещё раз, Amai не создаст вторую запись, а аккуратно пересинхронизирует текущую."
+        );
     }
     Ok(())
 }
