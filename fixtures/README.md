@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 15:00 MSK
-Ручная сверка guide/docs: 2026-03-20 15:00 MSK
+modified_at: 2026-03-20 20:41 MSK
+Ручная сверка guide/docs: 2026-03-20 20:41 MSK
 
 # Fixtures
 
@@ -14,3 +14,14 @@ modified_at: 2026-03-20 15:00 MSK
 Текущий набор:
 - `project_alpha/`
 - `project_beta/`
+- `token_benchmark_queries.txt`
+- `text_compare_cases.jsonl`
+
+`text_compare_cases.jsonl` нужен для сравнительного retrieval/text contour:
+- фиксирует query cases;
+- задаёт ожидаемые project/path/term/symbol сигналы;
+- позволяет честно сравнивать:
+  - `hybrid`
+  - `lexical-only`
+  - `semantic-only`
+  - и token budget против `naive scope`.

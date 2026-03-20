@@ -1,7 +1,7 @@
 use crate::bootstrap;
 use crate::cli::{
     ContextPackArgs, VerifyAccuracyArgs, VerifyBenchmarkArgs, VerifyHostileArgs, VerifyLoadArgs,
-    VerifyTokenBenchmarkArgs, VerifyTokenBenchmarkSuiteArgs,
+    VerifyTextCompareArgs, VerifyTokenBenchmarkArgs, VerifyTokenBenchmarkSuiteArgs,
 };
 use crate::compatibility;
 use crate::config::AppConfig;
@@ -10,6 +10,7 @@ use crate::postgres;
 use crate::retrieval;
 use anyhow::{Context, Result, anyhow};
 use ignore::WalkBuilder;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::fs;
@@ -597,6 +598,233 @@ pub async fn run_token_benchmark_suite(
         }
     });
     let _ = postgres::insert_observability_snapshot(db, "token_benchmark_suite", &payload).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TextCompareCase {
+    query: String,
+    #[serde(default)]
+    expected_projects: Vec<String>,
+    #[serde(default)]
+    expected_paths: Vec<String>,
+    #[serde(default)]
+    expected_terms: Vec<String>,
+    #[serde(default)]
+    expected_symbols: Vec<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct StrategyOutcome {
+    precision: f64,
+    hit: bool,
+    head_hit: bool,
+    total_items: usize,
+    matched_items: usize,
+    prompt_tokens: usize,
+}
+
+pub async fn run_text_compare(
+    cfg: &AppConfig,
+    db: &mut Client,
+    args: &VerifyTextCompareArgs,
+) -> Result<()> {
+    let default_cases_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/text_compare_cases.jsonl");
+    let cases_path = args
+        .cases_file
+        .as_deref()
+        .unwrap_or(default_cases_path.as_path());
+    let cases = collect_text_compare_cases(cases_path)?;
+    if cases.is_empty() {
+        return Err(anyhow!(
+            "text compare requires at least one case in {}",
+            cases_path.display()
+        ));
+    }
+
+    let tokenizer = build_tokenizer(&args.tokenizer)?;
+    let mut runs = Vec::with_capacity(cases.len());
+    let mut hybrid_precisions = Vec::with_capacity(cases.len());
+    let mut lexical_precisions = Vec::with_capacity(cases.len());
+    let mut semantic_precisions = Vec::with_capacity(cases.len());
+    let mut hybrid_hits = Vec::with_capacity(cases.len());
+    let mut lexical_hits = Vec::with_capacity(cases.len());
+    let mut semantic_hits = Vec::with_capacity(cases.len());
+    let mut hybrid_head_hits = Vec::with_capacity(cases.len());
+    let mut lexical_head_hits = Vec::with_capacity(cases.len());
+    let mut semantic_head_hits = Vec::with_capacity(cases.len());
+    let mut hybrid_tokens = Vec::with_capacity(cases.len());
+    let mut lexical_tokens = Vec::with_capacity(cases.len());
+    let mut semantic_tokens = Vec::with_capacity(cases.len());
+    let mut naive_tokens = Vec::with_capacity(cases.len());
+    let mut hybrid_savings_factors = Vec::with_capacity(cases.len());
+
+    for case in cases {
+        let context = ContextPackArgs {
+            project: args.project.clone(),
+            namespace: args.namespace.clone(),
+            query: case.query.clone(),
+            retrieval_mode: args.retrieval_mode.clone(),
+            disable_cache: args.disable_cache,
+            limit_documents: args.limit_documents,
+            limit_symbols: args.limit_symbols,
+            limit_chunks: args.limit_chunks,
+            limit_semantic_chunks: args.limit_semantic_chunks,
+        };
+        let pack = retrieval::execute_context_pack_capture(cfg, db, &context, false).await?;
+        let naive_scope = collect_naive_scope(
+            &pack.payload,
+            args.naive_limit_files,
+            args.naive_max_bytes_per_file,
+        )?;
+
+        let hybrid_prompt = render_context_pack_prompt(&pack.payload);
+        let lexical_prompt = render_filtered_context_prompt(&pack.payload, true, true, true, false);
+        let semantic_prompt =
+            render_filtered_context_prompt(&pack.payload, false, false, false, true);
+        let naive_prompt = render_naive_scope_prompt(&pack.payload, &naive_scope);
+
+        let hybrid = evaluate_strategy(
+            collect_strategy_items(&pack.payload, StrategySelection::Hybrid),
+            &case,
+            tokenizer.encode_with_special_tokens(&hybrid_prompt).len(),
+        );
+        let lexical = evaluate_strategy(
+            collect_strategy_items(&pack.payload, StrategySelection::LexicalOnly),
+            &case,
+            tokenizer.encode_with_special_tokens(&lexical_prompt).len(),
+        );
+        let semantic = evaluate_strategy(
+            collect_strategy_items(&pack.payload, StrategySelection::SemanticOnly),
+            &case,
+            tokenizer.encode_with_special_tokens(&semantic_prompt).len(),
+        );
+        let naive_prompt_tokens = tokenizer.encode_with_special_tokens(&naive_prompt).len();
+        let hybrid_savings_factor = if hybrid.prompt_tokens == 0 {
+            naive_prompt_tokens as f64
+        } else {
+            naive_prompt_tokens as f64 / hybrid.prompt_tokens as f64
+        };
+
+        hybrid_precisions.push(hybrid.precision);
+        lexical_precisions.push(lexical.precision);
+        semantic_precisions.push(semantic.precision);
+        hybrid_hits.push(hybrid.hit as usize as f64);
+        lexical_hits.push(lexical.hit as usize as f64);
+        semantic_hits.push(semantic.hit as usize as f64);
+        hybrid_head_hits.push(hybrid.head_hit as usize as f64);
+        lexical_head_hits.push(lexical.head_hit as usize as f64);
+        semantic_head_hits.push(semantic.head_hit as usize as f64);
+        hybrid_tokens.push(hybrid.prompt_tokens as f64);
+        lexical_tokens.push(lexical.prompt_tokens as f64);
+        semantic_tokens.push(semantic.prompt_tokens as f64);
+        naive_tokens.push(naive_prompt_tokens as f64);
+        hybrid_savings_factors.push(hybrid_savings_factor);
+
+        runs.push(json!({
+            "query": case.query,
+            "description": case.description,
+            "expected": {
+                "projects": case.expected_projects,
+                "paths": case.expected_paths,
+                "terms": case.expected_terms,
+                "symbols": case.expected_symbols,
+            },
+            "strategies": {
+                "hybrid": strategy_to_json(&hybrid),
+                "lexical_only": strategy_to_json(&lexical),
+                "semantic_only": strategy_to_json(&semantic),
+            },
+            "token_budget": {
+                "hybrid_prompt_tokens": hybrid.prompt_tokens,
+                "lexical_prompt_tokens": lexical.prompt_tokens,
+                "semantic_prompt_tokens": semantic.prompt_tokens,
+                "naive_prompt_tokens": naive_prompt_tokens,
+                "hybrid_savings_factor_vs_naive": hybrid_savings_factor,
+            },
+            "visible_projects": pack.payload["visible_projects"].clone(),
+        }));
+    }
+
+    let mean_hybrid_precision = mean_f64(&hybrid_precisions);
+    let mean_lexical_precision = mean_f64(&lexical_precisions);
+    let mean_semantic_precision = mean_f64(&semantic_precisions);
+    let hybrid_hit_ratio = mean_f64(&hybrid_hits);
+    let lexical_hit_ratio = mean_f64(&lexical_hits);
+    let semantic_hit_ratio = mean_f64(&semantic_hits);
+    let hybrid_head_hit_ratio = mean_f64(&hybrid_head_hits);
+    let lexical_head_hit_ratio = mean_f64(&lexical_head_hits);
+    let semantic_head_hit_ratio = mean_f64(&semantic_head_hits);
+    let mean_hybrid_tokens = mean_f64(&hybrid_tokens);
+    let mean_lexical_tokens = mean_f64(&lexical_tokens);
+    let mean_semantic_tokens = mean_f64(&semantic_tokens);
+    let mean_naive_tokens = mean_f64(&naive_tokens);
+    let mean_hybrid_savings_factor = mean_f64(&hybrid_savings_factors);
+
+    let mut violations = Vec::new();
+    if hybrid_hit_ratio < args.min_hybrid_hit_ratio {
+        violations.push(format!(
+            "hybrid_hit_ratio={hybrid_hit_ratio:.3} below {:.3}",
+            args.min_hybrid_hit_ratio
+        ));
+    }
+    if hybrid_head_hit_ratio < args.min_hybrid_head_hit_ratio {
+        violations.push(format!(
+            "hybrid_head_hit_ratio={hybrid_head_hit_ratio:.3} below {:.3}",
+            args.min_hybrid_head_hit_ratio
+        ));
+    }
+    if mean_hybrid_savings_factor < args.min_hybrid_savings_factor {
+        violations.push(format!(
+            "mean_hybrid_savings_factor={mean_hybrid_savings_factor:.3} below {:.3}",
+            args.min_hybrid_savings_factor
+        ));
+    }
+    if !violations.is_empty() {
+        return Err(anyhow!(
+            "text compare thresholds violated: {}",
+            violations.join("; ")
+        ));
+    }
+
+    let payload = json!({
+        "text_compare": {
+            "project": args.project,
+            "namespace": args.namespace,
+            "retrieval_mode": args.retrieval_mode,
+            "cases_file": cases_path.display().to_string(),
+            "cases_total": runs.len(),
+            "tokenizer": args.tokenizer,
+            "mean_precision": {
+                "hybrid": mean_hybrid_precision,
+                "lexical_only": mean_lexical_precision,
+                "semantic_only": mean_semantic_precision,
+            },
+            "case_hit_ratio": {
+                "hybrid": hybrid_hit_ratio,
+                "lexical_only": lexical_hit_ratio,
+                "semantic_only": semantic_hit_ratio,
+            },
+            "head_hit_ratio": {
+                "hybrid": hybrid_head_hit_ratio,
+                "lexical_only": lexical_head_hit_ratio,
+                "semantic_only": semantic_head_hit_ratio,
+            },
+            "mean_prompt_tokens": {
+                "hybrid": mean_hybrid_tokens,
+                "lexical_only": mean_lexical_tokens,
+                "semantic_only": mean_semantic_tokens,
+                "naive": mean_naive_tokens,
+            },
+            "mean_hybrid_savings_factor_vs_naive": mean_hybrid_savings_factor,
+            "runs": runs,
+        }
+    });
+    let _ = postgres::insert_observability_snapshot(db, "text_compare", &payload).await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
@@ -1197,6 +1425,181 @@ fn render_context_pack_prompt(payload: &Value) -> String {
     prompt
 }
 
+#[derive(Debug, Clone, Copy)]
+enum StrategySelection {
+    Hybrid,
+    LexicalOnly,
+    SemanticOnly,
+}
+
+fn collect_text_compare_cases(path: &Path) -> Result<Vec<TextCompareCase>> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read text compare cases {}", path.display()))?;
+    let mut cases = Vec::new();
+    for line in content.lines() {
+        let normalized = line.trim();
+        if normalized.is_empty() || normalized.starts_with('#') {
+            continue;
+        }
+        let case: TextCompareCase =
+            serde_json::from_str(normalized).context("failed to parse text compare case")?;
+        if case.query.trim().is_empty() {
+            return Err(anyhow!("text compare case query must not be empty"));
+        }
+        if case.expected_projects.is_empty()
+            && case.expected_paths.is_empty()
+            && case.expected_terms.is_empty()
+            && case.expected_symbols.is_empty()
+        {
+            return Err(anyhow!(
+                "text compare case must declare at least one expected signal"
+            ));
+        }
+        cases.push(case);
+    }
+    Ok(cases)
+}
+
+fn collect_strategy_items(payload: &Value, strategy: StrategySelection) -> Vec<Value> {
+    let retrieval = &payload["retrieval"];
+    match strategy {
+        StrategySelection::Hybrid => [
+            &retrieval["exact_documents"],
+            &retrieval["symbol_hits"],
+            &retrieval["lexical_chunks"],
+            &retrieval["semantic_chunks"],
+        ]
+        .into_iter()
+        .flat_map(|items| items.as_array().into_iter().flatten().cloned())
+        .collect(),
+        StrategySelection::LexicalOnly => [
+            &retrieval["exact_documents"],
+            &retrieval["symbol_hits"],
+            &retrieval["lexical_chunks"],
+        ]
+        .into_iter()
+        .flat_map(|items| items.as_array().into_iter().flatten().cloned())
+        .collect(),
+        StrategySelection::SemanticOnly => retrieval["semantic_chunks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect(),
+    }
+}
+
+fn evaluate_strategy(
+    items: Vec<Value>,
+    case: &TextCompareCase,
+    prompt_tokens: usize,
+) -> StrategyOutcome {
+    let matched_items = items
+        .iter()
+        .filter(|item| item_matches_text_compare_case(item, case))
+        .count();
+    let total_items = items.len();
+    let precision = if total_items == 0 {
+        0.0
+    } else {
+        matched_items as f64 / total_items as f64
+    };
+    StrategyOutcome {
+        precision,
+        hit: matched_items > 0,
+        head_hit: items
+            .iter()
+            .take(3)
+            .any(|item| item_matches_text_compare_case(item, case)),
+        total_items,
+        matched_items,
+        prompt_tokens,
+    }
+}
+
+fn strategy_to_json(outcome: &StrategyOutcome) -> Value {
+    json!({
+        "precision": outcome.precision,
+        "hit": outcome.hit,
+        "head_hit": outcome.head_hit,
+        "total_items": outcome.total_items,
+        "matched_items": outcome.matched_items,
+        "prompt_tokens": outcome.prompt_tokens,
+    })
+}
+
+fn item_matches_text_compare_case(item: &Value, case: &TextCompareCase) -> bool {
+    let project_ok = case.expected_projects.is_empty()
+        || item_project_code(item).is_some_and(|project| {
+            case.expected_projects
+                .iter()
+                .any(|expected| expected == project)
+        });
+    let path_ok = case.expected_paths.is_empty()
+        || item_relative_path(item)
+            .is_some_and(|path| case.expected_paths.iter().any(|expected| expected == path));
+    let term_ok = case.expected_terms.is_empty()
+        || case
+            .expected_terms
+            .iter()
+            .all(|term| item_contains_text(item, term));
+    let symbol_ok = case.expected_symbols.is_empty()
+        || item["name"].as_str().is_some_and(|name| {
+            case.expected_symbols
+                .iter()
+                .any(|expected| expected == name)
+        });
+    project_ok && path_ok && term_ok && symbol_ok
+}
+
+fn item_project_code(item: &Value) -> Option<&str> {
+    item["project_code"]
+        .as_str()
+        .or_else(|| item["provenance"]["source_project"].as_str())
+}
+
+fn item_relative_path(item: &Value) -> Option<&str> {
+    item["relative_path"]
+        .as_str()
+        .or_else(|| item["provenance"]["path"].as_str())
+}
+
+fn item_contains_text(item: &Value, expected: &str) -> bool {
+    let expected_lower = expected.to_lowercase();
+    [
+        item["snippet"].as_str(),
+        item["content"].as_str(),
+        item["name"].as_str(),
+        item["relative_path"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.to_lowercase().contains(&expected_lower))
+}
+
+fn render_filtered_context_prompt(
+    payload: &Value,
+    include_exact: bool,
+    include_symbols: bool,
+    include_lexical: bool,
+    include_semantic: bool,
+) -> String {
+    let mut filtered = payload.clone();
+    if !include_exact {
+        filtered["retrieval"]["exact_documents"] = json!([]);
+    }
+    if !include_symbols {
+        filtered["retrieval"]["symbol_hits"] = json!([]);
+    }
+    if !include_lexical {
+        filtered["retrieval"]["lexical_chunks"] = json!([]);
+    }
+    if !include_semantic {
+        filtered["retrieval"]["semantic_chunks"] = json!([]);
+    }
+    render_context_pack_prompt(&filtered)
+}
+
 fn push_compact_lines(prompt: &mut String, title: &str, lines: &[String]) {
     prompt.push_str(title);
     prompt.push('\n');
@@ -1290,8 +1693,9 @@ fn precision_ratio(items: &Value, predicate: impl Fn(&Value) -> bool) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_visible_namespaces, count_hits, item_belongs_to_project, percentile_sample,
-        precision_ratio, render_context_pack_prompt, safe_lossy_prefix,
+        TextCompareCase, collect_visible_namespaces, count_hits, item_belongs_to_project,
+        item_matches_text_compare_case, percentile_sample, precision_ratio,
+        render_context_pack_prompt, render_filtered_context_prompt, safe_lossy_prefix,
     };
     use serde_json::json;
 
@@ -1380,5 +1784,50 @@ mod tests {
             vec!["default".to_string(), "review".to_string()]
         );
         assert_eq!(count_hits(&payload), 3);
+    }
+
+    #[test]
+    fn text_compare_case_matches_expected_project_path_and_term() {
+        let case = TextCompareCase {
+            query: "shared_runtime_marker".to_string(),
+            expected_projects: vec!["project_alpha".to_string()],
+            expected_paths: vec!["src/lib.rs".to_string()],
+            expected_terms: vec!["shared_runtime_marker".to_string()],
+            expected_symbols: Vec::new(),
+            description: None,
+        };
+        assert!(item_matches_text_compare_case(
+            &json!({
+                "project_code":"project_alpha",
+                "relative_path":"src/lib.rs",
+                "content":"pub const SHARED_RUNTIME_MARKER: &str = \"shared_runtime_marker\";"
+            }),
+            &case
+        ));
+        assert!(!item_matches_text_compare_case(
+            &json!({
+                "project_code":"project_beta",
+                "relative_path":"src/lib.rs",
+                "content":"shared_runtime_marker"
+            }),
+            &case
+        ));
+    }
+
+    #[test]
+    fn filtered_prompt_can_hide_semantic_section() {
+        let payload = json!({
+            "query": "needle",
+            "project": {"code": "alpha"},
+            "effective_retrieval_mode": "local_strict",
+            "retrieval": {
+                "exact_documents": [],
+                "symbol_hits": [],
+                "lexical_chunks": [],
+                "semantic_chunks": [{"provenance":{"source_project":"alpha"},"relative_path":"src/lib.rs","content":"needle"}]
+            }
+        });
+        let prompt = render_filtered_context_prompt(&payload, false, false, false, false);
+        assert!(!prompt.contains("[alpha] src/lib.rs :: needle"));
     }
 }

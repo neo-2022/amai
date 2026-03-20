@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:31 MSK
-Ручная сверка guide/docs: 2026-03-20 20:31 MSK
+modified_at: 2026-03-20 20:41 MSK
+Ручная сверка guide/docs: 2026-03-20 20:41 MSK
 
 # Operations
 
@@ -468,6 +468,22 @@ cargo run --release -- verify token-benchmark-suite \
 
 ```bash
 ./scripts/proof_remote_ssh_config.sh
+```
+
+Сравнительный text contour:
+
+```bash
+./scripts/proof_text_compare.sh
+```
+
+Ручной запуск comparative benchmark:
+
+```bash
+cargo run -- verify text-compare \
+  --project project_alpha \
+  --namespace review \
+  --retrieval-mode local_plus_related \
+  --cases-file fixtures/text_compare_cases.jsonl
 ```
 
 Или напрямую:

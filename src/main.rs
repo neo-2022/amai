@@ -189,6 +189,12 @@ async fn main() -> Result<()> {
                 let mut db = postgres::connect_admin(&cfg).await?;
                 verify::run_token_benchmark_suite(&cfg, &mut db, &args).await?;
             }
+            VerifyCommand::TextCompare(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                let mut db = postgres::connect_admin(&cfg).await?;
+                verify::run_text_compare(&cfg, &mut db, &args).await?;
+            }
             VerifyCommand::Accuracy(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

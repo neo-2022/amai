@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:31 MSK
-Ручная сверка guide/docs: 2026-03-20 20:31 MSK
+modified_at: 2026-03-20 20:41 MSK
+Ручная сверка guide/docs: 2026-03-20 20:41 MSK
 
 # AGENTS.md для Art-memory-agent-index (Amai)
 
@@ -121,6 +121,7 @@ Machine-readable client install targets живут в:
 - `scripts/proof_remote_onboarding.sh`
 - `scripts/proof_client_lifecycle.sh`
 - `scripts/proof_remote_ssh_config.sh`
+- `scripts/proof_text_compare.sh`
 
 Rust-native verification commands:
 - `cargo run -- verify benchmark ...`

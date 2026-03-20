@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 18:49 MSK
-Ручная сверка guide/docs: 2026-03-20 18:49 MSK
+modified_at: 2026-03-20 20:41 MSK
+Ручная сверка guide/docs: 2026-03-20 20:41 MSK
 
 # Tests
 
@@ -21,6 +21,7 @@ modified_at: 2026-03-20 18:49 MSK
 ./scripts/proof_observability.sh
 ./scripts/proof_mcp.sh
 ./scripts/proof_hostile.sh
+./scripts/proof_text_compare.sh
 ```
 
 Отдельно materialized Rust-native verification commands:
@@ -29,6 +30,7 @@ modified_at: 2026-03-20 18:49 MSK
 - `cargo run -- verify load ...`
 - `cargo run -- verify token-benchmark ...`
 - `cargo run -- verify token-benchmark-suite ...`
+- `cargo run -- verify text-compare ...`
 - `cargo run -- verify mcp ...`
 - `cargo run -- verify hostile ...`
 

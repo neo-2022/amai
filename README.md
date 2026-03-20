@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:31 MSK
-Ручная сверка guide/docs: 2026-03-20 20:31 MSK
+modified_at: 2026-03-20 20:41 MSK
+Ручная сверка guide/docs: 2026-03-20 20:41 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -399,6 +399,37 @@ cargo build --release
 4. найти подходящие символы через tree-sitter;
 5. найти похожие по смыслу куски через Qdrant;
 6. собрать готовую подборку контекста с источником каждого фрагмента.
+
+## Сравнительный text contour
+
+`Amai` теперь умеет не только искать, но и сравнивать собственные retrieval-стратегии между собой.
+
+Простыми словами:
+- можно измерить, как ведёт себя полный `hybrid` path;
+- можно отдельно посмотреть `lexical-only`;
+- можно отдельно посмотреть `semantic-only`;
+- можно сравнить их с `naive scope`, где в модель почти без сокращения тянут весь видимый корпус.
+
+Это полезно, потому что дальше можно честно отвечать не словами “кажется лучше”, а цифрами:
+- где точность выше;
+- где coverage лучше;
+- сколько токенов реально экономится.
+
+Быстрый fixture proof:
+
+```bash
+./scripts/proof_text_compare.sh
+```
+
+Ручной запуск:
+
+```bash
+cargo run -- verify text-compare \
+  --project project_alpha \
+  --namespace review \
+  --retrieval-mode local_plus_related \
+  --cases-file fixtures/text_compare_cases.jsonl
+```
 
 Важно:
 - unsupported parser language не должен валить индексирующий проход целиком;
