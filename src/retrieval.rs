@@ -12,7 +12,7 @@ use qdrant_client::qdrant::point_id::PointIdOptions;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio_postgres::Client;
 use uuid::Uuid;
@@ -50,8 +50,8 @@ struct PreparedContextPack {
     namespace_id: Uuid,
     effective_mode: String,
     visible_projects_json: Value,
-    payload: Value,
-    payload_json: String,
+    payload: Arc<Value>,
+    payload_json: Arc<str>,
     stats: ContextPackStats,
     cache_key: String,
     scope_signature: String,
@@ -62,6 +62,18 @@ struct PreparedContextPack {
 struct CachedQueryEmbedder {
     model: String,
     embedder: TextEmbedding,
+}
+
+#[derive(Debug, Clone)]
+struct LocalContextPackEntry {
+    context_pack_id: Uuid,
+    payload: Arc<Value>,
+    payload_json: Arc<str>,
+    exact_documents: usize,
+    symbol_hits: usize,
+    lexical_chunks: usize,
+    semantic_chunks: usize,
+    durably_persisted: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -83,9 +95,8 @@ struct CacheHydrationContext<'a> {
 }
 
 static QUERY_EMBEDDER: OnceLock<Mutex<Option<CachedQueryEmbedder>>> = OnceLock::new();
-static LOCAL_CONTEXT_PACK_CACHE: OnceLock<
-    Mutex<HashMap<String, edge_cache::CachedContextPackEntry>>,
-> = OnceLock::new();
+static LOCAL_CONTEXT_PACK_CACHE: OnceLock<Mutex<HashMap<String, LocalContextPackEntry>>> =
+    OnceLock::new();
 
 pub async fn build_context_pack(
     cfg: &AppConfig,
@@ -169,7 +180,8 @@ async fn prepare_context_pack(
             &cache_key,
             &scope_signature,
         )? {
-            local_context_pack_cache_put(&cache_key, &scope_signature, &cached)?;
+            let local_cached = local_entry_from_edge(cached)?;
+            local_context_pack_cache_put(&cache_key, &scope_signature, &local_cached)?;
             let cache_lookup_ms = cache_lookup_started.elapsed().as_millis();
             return prepared_from_cached_payload(
                 CacheHydrationContext {
@@ -181,7 +193,7 @@ async fn prepare_context_pack(
                     resolve_scope_ms,
                     cache_lookup_ms,
                 },
-                cached,
+                local_cached,
             );
         }
     }
@@ -322,7 +334,7 @@ async fn prepare_context_pack(
             "trust_level"
         ]
     });
-    let payload_json = serde_json::to_string_pretty(&payload)?;
+    let payload_json: Arc<str> = Arc::from(serde_json::to_string(&payload)?);
     let mut stats = stats;
     stats.timings.serialize_ms = serialize_started.elapsed().as_millis();
 
@@ -332,7 +344,7 @@ async fn prepare_context_pack(
         namespace_id: namespace.namespace_id,
         effective_mode,
         visible_projects_json,
-        payload,
+        payload: Arc::new(payload),
         payload_json,
         stats,
         cache_key,
@@ -370,7 +382,7 @@ async fn persist_context_pack(
         &prepared.context_pack_id.to_string(),
         &prepared.project.code,
         &prepared.effective_mode,
-        &prepared.payload_json,
+        prepared.payload_json.as_ref(),
     )?;
 
     let object_key = format!(
@@ -382,7 +394,7 @@ async fn persist_context_pack(
         &s3_client,
         &cfg.s3_bucket_context,
         &object_key,
-        &prepared.payload_json,
+        prepared.payload_json.as_ref(),
     )
     .await?;
 
@@ -414,7 +426,7 @@ async fn persist_context_pack(
             retrieval_mode: &prepared.effective_mode,
             query_text: &args.query,
             visible_projects: &prepared.visible_projects_json,
-            payload: &prepared.payload,
+            payload: prepared.payload.as_ref(),
             artifact_ref_id: Some(artifact_ref_id),
         },
     )
@@ -445,18 +457,14 @@ fn cache_context_pack_entry(
             project_code: &prepared.project.code,
             namespace_code: &args.namespace,
             retrieval_mode: &prepared.effective_mode,
-            payload_json: &prepared.payload_json,
+            payload_json: prepared.payload_json.as_ref(),
             durably_persisted,
         },
     )?;
     local_context_pack_cache_put(
         &prepared.cache_key,
         &prepared.scope_signature,
-        &edge_cache::CachedContextPackEntry {
-            context_pack_id: prepared.context_pack_id.to_string(),
-            payload_json: prepared.payload_json.clone(),
-            durably_persisted,
-        },
+        &local_entry_from_prepared(prepared, durably_persisted),
     )?;
     Ok(())
 }
@@ -691,26 +699,14 @@ fn cache_key(cfg: &AppConfig, args: &ContextPackArgs, effective_mode: &str) -> S
 
 fn prepared_from_cached_payload(
     context: CacheHydrationContext<'_>,
-    cached: edge_cache::CachedContextPackEntry,
+    cached: LocalContextPackEntry,
 ) -> Result<PreparedContextPack> {
-    let payload: Value = serde_json::from_str(&cached.payload_json)
-        .context("failed to decode cached context pack payload")?;
-    let context_pack_id =
-        Uuid::parse_str(&cached.context_pack_id).context("cached context pack id is not a UUID")?;
     let stats = ContextPackStats {
-        context_pack_id,
-        exact_documents: payload["retrieval"]["exact_documents"]
-            .as_array()
-            .map_or(0, Vec::len),
-        symbol_hits: payload["retrieval"]["symbol_hits"]
-            .as_array()
-            .map_or(0, Vec::len),
-        lexical_chunks: payload["retrieval"]["lexical_chunks"]
-            .as_array()
-            .map_or(0, Vec::len),
-        semantic_chunks: payload["retrieval"]["semantic_chunks"]
-            .as_array()
-            .map_or(0, Vec::len),
+        context_pack_id: cached.context_pack_id,
+        exact_documents: cached.exact_documents,
+        symbol_hits: cached.symbol_hits,
+        lexical_chunks: cached.lexical_chunks,
+        semantic_chunks: cached.semantic_chunks,
         cache_hit: true,
         scope_signature: context.scope_signature.clone(),
         timings: ContextPackTimings {
@@ -728,12 +724,12 @@ fn prepared_from_cached_payload(
     };
 
     Ok(PreparedContextPack {
-        context_pack_id,
+        context_pack_id: cached.context_pack_id,
         project: context.project.clone(),
         namespace_id: context.namespace_id,
         effective_mode: context.effective_mode.to_string(),
-        visible_projects_json: payload["visible_projects"].clone(),
-        payload,
+        visible_projects_json: cached.payload["visible_projects"].clone(),
+        payload: cached.payload,
         payload_json: cached.payload_json,
         stats,
         cache_key: context.cache_key,
@@ -746,7 +742,7 @@ fn prepared_from_cached_payload(
 fn local_context_pack_cache_get(
     cache_key: &str,
     scope_signature: &str,
-) -> Result<Option<edge_cache::CachedContextPackEntry>> {
+) -> Result<Option<LocalContextPackEntry>> {
     let cache = LOCAL_CONTEXT_PACK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let guard = cache
         .lock()
@@ -758,7 +754,7 @@ fn local_context_pack_cache_get(
 fn local_context_pack_cache_put(
     cache_key: &str,
     scope_signature: &str,
-    entry: &edge_cache::CachedContextPackEntry,
+    entry: &LocalContextPackEntry,
 ) -> Result<()> {
     let cache = LOCAL_CONTEXT_PACK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = cache
@@ -767,6 +763,49 @@ fn local_context_pack_cache_put(
     let key = format!("{cache_key}::{scope_signature}");
     guard.insert(key, entry.clone());
     Ok(())
+}
+
+fn local_entry_from_prepared(
+    prepared: &PreparedContextPack,
+    durably_persisted: bool,
+) -> LocalContextPackEntry {
+    LocalContextPackEntry {
+        context_pack_id: prepared.context_pack_id,
+        payload: Arc::clone(&prepared.payload),
+        payload_json: Arc::clone(&prepared.payload_json),
+        exact_documents: prepared.stats.exact_documents,
+        symbol_hits: prepared.stats.symbol_hits,
+        lexical_chunks: prepared.stats.lexical_chunks,
+        semantic_chunks: prepared.stats.semantic_chunks,
+        durably_persisted,
+    }
+}
+
+fn local_entry_from_edge(
+    cached: edge_cache::CachedContextPackEntry,
+) -> Result<LocalContextPackEntry> {
+    let payload: Value = serde_json::from_str(&cached.payload_json)
+        .context("failed to decode cached context pack payload")?;
+    let context_pack_id =
+        Uuid::parse_str(&cached.context_pack_id).context("cached context pack id is not a UUID")?;
+    Ok(LocalContextPackEntry {
+        context_pack_id,
+        exact_documents: payload["retrieval"]["exact_documents"]
+            .as_array()
+            .map_or(0, Vec::len),
+        symbol_hits: payload["retrieval"]["symbol_hits"]
+            .as_array()
+            .map_or(0, Vec::len),
+        lexical_chunks: payload["retrieval"]["lexical_chunks"]
+            .as_array()
+            .map_or(0, Vec::len),
+        semantic_chunks: payload["retrieval"]["semantic_chunks"]
+            .as_array()
+            .map_or(0, Vec::len),
+        payload: Arc::new(payload),
+        payload_json: Arc::from(cached.payload_json),
+        durably_persisted: cached.durably_persisted,
+    })
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
