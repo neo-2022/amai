@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 21:36 MSK
-Ручная сверка guide/docs: 2026-03-20 21:36 MSK
+modified_at: 2026-03-20 21:53 MSK
+Ручная сверка guide/docs: 2026-03-20 21:53 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -179,12 +179,11 @@ Brand-pack проекта теперь хранится прямо в repo:
 
 ## Самый простой старт
 
-Если вам нужен путь “запустить как можно проще”, используйте onboarding-команду:
+Если вам нужен путь “запустить как можно проще”, используйте одну команду:
 
 ```bash
 cd /home/art/agent-memory-index
 ./scripts/install_amai.sh
-./scripts/onboard_local.sh --client vscode
 ```
 
 Самый короткий product path теперь такой:
