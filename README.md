@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 14:45 MSK
-Ручная сверка guide/docs: 2026-03-20 14:45 MSK
+modified_at: 2026-03-20 15:36 MSK
+Ручная сверка guide/docs: 2026-03-20 15:36 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -51,6 +51,7 @@ Amai — это отдельный внешний инструмент для И
 - `SQLite edge cache`
 - `LanceDB` только optional на edge
 - `Milvus` только как future scale-up replacement path
+- `config/observability.toml` как machine-readable SLA / observability профиль
 
 ## Parser Baseline
 
@@ -138,6 +139,7 @@ cd /home/art/agent-memory-index
 ./scripts/proof_hardening.sh
 ./scripts/proof_performance.sh
 ./scripts/proof_hostile.sh
+./scripts/proof_observability.sh
 ```
 
 4. Зарегистрировать свои проекты:
@@ -216,6 +218,50 @@ cargo run -- verify hostile --scenario all
   - проверяет fail-closed реакцию на partial-service loss;
   - проверяет recovery после возврата сервиса;
   - отдельно проверяет drift в `stack_meta`.
+
+## Observability contour
+
+Теперь в проекте materialized и отдельный observability/SLA слой:
+
+```bash
+cargo run --release -- observe snapshot
+cargo run --release -- observe sla-check
+```
+
+Что он делает:
+- снимает live snapshot по `PostgreSQL`, `Qdrant`, `NATS` и `S3-compatible storage`;
+- подтягивает последние benchmark/index snapshots из PostgreSQL;
+- считает SLA-статусы по machine-readable профилю [observability.toml](/home/art/agent-memory-index/config/observability.toml);
+- отделяет `hot retrieval` от `cold retrieval`, чтобы не подменять одно другим.
+
+Сейчас snapshot показывает как минимум:
+- `PostgreSQL`
+  - `connection_usage_ratio`
+  - `query_probe_p95_ms`
+  - `transactions_total`
+  - `deadlocks_total`
+  - `wal_bytes_total`
+- `Qdrant`
+  - `collections_vector_total`
+  - `running_optimizations`
+  - `update_queue_length`
+  - `memory_resident_bytes`
+  - cold retrieval `semantic_search_ms p95` через последний cold benchmark
+- `NATS / JetStream`
+  - `publish_probe_p95_ms`
+  - `consumer_lag_msgs`
+  - `jetstream_disk_usage_ratio`
+- `Retrieval`
+  - отдельные `hot` и `cold` benchmark snapshots
+- `Indexing`
+  - `files_per_min`
+  - `parser_coverage_ratio`
+  - `language_breakdown`
+
+Важно:
+- `hot retrieval` означает работающий result-cache contour;
+- `cold retrieval` означает живой retrieval path без result-cache bypassing;
+- оба режима нужны одновременно, иначе нельзя честно оценить ни UX-скорость, ни реальную цену полного retrieval path.
 
 ## Защита от version drift
 

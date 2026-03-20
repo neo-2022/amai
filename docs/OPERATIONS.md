@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 14:30 MSK
-Ручная сверка guide/docs: 2026-03-20 14:30 MSK
+modified_at: 2026-03-20 15:36 MSK
+Ручная сверка guide/docs: 2026-03-20 15:36 MSK
 
 # Operations
 
@@ -122,14 +122,14 @@ cargo run -- context pack \
 
 Этот proof:
 - индексирует fixture-проекты с эмбеддингами;
-- гоняет живой `context pack` path несколько раз;
-- мерит `mean/p50/p95/max`;
+- гоняет и `hot`, и `cold` retrieval path;
+- мерит `mean/p50/p95/p99/max`;
 - fail-ит, если practical latency baseline выходит за заданные thresholds.
 
 Прямая Rust-команда:
 
 ```bash
-cargo run -- verify benchmark \
+cargo run --release -- verify benchmark \
   --project project_alpha \
   --namespace review \
   --query "shared_runtime_marker" \
@@ -138,6 +138,24 @@ cargo run -- verify benchmark \
   --iterations 5 \
   --persist
 ```
+
+Для cold-path добавляется:
+
+```bash
+cargo run --release -- verify benchmark \
+  --project project_alpha \
+  --namespace review \
+  --query "shared_runtime_marker" \
+  --retrieval-mode local_plus_related \
+  --disable-cache \
+  --warmup 1 \
+  --iterations 5 \
+  --persist
+```
+
+Важно:
+- без `--disable-cache` измеряется `hot retrieval`;
+- с `--disable-cache` измеряется `cold retrieval`.
 
 ## Hostile proof
 
@@ -194,3 +212,25 @@ cargo run -- index project \
   --limit-files 5 \
   --skip-embeddings
 ```
+
+## Observability / SLA proof
+
+```bash
+./scripts/proof_observability.sh
+```
+
+Или напрямую:
+
+```bash
+cargo run --release -- observe snapshot
+cargo run --release -- observe sla-check
+```
+
+Что это даёт:
+- live snapshot по `PostgreSQL`, `Qdrant`, `NATS`, `S3-compatible storage`;
+- последние `index_project` и `retrieval_benchmark` snapshots;
+- SLA-оценку по [observability.toml](/home/art/agent-memory-index/config/observability.toml).
+
+Сейчас `observe sla-check` fail-ит только если:
+- есть `critical` нарушение;
+- или есть `unknown`, то есть обязательный контур ещё не был измерен.

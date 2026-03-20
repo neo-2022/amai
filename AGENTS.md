@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 14:30 MSK
-Ручная сверка guide/docs: 2026-03-20 14:30 MSK
+modified_at: 2026-03-20 15:36 MSK
+Ручная сверка guide/docs: 2026-03-20 15:36 MSK
 
 # AGENTS.md для Art-memory-agent-index (Amai)
 
@@ -99,10 +99,13 @@ CLI/binary canonical short name:
 - `scripts/proof_hardening.sh`
 - `scripts/proof_performance.sh`
 - `scripts/proof_hostile.sh`
+- `scripts/proof_observability.sh`
 
 Rust-native verification commands:
 - `cargo run -- verify benchmark ...`
 - `cargo run -- verify hostile ...`
+- `cargo run -- observe snapshot`
+- `cargo run -- observe sla-check`
 
 Если новый агент собирается утверждать, что проект «быстрый» или «устойчивый», он не имеет права
 опираться только на `proof_local` и `proof_hardening`.
@@ -110,3 +113,5 @@ Rust-native verification commands:
 - latency proof;
 - hostile fail-closed proof;
 - recovery proof после возврата сервиса.
+- observability snapshot;
+- SLA check по machine-readable профилю.

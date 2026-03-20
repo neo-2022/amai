@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 14:30 MSK
-Ручная сверка guide/docs: 2026-03-20 14:30 MSK
+modified_at: 2026-03-20 15:36 MSK
+Ручная сверка guide/docs: 2026-03-20 15:36 MSK
 
 # Architecture
 
@@ -191,3 +191,50 @@ Code structure plane:
   - Rust-native latency verifier с threshold enforcement;
 - `cargo run -- verify hostile ...`
   - Rust-native hostile verifier с fail-closed and recovery proof.
+
+## Observability plane
+
+Поверх verification plane теперь materialized и отдельный observability plane.
+
+Его задача:
+- не только сказать, что сервисы поднялись;
+- а снять воспроизводимый snapshot состояния стека;
+- сравнить его с machine-readable SLA профилем;
+- сохранить этот snapshot в PostgreSQL для следующих сравнений.
+
+Канонические команды:
+- `cargo run -- observe snapshot`
+- `cargo run -- observe sla-check`
+
+Machine-readable профиль:
+- [observability.toml](/home/art/agent-memory-index/config/observability.toml)
+
+Слои observability:
+- `PostgreSQL`
+  - connection saturation
+  - probe latency
+  - transaction counters
+  - deadlocks
+  - WAL bytes
+- `Qdrant`
+  - vectors total
+  - optimization queue
+  - update queue
+  - resident memory
+  - semantic search stage p95 через last cold retrieval benchmark
+- `NATS`
+  - publish probe latency
+  - consumer lag
+  - JetStream disk usage
+- `Indexing`
+  - last index throughput
+  - parser coverage ratio
+- `Retrieval`
+  - `hot benchmark`
+  - `cold benchmark`
+
+Принцип честности:
+- `hot` и `cold` retrieval не смешиваются;
+- `hot` нужен для реальной скорости повторной сессии агента;
+- `cold` нужен для оценки настоящего retrieval path без result-cache shortcut;
+- SLA нельзя честно считать выполненным, если известен только один из этих режимов.
