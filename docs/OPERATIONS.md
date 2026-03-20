@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 00:09 MSK
-Ручная сверка guide/docs: 2026-03-21 00:09 MSK
+modified_at: 2026-03-21 01:08 MSK
+Ручная сверка guide/docs: 2026-03-21 01:08 MSK
 
 # Operations
 
@@ -619,6 +619,45 @@ cargo run --release -- verify token-benchmark-suite \
 - считает `mean/p50/p95` по `saved_tokens`, `savings_factor`, `savings_percent`;
 - нужен как более честный product contour, который другой пользователь сможет воспроизвести на том же fixture наборе.
 
+## Token ledger report
+
+Если нужно увидеть не только последний benchmark, а накопительный эффект:
+
+```bash
+./scripts/token_report.sh
+```
+
+Если хотите отдельно смотреть 5-часовое окно Codex:
+
+```bash
+./scripts/token_report.sh --budget-profile codex_5h
+```
+
+Отдельный proof:
+
+```bash
+./scripts/proof_token_ledger.sh
+```
+
+Что показывает этот contour:
+- `current_session`
+  - токены, сэкономленные в текущей рабочей сессии;
+- `rolling_window`
+  - токены, сэкономленные в текущем лимитном окне профиля;
+- `lifetime`
+  - токены, сэкономленные за всё записанное время;
+- `source_breakdown`
+  - откуда пришли цифры:
+    - живые `context pack` вызовы;
+    - benchmark-события, если вы их явно включили.
+
+По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
+Если нужно показать всё вместе:
+
+```bash
+cargo run --release -- observe token-report --include-verify-events true
+```
+
 ## MCP proof
 
 ```bash
@@ -797,12 +836,20 @@ Prometheus + Grafana:
 - persistence остаётся только у явных `observe snapshot` и `observe sla-check`.
 - runtime scrape targets и monitoring ports не должны быть вшиты в конфиг как абсолютные литералы;
 - поэтому monitoring profile рендерится из `.env` перед `docker compose --profile monitoring up`.
-- token-economy metrics тоже приходят в exporter из последнего `token_benchmark` snapshot:
+- token-economy metrics тоже приходят в exporter:
+  - из последнего `token_benchmark` snapshot:
   - `amai_tokens_naive_scope_total`
   - `amai_tokens_context_pack_total`
   - `amai_tokens_saved_total`
   - `amai_tokens_savings_factor`
   - `amai_tokens_savings_percent`
+  - и как накопительный ledger:
+  - `amai_tokens_saved_session_total`
+  - `amai_tokens_saved_window_total`
+  - `amai_tokens_saved_lifetime_total`
+  - `amai_tokens_savings_percent_session`
+  - `amai_tokens_savings_percent_window`
+  - `amai_tokens_savings_percent_lifetime`
 
 ## Hardware baseline
 

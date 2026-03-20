@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 00:24 MSK
-Ручная сверка guide/docs: 2026-03-21 00:24 MSK
+modified_at: 2026-03-21 01:08 MSK
+Ручная сверка guide/docs: 2026-03-21 01:08 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -187,7 +187,10 @@ scripts\install_amai.cmd
 - пишет MCP config для клиента;
 - печатает финальную сводку уже после установки;
 - показывает живые метрики машины и stack;
-- если они уже есть, показывает и measured token savings.
+- если они уже есть, показывает и measured token savings:
+  - за текущую рабочую сессию;
+  - за текущее окно лимита;
+  - за всё время.
 
 Если `auto-detect` выбрал не тот клиент, можно указать явно.
 
@@ -406,10 +409,40 @@ cargo run -- deployment explain --target kubernetes_server
 - `context pack`;
 - warmup cache;
 - token benchmark;
+- token report;
 - observability snapshot.
 
 Понятный walkthrough для подключения:
 - [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)
+
+## Как смотреть накопительную экономию токенов
+
+Если нужен не один последний benchmark, а живая накопительная картина, используйте:
+
+```bash
+./scripts/token_report.sh
+```
+
+Если хотите отдельно смотреть 5-часовое окно Codex:
+
+```bash
+./scripts/token_report.sh --budget-profile codex_5h
+```
+
+Этот отчёт показывает:
+- сколько токенов `Amai` сэкономил за текущую рабочую сессию;
+- сколько токенов сэкономлено за текущее окно лимита;
+- сколько токенов сэкономлено за всё время;
+- откуда пришли цифры:
+  - живые `context pack` вызовы;
+  - verification/benchmark события, если вы их явно включили.
+
+По умолчанию proof/benchmark-трафик не смешивается с обычной рабочей активностью.
+Если нужно показать всё вместе, используйте:
+
+```bash
+./scripts/token_report.sh --include-verify-events true
+```
 
 ## Честно о скорости и пределах
 

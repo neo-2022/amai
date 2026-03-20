@@ -17,6 +17,7 @@ mod retrieval;
 mod s3;
 mod status;
 mod syntax;
+mod token_budget;
 mod verify;
 mod warmup;
 
@@ -246,6 +247,12 @@ async fn main() -> Result<()> {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 observe::run_sla_check(&cfg).await?;
+            }
+            ObserveCommand::TokenReport(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                let db = postgres::connect_admin(&cfg).await?;
+                token_budget::print_report(&db, &args).await?;
             }
             ObserveCommand::Serve(args) => {
                 let cfg = config::AppConfig::from_env()?;

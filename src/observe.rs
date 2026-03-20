@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::{nats, postgres, s3};
+use crate::{nats, postgres, s3, token_budget};
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Router,
@@ -192,6 +192,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         postgres::latest_observability_snapshot(&db, "retrieval_load_cold").await?;
     let latest_token_benchmark =
         postgres::latest_observability_snapshot(&db, "token_benchmark").await?;
+    let token_budget_report = token_budget::collect_default_report(&db).await?;
 
     let payload = json!({
         "captured_at_epoch_ms": captured_at_epoch_ms,
@@ -207,6 +208,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_retrieval_load_hot": latest_load_hot,
         "latest_retrieval_load_cold": latest_load_cold,
         "latest_token_benchmark": latest_token_benchmark,
+        "token_budget_report": token_budget_report,
     });
     let sla = evaluate_sla(&payload, &profile);
     let snapshot = json!({
@@ -223,6 +225,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_retrieval_load_hot": payload["latest_retrieval_load_hot"].clone(),
         "latest_retrieval_load_cold": payload["latest_retrieval_load_cold"].clone(),
         "latest_token_benchmark": payload["latest_token_benchmark"].clone(),
+        "token_budget_report": payload["token_budget_report"].clone(),
         "sla": sla,
     });
     if persist_snapshot {
@@ -1030,6 +1033,50 @@ fn render_prometheus_metrics(snapshot: &Value) -> String {
         "amai_tokens_savings_percent",
         "Token savings percent from the latest token benchmark.",
         snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_percent"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_saved_session_total",
+        "Saved tokens accumulated in the current token-usage session.",
+        snapshot["token_budget_report"]["token_budget_report"]["current_session"]
+            ["total_saved_tokens"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_saved_window_total",
+        "Saved tokens accumulated in the current budget window.",
+        snapshot["token_budget_report"]["token_budget_report"]["rolling_window"]["total_saved_tokens"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_saved_lifetime_total",
+        "Saved tokens accumulated across all recorded token-usage events.",
+        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["total_saved_tokens"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_savings_percent_session",
+        "Savings percent accumulated in the current token-usage session.",
+        snapshot["token_budget_report"]["token_budget_report"]["current_session"]
+            ["savings_percent"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_savings_percent_window",
+        "Savings percent accumulated in the current budget window.",
+        snapshot["token_budget_report"]["token_budget_report"]["rolling_window"]["savings_percent"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_savings_percent_lifetime",
+        "Savings percent accumulated across all recorded token-usage events.",
+        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["savings_percent"]
             .as_f64(),
     );
     push_metric(

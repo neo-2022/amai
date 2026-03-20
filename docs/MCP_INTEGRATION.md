@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 00:24 MSK
-Ручная сверка guide/docs: 2026-03-21 00:24 MSK
+modified_at: 2026-03-21 01:08 MSK
+Ручная сверка guide/docs: 2026-03-21 01:08 MSK
 
 # MCP Integration
 
@@ -13,6 +13,10 @@ modified_at: 2026-03-21 00:24 MSK
 - `Amai` сам держит индекс, retrieval и изоляцию проектов;
 - IDE или ИИ-клиент не обязаны читать весь проект целиком;
 - агент может просить у `Amai` готовый context pack и measured token benchmark.
+- агент может просить и накопительный token report:
+  - за текущую сессию;
+  - за окно лимита;
+  - за всё время.
 
 ## Это режим "скачал и всё"?
 
@@ -221,6 +225,7 @@ cargo build --release
 - `amai_list_namespaces`
 - `amai_context_pack`
 - `amai_token_benchmark`
+- `amai_token_report`
 - `amai_observe_snapshot`
 - `amai_warm_cache`
 

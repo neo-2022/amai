@@ -126,6 +126,7 @@ pub enum VerifyCommand {
 pub enum ObserveCommand {
     Snapshot,
     SlaCheck,
+    TokenReport(ObserveTokenReportArgs),
     Serve(ObserveServeArgs),
 }
 
@@ -395,6 +396,14 @@ pub struct VerifyMcpArgs {
 pub struct ObserveServeArgs {
     #[arg(long, default_value = "0.0.0.0:9464")]
     pub bind: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveTokenReportArgs {
+    #[arg(long)]
+    pub budget_profile: Option<String>,
+    #[arg(long)]
+    pub include_verify_events: Option<bool>,
 }
 
 #[derive(Debug, Clone, Args)]

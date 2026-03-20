@@ -1,5 +1,5 @@
 use crate::cli::{ContextPackArgs, McpConfigArgs, VerifyMcpArgs, VerifyTokenBenchmarkArgs};
-use crate::{compatibility, config, observe, postgres, retrieval, verify};
+use crate::{compatibility, config, observe, postgres, retrieval, token_budget, verify};
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -264,6 +264,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         "amai_list_namespaces".to_string(),
         "amai_context_pack".to_string(),
         "amai_token_benchmark".to_string(),
+        "amai_token_report".to_string(),
         "amai_observe_snapshot".to_string(),
         "amai_warm_cache".to_string(),
     ]);
@@ -424,6 +425,25 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         ));
     }
 
+    let token_report = session
+        .tool_call(
+            "amai_token_report",
+            json!({
+                "budget_profile": "codex_5h",
+                "include_verify_events": true,
+            }),
+        )
+        .await
+        .context("MCP amai_token_report failed")?;
+    let session_events = token_report["token_budget_report"]["current_session"]["events_total"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("MCP token report returned invalid current_session.events_total"))?;
+    if session_events == 0 {
+        return Err(anyhow!(
+            "MCP token report returned zero current session events"
+        ));
+    }
+
     let warm = session
         .tool_call(
             "amai_warm_cache",
@@ -454,6 +474,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "prompts": prompt_names,
             "token_savings_factor": savings_factor,
             "token_savings_percent": savings_percent,
+            "token_report_session_events": session_events,
             "critical": critical,
             "unknown": unknown,
         }
@@ -637,6 +658,10 @@ async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> Result<V
             let args: TokenBenchmarkToolArgs = parse_arguments(request.arguments)?;
             tool_token_benchmark(cfg, args).await
         }
+        "amai_token_report" => {
+            let args: TokenReportToolArgs = parse_arguments(request.arguments)?;
+            tool_token_report(cfg, args).await
+        }
         "amai_observe_snapshot" => tool_observe_snapshot(cfg).await,
         "amai_warm_cache" => {
             let args: WarmCacheToolArgs = parse_arguments(request.arguments)?;
@@ -755,6 +780,25 @@ async fn tool_token_benchmark(cfg: &AppConfig, args: TokenBenchmarkToolArgs) -> 
     Ok(tool_result(summary, payload))
 }
 
+async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result<Value> {
+    compatibility::assert_supported(cfg).await?;
+    let db = postgres::connect_admin(cfg).await?;
+    let payload = token_budget::collect_default_report_with_overrides(
+        &db,
+        args.budget_profile.as_deref(),
+        args.include_verify_events,
+    )
+    .await?;
+    let session = &payload["token_budget_report"]["current_session"];
+    let summary = format!(
+        "token report :: session_events={} saved_tokens={} savings_percent={:.3}",
+        session["events_total"].as_u64().unwrap_or_default(),
+        session["total_saved_tokens"].as_u64().unwrap_or_default(),
+        session["savings_percent"].as_f64().unwrap_or_default(),
+    );
+    Ok(tool_result(summary, payload))
+}
+
 async fn tool_observe_snapshot(cfg: &AppConfig) -> Result<Value> {
     compatibility::assert_supported(cfg).await?;
     let snapshot = observe::collect_snapshot_preview(cfg).await?;
@@ -826,6 +870,7 @@ fn server_instructions() -> String {
         "Use amai_list_namespaces before querying an unfamiliar project.",
         "Use amai_context_pack for retrieval instead of asking for whole repositories.",
         "Use amai_token_benchmark when you need a measured token-economy comparison.",
+        "Use amai_token_report when you need cumulative token savings for the current session, budget window, or lifetime.",
         "Use amai_observe_snapshot when you need live stack health and SLA evidence.",
     ]
     .join(" ")
@@ -892,6 +937,18 @@ fn tool_definitions() -> Vec<Value> {
                 "readOnlyHint": false,
                 "destructiveHint": false,
                 "idempotentHint": false,
+                "openWorldHint": false
+            }
+        }),
+        json!({
+            "name": "amai_token_report",
+            "description": "Report cumulative token savings for the current session, budget window, and lifetime.",
+            "inputSchema": token_report_input_schema(),
+            "annotations": {
+                "title": "Token Report",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
                 "openWorldHint": false
             }
         }),
@@ -1168,6 +1225,24 @@ fn token_benchmark_input_schema() -> Value {
         }),
     );
     schema
+}
+
+fn token_report_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "budget_profile": {
+                "type": "string",
+                "description": "Optional token budget profile code such as codex_5h."
+            },
+            "include_verify_events": {
+                "type": "boolean",
+                "description": "Whether verification and benchmark events should be included with live token usage.",
+                "default": false
+            }
+        },
+        "additionalProperties": false
+    })
 }
 
 fn tool_result(text: String, structured_content: Value) -> Value {
@@ -1628,6 +1703,12 @@ impl TokenBenchmarkToolArgs {
             min_savings_percent: 0.0,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct TokenReportToolArgs {
+    budget_profile: Option<String>,
+    include_verify_events: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

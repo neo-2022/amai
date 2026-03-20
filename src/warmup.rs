@@ -23,7 +23,8 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &WarmupCacheArgs) -> Re
             limit_chunks: args.limit_chunks,
             limit_semantic_chunks: args.limit_semantic_chunks,
         };
-        let stats = retrieval::execute_context_pack(cfg, db, &context, true).await?;
+        let stats =
+            retrieval::execute_context_pack_with_options(cfg, db, &context, true, false).await?;
         warmed.push(json!({
             "project": project,
             "namespace": args.namespace,

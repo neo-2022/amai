@@ -78,6 +78,13 @@ pub struct DocumentRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct ObservabilitySnapshotRecord {
+    pub snapshot_kind: String,
+    pub payload: Value,
+    pub created_at_epoch_ms: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct DocumentHit {
     pub project_code: String,
     pub namespace_code: String,
@@ -951,6 +958,41 @@ pub async fn latest_observability_snapshot(
         )
         .await?;
     Ok(row.map(|row| row.get(0)))
+}
+
+pub async fn list_observability_snapshots_by_kinds(
+    client: &Client,
+    kinds: &[&str],
+    limit: Option<i64>,
+) -> Result<Vec<ObservabilitySnapshotRecord>> {
+    if kinds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = limit.unwrap_or(i64::MAX);
+    let rows = client
+        .query(
+            r#"
+            SELECT
+                snapshot_kind,
+                payload,
+                (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = ANY($1::text[])
+            ORDER BY created_at DESC
+            LIMIT $2
+            "#,
+            &[&kinds, &limit],
+        )
+        .await
+        .context("failed to list observability snapshots by kinds")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ObservabilitySnapshotRecord {
+            snapshot_kind: row.get(0),
+            payload: row.get(1),
+            created_at_epoch_ms: row.get(2),
+        })
+        .collect())
 }
 
 fn sql_ident(input: &str) -> Result<String> {

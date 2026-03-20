@@ -53,6 +53,13 @@ struct InstallMetricsSummary {
     parser_coverage_ratio: Option<f64>,
     token_savings_percent: Option<f64>,
     token_savings_factor: Option<f64>,
+    token_saved_session_total: Option<u64>,
+    token_saved_window_total: Option<u64>,
+    token_saved_lifetime_total: Option<u64>,
+    token_savings_percent_session: Option<f64>,
+    token_savings_percent_window: Option<f64>,
+    token_savings_percent_lifetime: Option<f64>,
+    token_window_label: Option<String>,
 }
 
 pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
@@ -265,6 +272,30 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
                     format_percent_value(metrics.token_savings_percent),
                     format_factor(metrics.token_savings_factor)
                 );
+                if metrics.token_saved_session_total.is_some()
+                    || metrics.token_saved_window_total.is_some()
+                    || metrics.token_saved_lifetime_total.is_some()
+                {
+                    println!(
+                        "- Сэкономлено токенов за текущую сессию: {} ({})",
+                        format_u64(metrics.token_saved_session_total),
+                        format_percent_value(metrics.token_savings_percent_session)
+                    );
+                    println!(
+                        "- Сэкономлено токенов за {}: {} ({})",
+                        metrics
+                            .token_window_label
+                            .as_deref()
+                            .unwrap_or("текущее окно"),
+                        format_u64(metrics.token_saved_window_total),
+                        format_percent_value(metrics.token_savings_percent_window)
+                    );
+                    println!(
+                        "- Сэкономлено токенов за всё время: {} ({})",
+                        format_u64(metrics.token_saved_lifetime_total),
+                        format_percent_value(metrics.token_savings_percent_lifetime)
+                    );
+                }
             } else {
                 println!(
                     "- Метрики поиска пока не показаны: они появятся после первой индексации и первого benchmark-proof."
@@ -473,6 +504,28 @@ async fn collect_install_metrics_summary(cfg: &config::AppConfig) -> Result<Inst
         token_savings_factor:
             snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_factor"]
                 .as_f64(),
+        token_saved_session_total: snapshot["token_budget_report"]["token_budget_report"]
+            ["current_session"]["total_saved_tokens"]
+            .as_u64(),
+        token_saved_window_total: snapshot["token_budget_report"]["token_budget_report"]
+            ["rolling_window"]["total_saved_tokens"]
+            .as_u64(),
+        token_saved_lifetime_total: snapshot["token_budget_report"]["token_budget_report"]
+            ["lifetime"]["total_saved_tokens"]
+            .as_u64(),
+        token_savings_percent_session: snapshot["token_budget_report"]["token_budget_report"]
+            ["current_session"]["savings_percent"]
+            .as_f64(),
+        token_savings_percent_window: snapshot["token_budget_report"]["token_budget_report"]
+            ["rolling_window"]["savings_percent"]
+            .as_f64(),
+        token_savings_percent_lifetime: snapshot["token_budget_report"]["token_budget_report"]
+            ["lifetime"]["savings_percent"]
+            .as_f64(),
+        token_window_label: snapshot["token_budget_report"]["token_budget_report"]["profile"]
+            ["rolling_window_hours"]
+            .as_u64()
+            .map(|hours| format!("{hours} ч")),
     })
 }
 
@@ -516,6 +569,7 @@ fn has_post_install_runtime_metrics(metrics: &InstallMetricsSummary) -> bool {
         || metrics.retrieval_cold_p95_ms.is_some()
         || metrics.load_hot_qps.is_some()
         || metrics.token_savings_percent.is_some()
+        || metrics.token_saved_lifetime_total.is_some()
 }
 
 fn format_ms(value: Option<f64>) -> String {

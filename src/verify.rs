@@ -8,6 +8,7 @@ use crate::config::AppConfig;
 use crate::language;
 use crate::postgres;
 use crate::retrieval;
+use crate::token_budget;
 use anyhow::{Context, Result, anyhow};
 use ignore::WalkBuilder;
 use serde::Deserialize;
@@ -31,7 +32,8 @@ pub async fn run_benchmark(
     }
 
     for _ in 0..args.warmup {
-        retrieval::execute_context_pack(cfg, db, &args.context, args.persist).await?;
+        retrieval::execute_context_pack_with_options(cfg, db, &args.context, args.persist, false)
+            .await?;
     }
 
     let mut samples_us = Vec::with_capacity(args.iterations);
@@ -48,7 +50,14 @@ pub async fn run_benchmark(
     let mut last_stats = None;
     for _ in 0..args.iterations {
         let started = Instant::now();
-        let stats = retrieval::execute_context_pack(cfg, db, &args.context, args.persist).await?;
+        let stats = retrieval::execute_context_pack_with_options(
+            cfg,
+            db,
+            &args.context,
+            args.persist,
+            false,
+        )
+        .await?;
         samples_us.push(started.elapsed().as_micros());
         resolve_scope_samples.push(stats.timings.resolve_scope_ms);
         cache_lookup_samples.push(stats.timings.cache_lookup_ms);
@@ -166,7 +175,7 @@ pub async fn run_accuracy(
     db: &mut Client,
     args: &VerifyAccuracyArgs,
 ) -> Result<()> {
-    let strict_pack = retrieval::execute_context_pack_capture(
+    let strict_pack = retrieval::execute_context_pack_capture_with_options(
         cfg,
         db,
         &ContextPackArgs {
@@ -180,6 +189,7 @@ pub async fn run_accuracy(
             limit_chunks: 8,
             limit_semantic_chunks: 8,
         },
+        false,
         false,
     )
     .await?;
@@ -196,9 +206,10 @@ pub async fn run_accuracy(
         limit_semantic_chunks: 8,
     };
     let mut related_pack =
-        retrieval::execute_context_pack_capture(cfg, db, &related_args, false).await?;
+        retrieval::execute_context_pack_capture_with_options(cfg, db, &related_args, false, false)
+            .await?;
 
-    let symbol_pack = retrieval::execute_context_pack_capture(
+    let symbol_pack = retrieval::execute_context_pack_capture_with_options(
         cfg,
         db,
         &ContextPackArgs {
@@ -213,10 +224,11 @@ pub async fn run_accuracy(
             limit_semantic_chunks: 8,
         },
         false,
+        false,
     )
     .await?;
 
-    let namespace_strict_pack = retrieval::execute_context_pack_capture(
+    let namespace_strict_pack = retrieval::execute_context_pack_capture_with_options(
         cfg,
         db,
         &ContextPackArgs {
@@ -230,6 +242,7 @@ pub async fn run_accuracy(
             limit_chunks: 8,
             limit_semantic_chunks: 8,
         },
+        false,
         false,
     )
     .await?;
@@ -277,8 +290,14 @@ pub async fn run_accuracy(
             break;
         }
         sleep(Duration::from_millis(200)).await;
-        related_pack =
-            retrieval::execute_context_pack_capture(cfg, db, &related_args, false).await?;
+        related_pack = retrieval::execute_context_pack_capture_with_options(
+            cfg,
+            db,
+            &related_args,
+            false,
+            false,
+        )
+        .await?;
         semantic_precision = precision_ratio(
             &related_pack.payload["retrieval"]["semantic_chunks"],
             |item| {
@@ -347,7 +366,14 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
 
     let mut warmup_db = postgres::connect_admin(cfg).await?;
     for _ in 0..args.warmup_per_worker {
-        retrieval::execute_context_pack(cfg, &mut warmup_db, &args.context, args.persist).await?;
+        retrieval::execute_context_pack_with_options(
+            cfg,
+            &mut warmup_db,
+            &args.context,
+            args.persist,
+            false,
+        )
+        .await?;
     }
 
     let hot_cache_only =
@@ -382,7 +408,11 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
                 let mut db = postgres::connect_admin(&cfg).await?;
                 for _ in 0..iterations {
                     let op_started = Instant::now();
-                    match retrieval::execute_context_pack(&cfg, &mut db, &context, persist).await {
+                    match retrieval::execute_context_pack_with_options(
+                        &cfg, &mut db, &context, persist, false,
+                    )
+                    .await
+                    {
                         Ok(stats) => {
                             samples_us.push(op_started.elapsed().as_micros());
                             last_stats = Some(stats);
@@ -695,7 +725,9 @@ pub async fn run_text_compare(
             limit_chunks: args.limit_chunks,
             limit_semantic_chunks: args.limit_semantic_chunks,
         };
-        let pack = retrieval::execute_context_pack_capture(cfg, db, &context, false).await?;
+        let pack =
+            retrieval::execute_context_pack_capture_with_options(cfg, db, &context, false, false)
+                .await?;
         let naive_scope = collect_naive_scope(
             &pack.payload,
             args.naive_limit_files,
@@ -854,7 +886,9 @@ pub async fn collect_token_benchmark(
     db: &mut Client,
     args: &VerifyTokenBenchmarkArgs,
 ) -> Result<Value> {
-    let pack = retrieval::execute_context_pack_capture(cfg, db, &args.context, false).await?;
+    let pack =
+        retrieval::execute_context_pack_capture_with_options(cfg, db, &args.context, false, false)
+            .await?;
     let tokenizer = build_tokenizer(&args.tokenizer)?;
     let naive_scope = collect_naive_scope(
         &pack.payload,
@@ -907,6 +941,7 @@ pub async fn collect_token_benchmark(
         }
     });
     let _ = postgres::insert_observability_snapshot(db, "token_benchmark", &payload).await?;
+    token_budget::record_verify_benchmark_event(db, &payload).await?;
     Ok(payload)
 }
 

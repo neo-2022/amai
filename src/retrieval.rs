@@ -6,6 +6,7 @@ use crate::postgres::{
 };
 use crate::qdrant;
 use crate::s3;
+use crate::token_budget;
 use anyhow::{Context, Result, anyhow};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use qdrant_client::qdrant::point_id::PointIdOptions;
@@ -131,6 +132,7 @@ pub async fn build_context_pack(
     let mut prepared = prepare_context_pack(cfg, db, args).await?;
     ensure_context_pack_persisted(cfg, db, args, &mut prepared).await?;
     cache_context_pack_entry(cfg, args, &prepared, true)?;
+    record_context_pack_token_budget_event(db, prepared.payload.as_ref()).await?;
     if prepared.cache_hit {
         eprintln!(
             "context pack cache hit: {} :: scope={}",
@@ -156,9 +158,11 @@ pub async fn execute_context_pack(
     args: &ContextPackArgs,
     persist: bool,
 ) -> Result<ContextPackStats> {
-    Ok(execute_context_pack_capture(cfg, db, args, persist)
-        .await?
-        .stats)
+    Ok(
+        execute_context_pack_capture_with_options(cfg, db, args, persist, true)
+            .await?
+            .stats,
+    )
 }
 
 pub async fn execute_context_pack_capture(
@@ -167,7 +171,34 @@ pub async fn execute_context_pack_capture(
     args: &ContextPackArgs,
     persist: bool,
 ) -> Result<ContextPackResult> {
+    execute_context_pack_capture_with_options(cfg, db, args, persist, true).await
+}
+
+pub async fn execute_context_pack_with_options(
+    cfg: &AppConfig,
+    db: &mut Client,
+    args: &ContextPackArgs,
+    persist: bool,
+    track_token_usage: bool,
+) -> Result<ContextPackStats> {
+    Ok(
+        execute_context_pack_capture_with_options(cfg, db, args, persist, track_token_usage)
+            .await?
+            .stats,
+    )
+}
+
+pub async fn execute_context_pack_capture_with_options(
+    cfg: &AppConfig,
+    db: &mut Client,
+    args: &ContextPackArgs,
+    persist: bool,
+    track_token_usage: bool,
+) -> Result<ContextPackResult> {
     if let Some(cached) = try_execute_context_pack_fast_cached(cfg, args, persist)? {
+        if track_token_usage {
+            record_context_pack_token_budget_event(db, &cached.payload).await?;
+        }
         return Ok(cached);
     }
     let mut prepared = prepare_context_pack(cfg, db, args).await?;
@@ -176,10 +207,20 @@ pub async fn execute_context_pack_capture(
     }
     let durably_persisted = persist || prepared.durably_persisted;
     cache_context_pack_entry(cfg, args, &prepared, durably_persisted)?;
+    if track_token_usage {
+        record_context_pack_token_budget_event(db, prepared.payload.as_ref()).await?;
+    }
     Ok(ContextPackResult {
         payload: prepared.payload.as_ref().clone(),
         stats: prepared.stats,
     })
+}
+
+async fn record_context_pack_token_budget_event(db: &Client, payload: &Value) -> Result<()> {
+    if !payload.is_object() {
+        return Ok(());
+    }
+    token_budget::record_live_context_pack_event(db, payload).await
 }
 
 pub fn try_execute_context_pack_fast_cached(
