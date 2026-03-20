@@ -167,16 +167,8 @@ pub async fn execute_context_pack_capture(
     args: &ContextPackArgs,
     persist: bool,
 ) -> Result<ContextPackResult> {
-    if !args.disable_cache
-        && let Some(effective_mode) = args.retrieval_mode.as_deref()
-    {
-        let cache_key = cache_key(cfg, args, effective_mode);
-        if let Some(cached) =
-            local_fast_context_pack_cache_get(&cache_key, cfg.local_fast_cache_ttl_ms)?
-            && (!persist || cached.durably_persisted)
-        {
-            return Ok(context_pack_result_from_local_entry(cached));
-        }
+    if let Some(cached) = try_execute_context_pack_fast_cached(cfg, args, persist)? {
+        return Ok(cached);
     }
     let mut prepared = prepare_context_pack(cfg, db, args).await?;
     if persist {
@@ -188,6 +180,28 @@ pub async fn execute_context_pack_capture(
         payload: prepared.payload.as_ref().clone(),
         stats: prepared.stats,
     })
+}
+
+pub fn try_execute_context_pack_fast_cached(
+    cfg: &AppConfig,
+    args: &ContextPackArgs,
+    persist: bool,
+) -> Result<Option<ContextPackResult>> {
+    if args.disable_cache {
+        return Ok(None);
+    }
+    let Some(effective_mode) = args.retrieval_mode.as_deref() else {
+        return Ok(None);
+    };
+    let cache_key = cache_key(cfg, args, effective_mode);
+    let Some(cached) = local_fast_context_pack_cache_get(&cache_key, cfg.local_fast_cache_ttl_ms)?
+    else {
+        return Ok(None);
+    };
+    if persist && !cached.durably_persisted {
+        return Ok(None);
+    }
+    Ok(Some(context_pack_result_from_local_entry(cached)))
 }
 
 async fn prepare_context_pack(

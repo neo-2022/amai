@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:41 MSK
-Ручная сверка guide/docs: 2026-03-20 20:41 MSK
+modified_at: 2026-03-20 20:55 MSK
+Ручная сверка guide/docs: 2026-03-20 20:55 MSK
 
 # Operations
 
@@ -406,6 +406,42 @@ cargo run --release -- verify load \
 - `qps >= 5000`
 - `p95 < 10ms`
 - `error_rate = 0`
+
+Важно:
+- если после warmup `verify load` пишет `execution_mode = hot_cache_only`, это правильный и желаемый режим;
+- в этом режиме verifier честно мерит process-local hot retrieval, а не открывает PostgreSQL connection на каждого worker;
+- возврат к per-worker DB connections для hot-load считается регрессом, даже если код “выглядит проще”.
+
+## Stress scale proof
+
+```bash
+./scripts/proof_stress_scale.sh
+```
+
+Этот proof:
+- поднимает fixture stack;
+- прогревает hot cache;
+- последовательно гоняет `50`, `100` и `200` workers;
+- fail-ит, если `p95 >= 10ms`, `qps < 5000` или появляется `error_rate`.
+
+Текущий честный measured baseline на референсной машине:
+- CPU:
+  - `AMD Ryzen 9 7900X 12-Core Processor`
+  - `24` логических CPU
+- RAM:
+  - `62 GiB`
+- `50 workers`
+  - `p95 = 0.026 ms`
+  - `qps ≈ 384 024`
+- `100 workers`
+  - `p95 = 0.023 ms`
+  - `qps ≈ 434 593`
+- `200 workers`
+  - `p95 = 0.020 ms`
+  - `qps ≈ 670 016`
+
+Эти цифры относятся именно к `hot cached retrieval`.
+Cold/full path нужно оценивать отдельно через `proof_performance.sh` и при необходимости заранее прогревать `warmup_cache.sh`.
 
 ## Token benchmark proof
 

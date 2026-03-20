@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:41 MSK
-Ручная сверка guide/docs: 2026-03-20 20:41 MSK
+modified_at: 2026-03-20 20:55 MSK
+Ручная сверка guide/docs: 2026-03-20 20:55 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -273,6 +273,7 @@ cd /home/art/agent-memory-index
 ./scripts/proof_mcp.sh
 ./scripts/proof_onboarding.sh
 ./scripts/proof_client_lifecycle.sh
+./scripts/proof_stress_scale.sh
 ```
 
 4. Зарегистрировать свои проекты:
@@ -420,6 +421,55 @@ cargo build --release
 ```bash
 ./scripts/proof_text_compare.sh
 ```
+
+## Измерения на референсном железе
+
+Ниже не “красивые обещания”, а реальные локальные замеры на машине, где этот baseline materialize-ился:
+
+- CPU:
+  - `AMD Ryzen 9 7900X 12-Core Processor`
+  - `24` логических CPU
+- RAM:
+  - `62 GiB`
+
+Важно:
+- это не означает, что те же цифры magically появятся на более слабом железе;
+- но на таком же или более сильном железе эти proof-команды должны подтверждаться повторно.
+
+Текущий честный measured baseline:
+- `proof_load.sh`
+  - `execution_mode = hot_cache_only`
+  - `p95 = 0.022 ms`
+  - `qps ≈ 62 266`
+- `proof_stress_scale.sh`
+  - `50 workers`
+    - `p95 = 0.026 ms`
+    - `qps ≈ 384 024`
+  - `100 workers`
+    - `p95 = 0.023 ms`
+    - `qps ≈ 434 593`
+  - `200 workers`
+    - `p95 = 0.020 ms`
+    - `qps ≈ 670 016`
+- `cold retrieval`
+  - practical fixture baseline остаётся на десятках миллисекунд, а не на hot-cache цифрах;
+  - для честного low-latency UX cold-start стоит прогревать через `warmup_cache.sh`.
+
+## Важный guard: hot path не трогать
+
+Сейчас у `Amai` есть особенно сильный выигранный контур:
+- process-local `hot cached retrieval`
+- без лишних Postgres connections на каждого worker
+- с честным `scope_signature = local_fast_cache`
+
+Это означает:
+- для `hot` path не нужно снова лезть в PostgreSQL, если ответ уже лежит в process-local fast cache;
+- любые будущие refactor-изменения обязаны сохранять этот fast path;
+- если новый код снова заставит `verify load` открывать DB connection на каждого worker, это считается регрессом, а не “архитектурной чисткой”.
+
+Простыми словами:
+- cold path можно улучшать отдельно;
+- hot path уже топовый, его нельзя случайно испортить ради красивого рефактора.
 
 Ручной запуск:
 

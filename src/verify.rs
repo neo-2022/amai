@@ -350,6 +350,10 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
         retrieval::execute_context_pack(cfg, &mut warmup_db, &args.context, args.persist).await?;
     }
 
+    let hot_cache_only =
+        retrieval::try_execute_context_pack_fast_cached(cfg, &args.context, args.persist)?
+            .is_some();
+
     let started = Instant::now();
     let mut handles = Vec::with_capacity(args.workers);
     for _ in 0..args.workers {
@@ -358,19 +362,34 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
         let iterations = args.iterations_per_worker;
         let persist = args.persist;
         handles.push(tokio::spawn(async move {
-            let mut db = postgres::connect_admin(&cfg).await?;
             let mut samples_us = Vec::with_capacity(iterations);
             let mut error_count = 0_usize;
             let mut last_stats = None;
-            for _ in 0..iterations {
-                let op_started = Instant::now();
-                match retrieval::execute_context_pack(&cfg, &mut db, &context, persist).await {
-                    Ok(stats) => {
-                        samples_us.push(op_started.elapsed().as_micros());
-                        last_stats = Some(stats);
+            if hot_cache_only {
+                for _ in 0..iterations {
+                    let op_started = Instant::now();
+                    match retrieval::try_execute_context_pack_fast_cached(&cfg, &context, persist) {
+                        Ok(Some(result)) => {
+                            samples_us.push(op_started.elapsed().as_micros());
+                            last_stats = Some(result.stats);
+                        }
+                        Ok(None) | Err(_) => {
+                            error_count += 1;
+                        }
                     }
-                    Err(_) => {
-                        error_count += 1;
+                }
+            } else {
+                let mut db = postgres::connect_admin(&cfg).await?;
+                for _ in 0..iterations {
+                    let op_started = Instant::now();
+                    match retrieval::execute_context_pack(&cfg, &mut db, &context, persist).await {
+                        Ok(stats) => {
+                            samples_us.push(op_started.elapsed().as_micros());
+                            last_stats = Some(stats);
+                        }
+                        Err(_) => {
+                            error_count += 1;
+                        }
                     }
                 }
             }
@@ -430,6 +449,7 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
             "workers": args.workers,
             "iterations_per_worker": args.iterations_per_worker,
             "warmup_per_worker": args.warmup_per_worker,
+            "execution_mode": if hot_cache_only { "hot_cache_only" } else { "db_backed" },
             "success_count": success_count,
             "error_count": total_errors,
             "error_rate": error_rate,
