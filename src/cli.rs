@@ -43,6 +43,10 @@ pub enum Command {
         #[command(subcommand)]
         command: IndexCommand,
     },
+    Verify {
+        #[command(subcommand)]
+        command: VerifyCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -79,6 +83,12 @@ pub enum ContextCommand {
 #[derive(Debug, Subcommand)]
 pub enum IndexCommand {
     Project(IndexProjectArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum VerifyCommand {
+    Benchmark(Box<VerifyBenchmarkArgs>),
+    Hostile(VerifyHostileArgs),
 }
 
 #[derive(Debug, Args)]
@@ -151,4 +161,28 @@ pub struct IndexProjectArgs {
     pub limit_files: Option<usize>,
     #[arg(long, default_value_t = false)]
     pub skip_embeddings: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyBenchmarkArgs {
+    #[command(flatten)]
+    pub context: ContextPackArgs,
+    #[arg(long, default_value_t = 1)]
+    pub warmup: usize,
+    #[arg(long, default_value_t = 5)]
+    pub iterations: usize,
+    #[arg(long, default_value_t = false)]
+    pub persist: bool,
+    #[arg(long)]
+    pub max_mean_ms: Option<u128>,
+    #[arg(long)]
+    pub max_p95_ms: Option<u128>,
+    #[arg(long)]
+    pub max_max_ms: Option<u128>,
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyHostileArgs {
+    #[arg(long, default_value = "all")]
+    pub scenario: String,
 }

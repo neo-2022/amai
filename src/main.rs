@@ -12,12 +12,13 @@ mod retrieval;
 mod s3;
 mod status;
 mod syntax;
+mod verify;
 
 use anyhow::Result;
 use clap::Parser;
 use cli::{
     BootstrapCommand, Cli, Command, CompatCommand, ContextCommand, IndexCommand, NamespaceCommand,
-    ProjectCommand, RelationCommand,
+    ProjectCommand, RelationCommand, VerifyCommand,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -124,6 +125,16 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 let mut db = postgres::connect_admin(&cfg).await?;
                 indexer::index_project(&cfg, &mut db, &args).await?;
+            }
+        },
+        Command::Verify { command } => match command {
+            VerifyCommand::Benchmark(args) => {
+                compatibility::assert_supported(&cfg).await?;
+                let mut db = postgres::connect_admin(&cfg).await?;
+                verify::run_benchmark(&cfg, &mut db, &args).await?;
+            }
+            VerifyCommand::Hostile(args) => {
+                verify::run_hostile(&cfg, &args).await?;
             }
         },
     }

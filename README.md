@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 15:06 MSK
-Ручная сверка guide/docs: 2026-03-20 15:06 MSK
+modified_at: 2026-03-20 14:30 MSK
+Ручная сверка guide/docs: 2026-03-20 14:30 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -119,6 +119,8 @@ cd /home/art/agent-memory-index
 ```bash
 ./scripts/proof_local.sh
 ./scripts/proof_hardening.sh
+./scripts/proof_performance.sh
+./scripts/proof_hostile.sh
 ```
 
 4. Зарегистрировать свои проекты:
@@ -168,6 +170,35 @@ cargo run -- context pack \
 - делает semantic chunk recall через Qdrant;
 - собирает provenance-rich context pack;
 - пишет его в PostgreSQL, SQLite edge cache и S3 context bucket.
+
+## Verification contour
+
+В проекте теперь есть отдельный verification layer, а не только smoke-скрипты.
+
+Прямые Rust-команды:
+
+```bash
+cargo run -- verify benchmark \
+  --project project_alpha \
+  --namespace review \
+  --query "shared_runtime_marker" \
+  --retrieval-mode local_plus_related \
+  --warmup 1 \
+  --iterations 5 \
+  --persist
+
+cargo run -- verify hostile --scenario all
+```
+
+Что они доказывают:
+- `verify benchmark`
+  - мерит живой `context pack` path по времени;
+  - выдаёт `mean/p50/p95/max`;
+  - может fail-ить при нарушении заданных latency thresholds;
+- `verify hostile`
+  - проверяет fail-closed реакцию на partial-service loss;
+  - проверяет recovery после возврата сервиса;
+  - отдельно проверяет drift в `stack_meta`.
 
 ## Защита от version drift
 

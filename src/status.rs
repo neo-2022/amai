@@ -1,6 +1,7 @@
 use crate::{compatibility, config::AppConfig, nats, postgres, qdrant, s3};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use reqwest::StatusCode;
+use std::time::Duration;
 
 pub async fn print_status(cfg: &AppConfig) -> Result<()> {
     let db = postgres::connect_admin(cfg).await?;
@@ -22,7 +23,7 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
     let nats_client = nats::connect(cfg).await?;
     let streams = nats::status_stream_names(nats_client).await?;
 
-    let nats_http = reqwest::get(&cfg.nats_http_url).await?;
+    let nats_http = http_client()?.get(&cfg.nats_http_url).send().await?;
     let nats_http_ok = nats_http.status() == StatusCode::OK;
 
     println!("stack: {}", cfg.stack_name);
@@ -56,4 +57,11 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
         compatibility.s3.raw_version
     );
     Ok(())
+}
+
+fn http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .context("failed to build status HTTP client")
 }

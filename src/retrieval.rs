@@ -15,11 +15,64 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
+#[derive(Debug, Clone)]
+pub struct ContextPackStats {
+    pub context_pack_id: Uuid,
+    pub exact_documents: usize,
+    pub symbol_hits: usize,
+    pub lexical_chunks: usize,
+    pub semantic_chunks: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedContextPack {
+    context_pack_id: Uuid,
+    project: ProjectRecord,
+    namespace_id: Uuid,
+    effective_mode: String,
+    visible_projects_json: Value,
+    payload: Value,
+    payload_json: String,
+    stats: ContextPackStats,
+}
+
 pub async fn build_context_pack(
     cfg: &AppConfig,
     db: &mut Client,
     args: &ContextPackArgs,
 ) -> Result<()> {
+    let prepared = prepare_context_pack(cfg, db, args).await?;
+    persist_context_pack(cfg, db, args, &prepared).await?;
+    eprintln!(
+        "context pack stored: s3://{}/context-packs/{}/{}/{}.json :: {}",
+        cfg.s3_bucket_context,
+        prepared.project.code,
+        prepared.effective_mode,
+        prepared.context_pack_id,
+        prepared.context_pack_id
+    );
+    println!("{}", prepared.payload_json);
+    Ok(())
+}
+
+pub async fn execute_context_pack(
+    cfg: &AppConfig,
+    db: &mut Client,
+    args: &ContextPackArgs,
+    persist: bool,
+) -> Result<ContextPackStats> {
+    let prepared = prepare_context_pack(cfg, db, args).await?;
+    if persist {
+        persist_context_pack(cfg, db, args, &prepared).await?;
+    }
+    Ok(prepared.stats)
+}
+
+async fn prepare_context_pack(
+    cfg: &AppConfig,
+    db: &mut Client,
+    args: &ContextPackArgs,
+) -> Result<PreparedContextPack> {
     let project = postgres::get_project_by_code(db, &args.project).await?;
     let namespace =
         postgres::get_namespace_by_code(db, project.project_id, &args.namespace).await?;
@@ -95,6 +148,13 @@ pub async fn build_context_pack(
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
         .as_secs();
+    let stats = ContextPackStats {
+        context_pack_id,
+        exact_documents: documents.len(),
+        symbol_hits: symbols.len(),
+        lexical_chunks: chunks.len(),
+        semantic_chunks: semantic_chunks.len(),
+    };
     let payload = json!({
         "context_pack_id": context_pack_id,
         "stack_name": cfg.stack_name,
@@ -132,38 +192,56 @@ pub async fn build_context_pack(
     });
     let payload_json = serde_json::to_string_pretty(&payload)?;
 
+    Ok(PreparedContextPack {
+        context_pack_id,
+        project,
+        namespace_id: namespace.namespace_id,
+        effective_mode,
+        visible_projects_json,
+        payload,
+        payload_json,
+        stats,
+    })
+}
+
+async fn persist_context_pack(
+    cfg: &AppConfig,
+    db: &mut Client,
+    args: &ContextPackArgs,
+    prepared: &PreparedContextPack,
+) -> Result<()> {
     let edge_cache_path = edge_cache::ensure(&cfg.edge_cache_path)?;
     edge_cache::cache_context_pack(
         &edge_cache_path,
-        &context_pack_id.to_string(),
-        &project.code,
-        &effective_mode,
-        &payload_json,
+        &prepared.context_pack_id.to_string(),
+        &prepared.project.code,
+        &prepared.effective_mode,
+        &prepared.payload_json,
     )?;
 
     let object_key = format!(
         "context-packs/{}/{}/{}.json",
-        project.code, effective_mode, context_pack_id
+        prepared.project.code, prepared.effective_mode, prepared.context_pack_id
     );
     let s3_client = s3::connect(cfg).await?;
     s3::put_json_object(
         &s3_client,
         &cfg.s3_bucket_context,
         &object_key,
-        &payload_json,
+        &prepared.payload_json,
     )
     .await?;
 
     let artifact_metadata = json!({
-        "context_pack_id": context_pack_id,
+        "context_pack_id": prepared.context_pack_id,
         "query": args.query,
-        "effective_retrieval_mode": effective_mode
+        "effective_retrieval_mode": prepared.effective_mode
     });
     let artifact_ref_id = postgres::insert_artifact_ref(
         db,
         &postgres::ArtifactRefInsert {
-            project_id: project.project_id,
-            namespace_id: namespace.namespace_id,
+            project_id: prepared.project.project_id,
+            namespace_id: prepared.namespace_id,
             artifact_kind: "context_pack",
             bucket: &cfg.s3_bucket_context,
             object_key: &object_key,
@@ -176,23 +254,17 @@ pub async fn build_context_pack(
     postgres::insert_context_pack(
         db,
         &postgres::ContextPackInsert {
-            context_pack_id,
-            project_id: project.project_id,
-            namespace_id: namespace.namespace_id,
-            retrieval_mode: &effective_mode,
+            context_pack_id: prepared.context_pack_id,
+            project_id: prepared.project.project_id,
+            namespace_id: prepared.namespace_id,
+            retrieval_mode: &prepared.effective_mode,
             query_text: &args.query,
-            visible_projects: &visible_projects_json,
-            payload: &payload,
+            visible_projects: &prepared.visible_projects_json,
+            payload: &prepared.payload,
             artifact_ref_id: Some(artifact_ref_id),
         },
     )
     .await?;
-
-    eprintln!(
-        "context pack stored: s3://{}/{} :: {}",
-        cfg.s3_bucket_context, object_key, context_pack_id
-    );
-    println!("{payload_json}");
     Ok(())
 }
 

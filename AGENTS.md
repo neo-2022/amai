@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 15:06 MSK
-Ручная сверка guide/docs: 2026-03-20 15:06 MSK
+modified_at: 2026-03-20 14:30 MSK
+Ручная сверка guide/docs: 2026-03-20 14:30 MSK
 
 # AGENTS.md для Art-memory-agent-index (Amai)
 
@@ -97,3 +97,16 @@ CLI/binary canonical short name:
 Для жёсткого локального proof:
 - `scripts/proof_local.sh`
 - `scripts/proof_hardening.sh`
+- `scripts/proof_performance.sh`
+- `scripts/proof_hostile.sh`
+
+Rust-native verification commands:
+- `cargo run -- verify benchmark ...`
+- `cargo run -- verify hostile ...`
+
+Если новый агент собирается утверждать, что проект «быстрый» или «устойчивый», он не имеет права
+опираться только на `proof_local` и `proof_hardening`.
+Минимально честный контур теперь включает:
+- latency proof;
+- hostile fail-closed proof;
+- recovery proof после возврата сервиса.

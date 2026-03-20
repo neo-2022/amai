@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 15:06 MSK
-Ручная сверка guide/docs: 2026-03-20 15:06 MSK
+modified_at: 2026-03-20 14:30 MSK
+Ручная сверка guide/docs: 2026-03-20 14:30 MSK
 
 # Architecture
 
@@ -166,3 +166,28 @@ Code structure plane:
 Текущий parser baseline:
 - полноценный AST/symbol contour для `rust`, `toml`, `javascript`, `typescript`, `tsx`, `json`;
 - честный lexical fallback для остальных файлов до добавления отдельных grammar crates.
+
+## Verification plane
+
+Отдельно от runtime planes у проекта теперь materialized verification plane.
+
+Его задача:
+- не только проверять, что стек поднимается;
+- но и доказывать, что он:
+  - fail-closed ведёт себя при partial-service loss;
+  - восстанавливается после возврата сервиса;
+  - держит practical latency baseline для живого `context pack` path.
+
+Текущие verification contours:
+- `scripts/proof_local.sh`
+  - быстрый formatting + test + compat + status proof;
+- `scripts/proof_hardening.sh`
+  - repeat bootstrap, relation-aware retrieval и restart recovery;
+- `scripts/proof_performance.sh`
+  - end-to-end latency proof для `context pack`;
+- `scripts/proof_hostile.sh`
+  - hostile proof на `stack_meta` drift и service loss для `postgres`, `qdrant`, `minio`, `nats`;
+- `cargo run -- verify benchmark ...`
+  - Rust-native latency verifier с threshold enforcement;
+- `cargo run -- verify hostile ...`
+  - Rust-native hostile verifier с fail-closed and recovery proof.

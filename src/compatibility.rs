@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio_postgres::Client;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +86,7 @@ pub async fn bootstrap_meta(_cfg: &AppConfig, client: &Client) -> Result<()> {
 
 pub async fn check(cfg: &AppConfig) -> Result<CompatibilityReport> {
     let manifest = load_manifest()?;
+    let http = http_client()?;
 
     let db = postgres::connect_admin(cfg).await?;
     let pg_version = db
@@ -93,7 +95,9 @@ pub async fn check(cfg: &AppConfig) -> Result<CompatibilityReport> {
         .get::<_, String>(0);
     let postgres = evaluate_version_rule(&manifest.postgres, &pg_version, &pg_version)?;
 
-    let qdrant_value: Value = reqwest::get(format!("{}/", cfg.qdrant_http_url))
+    let qdrant_value: Value = http
+        .get(format!("{}/", cfg.qdrant_http_url))
+        .send()
         .await
         .context("failed to query qdrant root endpoint")?
         .json()
@@ -106,7 +110,9 @@ pub async fn check(cfg: &AppConfig) -> Result<CompatibilityReport> {
         .to_string();
     let qdrant = evaluate_version_rule(&manifest.qdrant, &qdrant_version, &qdrant_version)?;
 
-    let nats_value: Value = reqwest::get(format!("{}/varz", cfg.nats_http_url))
+    let nats_value: Value = http
+        .get(format!("{}/varz", cfg.nats_http_url))
+        .send()
         .await
         .context("failed to query nats /varz endpoint")?
         .json()
@@ -119,7 +125,7 @@ pub async fn check(cfg: &AppConfig) -> Result<CompatibilityReport> {
         .to_string();
     let nats = evaluate_version_rule(&manifest.nats, &nats_version, &nats_version)?;
 
-    let s3_response = reqwest::Client::new()
+    let s3_response = http
         .head(format!("{}/minio/health/live", cfg.s3_endpoint))
         .send()
         .await
@@ -223,6 +229,13 @@ fn load_manifest() -> Result<CompatibilityManifest> {
     let content = fs::read_to_string(&path)
         .with_context(|| format!("failed to read compatibility manifest {}", path.display()))?;
     toml::from_str(&content).context("failed to parse compatibility manifest")
+}
+
+fn http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .context("failed to build compatibility HTTP client")
 }
 
 fn manifest_path() -> PathBuf {

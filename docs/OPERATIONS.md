@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 15:06 MSK
-Ручная сверка guide/docs: 2026-03-20 15:06 MSK
+modified_at: 2026-03-20 14:30 MSK
+Ручная сверка guide/docs: 2026-03-20 14:30 MSK
 
 # Operations
 
@@ -113,6 +113,56 @@ cargo run -- context pack \
 - multi-project isolation на fixture-проектах;
 - controlled cross-project reading;
 - restart recovery после `docker compose restart`.
+
+## Performance proof
+
+```bash
+./scripts/proof_performance.sh
+```
+
+Этот proof:
+- индексирует fixture-проекты с эмбеддингами;
+- гоняет живой `context pack` path несколько раз;
+- мерит `mean/p50/p95/max`;
+- fail-ит, если practical latency baseline выходит за заданные thresholds.
+
+Прямая Rust-команда:
+
+```bash
+cargo run -- verify benchmark \
+  --project project_alpha \
+  --namespace review \
+  --query "shared_runtime_marker" \
+  --retrieval-mode local_plus_related \
+  --warmup 1 \
+  --iterations 5 \
+  --persist
+```
+
+## Hostile proof
+
+```bash
+./scripts/proof_hostile.sh
+```
+
+Этот proof:
+- специально создаёт `stack_meta` drift;
+- по очереди выключает `postgres`, `qdrant`, `minio`, `nats`;
+- проверяет, что compatibility path fail-closed;
+- затем поднимает сервис обратно и доказывает recovery.
+
+Прямая Rust-команда:
+
+```bash
+cargo run -- verify hostile --scenario all
+```
+
+Допустимые точечные сценарии:
+- `stack_meta_drift`
+- `postgres`
+- `qdrant`
+- `minio`
+- `nats`
 
 Текущий AST coverage:
 - `rust`
