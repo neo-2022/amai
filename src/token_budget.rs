@@ -691,6 +691,8 @@ fn build_event_payload(
     let fallback_triggered = fallback_count > 0;
     let sources_count = count_sources(payload) as u64;
     let chunks_count = count_chunks(payload) as u64;
+    let traffic_class = derive_traffic_class(source_kind);
+    let query_type = derive_query_type(payload["query"].as_str().unwrap_or_default());
     let event_id = payload["context_pack_id"]
         .as_str()
         .map(ToOwned::to_owned)
@@ -702,13 +704,13 @@ fn build_event_payload(
             "event_id": event_id,
             "timestamp_utc": timestamp_utc,
             "source_kind": source_kind,
-            "traffic_class": "live",
+            "traffic_class": traffic_class,
             "payload_origin": payload_origin,
             "project": payload["project"]["code"].clone(),
             "namespace": payload["namespace"]["code"].clone(),
             "query": payload["query"].clone(),
             "query_hash": hex_sha256(payload["query"].as_str().unwrap_or_default().as_bytes()),
-            "query_type": "unknown",
+            "query_type": query_type,
             "cold_warm_state": if payload["retrieval_runtime"]["cache_hit"].as_bool().unwrap_or(false) {
                 "warm"
             } else {
@@ -766,6 +768,91 @@ fn derive_traffic_class(source_kind: &str) -> String {
         "benchmark".to_string()
     } else {
         "unknown".to_string()
+    }
+}
+
+fn derive_query_type(query: &str) -> &'static str {
+    let lowered = query.to_lowercase();
+
+    if [
+        "onboarding",
+        "getting started",
+        "setup",
+        "install",
+        "как подключ",
+        "как установить",
+        "как запустить",
+        "как начать",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+    {
+        "onboarding_query"
+    } else if [
+        "config",
+        "конфиг",
+        "настрой",
+        ".env",
+        "yaml",
+        "toml",
+        "json",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+    {
+        "config_lookup"
+    } else if [
+        "bug",
+        "fix",
+        "ошиб",
+        "не работает",
+        "падает",
+        "сломал",
+        "почин",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+    {
+        "bugfix_context"
+    } else if ["архитект", "architecture", "контур", "как устроен", "зачем"]
+        .iter()
+        .any(|needle| lowered.contains(needle))
+    {
+        "architecture_question"
+    } else if [
+        "trace",
+        "call stack",
+        "flow",
+        "цепоч",
+        "где вызыва",
+        "откуда приходит",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+    {
+        "cross_file_trace"
+    } else if [
+        "symbol",
+        "struct",
+        "enum",
+        "trait",
+        "type",
+        "тип",
+        "функц",
+        "method",
+        "класс",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+    {
+        "symbol_lookup"
+    } else if ["docs", "readme", "guide", "док", "документац"]
+        .iter()
+        .any(|needle| lowered.contains(needle))
+    {
+        "docs_lookup"
+    } else {
+        "code_lookup"
     }
 }
 
@@ -1084,5 +1171,43 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
         "o200k_base" => o200k_base().context("failed to initialize o200k_base tokenizer"),
         "cl100k_base" => cl100k_base().context("failed to initialize cl100k_base tokenizer"),
         other => Err(anyhow!("unsupported tokenizer: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{derive_query_type, derive_traffic_class};
+
+    #[test]
+    fn traffic_class_comes_from_source_kind_prefix() {
+        assert_eq!(derive_traffic_class("live_context_pack"), "live");
+        assert_eq!(derive_traffic_class("verify_token_benchmark"), "verify");
+        assert_eq!(derive_traffic_class("proof_hostile"), "proof");
+        assert_eq!(derive_traffic_class("benchmark_hot_path"), "benchmark");
+        assert_eq!(derive_traffic_class("custom_unknown"), "unknown");
+    }
+
+    #[test]
+    fn query_type_is_classified_for_common_human_queries() {
+        assert_eq!(
+            derive_query_type("Как установить Amai и подключить к VS Code?"),
+            "onboarding_query"
+        );
+        assert_eq!(
+            derive_query_type("Почему падает retrieval и как это починить?"),
+            "bugfix_context"
+        );
+        assert_eq!(
+            derive_query_type("Где вызывается эта функция и как идёт flow?"),
+            "cross_file_trace"
+        );
+        assert_eq!(
+            derive_query_type("Покажи config и .env для Amai"),
+            "config_lookup"
+        );
+        assert_eq!(
+            derive_query_type("Где лежит нужный файл для MCP integration?"),
+            "code_lookup"
+        );
     }
 }
