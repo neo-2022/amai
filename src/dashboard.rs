@@ -739,22 +739,35 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         snapshot["token_budget_report"]["token_budget_report"]["current_session"]
             ["started_at_epoch_ms"]
             .as_u64();
+    let current_session_preliminary =
+        snapshot["token_budget_report"]["token_budget_report"]["current_session"]["preliminary"]
+            .as_bool()
+            .unwrap_or(false);
     let lifetime_events =
         snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["events_total"].as_u64();
     let lifetime_started =
         snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["started_at_epoch_ms"]
             .as_u64();
+    let lifetime_preliminary =
+        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["preliminary"]
+            .as_bool()
+            .unwrap_or(false);
 
     vec![
         card(
             "Экономия токенов за текущую сессию",
             format_u64(snapshot["token_budget_report"]["token_budget_report"]["current_session"]["total_saved_tokens"].as_u64()),
             format!(
-                "Сессия без паузы дольше {}. Длительность: {}. Запросов: {}. Экономия: {}.",
+                "Сессия без паузы дольше {}. Длительность: {}. Учтённых Amai-замеров: {}. Это не число всех сообщений в IDE или чате. Сырьевая экономия: {}. {}",
                 human_minutes(session_gap_minutes),
                 elapsed_since_epoch_label(current_session_started, captured_at_epoch_ms),
                 format_u64(current_session_events),
-                format_percent(snapshot["token_budget_report"]["token_budget_report"]["current_session"]["savings_percent"].as_f64())
+                format_percent(snapshot["token_budget_report"]["token_budget_report"]["current_session"]["savings_percent"].as_f64()),
+                if current_session_preliminary {
+                    "Пока предварительно: выборка ещё маленькая."
+                } else {
+                    "Выборка уже достаточно большая."
+                }
             ),
             savings_status(snapshot["token_budget_report"]["token_budget_report"]["current_session"]["total_saved_tokens"].as_u64()),
         ),
@@ -762,10 +775,15 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             "Экономия токенов за всё время записи",
             format_u64(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["total_saved_tokens"].as_u64()),
             format!(
-                "С начала учёта: {}, {} запросов, экономия {}.",
+                "С начала учёта: {}. Учтённых Amai-замеров: {}. Это не число всех сообщений в истории чатов, а только измеренные события retrieval/token-ledger. Сырьевая экономия: {}. {}",
                 elapsed_since_epoch_label(lifetime_started, captured_at_epoch_ms),
                 format_u64(lifetime_events),
-                format_percent(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["savings_percent"].as_f64())
+                format_percent(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["savings_percent"].as_f64()),
+                if lifetime_preliminary {
+                    "Пока предварительно: выборка ещё маленькая."
+                } else {
+                    "Выборка уже достаточно большая."
+                }
             ),
             savings_status(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["total_saved_tokens"].as_u64()),
         ),
