@@ -44,6 +44,12 @@ pub struct ContextPackStats {
 }
 
 #[derive(Debug, Clone)]
+pub struct ContextPackResult {
+    pub payload: Value,
+    pub stats: ContextPackStats,
+}
+
+#[derive(Debug, Clone)]
 struct PreparedContextPack {
     context_pack_id: Uuid,
     project: ProjectRecord,
@@ -131,12 +137,26 @@ pub async fn execute_context_pack(
     args: &ContextPackArgs,
     persist: bool,
 ) -> Result<ContextPackStats> {
+    Ok(execute_context_pack_capture(cfg, db, args, persist)
+        .await?
+        .stats)
+}
+
+pub async fn execute_context_pack_capture(
+    cfg: &AppConfig,
+    db: &mut Client,
+    args: &ContextPackArgs,
+    persist: bool,
+) -> Result<ContextPackResult> {
     let mut prepared = prepare_context_pack(cfg, db, args).await?;
     if persist {
         ensure_context_pack_persisted(cfg, db, args, &mut prepared).await?;
     }
     cache_context_pack_entry(cfg, args, &prepared, persist || prepared.durably_persisted)?;
-    Ok(prepared.stats)
+    Ok(ContextPackResult {
+        payload: prepared.payload.as_ref().clone(),
+        stats: prepared.stats,
+    })
 }
 
 async fn prepare_context_pack(

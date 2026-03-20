@@ -92,6 +92,8 @@ pub enum IndexCommand {
 #[derive(Debug, Subcommand)]
 pub enum VerifyCommand {
     Benchmark(Box<VerifyBenchmarkArgs>),
+    Accuracy(VerifyAccuracyArgs),
+    Load(Box<VerifyLoadArgs>),
     Hostile(VerifyHostileArgs),
 }
 
@@ -139,7 +141,7 @@ pub struct RelationAddArgs {
     pub access_mode: String,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct ContextPackArgs {
     #[arg(long)]
     pub project: String,
@@ -175,7 +177,7 @@ pub struct IndexProjectArgs {
     pub skip_embeddings: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct VerifyBenchmarkArgs {
     #[command(flatten)]
     pub context: ContextPackArgs,
@@ -193,6 +195,36 @@ pub struct VerifyBenchmarkArgs {
     pub max_p99_ms: Option<u128>,
     #[arg(long)]
     pub max_max_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct VerifyAccuracyArgs {
+    #[arg(long, default_value = "project_alpha")]
+    pub project: String,
+    #[arg(long, default_value = "project_beta")]
+    pub related_project: String,
+    #[arg(long, default_value = "review")]
+    pub namespace: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct VerifyLoadArgs {
+    #[command(flatten)]
+    pub context: ContextPackArgs,
+    #[arg(long, default_value_t = 8)]
+    pub workers: usize,
+    #[arg(long, default_value_t = 25)]
+    pub iterations_per_worker: usize,
+    #[arg(long, default_value_t = 1)]
+    pub warmup_per_worker: usize,
+    #[arg(long, default_value_t = false)]
+    pub persist: bool,
+    #[arg(long)]
+    pub max_p95_ms: Option<u128>,
+    #[arg(long)]
+    pub min_qps: Option<f64>,
+    #[arg(long)]
+    pub max_error_rate: Option<f64>,
 }
 
 #[derive(Debug, Args)]

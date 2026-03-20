@@ -157,6 +157,15 @@ async fn main() -> Result<()> {
                 let mut db = postgres::connect_admin(&cfg).await?;
                 verify::run_benchmark(&cfg, &mut db, &args).await?;
             }
+            VerifyCommand::Accuracy(args) => {
+                compatibility::assert_supported(&cfg).await?;
+                let mut db = postgres::connect_admin(&cfg).await?;
+                verify::run_accuracy(&cfg, &mut db, &args).await?;
+            }
+            VerifyCommand::Load(args) => {
+                compatibility::assert_supported(&cfg).await?;
+                verify::run_load(&cfg, &args).await?;
+            }
             VerifyCommand::Hostile(args) => {
                 verify::run_hostile(&cfg, &args).await?;
             }

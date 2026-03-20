@@ -16,6 +16,8 @@ struct ObservabilityProfile {
     nats: NatsThresholds,
     retrieval: RetrievalThresholds,
     parser: ParserThresholds,
+    accuracy: AccuracyThresholds,
+    load: LoadThresholds,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,6 +74,26 @@ struct ParserThresholds {
     critical_coverage_ratio: f64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct AccuracyThresholds {
+    target_symbol_precision: f64,
+    alert_symbol_precision: f64,
+    critical_symbol_precision: f64,
+    target_semantic_precision: f64,
+    alert_semantic_precision: f64,
+    critical_semantic_precision: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LoadThresholds {
+    target_hot_qps: f64,
+    alert_hot_qps: f64,
+    critical_hot_qps: f64,
+    target_hot_error_rate: f64,
+    alert_hot_error_rate: f64,
+    critical_hot_error_rate: f64,
+}
+
 pub async fn print_snapshot(cfg: &AppConfig) -> Result<()> {
     let snapshot = collect_snapshot(cfg).await?;
     println!("{}", serde_json::to_string_pretty(&snapshot)?);
@@ -118,6 +140,12 @@ async fn collect_snapshot(cfg: &AppConfig) -> Result<Value> {
     let latest_cold =
         postgres::latest_observability_snapshot(&db, "retrieval_benchmark_cold").await?;
     let latest_index = postgres::latest_observability_snapshot(&db, "index_project").await?;
+    let latest_accuracy =
+        postgres::latest_observability_snapshot(&db, "retrieval_accuracy").await?;
+    let latest_load_hot =
+        postgres::latest_observability_snapshot(&db, "retrieval_load_hot").await?;
+    let latest_load_cold =
+        postgres::latest_observability_snapshot(&db, "retrieval_load_cold").await?;
 
     let payload = json!({
         "captured_at_epoch_ms": captured_at_epoch_ms,
@@ -129,6 +157,9 @@ async fn collect_snapshot(cfg: &AppConfig) -> Result<Value> {
         "latest_index_project": latest_index,
         "latest_retrieval_hot": latest_hot,
         "latest_retrieval_cold": latest_cold,
+        "latest_retrieval_accuracy": latest_accuracy,
+        "latest_retrieval_load_hot": latest_load_hot,
+        "latest_retrieval_load_cold": latest_load_cold,
     });
     let sla = evaluate_sla(&payload, &profile);
     let snapshot = json!({
@@ -141,6 +172,9 @@ async fn collect_snapshot(cfg: &AppConfig) -> Result<Value> {
         "latest_index_project": payload["latest_index_project"].clone(),
         "latest_retrieval_hot": payload["latest_retrieval_hot"].clone(),
         "latest_retrieval_cold": payload["latest_retrieval_cold"].clone(),
+        "latest_retrieval_accuracy": payload["latest_retrieval_accuracy"].clone(),
+        "latest_retrieval_load_hot": payload["latest_retrieval_load_hot"].clone(),
+        "latest_retrieval_load_cold": payload["latest_retrieval_load_cold"].clone(),
         "sla": sla,
     });
     let _ = postgres::insert_observability_snapshot(&db, "system_snapshot", &snapshot).await?;
@@ -354,7 +388,7 @@ async fn collect_s3_live(cfg: &AppConfig) -> Result<Value> {
 }
 
 fn evaluate_sla(snapshot: &Value, profile: &ObservabilityProfile) -> Value {
-    let checks = vec![
+    let mut checks = vec![
         max_check(
             "postgres.connection_usage_ratio",
             snapshot["postgres"]["connection_usage_ratio"].as_f64(),
@@ -432,6 +466,51 @@ fn evaluate_sla(snapshot: &Value, profile: &ObservabilityProfile) -> Value {
             profile.parser.critical_coverage_ratio,
         ),
     ];
+
+    if let Some(check) = optional_zero_check(
+        "accuracy.cross_project_leakage",
+        snapshot["latest_retrieval_accuracy"]["accuracy_verification"]["cross_project_leakage"]
+            .as_f64(),
+    ) {
+        checks.push(check);
+    }
+    if let Some(check) = optional_min_check(
+        "accuracy.symbol_precision",
+        snapshot["latest_retrieval_accuracy"]["accuracy_verification"]["symbol_precision"].as_f64(),
+        profile.accuracy.target_symbol_precision,
+        profile.accuracy.alert_symbol_precision,
+        profile.accuracy.critical_symbol_precision,
+    ) {
+        checks.push(check);
+    }
+    if let Some(check) = optional_min_check(
+        "accuracy.semantic_precision",
+        snapshot["latest_retrieval_accuracy"]["accuracy_verification"]["semantic_precision"]
+            .as_f64(),
+        profile.accuracy.target_semantic_precision,
+        profile.accuracy.alert_semantic_precision,
+        profile.accuracy.critical_semantic_precision,
+    ) {
+        checks.push(check);
+    }
+    if let Some(check) = optional_min_check(
+        "load.hot_qps",
+        snapshot["latest_retrieval_load_hot"]["load_verification"]["qps"].as_f64(),
+        profile.load.target_hot_qps,
+        profile.load.alert_hot_qps,
+        profile.load.critical_hot_qps,
+    ) {
+        checks.push(check);
+    }
+    if let Some(check) = optional_max_check(
+        "load.hot_error_rate",
+        snapshot["latest_retrieval_load_hot"]["load_verification"]["error_rate"].as_f64(),
+        profile.load.target_hot_error_rate,
+        profile.load.alert_hot_error_rate,
+        profile.load.critical_hot_error_rate,
+    ) {
+        checks.push(check);
+    }
 
     let mut pass = 0_u64;
     let mut alert = 0_u64;
@@ -513,6 +592,30 @@ fn zero_check(metric: &str, value: Option<f64>) -> Value {
         Some(value) => json!({"metric": metric, "value": value, "status": "critical", "target": 0}),
         None => json!({"metric": metric, "value": Value::Null, "status": "unknown", "target": 0}),
     }
+}
+
+fn optional_max_check(
+    metric: &str,
+    value: Option<f64>,
+    target: f64,
+    alert: f64,
+    critical: f64,
+) -> Option<Value> {
+    value.map(|value| max_check(metric, Some(value), target, alert, critical))
+}
+
+fn optional_min_check(
+    metric: &str,
+    value: Option<f64>,
+    target: f64,
+    alert: f64,
+    critical: f64,
+) -> Option<Value> {
+    value.map(|value| min_check(metric, Some(value), target, alert, critical))
+}
+
+fn optional_zero_check(metric: &str, value: Option<f64>) -> Option<Value> {
+    value.map(|value| zero_check(metric, Some(value)))
 }
 
 fn threshold_json(
