@@ -1,7 +1,9 @@
-modified_at: 2026-03-20 14:30 MSK
-Ручная сверка guide/docs: 2026-03-20 14:30 MSK
+modified_at: 2026-03-20 14:45 MSK
+Ручная сверка guide/docs: 2026-03-20 14:45 MSK
 
 # Art-memory-agent-index (Amai)
+
+![Amai lockup](brand/amai_lockup.svg)
 
 Amai — это отдельный внешний инструмент для ИИ-агентов.
 Он помогает агентам работать сразу с несколькими репозиториями и при этом не путать их между собой.
@@ -79,6 +81,8 @@ Amai — это отдельный внешний инструмент для И
 
 ## Карта Поддоменов
 
+- `brand/`
+  - канонический branding contour проекта: lockup, mark, favicon и brand spec.
 - `docs/`
   - подробная архитектура, схема данных, операции и lifecycle.
 - `config/`
@@ -97,6 +101,19 @@ Amai — это отдельный внешний инструмент для И
   - локальные данные контейнеров, не трекаются в git.
 - `tmp/`
   - временные runtime-артефакты.
+
+## Branding
+
+Brand-pack проекта теперь хранится прямо в repo:
+- [brand/README.md](/home/art/agent-memory-index/brand/README.md)
+- [brand/amai_lockup.svg](/home/art/agent-memory-index/brand/amai_lockup.svg)
+- [brand/amai_mark.svg](/home/art/agent-memory-index/brand/amai_mark.svg)
+- [brand/favicon.ico](/home/art/agent-memory-index/brand/favicon.ico)
+- [brand/amai_brand_spec.md](/home/art/agent-memory-index/brand/amai_brand_spec.md)
+
+Правило использования:
+- `README` и docs используют lockup;
+- favicon и compact icon используют square mark или `favicon.ico`.
 
 ## Быстрый старт
 
