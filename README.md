@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 19:57 MSK
-Ручная сверка guide/docs: 2026-03-20 19:57 MSK
+modified_at: 2026-03-20 20:14 MSK
+Ручная сверка guide/docs: 2026-03-20 20:14 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -204,12 +204,17 @@ cd /home/art/agent-memory-index
 - `Claude Code` получает workspace-local `.mcp.json`;
 - `Claude Desktop` и `generic` пока получают готовый generated file для ручного импорта.
 
+Если нужен не Linux-style runner, а другой launcher target:
+- `Amai` теперь умеет генерировать MCP config с учётом платформы launcher'а;
+- это особенно важно для Windows-клиентов.
+
 Примеры:
 
 ```bash
 ./scripts/onboard_local.sh --client vscode
 ./scripts/onboard_local.sh --client cursor
 ./scripts/onboard_local.sh --client codex
+./scripts/onboard_local.sh --client cursor --launcher-platform windows-powershell
 ./scripts/disconnect_local.sh --client codex
 ```
 
@@ -322,6 +327,12 @@ cargo build --release
 - runner сам подтягивает `.env` и стартует `amai mcp serve`.
 - список default install targets теперь живёт не в коде README, а в:
   - `config/client_targets.toml`
+- platform launcher для MCP теперь тоже управляется явно:
+  - `--launcher-platform auto`
+  - `--launcher-platform linux`
+  - `--launcher-platform macos`
+  - `--launcher-platform windows-cmd`
+  - `--launcher-platform windows-powershell`
 
 ## Подключение и удаление
 
@@ -337,6 +348,13 @@ cargo build --release
 ./scripts/disconnect_local.sh --client vscode
 ./scripts/disconnect_local.sh --client cursor
 ./scripts/disconnect_local.sh --client codex
+```
+
+Для Windows-style MCP launcher generation:
+
+```bash
+./scripts/onboard_local.sh --client cursor --launcher-platform windows-powershell
+./target/release/amai mcp config --client codex --launcher-platform windows-cmd
 ```
 
 Это важно по двум причинам:

@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand};
@@ -161,6 +161,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         let config = render_client_config(&McpConfigArgs {
             client: client.to_string(),
             server_name: "amai".to_string(),
+            launcher_platform: "auto".to_string(),
             command: Some("/tmp/run_mcp_stdio.sh".to_string()),
             cwd: Some(PathBuf::from("/tmp/amai")),
             output: None,
@@ -1186,12 +1187,7 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
     let client = args.client.trim().to_ascii_lowercase();
     let repo_root = args.cwd.clone().unwrap_or(discover_repo_root()?);
     let cwd = repo_root.display().to_string();
-    let command = args.command.clone().unwrap_or_else(|| {
-        repo_root
-            .join("scripts/run_mcp_stdio.sh")
-            .display()
-            .to_string()
-    });
+    let launcher = resolve_launcher(&repo_root, &args.launcher_platform, args.command.as_deref())?;
     let server_name = args.server_name.trim();
     if server_name.is_empty() {
         return Err(anyhow!("MCP server name must not be empty"));
@@ -1201,8 +1197,8 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
         ConfigShape::GenericJson => serde_json::to_string_pretty(&json!({
             "name": server_name,
             "transport": "stdio",
-            "command": command,
-            "args": [],
+            "command": launcher.command,
+            "args": launcher.args,
             "cwd": cwd
         }))
         .context("failed to render generic MCP config"),
@@ -1210,8 +1206,8 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
             "servers": {
                 server_name: {
                     "type": "stdio",
-                    "command": command,
-                    "args": [],
+                    "command": launcher.command,
+                    "args": launcher.args,
                     "cwd": cwd
                 }
             }
@@ -1220,15 +1216,17 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
         ConfigShape::McpServersJson => serde_json::to_string_pretty(&json!({
             "mcpServers": {
                 server_name: {
-                    "command": command,
-                    "args": [],
+                    "command": launcher.command,
+                    "args": launcher.args,
                     "cwd": cwd
                 }
             }
         }))
         .context("failed to render MCP config"),
         ConfigShape::CodexToml => Ok(format!(
-            "[mcp_servers.{server_name}]\ncommand = {command:?}\nargs = []\n"
+            "[mcp_servers.{server_name}]\ncommand = {:?}\nargs = {}\n",
+            launcher.command,
+            format_toml_string_array(&launcher.args)
         )),
     }
 }
@@ -1251,6 +1249,83 @@ fn config_shape_for_client(client: &str) -> Result<ConfigShape> {
             "unsupported MCP client config target: {other}; use generic|vscode|cursor|claude-desktop|claude-code|codex"
         )),
     }
+}
+
+#[derive(Clone)]
+struct LauncherCommand {
+    command: String,
+    args: Vec<String>,
+}
+
+fn resolve_launcher(
+    repo_root: &Path,
+    launcher_platform: &str,
+    explicit_command: Option<&str>,
+) -> Result<LauncherCommand> {
+    if let Some(command) = explicit_command {
+        return Ok(LauncherCommand {
+            command: command.to_string(),
+            args: Vec::new(),
+        });
+    }
+
+    let normalized = normalize_launcher_platform(launcher_platform)?;
+    match normalized.as_str() {
+        "linux" | "macos" => Ok(LauncherCommand {
+            command: repo_root
+                .join("scripts/run_mcp_stdio.sh")
+                .display()
+                .to_string(),
+            args: Vec::new(),
+        }),
+        "windows-cmd" => Ok(LauncherCommand {
+            command: windows_path(&repo_root.join("scripts/run_mcp_stdio.cmd")),
+            args: Vec::new(),
+        }),
+        "windows-powershell" => Ok(LauncherCommand {
+            command: "powershell.exe".to_string(),
+            args: vec![
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                windows_path(&repo_root.join("scripts/run_mcp_stdio.ps1")),
+            ],
+        }),
+        other => Err(anyhow!("unsupported launcher platform: {other}")),
+    }
+}
+
+fn normalize_launcher_platform(input: &str) -> Result<String> {
+    let platform = input.trim().to_ascii_lowercase();
+    if platform == "auto" {
+        if cfg!(target_os = "windows") {
+            return Ok("windows-powershell".to_string());
+        }
+        if cfg!(target_os = "macos") {
+            return Ok("macos".to_string());
+        }
+        return Ok("linux".to_string());
+    }
+
+    match platform.as_str() {
+        "linux" | "macos" | "windows-cmd" | "windows-powershell" => Ok(platform),
+        other => Err(anyhow!(
+            "unsupported launcher platform: {other}; use auto|linux|macos|windows-cmd|windows-powershell"
+        )),
+    }
+}
+
+fn windows_path(path: &std::path::Path) -> String {
+    path.display().to_string().replace('/', "\\")
+}
+
+fn format_toml_string_array(items: &[String]) -> String {
+    let rendered = items
+        .iter()
+        .map(|item| format!("{item:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{rendered}]")
 }
 
 fn merge_existing_config(
@@ -1559,6 +1634,7 @@ mod tests {
         let config = render_client_config(&McpConfigArgs {
             client: "vscode".to_string(),
             server_name: "amai".to_string(),
+            launcher_platform: "auto".to_string(),
             command: Some("/tmp/run_mcp_stdio.sh".to_string()),
             cwd: Some(PathBuf::from("/tmp/amai")),
             output: None,
@@ -1575,6 +1651,7 @@ mod tests {
         let config = render_client_config(&McpConfigArgs {
             client: "codex".to_string(),
             server_name: "amai".to_string(),
+            launcher_platform: "auto".to_string(),
             command: Some("/tmp/run_mcp_stdio.sh".to_string()),
             cwd: Some(PathBuf::from("/tmp/amai")),
             output: None,
@@ -1584,6 +1661,29 @@ mod tests {
         assert_eq!(
             value["mcp_servers"]["amai"]["command"].as_str(),
             Some("/tmp/run_mcp_stdio.sh")
+        );
+    }
+
+    #[test]
+    fn renders_windows_powershell_config() {
+        let config = render_client_config(&McpConfigArgs {
+            client: "cursor".to_string(),
+            server_name: "amai".to_string(),
+            launcher_platform: "windows-powershell".to_string(),
+            command: None,
+            cwd: Some(PathBuf::from("/tmp/amai")),
+            output: None,
+        })
+        .expect("render should succeed");
+        let json: serde_json::Value =
+            serde_json::from_str(&config).expect("config must be valid JSON");
+        assert_eq!(json["mcpServers"]["amai"]["command"], "powershell.exe");
+        let args = json["mcpServers"]["amai"]["args"]
+            .as_array()
+            .expect("args must be array");
+        assert!(
+            args.iter()
+                .any(|item| item.as_str() == Some("\\tmp\\amai\\scripts\\run_mcp_stdio.ps1"))
         );
     }
 }

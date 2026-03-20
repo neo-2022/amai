@@ -348,6 +348,8 @@ pub struct McpConfigArgs {
     pub client: String,
     #[arg(long, default_value = "amai")]
     pub server_name: String,
+    #[arg(long, default_value = "auto")]
+    pub launcher_platform: String,
     #[arg(long)]
     pub command: Option<String>,
     #[arg(long)]
@@ -360,6 +362,8 @@ pub struct McpConfigArgs {
 pub struct BootstrapOnboardingArgs {
     #[arg(long, default_value = "vscode")]
     pub client: String,
+    #[arg(long, default_value = "auto")]
+    pub launcher_platform: String,
     #[arg(long)]
     pub output: Option<PathBuf>,
     #[arg(long)]

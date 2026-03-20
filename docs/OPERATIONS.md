@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 19:57 MSK
-Ручная сверка guide/docs: 2026-03-20 19:57 MSK
+modified_at: 2026-03-20 20:14 MSK
+Ручная сверка guide/docs: 2026-03-20 20:14 MSK
 
 # Operations
 
@@ -178,6 +178,13 @@ cargo run -- mcp config --client claude-desktop
 cargo run -- mcp config --client codex
 ```
 
+Если нужен platform-specific launcher:
+
+```bash
+cargo run -- mcp config --client cursor --launcher-platform windows-powershell
+cargo run -- mcp config --client codex --launcher-platform windows-cmd
+```
+
 Если auto-discovery корня не сработал:
 
 ```bash
@@ -202,6 +209,12 @@ cargo run -- mcp config --client vscode --cwd /path/to/art-memory-agent-index
 - работает внутри текущего repo root;
 - пишет config в target path из `config/client_targets.toml`;
 - для user-scope клиентов умеет создавать backup перед изменением файла.
+- launcher platform тоже может быть указан явно:
+  - `auto`
+  - `linux`
+  - `macos`
+  - `windows-cmd`
+  - `windows-powershell`
 
 Текущие default outputs:
 - `vscode` -> `.vscode/mcp.json`
@@ -233,6 +246,21 @@ Proof:
 - удаляется только запись `Amai`, а не весь чужой config целиком;
 - если файл после этого становится пустым и включён `purge_empty_file`, пустой файл удаляется;
 - для user-scope config перед изменением создаётся backup.
+
+## Platform launchers
+
+Materialized runner files:
+
+```text
+scripts/run_mcp_stdio.sh
+scripts/run_mcp_stdio.ps1
+scripts/run_mcp_stdio.cmd
+```
+
+Это значит:
+- Linux/macOS path можно обслуживать shell launcher'ом;
+- Windows path можно обслуживать через `cmd` или `PowerShell`;
+- client config generation теперь умеет честно учитывать platform launcher, а не только Unix-style путь.
 
 ## Hardening proof
 

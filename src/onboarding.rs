@@ -49,6 +49,7 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     let config_args = McpConfigArgs {
         client: args.client.clone(),
         server_name: "amai".to_string(),
+        launcher_platform: args.launcher_platform.clone(),
         command: None,
         cwd: Some(repo_root.clone()),
         output: Some(output.clone()),
@@ -87,6 +88,7 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
         &McpConfigArgs {
             client: args.client.clone(),
             server_name: "amai".to_string(),
+            launcher_platform: "auto".to_string(),
             command: None,
             cwd: Some(repo_root),
             output: Some(output.clone()),

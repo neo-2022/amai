@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 19:57 MSK
-Ручная сверка guide/docs: 2026-03-20 19:57 MSK
+modified_at: 2026-03-20 20:14 MSK
+Ручная сверка guide/docs: 2026-03-20 20:14 MSK
 
 # MCP Integration
 
@@ -46,6 +46,10 @@ modified_at: 2026-03-20 19:57 MSK
 - `Claude Desktop`
   - пока получает generated file для ручного импорта.
 
+Отдельно важно:
+- launcher platform теперь можно выбирать явно;
+- это позволяет честно генерировать config не только под Linux/macOS shell path, но и под Windows launchers.
+
 ## Минимальные шаги
 
 1. Самый простой путь
@@ -71,6 +75,13 @@ cargo build --release
 ./target/release/amai mcp config --client codex
 ```
 
+Если нужен Windows launcher:
+
+```bash
+./target/release/amai mcp config --client cursor --launcher-platform windows-powershell
+./target/release/amai mcp config --client codex --launcher-platform windows-cmd
+```
+
 4. Если onboarding уже запускался, часть этой работы уже сделана автоматически.
 
 ## Как отключить клиента обратно
@@ -88,6 +99,20 @@ cargo build --release
 ```
 
 Если после удаления config оказался пустым, `Amai` умеет честно убрать и сам пустой файл.
+
+## Что это значит для Windows и macOS
+
+`MCP` как стандарт не привязан к одной ОС.
+Поэтому:
+- `VS Code` на Windows и macOS можно подключать к `Amai`;
+- вопрос упирается не в стандарт, а в launcher path и install contour.
+
+Текущий baseline теперь умеет:
+- Linux/macOS shell launcher;
+- Windows `cmd`;
+- Windows `PowerShell`.
+
+Это ещё не полный polished cross-platform installer, но это уже реальный materialized шаг, а не обещание на будущее.
 
 ## Почему клиентский config маленький
 
