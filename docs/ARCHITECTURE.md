@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 15:36 MSK
-Ручная сверка guide/docs: 2026-03-20 15:36 MSK
+modified_at: 2026-03-20 16:33 MSK
+Ручная сверка guide/docs: 2026-03-20 16:33 MSK
 
 # Architecture
 
@@ -185,10 +185,18 @@ Code structure plane:
   - repeat bootstrap, relation-aware retrieval и restart recovery;
 - `scripts/proof_performance.sh`
   - end-to-end latency proof для `context pack`;
+- `scripts/proof_accuracy.sh`
+  - relation-aware precision и zero-leakage isolation proof;
+- `scripts/proof_load.sh`
+  - concurrent hot-load proof для reproducible QPS/error-rate baseline;
 - `scripts/proof_hostile.sh`
   - hostile proof на `stack_meta` drift и service loss для `postgres`, `qdrant`, `minio`, `nats`;
 - `cargo run -- verify benchmark ...`
   - Rust-native latency verifier с threshold enforcement;
+- `cargo run -- verify accuracy ...`
+  - Rust-native verifier для `cross_project_leakage`, `symbol_precision`, `semantic_precision`;
+- `cargo run -- verify load ...`
+  - Rust-native concurrent load verifier для `qps/error_rate/p95`;
 - `cargo run -- verify hostile ...`
   - Rust-native hostile verifier с fail-closed and recovery proof.
 
@@ -228,6 +236,13 @@ Machine-readable профиль:
   - JetStream disk usage
 - `Indexing`
   - last index throughput
+ - `Accuracy`
+   - cross-project leakage
+   - symbol precision
+   - semantic precision
+ - `Load`
+   - hot qps
+   - hot error rate
   - parser coverage ratio
 - `Retrieval`
   - `hot benchmark`

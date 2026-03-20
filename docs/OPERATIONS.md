@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 15:36 MSK
-Ручная сверка guide/docs: 2026-03-20 15:36 MSK
+modified_at: 2026-03-20 16:33 MSK
+Ручная сверка guide/docs: 2026-03-20 16:33 MSK
 
 # Operations
 
@@ -157,6 +157,49 @@ cargo run --release -- verify benchmark \
 - без `--disable-cache` измеряется `hot retrieval`;
 - с `--disable-cache` измеряется `cold retrieval`.
 
+## Accuracy proof
+
+```bash
+./scripts/proof_accuracy.sh
+```
+
+Или напрямую:
+
+```bash
+cargo run --release -- verify accuracy \
+  --project project_alpha \
+  --related-project project_beta \
+  --namespace review
+```
+
+Этот proof:
+- проверяет `local_strict` на отсутствие cross-project leakage;
+- мерит `exact_precision`, `lexical_precision`, `symbol_precision`, `semantic_precision`;
+- сохраняет snapshot `retrieval_accuracy`.
+
+## Load proof
+
+```bash
+./scripts/proof_load.sh
+```
+
+Или напрямую:
+
+```bash
+cargo run --release -- verify load \
+  --project project_alpha \
+  --namespace review \
+  --query "shared_runtime_marker" \
+  --retrieval-mode local_plus_related \
+  --workers 2 \
+  --iterations-per-worker 25
+```
+
+Этот proof:
+- мерит concurrent hot-load contour;
+- выдаёт `qps`, `error_rate`, `p50/p95/p99/max`;
+- сохраняет snapshot `retrieval_load_hot`.
+
 ## Hostile proof
 
 ```bash
@@ -229,6 +272,7 @@ cargo run --release -- observe sla-check
 Что это даёт:
 - live snapshot по `PostgreSQL`, `Qdrant`, `NATS`, `S3-compatible storage`;
 - последние `index_project` и `retrieval_benchmark` snapshots;
+- последние `retrieval_accuracy` и `retrieval_load_hot` snapshots;
 - SLA-оценку по [observability.toml](/home/art/agent-memory-index/config/observability.toml).
 
 Сейчас `observe sla-check` fail-ит только если:

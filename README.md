@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 15:36 MSK
-Ручная сверка guide/docs: 2026-03-20 15:36 MSK
+modified_at: 2026-03-20 16:33 MSK
+Ручная сверка guide/docs: 2026-03-20 16:33 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -138,6 +138,8 @@ cd /home/art/agent-memory-index
 ./scripts/proof_local.sh
 ./scripts/proof_hardening.sh
 ./scripts/proof_performance.sh
+./scripts/proof_accuracy.sh
+./scripts/proof_load.sh
 ./scripts/proof_hostile.sh
 ./scripts/proof_observability.sh
 ```
@@ -206,6 +208,19 @@ cargo run -- verify benchmark \
   --iterations 5 \
   --persist
 
+cargo run -- verify accuracy \
+  --project project_alpha \
+  --related-project project_beta \
+  --namespace review
+
+cargo run -- verify load \
+  --project project_alpha \
+  --namespace review \
+  --query "shared_runtime_marker" \
+  --retrieval-mode local_plus_related \
+  --workers 2 \
+  --iterations-per-worker 25
+
 cargo run -- verify hostile --scenario all
 ```
 
@@ -218,6 +233,14 @@ cargo run -- verify hostile --scenario all
   - проверяет fail-closed реакцию на partial-service loss;
   - проверяет recovery после возврата сервиса;
   - отдельно проверяет drift в `stack_meta`.
+- `verify accuracy`
+  - доказывает `cross_project_leakage = 0`;
+  - мерит `symbol_precision` и `semantic_precision`;
+  - сохраняет snapshot `retrieval_accuracy`.
+- `verify load`
+  - мерит concurrent hot-load contour;
+  - выдаёт `qps`, `error_rate`, `p50/p95/p99/max`;
+  - сохраняет snapshot `retrieval_load_hot`.
 
 ## Observability contour
 
@@ -257,6 +280,13 @@ cargo run --release -- observe sla-check
   - `files_per_min`
   - `parser_coverage_ratio`
   - `language_breakdown`
+- `Accuracy`
+  - `cross_project_leakage`
+  - `symbol_precision`
+  - `semantic_precision`
+- `Load`
+  - `hot_qps`
+  - `hot_error_rate`
 
 Важно:
 - `hot retrieval` означает работающий result-cache contour;
