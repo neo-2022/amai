@@ -20,6 +20,7 @@ state/nats/*
 !state/nats/.gitkeep
 state/sqlite/*
 !state/sqlite/.gitkeep
+state/install_state.json
 
 tmp/*
 !tmp/.gitkeep

@@ -3,7 +3,7 @@ use crate::config;
 use crate::mcp;
 use crate::profiles;
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
@@ -13,49 +13,26 @@ use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InstallState {
+    package_version: String,
+    repo_revision: String,
+    client_key: String,
+    client_config: String,
+    stack_profile: String,
+    installed_at_epoch_seconds: u64,
+}
+
 pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     let repo_root = discover_repo_root(args.cwd.as_deref())?;
     let remote_mode = args.ssh_destination.is_some();
     let client_resolution = resolve_client_target(&repo_root, &args.client)?;
+    let package_version = env!("CARGO_PKG_VERSION").to_string();
+    let repo_revision = current_repo_revision(&repo_root).await;
     let mut local_preflight_report: Option<profiles::PreflightReport> = None;
-
-    if !remote_mode {
-        let report = profiles::preflight_report(&repo_root, &args.stack_profile)?;
-        profiles::print_preflight_report(&report);
-        confirm_local_installation(args, &repo_root, &client_resolution, &report)?;
-        local_preflight_report = Some(report);
-        ensure_local_config_files(&repo_root)?;
-        dotenvy::from_path_override(repo_root.join(".env"))
-            .context("failed to load generated .env for onboarding")?;
-
-        check_dependency("docker", &["--version"]).await?;
-        check_dependency("cargo", &["--version"]).await?;
-
-        if !args.skip_stack {
-            run_command(
-                "bootstrap stack",
-                script_command(
-                    &repo_root,
-                    "scripts/bootstrap_stack.sh",
-                    ["--stack-profile", args.stack_profile.as_str()],
-                ),
-            )
-            .await?;
-        }
-
-        if !args.skip_release_build {
-            run_command(
-                "cargo build --release",
-                command_in(&repo_root, "cargo", ["build", "--release"]),
-            )
-            .await?;
-        }
-    }
 
     let target = client_resolution.target.clone();
     let output = resolve_output_path(&repo_root, &target, args.output.as_ref())?;
-    let backup = maybe_backup_user_global(&output, &target.install_scope)?;
-
     let config_args = McpConfigArgs {
         client: client_resolution.client_key.clone(),
         server_name: "amai".to_string(),
@@ -66,81 +43,245 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         cwd: Some(repo_root.clone()),
         output: Some(output.clone()),
     };
+    let install_state_before = load_install_state(&repo_root)?;
+    let config_existed_before = mcp::client_config_contains_server(&config_args).unwrap_or(false);
+
+    if !remote_mode {
+        let report = profiles::preflight_report(&repo_root, &args.stack_profile)?;
+        if env::var("AMAI_PREFLIGHT_ALREADY_SHOWN").unwrap_or_default() != "1" {
+            profiles::print_preflight_report(&report);
+        }
+        confirm_local_installation(args, &repo_root, &client_resolution, &report)?;
+        local_preflight_report = Some(report);
+        ensure_local_config_files(&repo_root)?;
+        dotenvy::from_path_override(repo_root.join(".env"))
+            .context("failed to load generated .env for onboarding")?;
+
+        check_dependency("docker", &["--version"]).await?;
+        check_dependency("cargo", &["--version"]).await?;
+
+        if !args.skip_stack {
+            let mut bootstrap_stack = script_command(
+                &repo_root,
+                "scripts/bootstrap_stack.sh",
+                ["--stack-profile", args.stack_profile.as_str()],
+            );
+            bootstrap_stack.env("AMAI_SKIP_STACK_PREFLIGHT", "1");
+            run_command("bootstrap stack", bootstrap_stack).await?;
+        }
+
+        if !args.skip_release_build {
+            run_command(
+                "cargo build --release",
+                command_in(&repo_root, "cargo", ["build", "--release"]),
+            )
+            .await?;
+        }
+    }
+    let backup = maybe_backup_user_global(&output, &target.install_scope)?;
     mcp::write_client_config(&config_args)?;
+    let install_status = build_install_status(
+        install_state_before.as_ref(),
+        config_existed_before,
+        &package_version,
+        &repo_revision,
+        &client_resolution.client_key,
+        &output,
+    );
+    save_install_state(
+        &repo_root,
+        &InstallState {
+            package_version: package_version.clone(),
+            repo_revision: repo_revision.clone(),
+            client_key: client_resolution.client_key.clone(),
+            client_config: output.display().to_string(),
+            stack_profile: args.stack_profile.clone(),
+            installed_at_epoch_seconds: current_epoch_seconds(),
+        },
+    )?;
 
     let release_binary = repo_root.join("target/release/amai");
     let release_ready = remote_mode || release_binary.is_file();
 
-    println!("onboarding completed");
-    println!("repo_root: {}", repo_root.display());
+    println!("Amai готов");
+    println!("Версия Amai: {}", package_version);
+    println!("Ревизия сборки: {}", repo_revision);
+    println!("Результат: {}", install_status);
     if remote_mode {
-        println!("launcher_mode: remote_ssh");
+        println!("Режим подключения: удалённый через SSH");
+        println!("Сервер: {}", args.ssh_destination.as_deref().unwrap_or(""));
         println!(
-            "remote_destination: {}",
-            args.ssh_destination.as_deref().unwrap_or("")
-        );
-        println!(
-            "remote_repo_root: {}",
+            "Удалённый путь: {}",
             args.remote_repo_root
                 .as_ref()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default()
         );
     } else {
-        println!("launcher_mode: local");
-        println!("env_file: {}", repo_root.join(".env").display());
+        println!("Режим подключения: локальный");
+        println!("Файл окружения: {}", repo_root.join(".env").display());
     }
-    println!("client: {}", client_resolution.client_key);
-    println!("client_display_name: {}", target.display_name);
+    println!("Клиент: {}", target.display_name);
+    println!("Файл подключения: {}", output.display());
     println!(
-        "client_resolution_mode: {}",
-        if client_resolution.auto_selected {
-            "auto_detected"
-        } else {
-            "explicit"
-        }
+        "Выбранный профиль: {} ({})",
+        target_profile_name(&local_preflight_report, args),
+        args.stack_profile
     );
-    println!("client_detection_reason: {}", client_resolution.reason);
-    println!("stack_profile: {}", args.stack_profile);
-    println!("client_config: {}", output.display());
     println!(
-        "client_config_mode: {}",
+        "Где установлен config: {}",
         install_scope_status(&target.install_scope)
     );
-    println!("release_binary_ready: {release_ready}");
+    println!(
+        "Release binary готов: {}",
+        if release_ready { "да" } else { "нет" }
+    );
     if let Some(backup) = backup {
-        println!("backup_file: {}", backup.display());
+        println!("Резервная копия старого config: {}", backup.display());
     }
     if remote_mode {
-        println!("next_step_1: verify that ssh access to the remote host works");
-        println!("next_step_2: reload the client window or restart the client");
-        println!("next_step_3: ask the client to call Amai through MCP on the remote host");
+        println!("Что делать дальше:");
+        println!("- проверьте, что SSH до сервера работает");
+        println!("- перезапустите клиент или сделайте Reload Window");
+        println!("- попросите клиента обратиться к Amai через MCP");
     } else {
-        println!("next_step_1: open the repo in your client");
-        println!("next_step_2: reload the client window or restart the client");
-        println!("next_step_3: ask the client to call Amai through MCP");
         if let Some(report) = &local_preflight_report {
             println!();
-            println!("what_this_machine_can_handle:");
+            println!("Сводка по этой машине:");
+            println!("- CPU: {} логических потоков", report.host_logical_cpus);
+            println!(
+                "- Память: {:.2} GiB всего, свободно сейчас {:.2} GiB",
+                report.host_total_memory_gib, report.host_available_memory_gib
+            );
+            println!("- Диск: свободно {:.2} GiB", report.host_available_disk_gib);
+            println!(
+                "- Итог по выбранному режиму: {}",
+                human_verdict(report.verdict)
+            );
+            println!("На что можно рассчитывать:");
             for item in &report.profile.suitable_for {
                 println!("- {}", item);
             }
-            println!("what_not_to_expect_from_this_machine:");
-            for item in &report.profile.not_for {
-                println!("- {}", item);
+            if report.verdict != "pass" {
+                println!("Предупреждение:");
+                println!(
+                    "- этот режим запускается, но не даёт большого запаса по тяжёлым сценариям"
+                );
+            } else if !report.profile.supports_peak_benchmarks {
+                println!("Важно:");
+                println!(
+                    "- выбран лёгкий режим. Он подходит для удалённого доступа и smoke/demo, но не для рекордных benchmark-цифр"
+                );
             }
-            println!(
-                "machine_capacity_summary: verdict={}, peak_benchmarks={}, remote_mode_recommended={}",
-                report.verdict,
-                report.profile.supports_peak_benchmarks,
-                report.profile.remote_mode_recommended
-            );
         }
-        println!(
-            "repeat_install_note: если запустить установку ещё раз, Amai не создаст вторую запись, а аккуратно пересинхронизирует текущую."
-        );
+        println!("Что делать дальше:");
+        println!("- откройте репозиторий в клиенте");
+        println!("- перезапустите клиент или сделайте Reload Window");
+        println!("- попросите клиента обратиться к Amai через MCP");
     }
     Ok(())
+}
+
+fn current_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or_default()
+}
+
+async fn current_repo_revision(repo_root: &Path) -> String {
+    match Command::new("git")
+        .arg("rev-parse")
+        .arg("--short")
+        .arg("HEAD")
+        .current_dir(repo_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
+fn install_state_path(repo_root: &Path) -> PathBuf {
+    env::var_os("AMAI_INSTALL_STATE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root.join("state/install_state.json"))
+}
+
+fn load_install_state(repo_root: &Path) -> Result<Option<InstallState>> {
+    let path = install_state_path(repo_root);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let state = serde_json::from_str(&content).context("failed to parse install state json")?;
+    Ok(Some(state))
+}
+
+fn save_install_state(repo_root: &Path, state: &InstallState) -> Result<()> {
+    let path = install_state_path(repo_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let content =
+        serde_json::to_string_pretty(state).context("failed to serialize install state")?;
+    fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn build_install_status(
+    previous_state: Option<&InstallState>,
+    config_existed_before: bool,
+    package_version: &str,
+    repo_revision: &str,
+    client_key: &str,
+    output: &Path,
+) -> String {
+    match previous_state {
+        Some(previous)
+            if previous.package_version == package_version
+                && previous.repo_revision == repo_revision
+                && previous.client_key == client_key
+                && previous.client_config == output.display().to_string() =>
+        {
+            "Amai уже был установлен. Обновление не требовалось; текущая версия уже актуальна."
+                .to_string()
+        }
+        Some(previous) if previous.client_key == client_key => format!(
+            "Amai обновлён: было {} ({}) , стало {} ({}).",
+            previous.package_version, previous.repo_revision, package_version, repo_revision
+        ),
+        _ if config_existed_before => {
+            "Amai уже был настроен раньше. Текущая установка аккуратно пересинхронизировала конфигурацию."
+                .to_string()
+        }
+        _ => "Amai установлен впервые.".to_string(),
+    }
+}
+
+fn human_verdict(verdict: &str) -> &'static str {
+    match verdict {
+        "pass" => "машина подходит",
+        "warn" => "машина подходит с оговорками",
+        "fail" => "машина не подходит",
+        _ => "статус не определён",
+    }
+}
+
+fn target_profile_name(
+    report: &Option<profiles::PreflightReport>,
+    args: &BootstrapOnboardingArgs,
+) -> String {
+    report
+        .as_ref()
+        .map(|value| value.profile.display_name.clone())
+        .unwrap_or_else(|| args.stack_profile.clone())
 }
 
 fn confirm_local_installation(
@@ -472,10 +613,10 @@ fn expand_target_template(template: &str, repo_root: &Path, home: &Path) -> Path
 
 fn install_scope_status(scope: &str) -> &'static str {
     match scope {
-        "workspace_local" => "ready",
-        "user_global" => "installed_in_user_scope",
-        "manual_generated" => "generated_for_manual_import",
-        _ => "generated",
+        "workspace_local" => "внутри текущего репозитория",
+        "user_global" => "в профиле пользователя",
+        "manual_generated" => "сгенерирован для ручного импорта",
+        _ => "сгенерирован",
     }
 }
 
@@ -605,14 +746,17 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
 
     #[test]
     fn reports_install_scope_statuses() {
-        assert_eq!(install_scope_status("workspace_local"), "ready");
+        assert_eq!(
+            install_scope_status("workspace_local"),
+            "внутри текущего репозитория"
+        );
         assert_eq!(
             install_scope_status("user_global"),
-            "installed_in_user_scope"
+            "в профиле пользователя"
         );
         assert_eq!(
             install_scope_status("manual_generated"),
-            "generated_for_manual_import"
+            "сгенерирован для ручного импорта"
         );
     }
 

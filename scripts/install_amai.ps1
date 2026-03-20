@@ -25,6 +25,7 @@ if ($env:AMAI_NO_INSTALL_PROMPT -ne "1") {
 }
 
 if ((-not $hasStackProfile) -and $interactivePrompt) {
+    $env:AMAI_SELECTOR_MODE = "install"
     & "$repoRoot/scripts/preflight.ps1" @args
     exit $LASTEXITCODE
 }

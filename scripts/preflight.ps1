@@ -102,6 +102,13 @@ function Test-InteractivePrompt {
     }
 }
 
+function Get-SelectorMode {
+    if ([string]::IsNullOrWhiteSpace($env:AMAI_SELECTOR_MODE)) {
+        return "check"
+    }
+    return $env:AMAI_SELECTOR_MODE
+}
+
 function Confirm-Install {
     param(
         [string]$ChosenProfile,
@@ -136,9 +143,13 @@ function Confirm-Install {
         }
     }
 
+    $env:AMAI_PREFLIGHT_ALREADY_SHOWN = "1"
+    $env:AMAI_SKIP_STACK_PREFLIGHT = "1"
     & "$repoRoot/scripts/install_amai.ps1" @installArgs --stack-profile $ChosenProfile --yes
     exit $LASTEXITCODE
 }
+
+$selectorMode = Get-SelectorMode
 
 if ($explicitProfile) {
     $result = Run-Preflight $stackProfile
@@ -146,15 +157,6 @@ if ($explicitProfile) {
     if ($result.ExitCode -ne 0) {
         exit $result.ExitCode
     }
-
-    if (-not (Test-InteractivePrompt)) {
-        exit 0
-    }
-
-    $profileLabel = Get-Field "Профиль: " $result.Output
-    $verdictTitle = Get-Field "Итог: " $result.Output
-    $verdictCode = Normalize-Verdict $verdictTitle
-    Confirm-Install $stackProfile $profileLabel $verdictCode
     exit 0
 }
 
@@ -216,7 +218,13 @@ if ($recommendedChoice -eq "1") {
 
 Write-Host ""
 Write-Host "Если хотите только посмотреть результат, можно остановиться здесь."
-Write-Host "Если хотите установить Amai, ниже можно выбрать профиль."
+if ($selectorMode -eq "install") {
+    Write-Host "Если хотите установить Amai, ниже можно выбрать профиль."
+}
+
+if ($selectorMode -ne "install") {
+    exit 0
+}
 
 if (-not (Test-InteractivePrompt)) {
     exit 0

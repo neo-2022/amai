@@ -15,7 +15,7 @@ done
 
 if [[ $has_stack_profile -eq 0 && "${AMAI_NO_INSTALL_PROMPT:-0}" != "1" ]]; then
   if [[ "${AMAI_FORCE_INTERACTIVE_PROMPT:-0}" == "1" || ( -t 0 && -t 1 ) ]]; then
-    exec ./scripts/preflight.sh "$@"
+    exec env AMAI_SELECTOR_MODE=install ./scripts/preflight.sh "$@"
   fi
 fi
 

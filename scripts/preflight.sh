@@ -118,7 +118,10 @@ confirm_install() {
   read -r -p "Напишите ДА, если хотите установить Amai в режиме ${chosen_label}: " answer
   case "$answer" in
     ДА|да|Да|YES|Yes|yes|Y|y)
-      exec ./scripts/install_amai.sh "${install_args[@]}" --stack-profile "$chosen_profile" --yes
+      exec env \
+        AMAI_PREFLIGHT_ALREADY_SHOWN=1 \
+        AMAI_SKIP_STACK_PREFLIGHT=1 \
+        ./scripts/install_amai.sh "${install_args[@]}" --stack-profile "$chosen_profile" --yes
       ;;
     *)
       echo "Установка не запущена. Когда захотите продолжить, снова запустите проверку."
@@ -126,18 +129,11 @@ confirm_install() {
   esac
 }
 
+selector_mode="${AMAI_SELECTOR_MODE:-check}"
+
 if [[ "$explicit_profile" -eq 1 ]]; then
   output="$(run_preflight "$stack_profile")"
   printf '%s\n' "$output"
-
-  if ! interactive_prompt_enabled; then
-    exit 0
-  fi
-
-  verdict_title="$(extract_field 'Итог: ' "$output")"
-  verdict_code="$(normalize_verdict "$verdict_title")"
-  profile_label="$(extract_field 'Профиль: ' "$output")"
-  confirm_install "$stack_profile" "$profile_label" "$verdict_code"
   exit 0
 fi
 
@@ -193,7 +189,13 @@ fi
 
 echo
 echo "Если хотите только посмотреть результат, можно остановиться здесь."
-echo "Если хотите установить Amai, ниже можно выбрать профиль."
+if [[ "$selector_mode" == "install" ]]; then
+  echo "Если хотите установить Amai, ниже можно выбрать профиль."
+fi
+
+if [[ "$selector_mode" != "install" ]]; then
+  exit 0
+fi
 
 if ! interactive_prompt_enabled; then
   exit 0

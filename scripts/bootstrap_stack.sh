@@ -20,7 +20,9 @@ done
 
 export AMI_STACK_PROFILE="${stack_profile}"
 
-cargo run -- bootstrap preflight --stack-profile "${stack_profile}"
+if [[ "${AMAI_SKIP_STACK_PREFLIGHT:-0}" != "1" ]]; then
+  cargo run -- bootstrap preflight --stack-profile "${stack_profile}"
+fi
 docker compose up -d --remove-orphans
 cargo run -- bootstrap stack
 

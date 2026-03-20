@@ -89,6 +89,27 @@ pub fn write_client_config(args: &McpConfigArgs) -> Result<()> {
     Ok(())
 }
 
+pub fn client_config_contains_server(args: &McpConfigArgs) -> Result<bool> {
+    let output = args.output.as_ref().ok_or_else(|| {
+        anyhow!("client config inspection requires --output or resolved install path")
+    })?;
+    if !output.exists() {
+        return Ok(false);
+    }
+
+    let existing = fs::read_to_string(output)
+        .with_context(|| format!("failed to read {}", output.display()))?;
+    let server_name = args.server_name.trim();
+    let shape = config_shape_for_client(&args.client)?;
+
+    match shape {
+        ConfigShape::GenericJson => Ok(!existing.trim().is_empty()),
+        ConfigShape::VscodeJson => json_server_exists(&existing, "servers", server_name),
+        ConfigShape::McpServersJson => json_server_exists(&existing, "mcpServers", server_name),
+        ConfigShape::CodexToml => toml_server_exists(&existing, server_name),
+    }
+}
+
 pub struct RemoveConfigResult {
     pub removed: bool,
     pub purged_file: bool,
@@ -1421,6 +1442,16 @@ fn merge_json_server(
         .context("failed to serialize merged MCP JSON config")
 }
 
+fn json_server_exists(existing: &str, top_level_key: &str, server_name: &str) -> Result<bool> {
+    let existing_json: Value =
+        serde_json::from_str(existing).context("failed to parse existing MCP JSON config")?;
+    Ok(existing_json
+        .get(top_level_key)
+        .and_then(Value::as_object)
+        .map(|servers| servers.contains_key(server_name))
+        .unwrap_or(false))
+}
+
 fn remove_json_server(
     existing: &str,
     top_level_key: &str,
@@ -1474,6 +1505,16 @@ fn merge_toml_server(existing: &str, rendered: &str, server_name: &str) -> Resul
         .ok_or_else(|| anyhow!("existing mcp_servers entry is not a TOML table"))?;
     server_map.insert(server_name.to_string(), new_server);
     toml::to_string_pretty(&existing_value).context("failed to serialize merged Codex TOML config")
+}
+
+fn toml_server_exists(existing: &str, server_name: &str) -> Result<bool> {
+    let existing_value: toml::Value =
+        toml::from_str(existing).context("failed to parse existing Codex TOML config")?;
+    Ok(existing_value
+        .get("mcp_servers")
+        .and_then(toml::Value::as_table)
+        .map(|table| table.contains_key(server_name))
+        .unwrap_or(false))
 }
 
 fn remove_toml_server(existing: &str, server_name: &str) -> Result<(String, bool, bool)> {
