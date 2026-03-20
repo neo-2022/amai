@@ -73,6 +73,11 @@ fi
 step "verify exported metrics payload"
 curl -fsS "http://127.0.0.1:${observe_port}/metrics" | rg '^amai_(qdrant_index_optimize_queue|nats_consumer_lag_msgs|postgres_replica_lag_seconds|retrieval_hot_p95_ms|retrieval_cold_p95_ms|tokens_savings_factor|tokens_savings_percent) ' >/dev/null
 
+step "verify human dashboard endpoints"
+curl -fsS "http://127.0.0.1:${observe_port}/" | rg 'Amai Human Dashboard|Главная польза прямо сейчас|Польза проекта видна сразу' >/dev/null
+curl -fsS "http://127.0.0.1:${observe_port}/api/dashboard" | rg '"top_cards"|"service_cards"|"glossary"' >/dev/null
+curl -fsS "http://127.0.0.1:${observe_port}/api/snapshot" | rg '"sla"|"postgres"|"token_budget_report"' >/dev/null
+
 step "start monitoring profile"
 ./scripts/monitoring_up.sh
 step "wait for prometheus"

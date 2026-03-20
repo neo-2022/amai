@@ -2,6 +2,7 @@ mod bootstrap;
 mod cli;
 mod compatibility;
 mod config;
+mod dashboard;
 mod deployment;
 mod edge_cache;
 mod indexer;

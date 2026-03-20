@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 19:14 MSK
-Ручная сверка guide/docs: 2026-03-20 19:14 MSK
+modified_at: 2026-03-21 02:09 MSK
+Ручная сверка guide/docs: 2026-03-21 02:09 MSK
 
 # Architecture
 
@@ -287,6 +287,7 @@ Machine-readable профиль:
 ## Monitoring profile
 
 Поверх observability plane materialized и monitoring profile:
+- встроенный human dashboard `/`;
 - Prometheus rules;
 - Grafana dashboard;
 - встроенный Rust exporter `/metrics`.
@@ -297,9 +298,13 @@ Machine-readable профиль:
 - `observe sla-check`
   - снимает snapshot и fail-ит при `critical`/`unknown`;
 - `observe serve`
-  - только публикует Prometheus metrics;
+  - публикует human dashboard, raw dashboard JSON, raw snapshot JSON и Prometheus metrics;
   - не становится source of truth и не подменяет explicit snapshots.
 
 Таким образом monitoring разделён на два слоя:
 - stateful evidence layer;
-- read-only scrape layer.
+- read-only runtime publish layer.
+
+Внутри read-only runtime publish layer теперь тоже есть два подслоя:
+- human-first dashboard для обычного пользователя;
+- engineering scrape layer для Prometheus/Grafana.

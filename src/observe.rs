@@ -1,11 +1,11 @@
 use crate::config::AppConfig;
-use crate::{nats, postgres, s3, token_budget};
+use crate::{dashboard, nats, postgres, s3, token_budget};
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Router,
     extract::State,
     http::{HeaderValue, StatusCode, header},
-    response::IntoResponse,
+    response::{Html, IntoResponse},
     routing::get,
 };
 use serde::Deserialize;
@@ -19,11 +19,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[derive(Clone)]
 struct ObserveState {
     cfg: AppConfig,
+    bind: String,
+    dashboard_refresh_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct ObservabilityProfile {
     snapshot: SnapshotProfile,
+    dashboard: DashboardProfile,
     postgres: PostgresThresholds,
     qdrant: QdrantThresholds,
     nats: NatsThresholds,
@@ -31,6 +34,11 @@ struct ObservabilityProfile {
     parser: ParserThresholds,
     accuracy: AccuracyThresholds,
     load: LoadThresholds,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DashboardProfile {
+    refresh_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,20 +142,38 @@ pub async fn run_sla_check(cfg: &AppConfig) -> Result<()> {
 }
 
 pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
+    let profile = load_profile()?;
     let addr: SocketAddr = bind
         .parse()
         .with_context(|| format!("invalid observe bind address: {bind}"))?;
     let app = Router::new()
+        .route("/", get(dashboard_page_handler))
+        .route("/dashboard", get(dashboard_page_handler))
+        .route("/api/dashboard", get(dashboard_api_handler))
+        .route("/api/snapshot", get(snapshot_api_handler))
         .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz_handler))
-        .with_state(ObserveState { cfg: cfg.clone() });
+        .with_state(ObserveState {
+            cfg: cfg.clone(),
+            bind: bind.to_string(),
+            dashboard_refresh_ms: profile.dashboard.refresh_ms,
+        });
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind observe exporter on {bind}"))?;
-    println!("observe exporter listening: http://{bind}/metrics");
+    let base_url = human_dashboard_base_url(bind);
+    println!("Amai human dashboard: {base_url}/");
+    println!("Amai dashboard JSON: {base_url}/api/dashboard");
+    println!("Amai raw snapshot JSON: {base_url}/api/snapshot");
+    println!("Amai health JSON: {base_url}/healthz");
+    println!("Amai Prometheus metrics: {base_url}/metrics");
     axum::serve(listener, app)
         .await
         .context("observe exporter stopped unexpectedly")
+}
+
+pub fn human_dashboard_base_url(bind: &str) -> String {
+    dashboard::browser_base_url(bind)
 }
 
 pub async fn collect_snapshot(cfg: &AppConfig) -> Result<Value> {
@@ -247,6 +273,64 @@ async fn metrics_handler(State(state): State<ObserveState>) -> impl IntoResponse
         Err(error) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("observe exporter failed to collect snapshot: {error:#}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn dashboard_page_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+    let html = dashboard::render_html(state.dashboard_refresh_ms);
+    Html(html).into_response()
+}
+
+async fn dashboard_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+    match build_snapshot(&state.cfg, false)
+        .await
+        .and_then(|snapshot| {
+            dashboard::build_payload(
+                &state.cfg,
+                &snapshot,
+                &state.bind,
+                state.dashboard_refresh_ms,
+            )
+        }) {
+        Ok(payload) => {
+            let headers = [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            )];
+            (
+                StatusCode::OK,
+                headers,
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
+            )
+                .into_response()
+        }
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn snapshot_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+    match build_snapshot(&state.cfg, false).await {
+        Ok(snapshot) => {
+            let headers = [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            )];
+            (
+                StatusCode::OK,
+                headers,
+                serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+            )
+                .into_response()
+        }
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
         )
             .into_response(),
     }

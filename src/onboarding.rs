@@ -88,6 +88,10 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     };
     let install_state_before = load_install_state(&repo_root)?;
     let config_existed_before = mcp::client_config_contains_server(&config_args).unwrap_or(false);
+    let local_dashboard_url = (!remote_mode).then(|| {
+        let bind = env::var("AMI_OBSERVE_BIND").unwrap_or_else(|_| "0.0.0.0:9464".to_string());
+        observe::human_dashboard_base_url(&bind)
+    });
 
     if !remote_mode {
         let report = profiles::preflight_report(&repo_root, &args.stack_profile)?;
@@ -199,6 +203,11 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         "Release binary готов: {}",
         if release_ready { "да" } else { "нет" }
     );
+    if let Some(url) = &local_dashboard_url {
+        println!("Живая панель Amai:");
+        println!("- запустить: ./scripts/human_dashboard.sh");
+        println!("- затем открыть: {url}/");
+    }
     if let Some(backup) = backup {
         println!("Резервная копия старого config: {}", backup.display());
     }

@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 01:08 MSK
-Ручная сверка guide/docs: 2026-03-21 01:08 MSK
+modified_at: 2026-03-21 02:09 MSK
+Ручная сверка guide/docs: 2026-03-21 02:09 MSK
 
 # Operations
 
@@ -799,6 +799,42 @@ cargo run --release -- observe sla-check
 
 ## Monitoring profile
 
+## Human dashboard
+
+Если нужен не инженерный scrape-слой, а обычная человеческая страница с живыми цифрами:
+
+```bash
+./scripts/human_dashboard.sh
+```
+
+Windows PowerShell:
+
+```powershell
+.\scripts\human_dashboard.ps1
+```
+
+Windows CMD:
+
+```bat
+scripts\human_dashboard.cmd
+```
+
+Это поднимает тот же `observe serve`, но теперь он отдаёт сразу несколько уровней:
+- `/`
+  - human-first HTML dashboard;
+- `/api/dashboard`
+  - тот же смысл в удобном JSON для внешней автоматизации;
+- `/api/snapshot`
+  - полный live snapshot без human-упаковки;
+- `/metrics`
+  - Prometheus scrape layer;
+- `/healthz`
+  - быстрый health JSON.
+
+Для обычного пользователя правильный путь теперь такой:
+- сначала открыть human dashboard;
+- а уже потом при необходимости идти глубже в Prometheus/Grafana.
+
 Встроенный exporter:
 
 ```bash
@@ -834,6 +870,7 @@ Prometheus + Grafana:
 - scrape path не должен менять operational truth;
 - поэтому `/metrics` собирает live snapshot read-only и не пишет `system_snapshot` в PostgreSQL на каждый Prometheus scrape;
 - persistence остаётся только у явных `observe snapshot` и `observe sla-check`.
+- human dashboard использует тот же read-only snapshot contour и тоже не пишет state на каждый refresh;
 - runtime scrape targets и monitoring ports не должны быть вшиты в конфиг как абсолютные литералы;
 - поэтому monitoring profile рендерится из `.env` перед `docker compose --profile monitoring up`.
 - token-economy metrics тоже приходят в exporter:
