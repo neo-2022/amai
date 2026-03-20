@@ -50,7 +50,9 @@ pub fn render_html(refresh_ms: u64) -> String {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Amai Human Dashboard</title>
-  <link rel="icon" href="/favicon.ico">
+  <link rel="icon" type="image/svg+xml" href="/brand/amai_mark.svg?v=__ASSET_VERSION__">
+  <link rel="icon" href="/favicon.ico?v=__ASSET_VERSION__" sizes="any">
+  <link rel="shortcut icon" href="/favicon.ico?v=__ASSET_VERSION__">
   <style>
     :root {
       color-scheme: light;
@@ -99,7 +101,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       display: grid;
       grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
       gap: 14px;
-      align-items: stretch;
+      align-items: start;
       margin-bottom: 14px;
     }
 
@@ -115,6 +117,8 @@ pub fn render_html(refresh_ms: u64) -> String {
       padding: 18px 20px;
       position: relative;
       overflow: hidden;
+      display: grid;
+      gap: 14px;
     }
 
     .brand-line {
@@ -165,10 +169,41 @@ pub fn render_html(refresh_ms: u64) -> String {
 
     .lead {
       margin: 0;
-      max-width: 64ch;
+      max-width: 60ch;
       color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .hero-cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .hero-metric-card {
+      padding: 14px 16px;
+      border-radius: 18px;
+    }
+
+    .hero-metric-card .card-top {
+      margin-bottom: 4px;
+      align-items: center;
+    }
+
+    .hero-metric-card .card-title {
       font-size: 14px;
-      line-height: 1.45;
+    }
+
+    .hero-metric-card .card-value {
+      margin: 8px 0 6px;
+      font-size: clamp(22px, 3vw, 32px);
+      line-height: 0.98;
+    }
+
+    .hero-metric-card .card-note {
+      font-size: 13px;
+      line-height: 1.4;
     }
 
     .hero-side {
@@ -368,6 +403,10 @@ pub fn render_html(refresh_ms: u64) -> String {
       .hero {
         grid-template-columns: 1fr;
       }
+
+      .hero-cards {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -382,10 +421,10 @@ pub fn render_html(refresh_ms: u64) -> String {
         </div>
         <h1>Amai: живая польза на одной странице.</h1>
         <p class="lead">
-          Здесь без инженерного шума видно главное: насколько быстро отвечает <code>Amai</code>,
-          сколько токенов он уже сэкономил, не течёт ли один проект в другой и не болеют ли
-          внутренние сервисы.
+          Здесь сразу видно главное: сколько токенов уже сэкономлено, насколько быстро отвечает
+          <code>Amai</code>, не течёт ли один проект в другой и всё ли в порядке у внутренних сервисов.
         </p>
+        <div class="hero-cards" id="hero-cards"></div>
       </div>
       <aside class="panel hero-side">
         <div id="summary-status"></div>
@@ -401,11 +440,10 @@ pub fn render_html(refresh_ms: u64) -> String {
     </section>
 
     <section class="panel section">
-      <h2>Главная польза прямо сейчас</h2>
+      <h2>Скорость и защита контекста</h2>
       <p class="muted">
-        Здесь собраны цифры, ради которых человек вообще ставит <code>Amai</code>:
-        экономия токенов, скорость ответов, отсутствие утечек между проектами и готовность
-        к нагрузке.
+        Здесь собраны уже не общие слова, а рабочие инженерные цифры: быстрый повторный запрос,
+        первый запрос без прогрева и контроль того, что контекст одного проекта не протекает в другой.
       </p>
       <div class="cards" id="top-cards"></div>
     </section>
@@ -585,6 +623,7 @@ pub fn render_html(refresh_ms: u64) -> String {
         hideError();
         renderSummary(payload.meta, payload.headline);
         renderLinks(payload.links);
+        renderCards("hero-cards", payload.hero_cards, "metric-card hero-metric-card");
         renderCards("top-cards", payload.top_cards, "metric-card");
         renderCards("machine-cards", payload.machine_cards, "metric-card");
         renderCards("service-cards", payload.service_cards, "service-card");
@@ -602,7 +641,9 @@ pub fn render_html(refresh_ms: u64) -> String {
 </html>
 "#;
 
-    TEMPLATE.replace("__REFRESH_MS__", &refresh_ms.to_string())
+    TEMPLATE
+        .replace("__REFRESH_MS__", &refresh_ms.to_string())
+        .replace("__ASSET_VERSION__", env!("CARGO_PKG_VERSION"))
 }
 
 pub fn build_payload(
@@ -631,6 +672,7 @@ pub fn build_payload(
             "base_url": base_url,
         },
         "headline": build_headline(snapshot, captured_at_epoch_ms),
+        "hero_cards": build_hero_cards(snapshot),
         "top_cards": build_top_cards(snapshot),
         "machine_cards": build_machine_cards(machine.as_ref(), install_state.as_ref()),
         "service_cards": build_service_cards(snapshot),
@@ -663,6 +705,29 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
 }
 
 fn build_top_cards(snapshot: &Value) -> Vec<Value> {
+    vec![
+        card(
+            "Hot retrieval p95",
+            format_ms(snapshot["latest_retrieval_hot"]["benchmark"]["p95_ms"].as_f64()),
+            "Это повторный запрос по уже прогретому быстрому кэшу.".to_string(),
+            status_for_metric_prefix(snapshot, "retrieval.hot"),
+        ),
+        card(
+            "Cold retrieval p95",
+            format_ms(snapshot["latest_retrieval_cold"]["benchmark"]["p95_ms"].as_f64()),
+            "Это первый запрос после старта или без готового прогрева.".to_string(),
+            status_for_metric_prefix(snapshot, "retrieval.cold"),
+        ),
+        card(
+            "Cross-project leakage",
+            format_f64_count(snapshot["latest_retrieval_accuracy"]["accuracy_verification"]["cross_project_leakage"].as_f64()),
+            "Должно быть ровно 0. Иначе один проект начал подтекать в другой.".to_string(),
+            status_for_metric_prefix(snapshot, "accuracy.cross_project_leakage"),
+        ),
+    ]
+}
+
+fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let captured_at_epoch_ms = snapshot["captured_at_epoch_ms"].as_u64();
     let session_gap_minutes =
         snapshot["token_budget_report"]["token_budget_report"]["profile"]["session_gap_minutes"]
@@ -685,7 +750,7 @@ fn build_top_cards(snapshot: &Value) -> Vec<Value> {
             "Экономия токенов за текущую сессию",
             format_u64(snapshot["token_budget_report"]["token_budget_report"]["current_session"]["total_saved_tokens"].as_u64()),
             format!(
-                "Сессия здесь = непрерывная работа без паузы дольше {}. Текущая сессия длится {} и сейчас в неё вошло {} запросов. Экономия: {}. Если новых запросов к Amai сейчас нет, число временно не меняется — и это нормально.",
+                "Сессия без паузы дольше {}. Длительность: {}. Запросов: {}. Экономия: {}.",
                 human_minutes(session_gap_minutes),
                 elapsed_since_epoch_label(current_session_started, captured_at_epoch_ms),
                 format_u64(current_session_events),
@@ -697,7 +762,7 @@ fn build_top_cards(snapshot: &Value) -> Vec<Value> {
             "Экономия токенов за всё время записи",
             format_u64(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["total_saved_tokens"].as_u64()),
             format!(
-                "Это итог за всё время, пока Amai ведёт эту статистику: {}. Сейчас в сумме учтено {} запросов. Экономия: {}. Этот блок растёт только когда появляются новые события использования.",
+                "С начала учёта: {}, {} запросов, экономия {}.",
                 elapsed_since_epoch_label(lifetime_started, captured_at_epoch_ms),
                 format_u64(lifetime_events),
                 format_percent(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["savings_percent"].as_f64())
@@ -708,7 +773,7 @@ fn build_top_cards(snapshot: &Value) -> Vec<Value> {
             "Экономия на последнем честном замере",
             format_percent(snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_percent"].as_f64()),
             format!(
-                "Это не сумма за день и не за сессию. Это отдельный контрольный замер: один context pack оказался {} относительно наивного полного объёма.",
+                "Последний контрольный замер показал {} относительно наивной полной подачи контекста.",
                 format_factor(snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_factor"].as_f64())
             ),
             if snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_percent"].as_f64().is_some() {
@@ -716,24 +781,6 @@ fn build_top_cards(snapshot: &Value) -> Vec<Value> {
             } else {
                 "unknown"
             },
-        ),
-        card(
-            "Hot retrieval p95",
-            format_ms(snapshot["latest_retrieval_hot"]["benchmark"]["p95_ms"].as_f64()),
-            "Это повторный запрос по уже прогретому быстрому кэшу.".to_string(),
-            status_for_metric_prefix(snapshot, "retrieval.hot"),
-        ),
-        card(
-            "Cold retrieval p95",
-            format_ms(snapshot["latest_retrieval_cold"]["benchmark"]["p95_ms"].as_f64()),
-            "Это первый запрос после старта или без готового прогрева.".to_string(),
-            status_for_metric_prefix(snapshot, "retrieval.cold"),
-        ),
-        card(
-            "Cross-project leakage",
-            format_f64_count(snapshot["latest_retrieval_accuracy"]["accuracy_verification"]["cross_project_leakage"].as_f64()),
-            "Должно быть ровно 0. Иначе один проект начал подтекать в другой.".to_string(),
-            status_for_metric_prefix(snapshot, "accuracy.cross_project_leakage"),
         ),
     ]
 }
