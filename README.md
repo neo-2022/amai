@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 19:38 MSK
-Ручная сверка guide/docs: 2026-03-20 19:38 MSK
+modified_at: 2026-03-20 19:57 MSK
+Ручная сверка guide/docs: 2026-03-20 19:57 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -146,7 +146,7 @@ Amai — это отдельный внешний инструмент для И
 - `docs/`
   - подробная архитектура, схема данных, операции и lifecycle.
 - `config/`
-  - конфиги сервисов и compatibility profile.
+  - конфиги сервисов, compatibility profile и machine-readable client target registry.
 - `sql/`
   - каноническая схема PostgreSQL и seed-данные.
 - `scripts/`
@@ -199,8 +199,10 @@ cd /home/art/agent-memory-index
 - потом обычно достаточно открыть repo в VS Code и сделать `Reload Window`.
 
 Для других клиентов onboarding тоже упрощает работу:
-- `Cursor`, `Claude Desktop`, `Codex` и `generic` получают готовый config-файл;
-- если у клиента нет очевидного workspace-local пути, `Amai` всё равно создаёт готовый snippet в `tmp/onboarding/`, чтобы его не собирать вручную с нуля.
+- `Cursor` по умолчанию получает auto-install в user config;
+- `Codex` по умолчанию получает auto-install в user config;
+- `Claude Code` получает workspace-local `.mcp.json`;
+- `Claude Desktop` и `generic` пока получают готовый generated file для ручного импорта.
 
 Примеры:
 
@@ -208,6 +210,7 @@ cd /home/art/agent-memory-index
 ./scripts/onboard_local.sh --client vscode
 ./scripts/onboard_local.sh --client cursor
 ./scripts/onboard_local.sh --client codex
+./scripts/disconnect_local.sh --client codex
 ```
 
 ## Инженерный старт вручную
@@ -264,6 +267,7 @@ cd /home/art/agent-memory-index
 ./scripts/proof_observability.sh
 ./scripts/proof_mcp.sh
 ./scripts/proof_onboarding.sh
+./scripts/proof_client_lifecycle.sh
 ```
 
 4. Зарегистрировать свои проекты:
@@ -307,6 +311,7 @@ cargo build --release
 ```bash
 ./target/release/amai mcp config --client vscode --output .vscode/mcp.json
 ./target/release/amai mcp config --client cursor
+./target/release/amai mcp config --client claude-code
 ./target/release/amai mcp config --client claude-desktop
 ./target/release/amai mcp config --client codex
 ```
@@ -315,6 +320,28 @@ cargo build --release
 - клиенту не нужно хранить DSN, bucket names и другие внутренние runtime детали;
 - клиент запускает `Amai` через `scripts/run_mcp_stdio.sh`;
 - runner сам подтягивает `.env` и стартует `amai mcp serve`.
+- список default install targets теперь живёт не в коде README, а в:
+  - `config/client_targets.toml`
+
+## Подключение и удаление
+
+`Amai` теперь умеет не только подключать client config, но и убирать его обратно.
+
+Примеры:
+
+```bash
+./scripts/onboard_local.sh --client vscode
+./scripts/onboard_local.sh --client cursor
+./scripts/onboard_local.sh --client codex
+
+./scripts/disconnect_local.sh --client vscode
+./scripts/disconnect_local.sh --client cursor
+./scripts/disconnect_local.sh --client codex
+```
+
+Это важно по двум причинам:
+- обычному пользователю не нужно потом руками вычищать куски config;
+- install/remove превращается в симметричный product lifecycle, а не в одноразовый setup без обратного пути.
 
 Подробный human-readable walkthrough:
 - [docs/MCP_INTEGRATION.md](/home/art/agent-memory-index/docs/MCP_INTEGRATION.md)

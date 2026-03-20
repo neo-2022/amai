@@ -1,0 +1,23 @@
+[clients.vscode]
+default_output = "${repo_root}/.vscode/mcp.json"
+install_scope = "workspace_local"
+
+[clients.cursor]
+default_output = "${home}/.cursor/mcp.json"
+install_scope = "user_global"
+
+[clients.claude-code]
+default_output = "${repo_root}/.mcp.json"
+install_scope = "workspace_local"
+
+[clients.codex]
+default_output = "${home}/.codex/config.toml"
+install_scope = "user_global"
+
+[clients.claude-desktop]
+default_output = "${repo_root}/tmp/onboarding/claude-desktop-mcp.json"
+install_scope = "manual_generated"
+
+[clients.generic]
+default_output = "${repo_root}/tmp/onboarding/generic-mcp.json"
+install_scope = "manual_generated"

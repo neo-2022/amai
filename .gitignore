@@ -1,6 +1,7 @@
 .env
 .env.local
 .fastembed_cache/
+.mcp.json
 
 target/
 *.log
@@ -24,3 +25,4 @@ tmp/*
 !tmp/.gitkeep
 
 .vscode/
+.cursor/

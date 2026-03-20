@@ -1,12 +1,14 @@
 use crate::bootstrap;
-use crate::cli::{BootstrapOnboardingArgs, McpConfigArgs};
+use crate::cli::{BootstrapDisconnectArgs, BootstrapOnboardingArgs, McpConfigArgs};
 use crate::config::AppConfig;
 use crate::mcp;
 use anyhow::{Context, Result, anyhow, bail};
-use std::collections::BTreeSet;
+use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
 pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
@@ -40,7 +42,10 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         .await?;
     }
 
-    let output = resolve_output_path(&repo_root, &args.client, args.output.as_ref())?;
+    let target = load_client_target(&repo_root, &args.client)?;
+    let output = resolve_output_path(&repo_root, &target, args.output.as_ref())?;
+    let backup = maybe_backup_user_global(&output, &target.install_scope)?;
+
     let config_args = McpConfigArgs {
         client: args.client.clone(),
         server_name: "amai".to_string(),
@@ -52,22 +57,53 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
 
     let release_binary = repo_root.join("target/release/amai");
     let release_ready = release_binary.is_file();
-    let config_mode = if client_config_is_workspace_local(&args.client) {
-        "ready"
-    } else {
-        "generated_for_manual_import"
-    };
 
     println!("onboarding completed");
     println!("repo_root: {}", repo_root.display());
     println!("env_file: {}", repo_root.join(".env").display());
     println!("client: {}", args.client);
     println!("client_config: {}", output.display());
-    println!("client_config_mode: {config_mode}");
+    println!(
+        "client_config_mode: {}",
+        install_scope_status(&target.install_scope)
+    );
     println!("release_binary_ready: {release_ready}");
+    if let Some(backup) = backup {
+        println!("backup_file: {}", backup.display());
+    }
     println!("next_step_1: open the repo in your client");
     println!("next_step_2: reload the client window or restart the client");
     println!("next_step_3: ask the client to call Amai through MCP");
+    Ok(())
+}
+
+pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
+    let repo_root = discover_repo_root(args.cwd.as_deref())?;
+    let target = load_client_target(&repo_root, &args.client)?;
+    let output = resolve_output_path(&repo_root, &target, args.output.as_ref())?;
+    let backup = maybe_backup_user_global(&output, &target.install_scope)?;
+
+    let result = mcp::remove_client_config(
+        &McpConfigArgs {
+            client: args.client.clone(),
+            server_name: "amai".to_string(),
+            command: None,
+            cwd: Some(repo_root),
+            output: Some(output.clone()),
+        },
+        args.purge_empty_file,
+    )?;
+
+    println!("disconnect completed");
+    println!("client: {}", args.client);
+    println!("client_config: {}", output.display());
+    println!("server_removed: {}", result.removed);
+    println!("file_purged: {}", result.purged_file);
+    if let Some(backup) = backup {
+        println!("backup_file: {}", backup.display());
+    }
+    println!("next_step_1: reload the client window or restart the client");
+    println!("next_step_2: verify that Amai is no longer listed as an MCP server");
     Ok(())
 }
 
@@ -197,9 +233,34 @@ async fn run_command(label: &str, mut command: Command) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct ClientTargetsManifest {
+    clients: BTreeMap<String, ClientTarget>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClientTarget {
+    default_output: String,
+    install_scope: String,
+}
+
+fn load_client_target(repo_root: &Path, client: &str) -> Result<ClientTarget> {
+    let manifest_path = repo_root.join("config/client_targets.toml");
+    let content = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest: ClientTargetsManifest =
+        toml::from_str(&content).context("failed to parse config/client_targets.toml")?;
+    let client_key = client.trim().to_ascii_lowercase();
+    manifest.clients.get(&client_key).cloned().ok_or_else(|| {
+        anyhow!(
+            "unsupported onboarding client target: {client_key}; register it in config/client_targets.toml"
+        )
+    })
+}
+
 fn resolve_output_path(
     repo_root: &Path,
-    client: &str,
+    target: &ClientTarget,
     explicit: Option<&PathBuf>,
 ) -> Result<PathBuf> {
     if let Some(path) = explicit {
@@ -211,27 +272,60 @@ fn resolve_output_path(
         return Ok(resolved);
     }
 
-    let client = client.trim().to_ascii_lowercase();
-    let path = match client.as_str() {
-        "vscode" => repo_root.join(".vscode/mcp.json"),
-        "codex" => repo_root.join("tmp/onboarding/codex-mcp.toml"),
-        "cursor" => repo_root.join("tmp/onboarding/cursor-mcp.json"),
-        "claude-desktop" => repo_root.join("tmp/onboarding/claude-desktop-mcp.json"),
-        "generic" => repo_root.join("tmp/onboarding/generic-mcp.json"),
-        other => bail!(
-            "unsupported onboarding client target: {other}; use vscode|cursor|claude-desktop|codex|generic"
-        ),
-    };
-    Ok(path)
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("failed to resolve user home directory"))?;
+    Ok(expand_target_template(
+        &target.default_output,
+        repo_root,
+        &home,
+    ))
 }
 
-fn client_config_is_workspace_local(client: &str) -> bool {
-    matches!(client.trim().to_ascii_lowercase().as_str(), "vscode")
+fn expand_target_template(template: &str, repo_root: &Path, home: &Path) -> PathBuf {
+    PathBuf::from(
+        template
+            .replace("${repo_root}", &repo_root.display().to_string())
+            .replace("${home}", &home.display().to_string()),
+    )
+}
+
+fn install_scope_status(scope: &str) -> &'static str {
+    match scope {
+        "workspace_local" => "ready",
+        "user_global" => "installed_in_user_scope",
+        "manual_generated" => "generated_for_manual_import",
+        _ => "generated",
+    }
+}
+
+fn maybe_backup_user_global(path: &Path, install_scope: &str) -> Result<Option<PathBuf>> {
+    if install_scope != "user_global" || !path.is_file() {
+        return Ok(None);
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock error while creating backup name")?
+        .as_secs();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("failed to derive backup filename for {}", path.display()))?;
+    let backup = path.with_file_name(format!("{file_name}.bak-{timestamp}"));
+    fs::copy(path, &backup).with_context(|| {
+        format!(
+            "failed to create backup before modifying user-global config {}",
+            path.display()
+        )
+    })?;
+    Ok(Some(backup))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{client_config_is_workspace_local, env_keys, resolve_output_path};
+    use super::{
+        env_keys, expand_target_template, install_scope_status, load_client_target,
+        resolve_output_path,
+    };
     use std::path::Path;
 
     #[test]
@@ -250,21 +344,47 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
     }
 
     #[test]
+    fn load_client_targets_manifest() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let target = load_client_target(repo, "vscode").expect("vscode target must exist");
+        assert_eq!(target.install_scope, "workspace_local");
+    }
+
+    #[test]
     fn resolves_default_output_paths() {
         let repo = Path::new("/tmp/amai");
+        let home = Path::new("/tmp/home");
         assert_eq!(
-            resolve_output_path(repo, "vscode", None).unwrap(),
+            expand_target_template("${repo_root}/.vscode/mcp.json", repo, home),
             repo.join(".vscode/mcp.json")
         );
         assert_eq!(
-            resolve_output_path(repo, "codex", None).unwrap(),
-            repo.join("tmp/onboarding/codex-mcp.toml")
+            expand_target_template("${home}/.codex/config.toml", repo, home),
+            home.join(".codex/config.toml")
         );
     }
 
     #[test]
-    fn reports_workspace_local_clients() {
-        assert!(client_config_is_workspace_local("vscode"));
-        assert!(!client_config_is_workspace_local("cursor"));
+    fn reports_install_scope_statuses() {
+        assert_eq!(install_scope_status("workspace_local"), "ready");
+        assert_eq!(
+            install_scope_status("user_global"),
+            "installed_in_user_scope"
+        );
+        assert_eq!(
+            install_scope_status("manual_generated"),
+            "generated_for_manual_import"
+        );
+    }
+
+    #[test]
+    fn resolve_output_path_prefers_explicit_path() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let target = load_client_target(repo, "vscode").unwrap();
+        let explicit = repo.join("custom/mcp.json");
+        assert_eq!(
+            resolve_output_path(repo, &target, Some(&explicit)).unwrap(),
+            explicit
+        );
     }
 }

@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 19:38 MSK
-Ручная сверка guide/docs: 2026-03-20 19:38 MSK
+modified_at: 2026-03-20 19:57 MSK
+Ручная сверка guide/docs: 2026-03-20 19:57 MSK
 
 # AGENTS.md для Art-memory-agent-index (Amai)
 
@@ -32,6 +32,8 @@ modified_at: 2026-03-20 19:38 MSK
   - `scripts/onboard_local.sh --client vscode`
 - инженерный ручной путь:
   - `scripts/bootstrap_stack.sh`
+- симметричное отключение клиента:
+  - `scripts/disconnect_local.sh --client vscode`
 
 ## 3. Главный закон
 
@@ -84,6 +86,9 @@ CLI/binary canonical short name:
 - Rust CLI/indexer;
 - local runtime state.
 
+Machine-readable client install targets живут в:
+- `config/client_targets.toml`
+
 Каталоги `state/**` и `tmp/**` не должны попадать в git.
 
 ## 7. Канонический runnable path
@@ -91,6 +96,8 @@ CLI/binary canonical short name:
 Минимальный runnable порядок для нового агента:
 1. для простого локального старта:
    - `scripts/onboard_local.sh --client vscode`
+   - если нужно убрать клиент обратно:
+     - `scripts/disconnect_local.sh --client vscode`
 2. для ручного инженерного пути:
    - `scripts/bootstrap_stack.sh`
    - `scripts/status.sh`
@@ -108,6 +115,8 @@ CLI/binary canonical short name:
 - `scripts/proof_load.sh`
 - `scripts/proof_hostile.sh`
 - `scripts/proof_observability.sh`
+- `scripts/proof_onboarding.sh`
+- `scripts/proof_client_lifecycle.sh`
 
 Rust-native verification commands:
 - `cargo run -- verify benchmark ...`

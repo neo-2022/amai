@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -77,7 +78,9 @@ pub fn write_client_config(args: &McpConfigArgs) -> Result<()> {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        std::fs::write(output, rendered.as_bytes())
+        let shape = config_shape_for_client(&args.client)?;
+        let final_content = merge_existing_config(shape, args, &rendered, output)?;
+        std::fs::write(output, final_content.as_bytes())
             .with_context(|| format!("failed to write {}", output.display()))?;
         println!("written: {}", output.display());
     } else {
@@ -86,10 +89,75 @@ pub fn write_client_config(args: &McpConfigArgs) -> Result<()> {
     Ok(())
 }
 
+pub struct RemoveConfigResult {
+    pub removed: bool,
+    pub purged_file: bool,
+}
+
+pub fn remove_client_config(
+    args: &McpConfigArgs,
+    purge_empty_file: bool,
+) -> Result<RemoveConfigResult> {
+    let output = args.output.as_ref().ok_or_else(|| {
+        anyhow!("client config removal requires --output or resolved install path")
+    })?;
+    if !output.exists() {
+        return Ok(RemoveConfigResult {
+            removed: false,
+            purged_file: false,
+        });
+    }
+
+    let shape = config_shape_for_client(&args.client)?;
+    let existing = fs::read_to_string(output)
+        .with_context(|| format!("failed to read {}", output.display()))?;
+
+    let (updated, removed, is_empty) = match shape {
+        ConfigShape::GenericJson => ("".to_string(), true, true),
+        ConfigShape::VscodeJson => {
+            remove_json_server(&existing, "servers", args.server_name.trim())?
+        }
+        ConfigShape::McpServersJson => {
+            remove_json_server(&existing, "mcpServers", args.server_name.trim())?
+        }
+        ConfigShape::CodexToml => remove_toml_server(&existing, args.server_name.trim())?,
+    };
+
+    if !removed {
+        return Ok(RemoveConfigResult {
+            removed: false,
+            purged_file: false,
+        });
+    }
+
+    if purge_empty_file && is_empty {
+        fs::remove_file(output)
+            .with_context(|| format!("failed to remove {}", output.display()))?;
+        return Ok(RemoveConfigResult {
+            removed: true,
+            purged_file: true,
+        });
+    }
+
+    fs::write(output, updated.as_bytes())
+        .with_context(|| format!("failed to write {}", output.display()))?;
+    Ok(RemoveConfigResult {
+        removed: true,
+        purged_file: false,
+    })
+}
+
 pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()> {
     compatibility::assert_supported(cfg).await?;
 
-    for client in ["generic", "vscode", "cursor", "claude-desktop", "codex"] {
+    for client in [
+        "generic",
+        "vscode",
+        "cursor",
+        "claude-desktop",
+        "claude-code",
+        "codex",
+    ] {
         let config = render_client_config(&McpConfigArgs {
             client: client.to_string(),
             server_name: "amai".to_string(),
@@ -1129,8 +1197,8 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
         return Err(anyhow!("MCP server name must not be empty"));
     }
 
-    match client.as_str() {
-        "generic" => serde_json::to_string_pretty(&json!({
+    match config_shape_for_client(&client)? {
+        ConfigShape::GenericJson => serde_json::to_string_pretty(&json!({
             "name": server_name,
             "transport": "stdio",
             "command": command,
@@ -1138,7 +1206,7 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
             "cwd": cwd
         }))
         .context("failed to render generic MCP config"),
-        "vscode" => serde_json::to_string_pretty(&json!({
+        ConfigShape::VscodeJson => serde_json::to_string_pretty(&json!({
             "servers": {
                 server_name: {
                     "type": "stdio",
@@ -1149,7 +1217,7 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
             }
         }))
         .context("failed to render VS Code MCP config"),
-        "cursor" | "claude-desktop" => serde_json::to_string_pretty(&json!({
+        ConfigShape::McpServersJson => serde_json::to_string_pretty(&json!({
             "mcpServers": {
                 server_name: {
                     "command": command,
@@ -1159,13 +1227,165 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
             }
         }))
         .context("failed to render MCP config"),
-        "codex" => Ok(format!(
+        ConfigShape::CodexToml => Ok(format!(
             "[mcp_servers.{server_name}]\ncommand = {command:?}\nargs = []\n"
         )),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ConfigShape {
+    GenericJson,
+    VscodeJson,
+    McpServersJson,
+    CodexToml,
+}
+
+fn config_shape_for_client(client: &str) -> Result<ConfigShape> {
+    match client.trim().to_ascii_lowercase().as_str() {
+        "generic" => Ok(ConfigShape::GenericJson),
+        "vscode" => Ok(ConfigShape::VscodeJson),
+        "cursor" | "claude-desktop" | "claude-code" => Ok(ConfigShape::McpServersJson),
+        "codex" => Ok(ConfigShape::CodexToml),
         other => Err(anyhow!(
-            "unsupported MCP client config target: {other}; use generic|vscode|cursor|claude-desktop|codex"
+            "unsupported MCP client config target: {other}; use generic|vscode|cursor|claude-desktop|claude-code|codex"
         )),
     }
+}
+
+fn merge_existing_config(
+    shape: ConfigShape,
+    args: &McpConfigArgs,
+    rendered: &str,
+    output: &PathBuf,
+) -> Result<String> {
+    if !output.is_file() {
+        return Ok(rendered.to_string());
+    }
+
+    let existing = fs::read_to_string(output)
+        .with_context(|| format!("failed to read {}", output.display()))?;
+    match shape {
+        ConfigShape::GenericJson => Ok(rendered.to_string()),
+        ConfigShape::VscodeJson => {
+            merge_json_server(&existing, rendered, "servers", args.server_name.trim())
+        }
+        ConfigShape::McpServersJson => {
+            merge_json_server(&existing, rendered, "mcpServers", args.server_name.trim())
+        }
+        ConfigShape::CodexToml => merge_toml_server(&existing, rendered, args.server_name.trim()),
+    }
+}
+
+fn merge_json_server(
+    existing: &str,
+    rendered: &str,
+    top_level_key: &str,
+    server_name: &str,
+) -> Result<String> {
+    let mut existing_json: Value =
+        serde_json::from_str(existing).context("failed to parse existing MCP JSON config")?;
+    let rendered_json: Value =
+        serde_json::from_str(rendered).context("failed to parse rendered MCP JSON config")?;
+
+    let new_server = rendered_json
+        .get(top_level_key)
+        .and_then(Value::as_object)
+        .and_then(|servers| servers.get(server_name))
+        .cloned()
+        .ok_or_else(|| anyhow!("rendered MCP config is missing server {server_name}"))?;
+
+    let root = existing_json
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("existing MCP JSON config is not an object"))?;
+    let server_map = root
+        .entry(top_level_key.to_string())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("existing MCP JSON server map {top_level_key} is not an object"))?;
+    server_map.insert(server_name.to_string(), new_server);
+    serde_json::to_string_pretty(&existing_json)
+        .context("failed to serialize merged MCP JSON config")
+}
+
+fn remove_json_server(
+    existing: &str,
+    top_level_key: &str,
+    server_name: &str,
+) -> Result<(String, bool, bool)> {
+    let mut existing_json: Value =
+        serde_json::from_str(existing).context("failed to parse existing MCP JSON config")?;
+    let root = existing_json
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("existing MCP JSON config is not an object"))?;
+    let Some(server_map_value) = root.get_mut(top_level_key) else {
+        return Ok((existing.to_string(), false, false));
+    };
+    let server_map = server_map_value
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("existing MCP JSON server map {top_level_key} is not an object"))?;
+    let removed = server_map.remove(server_name).is_some();
+    let server_map_empty = server_map.is_empty();
+    if server_map_empty {
+        root.remove(top_level_key);
+    }
+    let is_empty = root.is_empty() || root.values().all(Value::is_null);
+    Ok((
+        serde_json::to_string_pretty(&existing_json)
+            .context("failed to serialize pruned MCP JSON config")?,
+        removed,
+        is_empty || existing_json == json!({}),
+    ))
+}
+
+fn merge_toml_server(existing: &str, rendered: &str, server_name: &str) -> Result<String> {
+    let mut existing_value: toml::Value =
+        toml::from_str(existing).context("failed to parse existing Codex TOML config")?;
+    let rendered_value: toml::Value =
+        toml::from_str(rendered).context("failed to parse rendered Codex TOML config")?;
+
+    let new_server = rendered_value
+        .get("mcp_servers")
+        .and_then(toml::Value::as_table)
+        .and_then(|table| table.get(server_name))
+        .cloned()
+        .ok_or_else(|| anyhow!("rendered Codex config is missing server {server_name}"))?;
+
+    let root = existing_value
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("existing Codex config is not a TOML table"))?;
+    let server_map = root
+        .entry("mcp_servers".to_string())
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("existing mcp_servers entry is not a TOML table"))?;
+    server_map.insert(server_name.to_string(), new_server);
+    toml::to_string_pretty(&existing_value).context("failed to serialize merged Codex TOML config")
+}
+
+fn remove_toml_server(existing: &str, server_name: &str) -> Result<(String, bool, bool)> {
+    let mut existing_value: toml::Value =
+        toml::from_str(existing).context("failed to parse existing Codex TOML config")?;
+    let root = existing_value
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("existing Codex config is not a TOML table"))?;
+    let Some(mcp_servers_value) = root.get_mut("mcp_servers") else {
+        return Ok((existing.to_string(), false, false));
+    };
+    let mcp_servers = mcp_servers_value
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("existing mcp_servers entry is not a TOML table"))?;
+    let removed = mcp_servers.remove(server_name).is_some();
+    if mcp_servers.is_empty() {
+        root.remove("mcp_servers");
+    }
+    let is_empty = root.is_empty();
+    Ok((
+        toml::to_string_pretty(&existing_value)
+            .context("failed to serialize pruned Codex TOML config")?,
+        removed,
+        is_empty,
+    ))
 }
 
 fn required_prompt_arg(arguments: &serde_json::Map<String, Value>, key: &str) -> Result<String> {

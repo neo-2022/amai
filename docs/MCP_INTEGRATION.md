@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 19:38 MSK
-Ручная сверка guide/docs: 2026-03-20 19:38 MSK
+modified_at: 2026-03-20 19:57 MSK
+Ручная сверка guide/docs: 2026-03-20 19:57 MSK
 
 # MCP Integration
 
@@ -36,6 +36,16 @@ modified_at: 2026-03-20 19:38 MSK
 - сделать `Reload Window`;
 - проверить, что MCP server виден клиенту.
 
+Для других клиентов логика теперь тоже стала проще:
+- `Cursor`
+  - onboarding по умолчанию пишет config в user-scope path;
+- `Codex`
+  - onboarding по умолчанию пишет config в user-scope path;
+- `Claude Code`
+  - onboarding пишет workspace-local `.mcp.json`;
+- `Claude Desktop`
+  - пока получает generated file для ручного импорта.
+
 ## Минимальные шаги
 
 1. Самый простой путь
@@ -56,11 +66,28 @@ cargo build --release
 ```bash
 ./target/release/amai mcp config --client vscode
 ./target/release/amai mcp config --client cursor
+./target/release/amai mcp config --client claude-code
 ./target/release/amai mcp config --client claude-desktop
 ./target/release/amai mcp config --client codex
 ```
 
 4. Если onboarding уже запускался, часть этой работы уже сделана автоматически.
+
+## Как отключить клиента обратно
+
+Теперь lifecycle симметричный:
+- можно не только подключить `Amai`;
+- можно и убрать его из клиентского конфига одной командой.
+
+Примеры:
+
+```bash
+./scripts/disconnect_local.sh --client vscode
+./scripts/disconnect_local.sh --client cursor
+./scripts/disconnect_local.sh --client codex
+```
+
+Если после удаления config оказался пустым, `Amai` умеет честно убрать и сам пустой файл.
 
 ## Почему клиентский config маленький
 
@@ -115,3 +142,9 @@ cargo build --release
 - вызывает `context pack`, `token benchmark`, `observe snapshot`.
 
 Если этот proof зелёный, значит MCP path не остался "только на бумаге".
+
+Отдельно для install/remove lifecycle:
+
+```bash
+./scripts/proof_client_lifecycle.sh
+```

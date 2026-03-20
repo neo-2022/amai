@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 19:38 MSK
-Ручная сверка guide/docs: 2026-03-20 19:38 MSK
+modified_at: 2026-03-20 19:57 MSK
+Ручная сверка guide/docs: 2026-03-20 19:57 MSK
 
 # Operations
 
@@ -23,6 +23,12 @@ cd /home/art/agent-memory-index
 - materialize-ит bootstrap;
 - собирает release binary;
 - пишет готовый MCP config для клиента.
+
+Список default client targets теперь хранится отдельно в:
+
+```bash
+config/client_targets.toml
+```
 
 Если нужен ручной инженерный путь:
 
@@ -167,6 +173,7 @@ cargo run -- mcp serve
 cargo run -- mcp config --client generic
 cargo run -- mcp config --client vscode --output .vscode/mcp.json
 cargo run -- mcp config --client cursor
+cargo run -- mcp config --client claude-code
 cargo run -- mcp config --client claude-desktop
 cargo run -- mcp config --client codex
 ```
@@ -188,25 +195,44 @@ cargo run -- mcp config --client vscode --cwd /path/to/art-memory-agent-index
 ./scripts/onboard_local.sh --client vscode
 ./scripts/onboard_local.sh --client cursor
 ./scripts/onboard_local.sh --client codex
+./scripts/onboard_local.sh --client claude-code
 ```
 
 По умолчанию onboarding:
 - работает внутри текущего repo root;
-- не трогает глобальные IDE secrets;
-- пишет локальный config в понятный путь.
+- пишет config в target path из `config/client_targets.toml`;
+- для user-scope клиентов умеет создавать backup перед изменением файла.
 
 Текущие default outputs:
 - `vscode` -> `.vscode/mcp.json`
-- `cursor` -> `tmp/onboarding/cursor-mcp.json`
+- `cursor` -> `${home}/.cursor/mcp.json`
+- `claude-code` -> `.mcp.json`
 - `claude-desktop` -> `tmp/onboarding/claude-desktop-mcp.json`
-- `codex` -> `tmp/onboarding/codex-mcp.toml`
+- `codex` -> `${home}/.codex/config.toml`
 - `generic` -> `tmp/onboarding/generic-mcp.json`
 
 Proof:
 
 ```bash
 ./scripts/proof_onboarding.sh
+./scripts/proof_client_lifecycle.sh
 ```
+
+## Disconnect
+
+Симметричное удаление клиента:
+
+```bash
+./scripts/disconnect_local.sh --client vscode
+./scripts/disconnect_local.sh --client cursor
+./scripts/disconnect_local.sh --client codex
+./scripts/disconnect_local.sh --client claude-code
+```
+
+При disconnect:
+- удаляется только запись `Amai`, а не весь чужой config целиком;
+- если файл после этого становится пустым и включён `purge_empty_file`, пустой файл удаляется;
+- для user-scope config перед изменением создаётся backup.
 
 ## Hardening proof
 

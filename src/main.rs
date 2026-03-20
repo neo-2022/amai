@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
                 bootstrap::bootstrap_stack(&cfg).await?
             }
             BootstrapCommand::Onboarding(args) => onboarding::run(&args).await?,
+            BootstrapCommand::Disconnect(args) => onboarding::disconnect(&args).await?,
         },
         Command::Compat { command } => match command {
             CompatCommand::Check => {

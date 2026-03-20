@@ -61,6 +61,7 @@ pub enum Command {
 pub enum BootstrapCommand {
     Stack,
     Onboarding(BootstrapOnboardingArgs),
+    Disconnect(BootstrapDisconnectArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -367,4 +368,16 @@ pub struct BootstrapOnboardingArgs {
     pub skip_release_build: bool,
     #[arg(long, default_value_t = false)]
     pub skip_stack: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BootstrapDisconnectArgs {
+    #[arg(long, default_value = "vscode")]
+    pub client: String,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    #[arg(long)]
+    pub cwd: Option<PathBuf>,
+    #[arg(long, default_value_t = true)]
+    pub purge_empty_file: bool,
 }
