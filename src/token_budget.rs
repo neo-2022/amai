@@ -661,10 +661,15 @@ fn build_event_payload(
     payload_origin: &str,
 ) -> Result<Value> {
     let tokenizer = build_tokenizer(&measurement.tokenizer)?;
+    let query = payload["query"].as_str().unwrap_or_default();
+    let query_type = derive_query_type(query);
+    let baseline_strategy = derive_baseline_strategy(query_type);
     let naive_scope = collect_naive_scope(
         payload,
         measurement.naive_limit_files,
         measurement.naive_max_bytes_per_file,
+        baseline_strategy,
+        query,
     )?;
     let naive_prompt = render_naive_scope_prompt(payload, &naive_scope);
     let context_prompt = render_context_pack_prompt(payload);
@@ -692,7 +697,6 @@ fn build_event_payload(
     let sources_count = count_sources(payload) as u64;
     let chunks_count = count_chunks(payload) as u64;
     let traffic_class = derive_traffic_class(source_kind);
-    let query_type = derive_query_type(payload["query"].as_str().unwrap_or_default());
     let event_id = payload["context_pack_id"]
         .as_str()
         .map(ToOwned::to_owned)
@@ -709,14 +713,14 @@ fn build_event_payload(
             "project": payload["project"]["code"].clone(),
             "namespace": payload["namespace"]["code"].clone(),
             "query": payload["query"].clone(),
-            "query_hash": hex_sha256(payload["query"].as_str().unwrap_or_default().as_bytes()),
+            "query_hash": hex_sha256(query.as_bytes()),
             "query_type": query_type,
             "cold_warm_state": if payload["retrieval_runtime"]["cache_hit"].as_bool().unwrap_or(false) {
                 "warm"
             } else {
                 "cold"
             },
-            "baseline_strategy": "naive_top_files",
+            "baseline_strategy": baseline_strategy,
             "retrieval_mode": payload["effective_retrieval_mode"].clone(),
             "tokenizer": measurement.tokenizer,
             "naive_limit_files": measurement.naive_limit_files,
@@ -773,6 +777,13 @@ fn derive_traffic_class(source_kind: &str) -> String {
 
 fn include_traffic_class_in_report(traffic_class: &str, include_verify_events: bool) -> bool {
     include_verify_events || traffic_class == "live"
+}
+
+fn derive_baseline_strategy(query_type: &str) -> &'static str {
+    match query_type {
+        "config_lookup" | "docs_lookup" | "symbol_lookup" | "cross_file_trace" => "grep_top_files",
+        _ => "naive_top_files",
+    }
 }
 
 fn derive_query_type(query: &str) -> &'static str {
@@ -930,6 +941,8 @@ fn collect_naive_scope(
     payload: &Value,
     limit_files: usize,
     max_bytes_per_file: usize,
+    baseline_strategy: &str,
+    query: &str,
 ) -> Result<NaiveScope> {
     let mut files = Vec::new();
     for project in payload["visible_projects"].as_array().into_iter().flatten() {
@@ -939,7 +952,13 @@ fn collect_naive_scope(
         let Some(repo_root) = project["repo_root"].as_str() else {
             continue;
         };
-        for path in collect_scope_files(Path::new(repo_root), limit_files)? {
+        for path in collect_scope_files_by_strategy(
+            Path::new(repo_root),
+            query,
+            baseline_strategy,
+            limit_files,
+            max_bytes_per_file.min(16 * 1024),
+        )? {
             let relative_path = path
                 .strip_prefix(repo_root)
                 .unwrap_or(path.as_path())
@@ -989,6 +1008,21 @@ fn collect_naive_scope(
     })
 }
 
+fn collect_scope_files_by_strategy(
+    root: &Path,
+    query: &str,
+    baseline_strategy: &str,
+    limit_files: usize,
+    score_bytes_per_file: usize,
+) -> Result<Vec<PathBuf>> {
+    match baseline_strategy {
+        "grep_top_files" => {
+            collect_grep_scope_files(root, query, limit_files, score_bytes_per_file)
+        }
+        _ => collect_scope_files(root, limit_files),
+    }
+}
+
 fn collect_scope_files(root: &Path, limit_files: usize) -> Result<Vec<PathBuf>> {
     if !root.exists() {
         bail!("visible project root does not exist: {}", root.display());
@@ -1017,6 +1051,69 @@ fn collect_scope_files(root: &Path, limit_files: usize) -> Result<Vec<PathBuf>> 
         files.truncate(limit_files);
     }
     Ok(files)
+}
+
+fn collect_grep_scope_files(
+    root: &Path,
+    query: &str,
+    limit_files: usize,
+    score_bytes_per_file: usize,
+) -> Result<Vec<PathBuf>> {
+    let files = collect_scope_files(root, 0)?;
+    let terms = extract_query_terms(query);
+    if terms.is_empty() {
+        return collect_scope_files(root, limit_files);
+    }
+
+    let mut scored = Vec::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path.as_path())
+            .display()
+            .to_string()
+            .to_lowercase();
+        let mut score = text_match_score(&relative, &terms) * 8;
+
+        let bytes = fs::read(&path)
+            .with_context(|| format!("failed to read grep scope file {}", path.display()))?;
+        let content = safe_lossy_prefix(&bytes, score_bytes_per_file).to_lowercase();
+        score += text_match_score(&content, &terms);
+
+        if score > 0 {
+            scored.push((score, path));
+        }
+    }
+
+    if scored.is_empty() {
+        return collect_scope_files(root, limit_files);
+    }
+
+    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    let mut files = scored.into_iter().map(|(_, path)| path).collect::<Vec<_>>();
+    if limit_files > 0 {
+        files.truncate(limit_files);
+    }
+    Ok(files)
+}
+
+fn extract_query_terms(query: &str) -> Vec<String> {
+    let mut terms = query
+        .to_lowercase()
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '.')
+        .filter(|term| term.len() >= 3)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn text_match_score(haystack: &str, terms: &[String]) -> usize {
+    terms
+        .iter()
+        .map(|term| haystack.match_indices(term).count())
+        .sum()
 }
 
 fn safe_lossy_prefix(bytes: &[u8], max_bytes: usize) -> String {
@@ -1180,7 +1277,10 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_query_type, derive_traffic_class, include_traffic_class_in_report};
+    use super::{
+        derive_baseline_strategy, derive_query_type, derive_traffic_class,
+        include_traffic_class_in_report,
+    };
 
     #[test]
     fn traffic_class_comes_from_source_kind_prefix() {
@@ -1200,6 +1300,22 @@ mod tests {
         assert!(include_traffic_class_in_report("verify", true));
         assert!(include_traffic_class_in_report("proof", true));
         assert!(include_traffic_class_in_report("benchmark", true));
+    }
+
+    #[test]
+    fn baseline_strategy_uses_grep_for_exact_lookup_shapes() {
+        assert_eq!(derive_baseline_strategy("config_lookup"), "grep_top_files");
+        assert_eq!(derive_baseline_strategy("docs_lookup"), "grep_top_files");
+        assert_eq!(derive_baseline_strategy("symbol_lookup"), "grep_top_files");
+        assert_eq!(
+            derive_baseline_strategy("cross_file_trace"),
+            "grep_top_files"
+        );
+        assert_eq!(
+            derive_baseline_strategy("architecture_question"),
+            "naive_top_files"
+        );
+        assert_eq!(derive_baseline_strategy("code_lookup"), "naive_top_files");
     }
 
     #[test]
