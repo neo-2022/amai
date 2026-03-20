@@ -10,6 +10,7 @@ mod nats;
 mod observe;
 mod onboarding;
 mod postgres;
+mod profiles;
 mod qdrant;
 mod retrieval;
 mod s3;
@@ -39,9 +40,14 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Bootstrap { command } => match command {
-            BootstrapCommand::Stack => {
+            BootstrapCommand::Stack(_args) => {
                 let cfg = config::AppConfig::from_env()?;
                 bootstrap::bootstrap_stack(&cfg).await?
+            }
+            BootstrapCommand::Preflight(args) => {
+                let cwd =
+                    std::env::current_dir().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                profiles::print_preflight(&cwd, &args.stack_profile)?;
             }
             BootstrapCommand::Onboarding(args) => onboarding::run(&args).await?,
             BootstrapCommand::Disconnect(args) => onboarding::disconnect(&args).await?,

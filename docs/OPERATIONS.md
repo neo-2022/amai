@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:55 MSK
-Ручная сверка guide/docs: 2026-03-20 20:55 MSK
+modified_at: 2026-03-20 21:04 MSK
+Ручная сверка guide/docs: 2026-03-20 21:04 MSK
 
 # Operations
 
@@ -23,6 +23,18 @@ cd /home/art/agent-memory-index
 - materialize-ит bootstrap;
 - собирает release binary;
 - пишет готовый MCP config для клиента.
+
+Если нужен cheap remote/smoke contour под слабый VPS:
+
+```bash
+cd /home/art/agent-memory-index
+./scripts/onboard_lite_vps.sh --client vscode
+```
+
+Этот путь:
+- использует `stack_profile = lite_vps`;
+- сначала делает Rust preflight;
+- потом поднимает тот же baseline stack, но честно объясняет, что это не профиль для рекордных benchmark-цифр.
 
 Если `Amai` уже живёт на удалённом Linux/VPS-host, а локально нужен только клиентский config:
 
@@ -55,6 +67,11 @@ cp .env.example .env
 ```
 
 Критичные `.env` поля:
+- `AMI_STACK_PROFILE`
+  - machine-readable default profile для bootstrap/preflight;
+  - сейчас канонические значения:
+    - `default`
+    - `lite_vps`;
 - `AMI_DEFAULT_RETRIEVAL_MODE`
   - режим видимости по умолчанию;
 - `AMI_LOCAL_FAST_CACHE_TTL_MS`
@@ -79,6 +96,38 @@ cp .env.example .env
 - `bootstrap_stack.sh` сам вызовет `warmup_cache.sh`;
 - warmup будет best-effort;
 - незарегистрированные проекты будут честно перечислены в `skipped`, а bootstrap не сорвётся.
+
+## Deployment profiles
+
+Канонический registry профилей:
+
+```bash
+config/deployment_profiles.toml
+```
+
+Сейчас materialized два профиля:
+- `default`
+  - основной workstation/full baseline;
+- `lite_vps`
+  - cheap remote smoke/demo baseline.
+
+Проверить машину под профиль:
+
+```bash
+cargo run -- bootstrap preflight --stack-profile default
+cargo run -- bootstrap preflight --stack-profile lite_vps
+```
+
+Preflight показывает обычным человеческим языком:
+- какой профиль выбран;
+- minimum и recommended requirements;
+- подходит ли машина под минимум;
+- для чего профиль подходит;
+- для чего профиль не подходит.
+
+Принцип тут честный:
+- `lite_vps` не скрывает ограничения;
+- он специально нужен, чтобы пользователь сразу понимал границы ожиданий, а не узнал о них после неудачного benchmark-запуска.
 
 ## Status
 
@@ -255,6 +304,7 @@ Proof:
 ./scripts/proof_onboarding.sh
 ./scripts/proof_remote_onboarding.sh
 ./scripts/proof_client_lifecycle.sh
+./scripts/proof_profiles.sh
 ```
 
 ## Disconnect

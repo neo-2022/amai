@@ -1,0 +1,50 @@
+modified_at = "2026-03-20 20:57 MSK"
+"Ручная сверка guide/docs" = "2026-03-20 20:57 MSK"
+
+[profiles.default]
+display_name = "Workstation Full"
+summary = "Профиль для основной локальной машины, где можно честно поднимать полный stack, индексировать реальные проекты и запускать жёсткие proof/benchmark контуры."
+suitable_for = [
+  "полный локальный bootstrap",
+  "индексация реальных проектов",
+  "жёсткие proof и benchmark контуры",
+  "наблюдаемость и monitoring profile"
+]
+not_for = [
+  "дешёвый маленький VPS",
+  "минимальные ресурсы ради smoke-only сценария"
+]
+minimum_cpu_logical = 4
+minimum_memory_gib = 8.0
+minimum_disk_gib = 25.0
+recommended_cpu_logical = 8
+recommended_memory_gib = 16.0
+recommended_disk_gib = 40.0
+supports_peak_benchmarks = true
+start_monitoring_by_default = false
+remote_mode_recommended = false
+
+[profiles.lite_vps]
+display_name = "Lite VPS"
+summary = "Профиль для дешёвого удалённого сервера, где нужен smoke/demo/remote MCP контур, но не нужно обещать топовые benchmark-цифры и high-load baseline."
+suitable_for = [
+  "remote MCP и SSH launcher",
+  "маленькие fixture-проекты",
+  "smoke/health проверки",
+  "демо и pilot-install"
+]
+not_for = [
+  "пиковые benchmark-цифры",
+  "50/100/200 worker stress как канонический performance proof",
+  "большие real-project корпуса",
+  "heavy monitoring profile на том же host"
+]
+minimum_cpu_logical = 1
+minimum_memory_gib = 2.0
+minimum_disk_gib = 20.0
+recommended_cpu_logical = 2
+recommended_memory_gib = 4.0
+recommended_disk_gib = 30.0
+supports_peak_benchmarks = false
+start_monitoring_by_default = false
+remote_mode_recommended = true

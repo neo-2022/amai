@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:31 MSK
-Ручная сверка guide/docs: 2026-03-20 20:31 MSK
+modified_at: 2026-03-20 21:04 MSK
+Ручная сверка guide/docs: 2026-03-20 21:04 MSK
 
 # MCP Integration
 
@@ -30,6 +30,17 @@ modified_at: 2026-03-20 20:31 MSK
 ```bash
 ./scripts/onboard_local.sh --client vscode
 ```
+
+Если клиент должен работать через дешёвый удалённый VPS, появился отдельный короткий путь:
+
+```bash
+./scripts/onboard_lite_vps.sh --client vscode
+```
+
+Это не “магическая оптимизация”.
+Это честный профиль `lite_vps`, который заранее предупреждает:
+- такой сервер подходит для remote MCP, smoke и demo;
+- но не для наших рекордных benchmark-цифр.
 
 После этого обычно остаётся:
 - открыть repo в VS Code;
@@ -216,4 +227,10 @@ cargo build --release
 
 ```bash
 ./scripts/proof_remote_onboarding.sh
+```
+
+Для deployment profile preflight:
+
+```bash
+./scripts/proof_profiles.sh
 ```

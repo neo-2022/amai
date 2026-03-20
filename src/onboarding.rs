@@ -1,7 +1,6 @@
-use crate::bootstrap;
 use crate::cli::{BootstrapDisconnectArgs, BootstrapOnboardingArgs, McpConfigArgs};
-use crate::config::AppConfig;
 use crate::mcp;
+use crate::profiles;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,6 +15,7 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     let remote_mode = args.ssh_destination.is_some();
 
     if !remote_mode {
+        profiles::print_preflight(&repo_root, &args.stack_profile)?;
         ensure_local_config_files(&repo_root)?;
         dotenvy::from_path_override(repo_root.join(".env"))
             .context("failed to load generated .env for onboarding")?;
@@ -25,16 +25,14 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
 
         if !args.skip_stack {
             run_command(
-                "docker compose up",
-                command_in(
+                "bootstrap stack",
+                script_command(
                     &repo_root,
-                    "docker",
-                    ["compose", "up", "-d", "--remove-orphans"],
+                    "scripts/bootstrap_stack.sh",
+                    ["--stack-profile", args.stack_profile.as_str()],
                 ),
             )
             .await?;
-            let cfg = AppConfig::from_env()?;
-            bootstrap::bootstrap_stack(&cfg).await?;
         }
 
         if !args.skip_release_build {
@@ -85,6 +83,7 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         println!("env_file: {}", repo_root.join(".env").display());
     }
     println!("client: {}", args.client);
+    println!("stack_profile: {}", args.stack_profile);
     println!("client_config: {}", output.display());
     println!(
         "client_config_mode: {}",
@@ -247,6 +246,19 @@ async fn check_dependency(program: &str, args: &[&str]) -> Result<()> {
 
 fn command_in<const N: usize>(repo_root: &Path, program: &str, args: [&str; N]) -> Command {
     let mut command = Command::new(program);
+    command.current_dir(repo_root);
+    command.args(args);
+    command.stdout(Stdio::inherit());
+    command.stderr(Stdio::inherit());
+    command
+}
+
+fn script_command<const N: usize>(
+    repo_root: &Path,
+    relative_path: &str,
+    args: [&str; N],
+) -> Command {
+    let mut command = Command::new(repo_root.join(relative_path));
     command.current_dir(repo_root);
     command.args(args);
     command.stdout(Stdio::inherit());

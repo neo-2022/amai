@@ -4,6 +4,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source ./scripts/load_env.sh
 
+stack_profile="${AMI_STACK_PROFILE:-default}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --stack-profile)
+      stack_profile="${2:?missing value for --stack-profile}"
+      shift 2
+      ;;
+    *)
+      echo "unsupported bootstrap_stack.sh argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+export AMI_STACK_PROFILE="${stack_profile}"
+
+cargo run -- bootstrap preflight --stack-profile "${stack_profile}"
 docker compose up -d --remove-orphans
 cargo run -- bootstrap stack
 

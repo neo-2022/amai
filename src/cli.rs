@@ -59,7 +59,8 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum BootstrapCommand {
-    Stack,
+    Stack(BootstrapStackArgs),
+    Preflight(BootstrapPreflightArgs),
     Onboarding(BootstrapOnboardingArgs),
     Disconnect(BootstrapDisconnectArgs),
 }
@@ -378,6 +379,18 @@ pub struct ObserveServeArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct BootstrapStackArgs {
+    #[arg(long, default_value = "default")]
+    pub stack_profile: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BootstrapPreflightArgs {
+    #[arg(long, default_value = "default")]
+    pub stack_profile: String,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct McpConfigArgs {
     #[arg(long, default_value = "generic")]
     pub client: String,
@@ -401,6 +414,8 @@ pub struct McpConfigArgs {
 pub struct BootstrapOnboardingArgs {
     #[arg(long, default_value = "vscode")]
     pub client: String,
+    #[arg(long, default_value = "default")]
+    pub stack_profile: String,
     #[arg(long, default_value = "auto")]
     pub launcher_platform: String,
     #[arg(long)]

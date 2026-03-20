@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:55 MSK
-Ручная сверка guide/docs: 2026-03-20 20:55 MSK
+modified_at: 2026-03-20 21:04 MSK
+Ручная сверка guide/docs: 2026-03-20 21:04 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -186,6 +186,12 @@ cd /home/art/agent-memory-index
 ./scripts/onboard_local.sh --client vscode
 ```
 
+Если нужен дешёвый удалённый smoke/demo режим на маленьком VPS, используйте явный профиль:
+
+```bash
+./scripts/onboard_lite_vps.sh --client vscode
+```
+
 Что она делает сама:
 - создаёт `.env`, если его ещё нет;
 - досинхронизирует недостающие переменные из `.env.example`;
@@ -203,6 +209,54 @@ cd /home/art/agent-memory-index
 - `Codex` по умолчанию получает auto-install в user config;
 - `Claude Code` получает workspace-local `.mcp.json`;
 - `Claude Desktop` и `generic` пока получают готовый generated file для ручного импорта.
+
+## Профили установки простыми словами
+
+У `Amai` теперь есть не просто “один режим на все случаи”, а два понятных профиля:
+
+- `default`
+  - это нормальный основной режим для сильной локальной машины;
+  - он подходит для:
+    - полного bootstrap;
+    - индексации реальных проектов;
+    - жёстких proof/benchmark контуров;
+    - observability и monitoring path.
+- `lite_vps`
+  - это режим для дешёвого удалённого сервера;
+  - он подходит для:
+    - `remote MCP`;
+    - маленьких fixture-проектов;
+    - smoke/demo/pilot-install;
+    - удалённого SSH-подключения клиента.
+
+Главное отличие простыми словами:
+- `default` = “хочу нормальную рабочую базу и честные сильные проверки”;
+- `lite_vps` = “хочу дешёвый удалённый сервер для жизни продукта, но без обещания рекордных benchmark-цифр”.
+
+`lite_vps` честно **не** обещает:
+- топовые speed-рекорды;
+- большие real-project индексы;
+- heavy monitoring на том же маленьком сервере;
+- canonical `50/100/200 worker` performance baseline.
+
+## Как понять, подходит ли машина
+
+Есть явная Rust-команда preflight:
+
+```bash
+cargo run -- bootstrap preflight --stack-profile default
+cargo run -- bootstrap preflight --stack-profile lite_vps
+```
+
+Она показывает:
+- какой профиль вы выбрали;
+- сколько у машины CPU, памяти и диска;
+- подходит ли машина под минимум;
+- где есть риски;
+- чего от такого режима вообще ждать.
+
+То есть обычному человеку не нужно гадать, “потянет или нет”.
+`Amai` сам объясняет это понятным текстом.
 
 Если нужен не Linux-style runner, а другой launcher target:
 - `Amai` теперь умеет генерировать MCP config с учётом платформы launcher'а;
