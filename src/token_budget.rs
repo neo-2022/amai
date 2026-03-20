@@ -511,6 +511,7 @@ fn summarize_events(
             "events_total": 0,
             "events_count": 0,
             "counted_events": 0,
+            "legacy_unverified_events": 0,
             "preliminary": true,
             "total_saved_tokens": 0,
             "total_effective_saved_tokens": 0,
@@ -571,6 +572,10 @@ fn summarize_events(
     };
     let avg_saved_tokens_per_event = total_saved_tokens as f64 / events.len() as f64;
     let quality_ok_events = events.iter().filter(|event| event.quality_ok).count() as f64;
+    let legacy_unverified_events = events
+        .iter()
+        .filter(|event| event.quality_method == "legacy_unverified")
+        .count();
     let fallback_events = events
         .iter()
         .filter(|event| event.fallback_triggered)
@@ -593,6 +598,7 @@ fn summarize_events(
         "events_total": events.len(),
         "events_count": events.len(),
         "counted_events": verified_events.len(),
+        "legacy_unverified_events": legacy_unverified_events,
         "preliminary": preliminary,
         "total_saved_tokens": total_saved_tokens,
         "total_effective_saved_tokens": total_effective_saved_tokens,
@@ -617,6 +623,7 @@ fn summarize_events(
 fn build_product_headline(summary: &Value, scope_label: &str) -> Value {
     let events_total = summary["events_total"].as_u64().unwrap_or(0);
     let counted_events = summary["counted_events"].as_u64().unwrap_or(0);
+    let legacy_unverified_events = summary["legacy_unverified_events"].as_u64().unwrap_or(0);
     let preliminary = summary["preliminary"].as_bool().unwrap_or(true);
     let verified_percent = summary["verified_effective_savings_pct"]
         .as_f64()
@@ -663,7 +670,11 @@ fn build_product_headline(summary: &Value, scope_label: &str) -> Value {
             "counted_events": counted_events,
             "quality_ok_rate": quality_ok_rate,
             "fallback_rate": fallback_rate,
-            "note": "Проверенная выборка ещё не набрана, поэтому временно показывается общая реальная экономия по live-событиям.",
+            "note": if legacy_unverified_events > 0 {
+                "Проверенная выборка ещё не набрана: часть исторических live-событий была записана старым форматом без quality-блока, поэтому пока показывается общая реальная экономия."
+            } else {
+                "Проверенная выборка ещё не набрана, поэтому временно показывается общая реальная экономия по live-событиям."
+            },
         })
     } else {
         json!({
@@ -1462,6 +1473,7 @@ mod tests {
             &json!({
                 "events_total": 10,
                 "counted_events": 0,
+                "legacy_unverified_events": 3,
                 "preliminary": true,
                 "verified_effective_savings_pct": 0.0,
                 "effective_savings_pct": 44.0,
@@ -1476,5 +1488,11 @@ mod tests {
         assert_eq!(headline["value_percent"], 44.0);
         assert_eq!(headline["saved_tokens"], 1200);
         assert_eq!(headline["status"], "alert");
+        assert!(
+            headline["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("старым форматом")
+        );
     }
 }
