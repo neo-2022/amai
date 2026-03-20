@@ -60,6 +60,10 @@ struct InstallMetricsSummary {
     token_savings_percent_window: Option<f64>,
     token_savings_percent_lifetime: Option<f64>,
     token_window_label: Option<String>,
+    token_headline_title: Option<String>,
+    token_headline_value_percent: Option<f64>,
+    token_headline_saved_tokens: Option<i64>,
+    token_headline_scope_label: Option<String>,
 }
 
 pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
@@ -281,6 +285,24 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
                     format_percent_value(metrics.token_savings_percent),
                     format_factor(metrics.token_savings_factor)
                 );
+                if metrics.token_headline_title.is_some()
+                    || metrics.token_headline_value_percent.is_some()
+                    || metrics.token_headline_saved_tokens.is_some()
+                {
+                    println!(
+                        "- Главный KPI по токенам: {} — {} и {} токенов ({})",
+                        metrics
+                            .token_headline_title
+                            .as_deref()
+                            .unwrap_or("ещё нет данных"),
+                        format_percent_value(metrics.token_headline_value_percent),
+                        format_i64(metrics.token_headline_saved_tokens),
+                        metrics
+                            .token_headline_scope_label
+                            .as_deref()
+                            .unwrap_or("рабочее окно")
+                    );
+                }
                 if metrics.token_saved_session_total.is_some()
                     || metrics.token_saved_window_total.is_some()
                     || metrics.token_saved_lifetime_total.is_some()
@@ -535,6 +557,20 @@ async fn collect_install_metrics_summary(cfg: &config::AppConfig) -> Result<Inst
             ["rolling_window_hours"]
             .as_u64()
             .map(|hours| format!("{hours} ч")),
+        token_headline_title: snapshot["token_budget_report"]["token_budget_report"]["headline"]
+            ["title"]
+            .as_str()
+            .map(ToOwned::to_owned),
+        token_headline_value_percent: snapshot["token_budget_report"]["token_budget_report"]
+            ["headline"]["value_percent"]
+            .as_f64(),
+        token_headline_saved_tokens: snapshot["token_budget_report"]["token_budget_report"]
+            ["headline"]["saved_tokens"]
+            .as_i64(),
+        token_headline_scope_label: snapshot["token_budget_report"]["token_budget_report"]
+            ["headline"]["scope_label"]
+            .as_str()
+            .map(ToOwned::to_owned),
     })
 }
 
@@ -612,6 +648,12 @@ fn format_count(value: Option<f64>) -> String {
 }
 
 fn format_u64(value: Option<u64>) -> String {
+    value
+        .map(|number| number.to_string())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+fn format_i64(value: Option<i64>) -> String {
     value
         .map(|number| number.to_string())
         .unwrap_or_else(|| "?".to_string())

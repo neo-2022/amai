@@ -511,6 +511,8 @@ pub fn render_html(refresh_ms: u64) -> String {
       const rows = [
         ["Stack", meta.stack_name],
         ["Версия", meta.package_version],
+        ["Главный KPI", headline.token_title],
+        ["Сейчас", `${headline.token_value} (${headline.token_scope})`],
         ["Обновление", headline.captured_at],
         ["Автообновление", `${meta.refresh_seconds} сек.`],
       ];
@@ -687,6 +689,7 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
     let alert = snapshot["sla"]["summary"]["alert"].as_u64().unwrap_or(0);
     let critical = snapshot["sla"]["summary"]["critical"].as_u64().unwrap_or(0);
     let unknown = snapshot["sla"]["summary"]["unknown"].as_u64().unwrap_or(0);
+    let token_headline = &snapshot["token_budget_report"]["token_budget_report"]["headline"];
     let status = if critical > 0 {
         "critical"
     } else if alert > 0 {
@@ -701,6 +704,9 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
         "status_label": status_label(status),
         "captured_at": human_timestamp(captured_at_epoch_ms),
         "summary": format!("SLA сейчас: pass={pass}, alert={alert}, critical={critical}, unknown={unknown}"),
+        "token_title": token_headline["title"].as_str().unwrap_or("ещё нет данных"),
+        "token_value": format_percent(token_headline["value_percent"].as_f64()),
+        "token_scope": token_headline["scope_label"].as_str().unwrap_or("ещё нет данных"),
     })
 }
 
