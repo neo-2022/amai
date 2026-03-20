@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 18:49 MSK
-Ручная сверка guide/docs: 2026-03-20 18:49 MSK
+modified_at: 2026-03-20 19:14 MSK
+Ручная сверка guide/docs: 2026-03-20 19:14 MSK
 
 # Architecture
 
@@ -157,11 +157,13 @@ Code structure plane:
 - `context pack`
   - определяет effective retrieval mode;
   - строит visible project set через relation graph;
+  - для каждого видимого проекта дополнительно разрешает только тот же `namespace` code, который запросил агент;
   - делает exact document lookup в PostgreSQL;
   - делает symbol lookup в PostgreSQL;
   - делает lexical chunk lookup в PostgreSQL;
   - сначала делает semantic chunk recall в Qdrant;
   - если vector tier временно возвращает пустой результат на локальном tiny contour, использует уже найденные lexical chunks как explicit semantic fallback, не скрывая provenance;
+  - если lexical/symbol/exact evidence вообще нет, а semantic hits не перекрывают query terms по path/content, делает semantic abstention вместо слабого шума;
   - materialize-ит provenance-rich context pack в PostgreSQL, SQLite edge cache и S3 context bucket.
 - `mcp serve`
   - materialize-ит stdio MCP server поверх уже существующего retrieval/observability baseline;

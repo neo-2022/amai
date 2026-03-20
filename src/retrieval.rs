@@ -65,6 +65,22 @@ struct PreparedContextPack {
     durably_persisted: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedVisibleScope {
+    visible: VisibleProjectRecord,
+    namespace: postgres::NamespaceRecord,
+}
+
+#[derive(Debug, Clone)]
+struct SemanticGuardSummary {
+    query_terms: Vec<String>,
+    lexical_signal_count: usize,
+    accepted_hits: usize,
+    rejected_hits: usize,
+    abstained: bool,
+    reason: Option<&'static str>,
+}
+
 struct CachedQueryEmbedder {
     model: String,
     embedder: TextEmbedding,
@@ -188,8 +204,9 @@ async fn prepare_context_pack(
         .clone()
         .unwrap_or_else(|| namespace.retrieval_mode.clone());
     let visible_projects = resolve_visible_projects(db, &project, &effective_mode).await?;
+    let visible_scopes = resolve_visible_scopes(db, &visible_projects, &namespace.code).await?;
     let resolve_scope_ms = resolve_started.elapsed().as_millis();
-    let scope_signature = scope_signature(&visible_projects);
+    let scope_signature = scope_signature(&visible_scopes);
     let cache_key = cache_key(cfg, args, &effective_mode);
     let edge_cache_path = edge_cache::ensure(&cfg.edge_cache_path)?;
 
@@ -236,11 +253,12 @@ async fn prepare_context_pack(
 
     let exact_started = Instant::now();
     let mut documents = Vec::new();
-    for visible in &visible_projects {
+    for scope in &visible_scopes {
         documents.extend(
-            postgres::search_documents_for_project(
+            postgres::search_documents_for_namespace(
                 db,
-                visible.project.project_id,
+                scope.visible.project.project_id,
+                scope.namespace.namespace_id,
                 &args.query,
                 args.limit_documents as i64,
             )
@@ -251,11 +269,12 @@ async fn prepare_context_pack(
 
     let symbol_started = Instant::now();
     let mut symbols = Vec::new();
-    for visible in &visible_projects {
+    for scope in &visible_scopes {
         symbols.extend(
-            postgres::search_symbols_for_project(
+            postgres::search_symbols_for_namespace(
                 db,
-                visible.project.project_id,
+                scope.visible.project.project_id,
+                scope.namespace.namespace_id,
                 &args.query,
                 args.limit_symbols as i64,
             )
@@ -266,11 +285,12 @@ async fn prepare_context_pack(
 
     let lexical_started = Instant::now();
     let mut chunks = Vec::new();
-    for visible in &visible_projects {
+    for scope in &visible_scopes {
         chunks.extend(
-            postgres::search_chunks_for_project(
+            postgres::search_chunks_for_namespace(
                 db,
-                visible.project.project_id,
+                scope.visible.project.project_id,
+                scope.namespace.namespace_id,
                 &args.query,
                 args.limit_chunks as i64,
             )
@@ -283,26 +303,30 @@ async fn prepare_context_pack(
     sort_and_truncate_symbols(&mut symbols, args.limit_symbols);
     sort_and_truncate_chunks(&mut chunks, args.limit_chunks);
 
-    let (semantic_chunks, semantic_timings) = semantic_chunks(
+    let lexical_signal_count = documents.len() + symbols.len() + chunks.len();
+    let (semantic_chunks, semantic_timings, semantic_guard) = semantic_chunks(
         cfg,
         db,
-        &visible_projects,
+        &visible_scopes,
         &args.query,
         args.limit_semantic_chunks,
+        lexical_signal_count,
         &chunks,
     )
     .await?;
     let visible_projects_json = json!(
-        visible_projects
+        visible_scopes
             .iter()
-            .map(|visible| {
+            .map(|scope| {
                 json!({
-                    "project_code": visible.project.code,
-                    "display_name": visible.project.display_name,
-                    "repo_root": visible.project.repo_root,
-                    "relation_type": visible.relation_type,
-                    "shared_contour": visible.shared_contour,
-                    "access_mode": visible.access_mode
+                    "project_code": scope.visible.project.code,
+                    "display_name": scope.visible.project.display_name,
+                    "repo_root": scope.visible.project.repo_root,
+                    "relation_type": scope.visible.relation_type,
+                    "shared_contour": scope.visible.shared_contour,
+                    "access_mode": scope.visible.access_mode,
+                    "namespace_code": scope.namespace.code,
+                    "namespace_display_name": scope.namespace.display_name
                 })
             })
             .collect::<Vec<_>>()
@@ -358,6 +382,9 @@ async fn prepare_context_pack(
             "symbol_hits": symbols.iter().map(symbol_to_json).collect::<Vec<_>>(),
             "lexical_chunks": chunks.iter().map(chunk_to_json).collect::<Vec<_>>(),
             "semantic_chunks": semantic_chunks
+        },
+        "quality": {
+            "semantic_guard": semantic_guard_to_json(&semantic_guard)
         },
         "provenance_minimum": [
             "source_project",
@@ -552,16 +579,49 @@ async fn resolve_visible_projects(
     Ok(visible)
 }
 
+async fn resolve_visible_scopes(
+    db: &Client,
+    visible_projects: &[VisibleProjectRecord],
+    namespace_code: &str,
+) -> Result<Vec<ResolvedVisibleScope>> {
+    let mut scopes = Vec::new();
+    for visible in visible_projects {
+        let Some(namespace) =
+            postgres::find_namespace_by_code(db, visible.project.project_id, namespace_code)
+                .await?
+        else {
+            continue;
+        };
+        scopes.push(ResolvedVisibleScope {
+            visible: visible.clone(),
+            namespace,
+        });
+    }
+    Ok(scopes)
+}
+
 async fn semantic_chunks(
     cfg: &AppConfig,
     db: &Client,
-    visible_projects: &[VisibleProjectRecord],
+    visible_scopes: &[ResolvedVisibleScope],
     query: &str,
     limit: usize,
+    lexical_signal_count: usize,
     lexical_fallback_chunks: &[ChunkHit],
-) -> Result<(Vec<Value>, SemanticTimings)> {
+) -> Result<(Vec<Value>, SemanticTimings, SemanticGuardSummary)> {
     if limit == 0 {
-        return Ok((Vec::new(), SemanticTimings::default()));
+        return Ok((
+            Vec::new(),
+            SemanticTimings::default(),
+            SemanticGuardSummary {
+                query_terms: Vec::new(),
+                lexical_signal_count,
+                accepted_hits: 0,
+                rejected_hits: 0,
+                abstained: false,
+                reason: None,
+            },
+        ));
     }
 
     let (vector, query_embed_ms) = embed_query(cfg, query)?;
@@ -577,12 +637,13 @@ async fn semantic_chunks(
     let qdrant_client = qdrant::connect(cfg)?;
     let per_project_limit = limit.max(1);
     let mut points = Vec::new();
-    for visible in visible_projects {
-        let result = qdrant::search_project_points(
+    for scope in visible_scopes {
+        let result = qdrant::search_namespace_points(
             &qdrant_client,
             &cfg.qdrant_alias_code,
             vector.clone(),
-            &visible.project.code,
+            &scope.visible.project.code,
+            &scope.namespace.code,
             per_project_limit,
         )
         .await?;
@@ -660,16 +721,27 @@ async fn semantic_chunks(
                 search_ms,
                 hydrate_ms,
             },
+            SemanticGuardSummary {
+                query_terms: query_terms(query),
+                lexical_signal_count,
+                accepted_hits: fallback_hits.len().min(limit),
+                rejected_hits: 0,
+                abstained: false,
+                reason: None,
+            },
         ));
     }
-    hits.truncate(limit);
+    let semantic_guard = apply_semantic_relevance_guard(query, lexical_signal_count, hits);
+    let mut guarded_hits = semantic_guard.0;
+    guarded_hits.truncate(limit);
     Ok((
-        hits,
+        guarded_hits,
         SemanticTimings {
             query_embed_ms,
             search_ms,
             hydrate_ms,
         },
+        semantic_guard.1,
     ))
 }
 
@@ -727,6 +799,100 @@ fn semantic_chunk_fallback_to_json(chunk: &ChunkHit) -> Value {
     })
 }
 
+fn apply_semantic_relevance_guard(
+    query: &str,
+    lexical_signal_count: usize,
+    hits: Vec<Value>,
+) -> (Vec<Value>, SemanticGuardSummary) {
+    let query_terms = query_terms(query);
+    let require_overlap = lexical_signal_count == 0 && !query_terms.is_empty();
+    let mut accepted_hits = Vec::new();
+    let mut rejected_hits = 0usize;
+
+    for hit in hits {
+        if !require_overlap || semantic_hit_has_query_overlap(&hit, &query_terms) {
+            accepted_hits.push(hit);
+        } else {
+            rejected_hits += 1;
+        }
+    }
+
+    let accepted_count = accepted_hits.len();
+    let abstained = require_overlap && accepted_count == 0 && rejected_hits > 0;
+    (
+        accepted_hits,
+        SemanticGuardSummary {
+            query_terms,
+            lexical_signal_count,
+            accepted_hits: accepted_count,
+            rejected_hits,
+            abstained,
+            reason: if abstained {
+                Some("semantic_hits_missing_query_overlap")
+            } else {
+                None
+            },
+        },
+    )
+}
+
+fn semantic_hit_has_query_overlap(hit: &Value, query_terms: &[String]) -> bool {
+    if query_terms.is_empty() {
+        return true;
+    }
+
+    let relative_path = hit["relative_path"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    let content = hit["content"].as_str().unwrap_or_default().to_lowercase();
+
+    query_terms
+        .iter()
+        .any(|term| relative_path.contains(term) || content.contains(term))
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen = HashSet::new();
+    let mut current = String::new();
+
+    let push_current =
+        |current: &mut String, terms: &mut Vec<String>, seen: &mut HashSet<String>| {
+            if current.chars().count() >= 3 {
+                let lowered = current.to_lowercase();
+                if seen.insert(lowered.clone()) {
+                    terms.push(lowered);
+                }
+            }
+            current.clear();
+        };
+
+    for ch in query.chars() {
+        if ch.is_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            push_current(&mut current, &mut terms, &mut seen);
+        }
+    }
+    if !current.is_empty() {
+        push_current(&mut current, &mut terms, &mut seen);
+    }
+
+    terms
+}
+
+fn semantic_guard_to_json(guard: &SemanticGuardSummary) -> Value {
+    json!({
+        "query_terms": guard.query_terms,
+        "lexical_signal_count": guard.lexical_signal_count,
+        "accepted_hits": guard.accepted_hits,
+        "rejected_hits": guard.rejected_hits,
+        "abstained": guard.abstained,
+        "reason": guard.reason
+    })
+}
+
 fn build_query_embedder(cfg: &AppConfig) -> Result<TextEmbedding> {
     let model = match cfg.code_embed_model.as_str() {
         "jina_base_code" => EmbeddingModel::JinaEmbeddingsV2BaseCode,
@@ -764,17 +930,19 @@ fn embed_query(cfg: &AppConfig, query: &str) -> Result<(Vec<f32>, u128)> {
     Ok((vector, started.elapsed().as_millis()))
 }
 
-fn scope_signature(visible_projects: &[VisibleProjectRecord]) -> String {
-    visible_projects
+fn scope_signature(visible_scopes: &[ResolvedVisibleScope]) -> String {
+    visible_scopes
         .iter()
-        .map(|visible| {
+        .map(|scope| {
             format!(
-                "{}:{}:{}:{}:{}",
-                visible.project.code,
-                visible.project.updated_at,
-                visible.relation_type,
-                visible.shared_contour,
-                visible.access_mode
+                "{}:{}:{}:{}:{}:{}:{}",
+                scope.visible.project.code,
+                scope.visible.project.updated_at,
+                scope.visible.relation_type,
+                scope.visible.shared_contour,
+                scope.visible.access_mode,
+                scope.namespace.namespace_id,
+                scope.namespace.code
             )
         })
         .collect::<Vec<_>>()
@@ -1108,4 +1276,55 @@ fn chunk_to_json(hit: &ChunkHit) -> Value {
             "trust_level": "local_repo"
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_semantic_relevance_guard, query_terms, semantic_hit_has_query_overlap};
+    use serde_json::json;
+
+    #[test]
+    fn query_terms_extracts_unique_alphanumeric_tokens() {
+        assert_eq!(
+            query_terms("Amai onboarding MCP VS Code integration"),
+            vec![
+                "amai".to_string(),
+                "onboarding".to_string(),
+                "mcp".to_string(),
+                "code".to_string(),
+                "integration".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn semantic_guard_abstains_without_lexical_signals_and_overlap() {
+        let hit = json!({
+            "relative_path": "packages/art-i18n/src/lib.rs",
+            "content": "m.insert(\"shell.title\", \"Art Console\");"
+        });
+        let (accepted, summary) =
+            apply_semantic_relevance_guard("Amai onboarding MCP VS Code integration", 0, vec![hit]);
+        assert!(accepted.is_empty());
+        assert!(summary.abstained);
+        assert_eq!(summary.rejected_hits, 1);
+        assert_eq!(summary.reason, Some("semantic_hits_missing_query_overlap"));
+    }
+
+    #[test]
+    fn semantic_guard_keeps_hits_with_query_overlap() {
+        let hit = json!({
+            "relative_path": "docs/MCP_INTEGRATION.md",
+            "content": "VS Code MCP onboarding guide"
+        });
+        assert!(semantic_hit_has_query_overlap(
+            &hit,
+            &query_terms("Amai onboarding MCP VS Code integration")
+        ));
+        let (accepted, summary) =
+            apply_semantic_relevance_guard("Amai onboarding MCP VS Code integration", 0, vec![hit]);
+        assert_eq!(accepted.len(), 1);
+        assert!(!summary.abstained);
+        assert_eq!(summary.accepted_hits, 1);
+    }
 }

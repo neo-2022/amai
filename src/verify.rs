@@ -215,6 +215,24 @@ pub async fn run_accuracy(
     )
     .await?;
 
+    let namespace_strict_pack = retrieval::execute_context_pack_capture(
+        cfg,
+        db,
+        &ContextPackArgs {
+            project: args.project.clone(),
+            namespace: "default".to_string(),
+            query: "alpha_runtime_summary".to_string(),
+            retrieval_mode: Some("local_strict".to_string()),
+            disable_cache: true,
+            limit_documents: 8,
+            limit_symbols: 8,
+            limit_chunks: 8,
+            limit_semantic_chunks: 8,
+        },
+        false,
+    )
+    .await?;
+
     let expected_related = HashSet::from([args.project.as_str(), args.related_project.as_str()]);
     let strict_visible = collect_visible_projects(&strict_pack.payload);
     let strict_visible_unexpected = strict_visible
@@ -223,6 +241,8 @@ pub async fn run_accuracy(
         .count();
     let strict_hit_leaks = count_foreign_hits(&strict_pack.payload, &args.project);
     let cross_project_leakage = strict_visible_unexpected + strict_hit_leaks;
+    let namespace_visible = collect_visible_namespaces(&namespace_strict_pack.payload);
+    let cross_namespace_leakage = count_hits(&namespace_strict_pack.payload);
 
     let exact_precision = precision_ratio(
         &related_pack.payload["retrieval"]["exact_documents"],
@@ -282,6 +302,11 @@ pub async fn run_accuracy(
             "accuracy verification failed: cross_project_leakage={cross_project_leakage}"
         ));
     }
+    if cross_namespace_leakage != 0 {
+        return Err(anyhow!(
+            "accuracy verification failed: cross_namespace_leakage={cross_namespace_leakage}"
+        ));
+    }
     if symbol_precision < 1.0 || semantic_precision < 1.0 {
         return Err(anyhow!(
             "accuracy verification failed: symbol_precision={symbol_precision:.3}, semantic_precision={semantic_precision:.3}"
@@ -297,6 +322,9 @@ pub async fn run_accuracy(
             "strict_visible_projects": strict_visible,
             "strict_visible_projects_unexpected": strict_visible_unexpected,
             "strict_hit_leaks": strict_hit_leaks,
+            "cross_namespace_leakage": cross_namespace_leakage,
+            "namespace_strict_visible_projects": collect_visible_projects(&namespace_strict_pack.payload),
+            "namespace_strict_visible_namespaces": namespace_visible,
             "exact_precision": exact_precision,
             "lexical_precision": lexical_precision,
             "semantic_precision": semantic_precision,
@@ -1196,6 +1224,27 @@ fn collect_visible_projects(payload: &Value) -> Vec<String> {
         .collect()
 }
 
+fn collect_visible_namespaces(payload: &Value) -> Vec<String> {
+    payload["visible_projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["namespace_code"].as_str().map(ToOwned::to_owned))
+        .collect()
+}
+
+fn count_hits(payload: &Value) -> usize {
+    [
+        &payload["retrieval"]["exact_documents"],
+        &payload["retrieval"]["symbol_hits"],
+        &payload["retrieval"]["lexical_chunks"],
+        &payload["retrieval"]["semantic_chunks"],
+    ]
+    .into_iter()
+    .map(|items| items.as_array().map_or(0, Vec::len))
+    .sum()
+}
+
 fn count_foreign_hits(payload: &Value, local_project: &str) -> usize {
     [
         &payload["retrieval"]["exact_documents"],
@@ -1241,8 +1290,8 @@ fn precision_ratio(items: &Value, predicate: impl Fn(&Value) -> bool) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        item_belongs_to_project, percentile_sample, precision_ratio, render_context_pack_prompt,
-        safe_lossy_prefix,
+        collect_visible_namespaces, count_hits, item_belongs_to_project, percentile_sample,
+        precision_ratio, render_context_pack_prompt, safe_lossy_prefix,
     };
     use serde_json::json;
 
@@ -1310,5 +1359,26 @@ mod tests {
         assert!(prompt.contains("D\n[alpha] README.md needle"));
         assert!(prompt.contains("S\n[alpha] src/lib.rs :: run :: fn"));
         assert!(prompt.contains("E\n[alpha] src/lib.rs :: needle"));
+    }
+
+    #[test]
+    fn helper_collects_visible_namespaces_and_hits() {
+        let payload = json!({
+            "visible_projects": [
+                {"project_code":"alpha","namespace_code":"default"},
+                {"project_code":"beta","namespace_code":"review"}
+            ],
+            "retrieval": {
+                "exact_documents": [{"project_code":"alpha"}],
+                "symbol_hits": [],
+                "lexical_chunks": [{"project_code":"alpha"}],
+                "semantic_chunks": [{"project_code":"beta"}]
+            }
+        });
+        assert_eq!(
+            collect_visible_namespaces(&payload),
+            vec!["default".to_string(), "review".to_string()]
+        );
+        assert_eq!(count_hits(&payload), 3);
     }
 }

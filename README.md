@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 18:49 MSK
-Ручная сверка guide/docs: 2026-03-20 18:49 MSK
+modified_at: 2026-03-20 19:14 MSK
+Ручная сверка guide/docs: 2026-03-20 19:14 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -236,6 +236,9 @@ cargo build --release
 Важно:
 - unsupported parser language не должен валить индексирующий проход целиком;
 - сначала сохраняется lexical/provenance baseline, затем по мере появления grammar coverage расширяется AST contour.
+- запрошенный `namespace` внутри проекта тоже является частью границы поиска:
+  - `default` не должен молча подтягивать результаты из `smoke`;
+  - related project участвует только если у него есть такой же `namespace` code.
 
 ## Context Pack
 
@@ -255,6 +258,7 @@ cargo run -- context pack \
 - делает lexical chunk lookup;
 - сначала пытается сделать semantic chunk recall через Qdrant;
 - если vector tier временно не даёт usable hits, честно деградирует в lexical fallback вместо пустого semantic слоя;
+- если нет exact/symbol/lexical evidence и semantic hits не перекрывают query terms по path/content, `Amai` честно возвращает пустой semantic слой вместо слабого шума;
 - собирает provenance-rich context pack;
 - пишет его в PostgreSQL, SQLite edge cache и S3 context bucket.
 

@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 18:49 MSK
-Ручная сверка guide/docs: 2026-03-20 18:49 MSK
+modified_at: 2026-03-20 19:14 MSK
+Ручная сверка guide/docs: 2026-03-20 19:14 MSK
 
 # Operations
 
@@ -118,6 +118,11 @@ cargo run -- context pack \
 - кэшируется в SQLite;
 - сохраняется в PostgreSQL;
 - выгружается в S3 context bucket.
+
+Важно:
+- `namespace` участвует в retrieval буквально;
+- если вы запросили `default`, `Amai` не должен молча тянуть `smoke` или другой namespace того же проекта;
+- если related project не имеет такого же namespace code, он просто не попадает в scope этого `context pack`.
 
 ## MCP server
 
@@ -245,6 +250,7 @@ cargo run --release -- verify accuracy \
 
 Этот proof:
 - проверяет `local_strict` на отсутствие cross-project leakage;
+- проверяет отсутствие cross-namespace leakage внутри одного и того же проекта;
 - мерит `exact_precision`, `lexical_precision`, `symbol_precision`, `semantic_precision`;
 - сохраняет snapshot `retrieval_accuracy`.
 

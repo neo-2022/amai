@@ -364,6 +364,29 @@ pub async fn get_namespace_by_code(
     })
 }
 
+pub async fn find_namespace_by_code(
+    client: &Client,
+    project_id: Uuid,
+    code: &str,
+) -> Result<Option<NamespaceRecord>> {
+    let row = client
+        .query_opt(
+            r#"
+            SELECT namespace_id, code, display_name, retrieval_mode
+            FROM ami.namespaces
+            WHERE project_id = $1 AND code = $2
+            "#,
+            &[&project_id, &code],
+        )
+        .await?;
+    Ok(row.map(|row| NamespaceRecord {
+        namespace_id: row.get(0),
+        code: row.get(1),
+        display_name: row.get(2),
+        retrieval_mode: row.get(3),
+    }))
+}
+
 pub async fn list_namespaces_for_project(
     client: &Client,
     project_id: Uuid,
@@ -457,9 +480,10 @@ pub async fn list_related_projects(
         .collect())
 }
 
-pub async fn search_documents_for_project(
+pub async fn search_documents_for_namespace(
     client: &Client,
     project_id: Uuid,
+    namespace_id: Uuid,
     query: &str,
     limit: i64,
 ) -> Result<Vec<DocumentHit>> {
@@ -474,17 +498,18 @@ pub async fn search_documents_for_project(
                 d.language,
                 d.source_kind,
                 d.git_commit_sha,
-                ts_rank_cd(d.search_vector, websearch_to_tsquery('simple', $2)) AS score,
+                ts_rank_cd(d.search_vector, websearch_to_tsquery('simple', $3)) AS score,
                 LEFT(d.content, 1600)
             FROM ami.code_documents d
             JOIN ami.projects p ON p.project_id = d.project_id
             JOIN ami.namespaces n ON n.namespace_id = d.namespace_id
             WHERE d.project_id = $1
-              AND d.search_vector @@ websearch_to_tsquery('simple', $2)
+              AND d.namespace_id = $2
+              AND d.search_vector @@ websearch_to_tsquery('simple', $3)
             ORDER BY score DESC, d.relative_path
-            LIMIT $3
+            LIMIT $4
             "#,
-            &[&project_id, &query, &limit],
+            &[&project_id, &namespace_id, &query, &limit],
         )
         .await?;
     Ok(rows
@@ -503,9 +528,10 @@ pub async fn search_documents_for_project(
         .collect())
 }
 
-pub async fn search_symbols_for_project(
+pub async fn search_symbols_for_namespace(
     client: &Client,
     project_id: Uuid,
+    namespace_id: Uuid,
     query: &str,
     limit: i64,
 ) -> Result<Vec<SymbolHit>> {
@@ -523,18 +549,19 @@ pub async fn search_symbols_for_project(
                 s.end_line,
                 s.start_byte,
                 s.end_byte,
-                ts_rank_cd(s.search_vector, websearch_to_tsquery('simple', $2)) AS score,
+                ts_rank_cd(s.search_vector, websearch_to_tsquery('simple', $3)) AS score,
                 s.metadata
             FROM ami.code_symbols s
             JOIN ami.code_documents d ON d.document_id = s.document_id
             JOIN ami.projects p ON p.project_id = s.project_id
             JOIN ami.namespaces n ON n.namespace_id = s.namespace_id
             WHERE s.project_id = $1
-              AND s.search_vector @@ websearch_to_tsquery('simple', $2)
+              AND s.namespace_id = $2
+              AND s.search_vector @@ websearch_to_tsquery('simple', $3)
             ORDER BY score DESC, d.relative_path, s.start_line
-            LIMIT $3
+            LIMIT $4
             "#,
-            &[&project_id, &query, &limit],
+            &[&project_id, &namespace_id, &query, &limit],
         )
         .await?;
     Ok(rows
@@ -556,9 +583,10 @@ pub async fn search_symbols_for_project(
         .collect())
 }
 
-pub async fn search_chunks_for_project(
+pub async fn search_chunks_for_namespace(
     client: &Client,
     project_id: Uuid,
+    namespace_id: Uuid,
     query: &str,
     limit: i64,
 ) -> Result<Vec<ChunkHit>> {
@@ -574,7 +602,7 @@ pub async fn search_chunks_for_project(
                 c.chunk_index,
                 c.start_line,
                 c.end_line,
-                ts_rank_cd(c.search_vector, websearch_to_tsquery('simple', $2)) AS score,
+                ts_rank_cd(c.search_vector, websearch_to_tsquery('simple', $3)) AS score,
                 LEFT(c.content, 2000),
                 c.metadata
             FROM ami.code_chunks c
@@ -582,11 +610,12 @@ pub async fn search_chunks_for_project(
             JOIN ami.projects p ON p.project_id = c.project_id
             JOIN ami.namespaces n ON n.namespace_id = c.namespace_id
             WHERE c.project_id = $1
-              AND c.search_vector @@ websearch_to_tsquery('simple', $2)
+              AND c.namespace_id = $2
+              AND c.search_vector @@ websearch_to_tsquery('simple', $3)
             ORDER BY score DESC, d.relative_path, c.chunk_index
-            LIMIT $3
+            LIMIT $4
             "#,
-            &[&project_id, &query, &limit],
+            &[&project_id, &namespace_id, &query, &limit],
         )
         .await?;
     Ok(rows

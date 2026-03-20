@@ -118,25 +118,28 @@ pub async fn replace_document_points(
     Ok(())
 }
 
-pub async fn search_project_points(
+pub async fn search_namespace_points(
     client: &Qdrant,
     collection_alias: &str,
     vector: Vec<f32>,
     project_code: &str,
+    namespace_code: &str,
     limit: usize,
 ) -> Result<Vec<ScoredPoint>> {
     let response = client
         .search_points(
             SearchPointsBuilder::new(collection_alias, vector, limit as u64)
-                .filter(Filter::must([Condition::matches(
-                    "project_code",
-                    project_code.to_string(),
-                )]))
+                .filter(Filter::must([
+                    Condition::matches("project_code", project_code.to_string()),
+                    Condition::matches("namespace_code", namespace_code.to_string()),
+                ]))
                 .with_payload(true),
         )
         .await
         .with_context(|| {
-            format!("failed semantic search in {collection_alias} for project {project_code}")
+            format!(
+                "failed semantic search in {collection_alias} for project {project_code} namespace {namespace_code}"
+            )
         })?;
     Ok(response.result)
 }
