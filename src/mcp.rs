@@ -789,12 +789,13 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
         args.include_verify_events,
     )
     .await?;
-    let session = &payload["token_budget_report"]["current_session"];
+    let headline = &payload["token_budget_report"]["headline"];
     let summary = format!(
-        "token report :: session_events={} saved_tokens={} savings_percent={:.3}",
-        session["events_total"].as_u64().unwrap_or_default(),
-        session["total_saved_tokens"].as_u64().unwrap_or_default(),
-        session["savings_percent"].as_f64().unwrap_or_default(),
+        "token report :: metric={} value_percent={:.3} saved_tokens={} events={}",
+        headline["metric_code"].as_str().unwrap_or("unknown"),
+        headline["value_percent"].as_f64().unwrap_or_default(),
+        headline["saved_tokens"].as_i64().unwrap_or_default(),
+        headline["events_count"].as_u64().unwrap_or_default(),
     );
     Ok(tool_result(summary, payload))
 }

@@ -258,6 +258,22 @@ async fn collect_report(
         .map(event_to_json)
         .unwrap_or_else(|| json!(null));
     let source_breakdown = source_breakdown(&events, &config.measurement);
+    let current_session_summary =
+        summarize_events(&session_events, now_epoch_ms, &config.measurement);
+    let rolling_window_summary = if profile.rolling_window_hours.is_some() {
+        summarize_events(&rolling_window_events, now_epoch_ms, &config.measurement)
+    } else {
+        json!(null)
+    };
+    let lifetime_summary = summarize_events(&events, now_epoch_ms, &config.measurement);
+    let headline_summary = if profile.rolling_window_hours.is_some() {
+        build_product_headline(
+            &rolling_window_summary,
+            &format!("окно {}", profile.display_name),
+        )
+    } else {
+        build_product_headline(&lifetime_summary, "всё время записи")
+    };
 
     Ok(json!({
         "token_budget_report": {
@@ -273,14 +289,11 @@ async fn collect_report(
             "filters": {
                 "include_verify_events": include_verify_events,
             },
+            "headline": headline_summary,
             "latest_event": latest_event,
-            "current_session": summarize_events(&session_events, now_epoch_ms, &config.measurement),
-            "rolling_window": if profile.rolling_window_hours.is_some() {
-                summarize_events(&rolling_window_events, now_epoch_ms, &config.measurement)
-            } else {
-                json!(null)
-            },
-            "lifetime": summarize_events(&events, now_epoch_ms, &config.measurement),
+            "current_session": current_session_summary,
+            "rolling_window": rolling_window_summary,
+            "lifetime": lifetime_summary,
             "source_breakdown": source_breakdown,
         }
     }))
@@ -380,15 +393,20 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| hex_sha256(query.as_bytes()));
-    let query_type = node["query_type"].as_str().unwrap_or("unknown").to_string();
+    let query_type = node["query_type"]
+        .as_str()
+        .filter(|value| !value.is_empty() && *value != "unknown")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| derive_query_type(&query).to_string());
     let cold_warm_state = node["cold_warm_state"]
         .as_str()
         .unwrap_or("unknown")
         .to_string();
     let baseline_strategy = node["baseline_strategy"]
         .as_str()
-        .unwrap_or("naive_top_files")
-        .to_string();
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| derive_baseline_strategy(&query_type).to_string());
     let retrieval_mode = node["retrieval_mode"].as_str().map(ToOwned::to_owned);
     let tokenizer = node["tokenizer"].as_str().unwrap_or_default().to_string();
     let event_id = node["event_id"]
@@ -416,7 +434,11 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .unwrap_or(if quality_ok { 1.0 } else { 0.0 });
     let quality_method = node["quality"]["quality_method"]
         .as_str()
-        .unwrap_or("unknown")
+        .unwrap_or(if node["quality"].is_object() {
+            "unknown"
+        } else {
+            "legacy_unverified"
+        })
         .to_string();
     let fallback_triggered = node["recovery"]["fallback_triggered"]
         .as_bool()
@@ -590,6 +612,75 @@ fn summarize_events(
         "ended_at_epoch_ms": ended_at_epoch_ms,
         "age_ms_since_latest": now_epoch_ms.saturating_sub(ended_at_epoch_ms),
     })
+}
+
+fn build_product_headline(summary: &Value, scope_label: &str) -> Value {
+    let events_total = summary["events_total"].as_u64().unwrap_or(0);
+    let counted_events = summary["counted_events"].as_u64().unwrap_or(0);
+    let preliminary = summary["preliminary"].as_bool().unwrap_or(true);
+    let verified_percent = summary["verified_effective_savings_pct"]
+        .as_f64()
+        .unwrap_or(0.0);
+    let effective_percent = summary["effective_savings_pct"].as_f64().unwrap_or(0.0);
+    let verified_saved_tokens = summary["verified_effective_saved_tokens"]
+        .as_i64()
+        .unwrap_or(0);
+    let effective_saved_tokens = summary["total_effective_saved_tokens"]
+        .as_i64()
+        .unwrap_or(0);
+    let quality_ok_rate = summary["quality_ok_rate"].as_f64().unwrap_or(0.0);
+    let fallback_rate = summary["fallback_rate"].as_f64().unwrap_or(0.0);
+
+    if counted_events > 0 {
+        json!({
+            "metric_code": "verified_effective_savings_pct",
+            "title": "Проверенная реальная экономия",
+            "scope_label": scope_label,
+            "status": if preliminary { "alert" } else { "pass" },
+            "preliminary": preliminary,
+            "value_percent": verified_percent,
+            "saved_tokens": verified_saved_tokens,
+            "events_count": events_total,
+            "counted_events": counted_events,
+            "quality_ok_rate": quality_ok_rate,
+            "fallback_rate": fallback_rate,
+            "note": if preliminary {
+                "Это уже quality-gated метрика, но выборка пока ещё маленькая."
+            } else {
+                "Это главный честный KPI: live-only, quality-gated и с учётом recovery."
+            },
+        })
+    } else if events_total > 0 {
+        json!({
+            "metric_code": "effective_savings_pct_preliminary",
+            "title": "Реальная экономия пока предварительно",
+            "scope_label": scope_label,
+            "status": "alert",
+            "preliminary": true,
+            "value_percent": effective_percent,
+            "saved_tokens": effective_saved_tokens,
+            "events_count": events_total,
+            "counted_events": counted_events,
+            "quality_ok_rate": quality_ok_rate,
+            "fallback_rate": fallback_rate,
+            "note": "Проверенная выборка ещё не набрана, поэтому временно показывается общая реальная экономия по live-событиям.",
+        })
+    } else {
+        json!({
+            "metric_code": "no_live_events",
+            "title": "Реальная экономия пока не накоплена",
+            "scope_label": scope_label,
+            "status": "unknown",
+            "preliminary": true,
+            "value_percent": 0.0,
+            "saved_tokens": 0,
+            "events_count": 0,
+            "counted_events": 0,
+            "quality_ok_rate": 0.0,
+            "fallback_rate": 0.0,
+            "note": "Amai ещё не накопил live-события для этой метрики.",
+        })
+    }
 }
 
 fn source_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementConfig) -> Value {
@@ -1278,9 +1369,10 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
 #[cfg(test)]
 mod tests {
     use super::{
-        derive_baseline_strategy, derive_query_type, derive_traffic_class,
+        build_product_headline, derive_baseline_strategy, derive_query_type, derive_traffic_class,
         include_traffic_class_in_report,
     };
+    use serde_json::json;
 
     #[test]
     fn traffic_class_comes_from_source_kind_prefix() {
@@ -1340,5 +1432,49 @@ mod tests {
             derive_query_type("Где лежит нужный файл для MCP integration?"),
             "code_lookup"
         );
+    }
+
+    #[test]
+    fn product_headline_prefers_verified_metric_when_available() {
+        let headline = build_product_headline(
+            &json!({
+                "events_total": 12,
+                "counted_events": 7,
+                "preliminary": false,
+                "verified_effective_savings_pct": 28.4,
+                "effective_savings_pct": 31.2,
+                "verified_effective_saved_tokens": 184220,
+                "total_effective_saved_tokens": 200000,
+                "quality_ok_rate": 96.1,
+                "fallback_rate": 3.8
+            }),
+            "окно Codex 5 часов",
+        );
+        assert_eq!(headline["metric_code"], "verified_effective_savings_pct");
+        assert_eq!(headline["value_percent"], 28.4);
+        assert_eq!(headline["saved_tokens"], 184220);
+        assert_eq!(headline["status"], "pass");
+    }
+
+    #[test]
+    fn product_headline_falls_back_to_preliminary_effective_metric() {
+        let headline = build_product_headline(
+            &json!({
+                "events_total": 10,
+                "counted_events": 0,
+                "preliminary": true,
+                "verified_effective_savings_pct": 0.0,
+                "effective_savings_pct": 44.0,
+                "verified_effective_saved_tokens": 0,
+                "total_effective_saved_tokens": 1200,
+                "quality_ok_rate": 0.0,
+                "fallback_rate": 0.0
+            }),
+            "окно Codex 5 часов",
+        );
+        assert_eq!(headline["metric_code"], "effective_savings_pct_preliminary");
+        assert_eq!(headline["value_percent"], 44.0);
+        assert_eq!(headline["saved_tokens"], 1200);
+        assert_eq!(headline["status"], "alert");
     }
 }
