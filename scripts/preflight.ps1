@@ -145,6 +145,7 @@ function Confirm-Install {
 
     $env:AMAI_PREFLIGHT_ALREADY_SHOWN = "1"
     $env:AMAI_SKIP_STACK_PREFLIGHT = "1"
+    $env:AMAI_ALLOW_CLIENT_PROMPT = "1"
     & "$repoRoot/scripts/install_amai.ps1" @installArgs --stack-profile $ChosenProfile --yes
     exit $LASTEXITCODE
 }

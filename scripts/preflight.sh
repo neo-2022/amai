@@ -121,6 +121,7 @@ confirm_install() {
       exec env \
         AMAI_PREFLIGHT_ALREADY_SHOWN=1 \
         AMAI_SKIP_STACK_PREFLIGHT=1 \
+        AMAI_ALLOW_CLIENT_PROMPT=1 \
         ./scripts/install_amai.sh "${install_args[@]}" --stack-profile "$chosen_profile" --yes
       ;;
     *)
