@@ -4,7 +4,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::env;
 use std::fs;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use sysinfo::{Disks, System};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +40,7 @@ pub fn render_html(refresh_ms: u64) -> String {
   <title>Amai Human Dashboard</title>
   <style>
     :root {
+      color-scheme: light;
       --bg: linear-gradient(180deg, #f5f1e7 0%, #f3f6ef 45%, #eef4f6 100%);
       --paper: rgba(255, 252, 247, 0.92);
       --ink: #1e2a2f;
@@ -54,6 +57,12 @@ pub fn render_html(refresh_ms: u64) -> String {
       --unknown-soft: rgba(97, 113, 122, 0.12);
       --shadow: 0 18px 44px rgba(28, 43, 49, 0.12);
       --border: rgba(30, 42, 47, 0.10);
+      --surface: rgba(255, 255, 255, 0.72);
+      --surface-raised: rgba(255, 255, 255, 0.78);
+      --surface-solid: rgba(255, 255, 255, 0.82);
+      --surface-border: rgba(30, 42, 47, 0.08);
+      --hero-glow: rgba(13, 107, 111, 0.11);
+      --error-border: rgba(182, 56, 43, 0.18);
     }
 
     * { box-sizing: border-box; }
@@ -70,15 +79,15 @@ pub fn render_html(refresh_ms: u64) -> String {
     .shell {
       max-width: 1280px;
       margin: 0 auto;
-      padding: 28px 20px 48px;
+      padding: 18px 20px 40px;
     }
 
     .hero {
       display: grid;
-      grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.8fr);
-      gap: 18px;
+      grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+      gap: 14px;
       align-items: stretch;
-      margin-bottom: 22px;
+      margin-bottom: 14px;
     }
 
     .panel {
@@ -90,7 +99,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .hero-main {
-      padding: 28px;
+      padding: 18px 20px;
       position: relative;
       overflow: hidden;
     }
@@ -99,9 +108,9 @@ pub fn render_html(refresh_ms: u64) -> String {
       content: "";
       position: absolute;
       inset: auto -80px -120px auto;
-      width: 260px;
-      height: 260px;
-      background: radial-gradient(circle, rgba(13, 107, 111, 0.16) 0%, rgba(13, 107, 111, 0) 70%);
+      width: 180px;
+      height: 180px;
+      background: radial-gradient(circle, var(--hero-glow) 0%, rgba(13, 107, 111, 0) 70%);
       pointer-events: none;
     }
 
@@ -120,25 +129,25 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     h1 {
-      margin: 18px 0 12px;
-      font-size: clamp(34px, 5vw, 56px);
-      line-height: 0.95;
+      margin: 12px 0 8px;
+      font-size: clamp(24px, 3vw, 34px);
+      line-height: 1.02;
       letter-spacing: -0.04em;
     }
 
     .lead {
       margin: 0;
-      max-width: 58ch;
+      max-width: 64ch;
       color: var(--muted);
-      font-size: 17px;
-      line-height: 1.6;
+      font-size: 14px;
+      line-height: 1.45;
     }
 
     .hero-side {
-      padding: 22px;
+      padding: 16px;
       display: flex;
       flex-direction: column;
-      gap: 14px;
+      gap: 10px;
     }
 
     .status-pill {
@@ -158,10 +167,10 @@ pub fn render_html(refresh_ms: u64) -> String {
     .status-pill.unknown { background: var(--unknown-soft); color: var(--unknown); }
 
     .side-block {
-      padding: 14px 16px;
+      padding: 12px 14px;
       border-radius: 18px;
-      background: rgba(255, 255, 255, 0.72);
-      border: 1px solid rgba(30, 42, 47, 0.08);
+      background: var(--surface);
+      border: 1px solid var(--surface-border);
     }
 
     .side-block h2,
@@ -192,8 +201,8 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .section {
-      padding: 22px;
-      margin-bottom: 18px;
+      padding: 18px;
+      margin-bottom: 14px;
     }
 
     .cards {
@@ -208,18 +217,18 @@ pub fn render_html(refresh_ms: u64) -> String {
     .link-card {
       padding: 18px;
       border-radius: 20px;
-      border: 1px solid rgba(30, 42, 47, 0.08);
-      background: rgba(255, 255, 255, 0.78);
+      border: 1px solid var(--surface-border);
+      background: var(--surface-raised);
     }
 
     .metric-card.pass,
-    .service-card.pass { background: linear-gradient(180deg, rgba(29, 124, 91, 0.10), rgba(255,255,255,0.82)); }
+    .service-card.pass { background: linear-gradient(180deg, rgba(29, 124, 91, 0.10), var(--surface-solid)); }
     .metric-card.alert,
-    .service-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.10), rgba(255,255,255,0.82)); }
+    .service-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.10), var(--surface-solid)); }
     .metric-card.critical,
-    .service-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.10), rgba(255,255,255,0.82)); }
+    .service-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.10), var(--surface-solid)); }
     .metric-card.unknown,
-    .service-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.10), rgba(255,255,255,0.82)); }
+    .service-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.10), var(--surface-solid)); }
 
     .card-top {
       display: flex;
@@ -284,12 +293,47 @@ pub fn render_html(refresh_ms: u64) -> String {
       color: var(--critical);
       font-weight: 700;
       margin-bottom: 18px;
-      border: 1px solid rgba(182, 56, 43, 0.18);
+      border: 1px solid var(--error-border);
+    }
+
+    .link-disabled {
+      color: var(--muted);
+      font-weight: 700;
+      text-decoration: none;
+      cursor: default;
     }
 
     code {
       font-family: "IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", monospace;
       font-size: 0.92em;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --bg: radial-gradient(circle at top, #163338 0%, #10191f 36%, #0a0f13 100%);
+        --paper: rgba(14, 20, 24, 0.92);
+        --ink: #eef4f7;
+        --muted: #a5b7bf;
+        --accent: #79d2c5;
+        --accent-soft: rgba(121, 210, 197, 0.14);
+        --pass: #7fd8ae;
+        --pass-soft: rgba(79, 158, 122, 0.22);
+        --alert: #f4c06a;
+        --alert-soft: rgba(185, 109, 16, 0.24);
+        --critical: #ff8f82;
+        --critical-soft: rgba(182, 56, 43, 0.24);
+        --unknown: #b2bfca;
+        --unknown-soft: rgba(97, 113, 122, 0.24);
+        --shadow: 0 22px 56px rgba(0, 0, 0, 0.34);
+        --border: rgba(238, 244, 247, 0.08);
+        --surface: rgba(17, 25, 30, 0.78);
+        --surface-raised: rgba(17, 25, 30, 0.88);
+        --surface-solid: rgba(20, 30, 36, 0.94);
+        --surface-border: rgba(238, 244, 247, 0.08);
+        --hero-glow: rgba(121, 210, 197, 0.18);
+        --error-border: rgba(255, 143, 130, 0.30);
+      }
     }
 
     @media (max-width: 900px) {
@@ -305,11 +349,11 @@ pub fn render_html(refresh_ms: u64) -> String {
     <section class="hero">
       <div class="panel hero-main">
         <div class="eyebrow">Amai Human Dashboard</div>
-        <h1>Польза проекта видна сразу, а не прячется в логах.</h1>
+        <h1>Amai: живая польза на одной странице.</h1>
         <p class="lead">
-          Эта страница показывает обычным человеческим языком, что именно сейчас делает
-          <code>Amai</code>: насколько быстро он отвечает, сколько токенов экономит, не течёт ли
-          контекст между проектами и всё ли в порядке у внутренних сервисов.
+          Здесь без инженерного шума видно главное: насколько быстро отвечает <code>Amai</code>,
+          сколько токенов он уже сэкономил, не течёт ли один проект в другой и не болеют ли
+          внутренние сервисы.
         </p>
       </div>
       <aside class="panel hero-side">
@@ -414,12 +458,16 @@ pub fn render_html(refresh_ms: u64) -> String {
       clearNode(list);
       links.forEach((entry) => {
         const li = document.createElement("li");
-        const link = document.createElement("a");
-        link.href = entry.url;
-        link.textContent = entry.label;
-        link.target = "_blank";
-        link.rel = "noreferrer";
-        li.appendChild(link);
+        if (entry.url) {
+          const link = document.createElement("a");
+          link.href = entry.url;
+          link.textContent = entry.label;
+          link.target = "_blank";
+          link.rel = "noreferrer";
+          li.appendChild(link);
+        } else {
+          li.appendChild(textNode("span", "link-disabled", entry.label));
+        }
         if (entry.note) {
           li.appendChild(textNode("span", "muted", ` — ${entry.note}`));
         }
@@ -584,30 +632,52 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
 }
 
 fn build_top_cards(snapshot: &Value) -> Vec<Value> {
+    let captured_at_epoch_ms = snapshot["captured_at_epoch_ms"].as_u64();
+    let session_gap_minutes =
+        snapshot["token_budget_report"]["token_budget_report"]["profile"]["session_gap_minutes"]
+            .as_u64();
+    let current_session_events =
+        snapshot["token_budget_report"]["token_budget_report"]["current_session"]["events_total"]
+            .as_u64();
+    let current_session_started =
+        snapshot["token_budget_report"]["token_budget_report"]["current_session"]
+            ["started_at_epoch_ms"]
+            .as_u64();
+    let lifetime_events =
+        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["events_total"].as_u64();
+    let lifetime_started =
+        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["started_at_epoch_ms"]
+            .as_u64();
+
     vec![
         card(
-            "Экономия токенов за сессию",
+            "Экономия токенов за текущую сессию",
             format_u64(snapshot["token_budget_report"]["token_budget_report"]["current_session"]["total_saved_tokens"].as_u64()),
             format!(
-                "{} меньше токенов по сравнению с полным видимым объёмом за текущую рабочую сессию.",
+                "Сессия здесь = непрерывная работа без паузы дольше {}. Текущая сессия длится {} и сейчас в неё вошло {} запросов. Экономия: {}.",
+                human_minutes(session_gap_minutes),
+                elapsed_since_epoch_label(current_session_started, captured_at_epoch_ms),
+                format_u64(current_session_events),
                 format_percent(snapshot["token_budget_report"]["token_budget_report"]["current_session"]["savings_percent"].as_f64())
             ),
             savings_status(snapshot["token_budget_report"]["token_budget_report"]["current_session"]["total_saved_tokens"].as_u64()),
         ),
         card(
-            "Экономия токенов за всё время",
+            "Экономия токенов за всё время записи",
             format_u64(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["total_saved_tokens"].as_u64()),
             format!(
-                "{} накопленной экономии токенов с начала записи ledger.",
+                "Это итог за всё время, пока Amai ведёт эту статистику: {}. Сейчас в сумме учтено {} запросов. Экономия: {}.",
+                elapsed_since_epoch_label(lifetime_started, captured_at_epoch_ms),
+                format_u64(lifetime_events),
                 format_percent(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["savings_percent"].as_f64())
             ),
             savings_status(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["total_saved_tokens"].as_u64()),
         ),
         card(
-            "Последний measured savings",
+            "Экономия на последнем честном замере",
             format_percent(snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_percent"].as_f64()),
             format!(
-                "{} относительно наивного scope в последнем честном benchmark-run.",
+                "Это не сумма за день и не за сессию. Это отдельный контрольный замер: один context pack оказался {} относительно наивного полного объёма.",
                 format_factor(snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_factor"].as_f64())
             ),
             if snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_percent"].as_f64().is_some() {
@@ -884,17 +954,51 @@ fn build_links(base_url: &str) -> Vec<Value> {
 
     let prometheus_port = env::var("AMI_PROMETHEUS_PORT").unwrap_or_else(|_| "59090".to_string());
     let grafana_port = env::var("AMI_GRAFANA_PORT").unwrap_or_else(|_| "53000".to_string());
+    let prometheus_available = tcp_port_is_open("127.0.0.1", &prometheus_port);
+    let grafana_available = tcp_port_is_open("127.0.0.1", &grafana_port);
     links.push(json!({
         "label": "Prometheus",
-        "url": format!("http://127.0.0.1:{prometheus_port}"),
-        "note": "Глубокие live-метрики, если monitoring profile уже поднят."
+        "url": if prometheus_available { Value::from(monitoring_url(base_url, &prometheus_port)) } else { Value::Null },
+        "note": if prometheus_available {
+            "Глубокие live-метрики уже доступны."
+        } else {
+            "Monitoring profile сейчас не поднят. Сначала запустите ./scripts/monitoring_up.sh."
+        }
     }));
     links.push(json!({
         "label": "Grafana",
-        "url": format!("http://127.0.0.1:{grafana_port}"),
-        "note": "Готовый инженерный dashboard поверх тех же метрик."
+        "url": if grafana_available { Value::from(monitoring_url(base_url, &grafana_port)) } else { Value::Null },
+        "note": if grafana_available {
+            "Готовый инженерный dashboard уже доступен."
+        } else {
+            "Grafana поднимается вместе с monitoring profile. Сначала запустите ./scripts/monitoring_up.sh."
+        }
     }));
     links
+}
+
+fn monitoring_url(base_url: &str, port: &str) -> String {
+    let (scheme, host) = parse_base_url_host(base_url);
+    format!("{scheme}://{host}:{port}")
+}
+
+fn parse_base_url_host(base_url: &str) -> (&str, &str) {
+    let (scheme, rest) = base_url.split_once("://").unwrap_or(("http", base_url));
+    let host = rest
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(rest)
+        .trim_end_matches('/');
+    (scheme, host)
+}
+
+fn tcp_port_is_open(host: &str, port: &str) -> bool {
+    let Ok(addrs) = format!("{host}:{port}").to_socket_addrs() else {
+        return false;
+    };
+    addrs
+        .into_iter()
+        .any(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok())
 }
 
 fn load_install_state(repo_root: &Path) -> Result<Option<InstallState>> {
@@ -1198,13 +1302,57 @@ fn human_bytes_per_sec(value: f64) -> String {
     format!("{}/s", human_bytes(value))
 }
 
+fn human_minutes(value: Option<u64>) -> String {
+    value
+        .map(|minutes| format!("{minutes} минут"))
+        .unwrap_or_else(|| "ещё нет данных".to_string())
+}
+
+fn elapsed_since_epoch_label(start_epoch_ms: Option<u64>, end_epoch_ms: Option<u64>) -> String {
+    let Some(start_epoch_ms) = start_epoch_ms.filter(|value| *value > 0) else {
+        return "ещё нет данных".to_string();
+    };
+    let Some(end_epoch_ms) = end_epoch_ms.filter(|value| *value >= start_epoch_ms) else {
+        return "ещё нет данных".to_string();
+    };
+    human_elapsed_ms(end_epoch_ms.saturating_sub(start_epoch_ms))
+}
+
+fn human_elapsed_ms(value_ms: u64) -> String {
+    let total_minutes = value_ms / 60_000;
+    if total_minutes < 1 {
+        return "меньше минуты".to_string();
+    }
+
+    let days = total_minutes / (60 * 24);
+    let hours = (total_minutes % (60 * 24)) / 60;
+    let minutes = total_minutes % 60;
+    let mut parts = Vec::new();
+
+    if days > 0 {
+        parts.push(format!("{days} дн."));
+    }
+    if hours > 0 {
+        parts.push(format!("{hours} ч."));
+    }
+    if minutes > 0 {
+        parts.push(format!("{minutes} мин."));
+    }
+
+    if parts.is_empty() {
+        "меньше минуты".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
 fn bytes_to_gib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0 * 1024.0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{browser_base_url, worst_status};
+    use super::{browser_base_url, human_elapsed_ms, monitoring_url, worst_status};
 
     #[test]
     fn browser_url_rewrites_unspecified_v4() {
@@ -1215,5 +1363,20 @@ mod tests {
     fn critical_status_wins() {
         assert_eq!(worst_status("pass", "critical"), "critical");
         assert_eq!(worst_status("alert", "unknown"), "alert");
+    }
+
+    #[test]
+    fn monitoring_url_reuses_dashboard_host() {
+        assert_eq!(
+            monitoring_url("http://demo-host:9464", "59090"),
+            "http://demo-host:59090"
+        );
+    }
+
+    #[test]
+    fn elapsed_label_is_compact() {
+        assert_eq!(human_elapsed_ms(30_000), "меньше минуты");
+        assert_eq!(human_elapsed_ms(61_000), "1 мин.");
+        assert_eq!(human_elapsed_ms(3_720_000), "1 ч. 2 мин.");
     }
 }
