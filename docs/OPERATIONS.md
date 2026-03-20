@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 23:43 MSK
-Ручная сверка guide/docs: 2026-03-20 23:43 MSK
+modified_at: 2026-03-20 23:50 MSK
+Ручная сверка guide/docs: 2026-03-20 23:50 MSK
 
 # Operations
 
@@ -136,6 +136,13 @@ config/deployment_profiles.toml
 ./scripts/preflight.sh --stack-profile default
 ./scripts/preflight.sh --stack-profile lite_vps
 ```
+
+Важно не путать:
+- `install_amai.sh`
+  - может перейти к реальной установке после выбора профиля и подтверждения;
+- `preflight.sh`
+  - ничего не устанавливает и ничего не меняет;
+  - это режим только для проверки машины и выбора подходящего профиля.
 
 Preflight показывает обычным человеческим языком:
 - какой профиль выбран;
