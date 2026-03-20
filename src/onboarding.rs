@@ -13,33 +13,37 @@ use tokio::process::Command;
 
 pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     let repo_root = discover_repo_root(args.cwd.as_deref())?;
-    ensure_local_config_files(&repo_root)?;
-    dotenvy::from_path_override(repo_root.join(".env"))
-        .context("failed to load generated .env for onboarding")?;
+    let remote_mode = args.ssh_destination.is_some();
 
-    check_dependency("docker", &["--version"]).await?;
-    check_dependency("cargo", &["--version"]).await?;
+    if !remote_mode {
+        ensure_local_config_files(&repo_root)?;
+        dotenvy::from_path_override(repo_root.join(".env"))
+            .context("failed to load generated .env for onboarding")?;
 
-    if !args.skip_stack {
-        run_command(
-            "docker compose up",
-            command_in(
-                &repo_root,
-                "docker",
-                ["compose", "up", "-d", "--remove-orphans"],
-            ),
-        )
-        .await?;
-        let cfg = AppConfig::from_env()?;
-        bootstrap::bootstrap_stack(&cfg).await?;
-    }
+        check_dependency("docker", &["--version"]).await?;
+        check_dependency("cargo", &["--version"]).await?;
 
-    if !args.skip_release_build {
-        run_command(
-            "cargo build --release",
-            command_in(&repo_root, "cargo", ["build", "--release"]),
-        )
-        .await?;
+        if !args.skip_stack {
+            run_command(
+                "docker compose up",
+                command_in(
+                    &repo_root,
+                    "docker",
+                    ["compose", "up", "-d", "--remove-orphans"],
+                ),
+            )
+            .await?;
+            let cfg = AppConfig::from_env()?;
+            bootstrap::bootstrap_stack(&cfg).await?;
+        }
+
+        if !args.skip_release_build {
+            run_command(
+                "cargo build --release",
+                command_in(&repo_root, "cargo", ["build", "--release"]),
+            )
+            .await?;
+        }
     }
 
     let target = load_client_target(&repo_root, &args.client)?;
@@ -50,8 +54,8 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         client: args.client.clone(),
         server_name: "amai".to_string(),
         launcher_platform: args.launcher_platform.clone(),
-        ssh_destination: None,
-        remote_repo_root: None,
+        ssh_destination: args.ssh_destination.clone(),
+        remote_repo_root: args.remote_repo_root.clone(),
         command: None,
         cwd: Some(repo_root.clone()),
         output: Some(output.clone()),
@@ -59,11 +63,27 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     mcp::write_client_config(&config_args)?;
 
     let release_binary = repo_root.join("target/release/amai");
-    let release_ready = release_binary.is_file();
+    let release_ready = remote_mode || release_binary.is_file();
 
     println!("onboarding completed");
     println!("repo_root: {}", repo_root.display());
-    println!("env_file: {}", repo_root.join(".env").display());
+    if remote_mode {
+        println!("launcher_mode: remote_ssh");
+        println!(
+            "remote_destination: {}",
+            args.ssh_destination.as_deref().unwrap_or("")
+        );
+        println!(
+            "remote_repo_root: {}",
+            args.remote_repo_root
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default()
+        );
+    } else {
+        println!("launcher_mode: local");
+        println!("env_file: {}", repo_root.join(".env").display());
+    }
     println!("client: {}", args.client);
     println!("client_config: {}", output.display());
     println!(
@@ -74,9 +94,15 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     if let Some(backup) = backup {
         println!("backup_file: {}", backup.display());
     }
-    println!("next_step_1: open the repo in your client");
-    println!("next_step_2: reload the client window or restart the client");
-    println!("next_step_3: ask the client to call Amai through MCP");
+    if remote_mode {
+        println!("next_step_1: verify that ssh access to the remote host works");
+        println!("next_step_2: reload the client window or restart the client");
+        println!("next_step_3: ask the client to call Amai through MCP on the remote host");
+    } else {
+        println!("next_step_1: open the repo in your client");
+        println!("next_step_2: reload the client window or restart the client");
+        println!("next_step_3: ask the client to call Amai through MCP");
+    }
     Ok(())
 }
 

@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:23 MSK
-Ручная сверка guide/docs: 2026-03-20 20:23 MSK
+modified_at: 2026-03-20 20:31 MSK
+Ручная сверка guide/docs: 2026-03-20 20:31 MSK
 
 # Operations
 
@@ -23,6 +23,22 @@ cd /home/art/agent-memory-index
 - materialize-ит bootstrap;
 - собирает release binary;
 - пишет готовый MCP config для клиента.
+
+Если `Amai` уже живёт на удалённом Linux/VPS-host, а локально нужен только клиентский config:
+
+```bash
+cd /home/art/agent-memory-index
+./scripts/onboard_remote_client.sh \
+  --client vscode \
+  --ssh-destination ops@example-host \
+  --remote-repo-root /srv/amai
+```
+
+Этот путь:
+- не поднимает локальный stack;
+- не требует локального `docker compose up`;
+- не требует локального `cargo build --release`;
+- просто пишет клиентский config, который запускает удалённый `Amai` через `ssh`.
 
 Список default client targets теперь хранится отдельно в:
 
@@ -237,6 +253,7 @@ Proof:
 
 ```bash
 ./scripts/proof_onboarding.sh
+./scripts/proof_remote_onboarding.sh
 ./scripts/proof_client_lifecycle.sh
 ```
 

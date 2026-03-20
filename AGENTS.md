@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:23 MSK
-Ручная сверка guide/docs: 2026-03-20 20:23 MSK
+modified_at: 2026-03-20 20:31 MSK
+Ручная сверка guide/docs: 2026-03-20 20:31 MSK
 
 # AGENTS.md для Art-memory-agent-index (Amai)
 
@@ -31,7 +31,7 @@ modified_at: 2026-03-20 20:23 MSK
 - самый простой путь:
   - `scripts/onboard_local.sh --client vscode`
 - если `Amai` уже стоит на удалённом Linux/VPS-host:
-  - `cargo run -- mcp config --client vscode --ssh-destination user@host --remote-repo-root /srv/amai`
+  - `scripts/onboard_remote_client.sh --client vscode --ssh-destination user@host --remote-repo-root /srv/amai`
 - инженерный ручной путь:
   - `scripts/bootstrap_stack.sh`
 - симметричное отключение клиента:
@@ -118,7 +118,9 @@ Machine-readable client install targets живут в:
 - `scripts/proof_hostile.sh`
 - `scripts/proof_observability.sh`
 - `scripts/proof_onboarding.sh`
+- `scripts/proof_remote_onboarding.sh`
 - `scripts/proof_client_lifecycle.sh`
+- `scripts/proof_remote_ssh_config.sh`
 
 Rust-native verification commands:
 - `cargo run -- verify benchmark ...`

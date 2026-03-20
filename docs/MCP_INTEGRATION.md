@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:23 MSK
-Ручная сверка guide/docs: 2026-03-20 20:23 MSK
+modified_at: 2026-03-20 20:31 MSK
+Ручная сверка guide/docs: 2026-03-20 20:31 MSK
 
 # MCP Integration
 
@@ -91,6 +91,15 @@ cargo build --release
   --remote-repo-root /srv/amai
 ```
 
+Если хочется совсем короткий путь без ручной сборки snippet:
+
+```bash
+./scripts/onboard_remote_client.sh \
+  --client vscode \
+  --ssh-destination ops@example-host \
+  --remote-repo-root /srv/amai
+```
+
 4. Если onboarding уже запускался, часть этой работы уже сделана автоматически.
 
 ## Как отключить клиента обратно
@@ -133,6 +142,8 @@ cargo build --release
 - чтобы `Amai` уже был поднят на удалённой машине;
 - чтобы клиент умел выполнять `ssh user@host`;
 - чтобы вы знали путь до repo на сервере, например `/srv/amai`.
+- если хотите автоматическую запись клиентского конфига, используйте `scripts/onboard_remote_client.sh`;
+- если нужен только snippet без записи файла, используйте `amai mcp config`.
 
 ## Почему клиентский config маленький
 
@@ -199,4 +210,10 @@ cargo build --release
 
 ```bash
 ./scripts/proof_remote_ssh_config.sh
+```
+
+Для короткого remote onboarding path:
+
+```bash
+./scripts/proof_remote_onboarding.sh
 ```

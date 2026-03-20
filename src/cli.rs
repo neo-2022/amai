@@ -369,6 +369,10 @@ pub struct BootstrapOnboardingArgs {
     #[arg(long, default_value = "auto")]
     pub launcher_platform: String,
     #[arg(long)]
+    pub ssh_destination: Option<String>,
+    #[arg(long)]
+    pub remote_repo_root: Option<PathBuf>,
+    #[arg(long)]
     pub output: Option<PathBuf>,
     #[arg(long)]
     pub cwd: Option<PathBuf>,
