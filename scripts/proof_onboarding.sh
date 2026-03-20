@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 output="tmp/onboarding/proof-vscode-mcp.json"
 rm -f "${output}"
 
-./scripts/onboard_local.sh --client vscode --output "${output}"
+./scripts/onboard_local.sh --client vscode --yes --output "${output}"
 
 test -f .env
 test -f "${output}"

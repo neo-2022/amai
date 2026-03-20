@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 21:06 MSK
-Ручная сверка guide/docs: 2026-03-20 21:06 MSK
+modified_at: 2026-03-20 21:36 MSK
+Ручная сверка guide/docs: 2026-03-20 21:36 MSK
 
 # Operations
 
@@ -15,10 +15,11 @@ modified_at: 2026-03-20 21:06 MSK
 ```bash
 cd /home/art/agent-memory-index
 ./scripts/install_amai.sh
-./scripts/onboard_local.sh --client vscode
 ```
 
 Эта команда:
+- сначала показывает понятную проверку машины;
+- ждёт явного подтверждения словом `ДА`;
 - создаёт и досинхронизирует `.env`;
 - поднимает stack;
 - materialize-ит bootstrap;
@@ -127,8 +128,8 @@ config/deployment_profiles.toml
 Проверить машину под профиль:
 
 ```bash
-cargo run -- bootstrap preflight --stack-profile default
-cargo run -- bootstrap preflight --stack-profile lite_vps
+./scripts/preflight.sh --stack-profile default
+./scripts/preflight.sh --stack-profile lite_vps
 ```
 
 Preflight показывает обычным человеческим языком:

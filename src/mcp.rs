@@ -1,5 +1,5 @@
 use crate::cli::{ContextPackArgs, McpConfigArgs, VerifyMcpArgs, VerifyTokenBenchmarkArgs};
-use crate::{compatibility, observe, postgres, retrieval, verify};
+use crate::{compatibility, config, observe, postgres, retrieval, verify};
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -1510,17 +1510,7 @@ fn required_prompt_arg(arguments: &serde_json::Map<String, Value>, key: &str) ->
 }
 
 fn discover_repo_root() -> Result<PathBuf> {
-    let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
-    for ancestor in cwd.ancestors() {
-        let cargo_toml = ancestor.join("Cargo.toml");
-        let runner = ancestor.join("scripts/run_mcp_stdio.sh");
-        if cargo_toml.is_file() && runner.is_file() {
-            return Ok(ancestor.to_path_buf());
-        }
-    }
-    Err(anyhow!(
-        "failed to discover Amai repo root from current directory; pass --cwd explicitly"
-    ))
+    config::discover_repo_root(None)
 }
 
 #[derive(Debug, Deserialize)]

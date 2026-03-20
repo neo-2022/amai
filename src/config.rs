@@ -1,7 +1,7 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use qdrant_client::qdrant::Distance;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -98,6 +98,70 @@ impl AppConfig {
             other => Err(anyhow!("unsupported Qdrant distance: {other}")),
         }
     }
+}
+
+pub fn discover_repo_root(explicit: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return normalize_repo_root(path);
+    }
+
+    if let Ok(value) = env::var("AMAI_REPO_ROOT") {
+        let candidate = PathBuf::from(value);
+        if is_repo_root(&candidate) {
+            return normalize_repo_root(&candidate);
+        }
+    }
+
+    if let Some(repo_root) = env::current_dir()
+        .ok()
+        .and_then(|cwd| search_repo_root_from(&cwd))
+    {
+        return Ok(repo_root);
+    }
+
+    if let Some(repo_root) = env::current_exe()
+        .ok()
+        .and_then(|exe| search_repo_root_from(&exe))
+    {
+        return Ok(repo_root);
+    }
+
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if is_repo_root(manifest_dir) {
+        return normalize_repo_root(manifest_dir);
+    }
+
+    bail!(
+        "failed to discover Amai repo root; run from the repo, set AMAI_REPO_ROOT, or pass an explicit path"
+    )
+}
+
+pub fn normalize_repo_root(path: &Path) -> Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", path.display()))?;
+    if !is_repo_root(&canonical) {
+        bail!(
+            "{} is not an Amai repo root (expected Cargo.toml, compose.yaml, scripts/run_mcp_stdio.sh)",
+            canonical.display()
+        );
+    }
+    Ok(canonical)
+}
+
+pub fn is_repo_root(path: &Path) -> bool {
+    path.join("Cargo.toml").is_file()
+        && path.join("compose.yaml").is_file()
+        && path.join("scripts/run_mcp_stdio.sh").is_file()
+}
+
+fn search_repo_root_from(path: &Path) -> Option<PathBuf> {
+    for ancestor in path.ancestors() {
+        if is_repo_root(ancestor) {
+            return normalize_repo_root(ancestor).ok();
+        }
+    }
+    None
 }
 
 fn required(key: &str) -> Result<String> {

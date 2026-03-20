@@ -9,7 +9,7 @@ trap 'rm -rf "${temp_home}"' EXIT
 RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 
-HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client codex --skip-stack --skip-release-build
+HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client codex --yes --skip-stack --skip-release-build
 test -f "${temp_home}/.codex/config.toml"
 grep -q '\[mcp_servers.amai\]' "${temp_home}/.codex/config.toml"
 
@@ -19,7 +19,7 @@ if grep -q '\[mcp_servers.amai\]' "${temp_home}/.codex/config.toml"; then
   exit 1
 fi
 
-HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client cursor --skip-stack --skip-release-build
+HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client cursor --yes --skip-stack --skip-release-build
 test -f "${temp_home}/.cursor/mcp.json"
 grep -q '"amai"' "${temp_home}/.cursor/mcp.json"
 
@@ -29,7 +29,7 @@ if [[ -f "${temp_home}/.cursor/mcp.json" ]] && grep -q '"amai"' "${temp_home}/.c
   exit 1
 fi
 
-./scripts/onboard_local.sh --client claude-code --skip-stack --skip-release-build
+./scripts/onboard_local.sh --client claude-code --yes --skip-stack --skip-release-build
 test -f .mcp.json
 grep -q '"amai"' .mcp.json
 

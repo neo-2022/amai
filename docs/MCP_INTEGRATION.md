@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 21:06 MSK
-Ручная сверка guide/docs: 2026-03-20 21:06 MSK
+modified_at: 2026-03-20 21:36 MSK
+Ручная сверка guide/docs: 2026-03-20 21:36 MSK
 
 # MCP Integration
 
@@ -29,13 +29,14 @@ modified_at: 2026-03-20 21:06 MSK
 
 ```bash
 ./scripts/install_amai.sh
-./scripts/onboard_local.sh --client vscode
 ```
 
 Самый человеческий путь теперь:
 - `./scripts/install_amai.sh`
   - пытается сам определить подходящий клиент;
-  - дальше делает install path под него.
+  - сначала показывает понятную проверку машины;
+  - потом просит написать `ДА`;
+  - только после этого делает install path под него.
 - `./scripts/remove_amai.sh`
   - убирает `Amai` обратно.
 

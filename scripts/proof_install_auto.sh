@@ -11,6 +11,7 @@ remove_out="$tmp_dir/remove.out"
 target_file="$tmp_dir/mcp.json"
 
 ./scripts/install_amai.sh \
+  --yes \
   --skip-stack \
   --skip-release-build \
   --output "$target_file" \

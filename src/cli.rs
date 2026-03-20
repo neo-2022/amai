@@ -418,6 +418,8 @@ pub struct BootstrapOnboardingArgs {
     pub client: String,
     #[arg(long, default_value = "default")]
     pub stack_profile: String,
+    #[arg(long, default_value_t = false)]
+    pub yes: bool,
     #[arg(long, default_value = "auto")]
     pub launcher_platform: String,
     #[arg(long)]

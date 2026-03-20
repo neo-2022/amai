@@ -45,9 +45,8 @@ async fn main() -> Result<()> {
                 bootstrap::bootstrap_stack(&cfg).await?
             }
             BootstrapCommand::Preflight(args) => {
-                let cwd =
-                    std::env::current_dir().map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                profiles::print_preflight(&cwd, &args.stack_profile)?;
+                let repo_root = config::discover_repo_root(None)?;
+                profiles::print_preflight(&repo_root, &args.stack_profile)?;
             }
             BootstrapCommand::Install(args) => onboarding::run(&args).await?,
             BootstrapCommand::Onboarding(args) => onboarding::run(&args).await?,

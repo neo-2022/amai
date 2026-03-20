@@ -54,65 +54,103 @@ pub fn load_profile(repo_root: &Path, profile_code: &str) -> Result<DeploymentPr
 
 pub fn print_preflight(repo_root: &Path, profile_code: &str) -> Result<()> {
     let report = preflight_report(repo_root, profile_code)?;
-    println!("deployment profile: {}", report.profile_code);
-    println!("profile display name: {}", report.profile.display_name);
-    println!("summary: {}", report.profile.summary);
-    println!("host logical cpu: {}", report.host_logical_cpus);
-    println!("host total memory gib: {:.2}", report.host_total_memory_gib);
+    print_preflight_report(&report);
+    Ok(())
+}
+
+pub fn print_preflight_report(report: &PreflightReport) {
+    println!("Amai preflight");
+    println!();
     println!(
-        "host available memory gib: {:.2}",
-        report.host_available_memory_gib
+        "Профиль: {} ({})",
+        report.profile.display_name, report.profile_code
     );
+    println!("Итог: {}", verdict_title(report.verdict));
+    println!();
+    println!("Простыми словами:");
+    println!("{}", verdict_explainer(report));
+    println!("Коротко о профиле: {}", report.profile.summary);
+    println!();
+    println!("Что проверили:");
     println!(
-        "host available disk gib: {:.2}",
-        report.host_available_disk_gib
-    );
-    println!("verdict: {}", report.verdict);
-    println!(
-        "supports peak benchmarks: {}",
-        report.profile.supports_peak_benchmarks
-    );
-    println!(
-        "monitoring by default: {}",
-        report.profile.start_monitoring_by_default
-    );
-    println!(
-        "remote mode recommended: {}",
-        report.profile.remote_mode_recommended
-    );
-    println!(
-        "minimum requirements: {} logical cpu, {:.1} GiB memory, {:.1} GiB disk",
+        "- CPU: {} логических потоков. Нужно минимум {}, комфортно от {}. {}",
+        report.host_logical_cpus,
         report.profile.minimum_cpu_logical,
-        report.profile.minimum_memory_gib,
-        report.profile.minimum_disk_gib
+        report.profile.recommended_cpu_logical,
+        resource_status_usize(
+            report.host_logical_cpus,
+            report.profile.minimum_cpu_logical,
+            report.profile.recommended_cpu_logical
+        )
     );
     println!(
-        "recommended requirements: {} logical cpu, {:.1} GiB memory, {:.1} GiB disk",
-        report.profile.recommended_cpu_logical,
+        "- Память: {:.2} GiB всего, свободно сейчас {:.2} GiB. Нужно минимум {:.1} GiB, комфортно от {:.1} GiB. {}",
+        report.host_total_memory_gib,
+        report.host_available_memory_gib,
+        report.profile.minimum_memory_gib,
         report.profile.recommended_memory_gib,
-        report.profile.recommended_disk_gib
+        resource_status_f64(
+            report.host_total_memory_gib,
+            report.profile.minimum_memory_gib,
+            report.profile.recommended_memory_gib
+        )
     );
-    println!("suitable for:");
+    println!(
+        "- Диск: свободно {:.2} GiB. Нужно минимум {:.1} GiB, комфортно от {:.1} GiB. {}",
+        report.host_available_disk_gib,
+        report.profile.minimum_disk_gib,
+        report.profile.recommended_disk_gib,
+        resource_status_f64(
+            report.host_available_disk_gib,
+            report.profile.minimum_disk_gib,
+            report.profile.recommended_disk_gib
+        )
+    );
+    println!();
+    println!("Для чего этот режим подходит:");
     for item in &report.profile.suitable_for {
         println!("- {}", item);
     }
-    println!("not for:");
+    println!();
+    println!("На что не стоит рассчитывать:");
     for item in &report.profile.not_for {
         println!("- {}", item);
     }
     if !report.unmet_minimums.is_empty() {
-        println!("minimum risks:");
+        println!();
+        println!("Что сейчас блокирует запуск в этом режиме:");
         for item in &report.unmet_minimums {
             println!("- {}", item);
         }
     }
     if !report.unmet_recommendations.is_empty() {
-        println!("recommendation gaps:");
+        println!();
+        println!("Где есть риск, даже если запуск возможен:");
         for item in &report.unmet_recommendations {
             println!("- {}", item);
         }
     }
-    Ok(())
+    println!();
+    println!("Что делать дальше:");
+    for item in next_steps(report) {
+        println!("- {}", item);
+    }
+    println!();
+    println!("Техническая сводка:");
+    println!("- profile_code: {}", report.profile_code);
+    println!("- verdict: {}", report.verdict);
+    println!(
+        "- supports_peak_benchmarks: {}",
+        report.profile.supports_peak_benchmarks
+    );
+    println!(
+        "- monitoring_by_default: {}",
+        report.profile.start_monitoring_by_default
+    );
+    println!(
+        "- remote_mode_recommended: {}",
+        report.profile.remote_mode_recommended
+    );
 }
 
 pub fn preflight_report(repo_root: &Path, profile_code: &str) -> Result<PreflightReport> {
@@ -222,6 +260,94 @@ fn disk_available_for_path(disks: &Disks, path: &Path) -> Option<u64> {
 
 fn bytes_to_gib(bytes: u64) -> f64 {
     bytes as f64 / 1024_f64 / 1024_f64 / 1024_f64
+}
+
+fn verdict_title(verdict: &str) -> &'static str {
+    match verdict {
+        "pass" => "машина подходит",
+        "warn" => "машина подходит с оговорками",
+        "fail" => "машина не подходит для этого режима",
+        _ => "статус неизвестен",
+    }
+}
+
+fn verdict_explainer(report: &PreflightReport) -> String {
+    match report.verdict {
+        "pass" => format!(
+            "Эта машина уверенно подходит для профиля \"{}\". Можно рассчитывать на тот сценарий, для которого этот профиль задуман.",
+            report.profile.display_name
+        ),
+        "warn" => format!(
+            "Эта машина может работать в профиле \"{}\", но без запаса прочности. Базовый запуск возможен, однако часть тяжёлых сценариев лучше не обещать заранее.",
+            report.profile.display_name
+        ),
+        "fail" => format!(
+            "Эта машина слишком слабая для профиля \"{}\". В таком режиме лучше не продолжать установку, пока не уменьшите требования или не возьмёте более сильный хост.",
+            report.profile.display_name
+        ),
+        _ => "Не удалось сформулировать понятный вывод.".to_string(),
+    }
+}
+
+fn resource_status_usize(actual: usize, minimum: usize, recommended: usize) -> &'static str {
+    if actual < minimum {
+        "Этого мало даже для минимального сценария."
+    } else if actual < recommended {
+        "Минимум выполняется, но комфортного запаса нет."
+    } else {
+        "Есть нормальный запас."
+    }
+}
+
+fn resource_status_f64(actual: f64, minimum: f64, recommended: f64) -> &'static str {
+    if actual < minimum {
+        "Этого мало даже для минимального сценария."
+    } else if actual < recommended {
+        "Минимум выполняется, но комфортного запаса нет."
+    } else {
+        "Есть нормальный запас."
+    }
+}
+
+fn next_steps(report: &PreflightReport) -> Vec<String> {
+    match report.verdict {
+        "pass" => vec![
+            format!(
+                "Можно продолжать с профилем \"{}\".",
+                report.profile_code
+            ),
+            "Если хотите просто посмотреть продукт, следующий шаг обычно: ./scripts/install_amai.sh".to_string(),
+        ],
+        "warn" => {
+            let mut steps = vec![
+                format!(
+                    "Запуск возможен, но лучше не обещать тяжёлые сценарии в профиле \"{}\".",
+                    report.profile_code
+                ),
+            ];
+            if report.profile_code == "default" {
+                steps.push(
+                    "Если нужен более дешёвый и лёгкий режим, проверьте ещё профиль \"lite_vps\"."
+                        .to_string(),
+                );
+            }
+            steps
+        }
+        "fail" => {
+            let mut steps = vec![
+                "Сначала устраните блокирующие ограничения по CPU, памяти или диску."
+                    .to_string(),
+            ];
+            if report.profile_code == "default" {
+                steps.push(
+                    "Если вам нужен не полный локальный режим, а лёгкий удалённый режим, проверьте профиль \"lite_vps\"."
+                        .to_string(),
+                );
+            }
+            steps
+        }
+        _ => vec!["Перезапустите проверку.".to_string()],
+    }
 }
 
 #[cfg(test)]

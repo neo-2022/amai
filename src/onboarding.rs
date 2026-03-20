@@ -1,4 +1,5 @@
 use crate::cli::{BootstrapDisconnectArgs, BootstrapOnboardingArgs, McpConfigArgs};
+use crate::config;
 use crate::mcp;
 use crate::profiles;
 use anyhow::{Context, Result, anyhow, bail};
@@ -6,6 +7,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,9 +17,13 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     let repo_root = discover_repo_root(args.cwd.as_deref())?;
     let remote_mode = args.ssh_destination.is_some();
     let client_resolution = resolve_client_target(&repo_root, &args.client)?;
+    let mut local_preflight_report: Option<profiles::PreflightReport> = None;
 
     if !remote_mode {
-        profiles::print_preflight(&repo_root, &args.stack_profile)?;
+        let report = profiles::preflight_report(&repo_root, &args.stack_profile)?;
+        profiles::print_preflight_report(&report);
+        confirm_local_installation(args, &repo_root, &client_resolution, &report)?;
+        local_preflight_report = Some(report);
         ensure_local_config_files(&repo_root)?;
         dotenvy::from_path_override(repo_root.join(".env"))
             .context("failed to load generated .env for onboarding")?;
@@ -113,7 +119,68 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         println!("next_step_1: open the repo in your client");
         println!("next_step_2: reload the client window or restart the client");
         println!("next_step_3: ask the client to call Amai through MCP");
+        if let Some(report) = &local_preflight_report {
+            println!();
+            println!("what_this_machine_can_handle:");
+            for item in &report.profile.suitable_for {
+                println!("- {}", item);
+            }
+            println!("what_not_to_expect_from_this_machine:");
+            for item in &report.profile.not_for {
+                println!("- {}", item);
+            }
+            println!(
+                "machine_capacity_summary: verdict={}, peak_benchmarks={}, remote_mode_recommended={}",
+                report.verdict,
+                report.profile.supports_peak_benchmarks,
+                report.profile.remote_mode_recommended
+            );
+        }
     }
+    Ok(())
+}
+
+fn confirm_local_installation(
+    args: &BootstrapOnboardingArgs,
+    repo_root: &Path,
+    client_resolution: &ClientResolution,
+    report: &profiles::PreflightReport,
+) -> Result<()> {
+    if args.yes {
+        return Ok(());
+    }
+
+    println!();
+    println!("Если продолжить, Amai сделает следующее:");
+    println!("- создаст или досинхронизирует файл .env");
+    println!("- поднимет локальный stack, если он ещё не поднят");
+    println!("- при необходимости соберёт release binary");
+    println!(
+        "- подготовит MCP config для клиента: {}",
+        client_resolution.target.display_name
+    );
+    println!("- рабочий корень установки: {}", repo_root.display());
+    println!("- выбранный профиль: {}", report.profile.display_name);
+    println!();
+    print!("Если согласны продолжать, напишите ДА и нажмите Enter: ");
+    io::stdout().flush().context("failed to flush stdout")?;
+
+    let mut answer = String::new();
+    if !io::stdin().is_terminal() {
+        println!("Подсказка: для автоматизации можно передать --yes.");
+    }
+    let bytes_read = io::stdin()
+        .read_line(&mut answer)
+        .context("failed to read confirmation input")?;
+    if bytes_read == 0 {
+        bail!("installation cancelled because no confirmation was provided");
+    }
+    let normalized = answer.trim();
+    let approved = matches!(normalized, "ДА" | "да" | "Да" | "yes" | "YES" | "y" | "Y");
+    if !approved {
+        bail!("installation cancelled by user before any changes were made");
+    }
+
     Ok(())
 }
 
@@ -162,37 +229,7 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
 }
 
 fn discover_repo_root(explicit: Option<&Path>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return normalize_repo_root(path);
-    }
-
-    let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
-    for ancestor in cwd.ancestors() {
-        if is_repo_root(ancestor) {
-            return Ok(ancestor.to_path_buf());
-        }
-    }
-
-    bail!("failed to discover Amai repo root; pass --cwd explicitly");
-}
-
-fn normalize_repo_root(path: &Path) -> Result<PathBuf> {
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("failed to resolve {}", path.display()))?;
-    if !is_repo_root(&canonical) {
-        bail!(
-            "{} is not an Amai repo root (expected Cargo.toml, compose.yaml, scripts/run_mcp_stdio.sh)",
-            canonical.display()
-        );
-    }
-    Ok(canonical)
-}
-
-fn is_repo_root(path: &Path) -> bool {
-    path.join("Cargo.toml").is_file()
-        && path.join("compose.yaml").is_file()
-        && path.join("scripts/run_mcp_stdio.sh").is_file()
+    config::discover_repo_root(explicit)
 }
 
 fn ensure_local_config_files(repo_root: &Path) -> Result<()> {
