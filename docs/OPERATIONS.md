@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 19:14 MSK
-Ручная сверка guide/docs: 2026-03-20 19:14 MSK
+modified_at: 2026-03-20 19:38 MSK
+Ручная сверка guide/docs: 2026-03-20 19:38 MSK
 
 # Operations
 
@@ -9,6 +9,22 @@ modified_at: 2026-03-20 19:14 MSK
 - текущий path: `/home/art/agent-memory-index`
 
 ## Bootstrap
+
+Самый простой путь для локального пользователя:
+
+```bash
+cd /home/art/agent-memory-index
+./scripts/onboard_local.sh --client vscode
+```
+
+Эта команда:
+- создаёт и досинхронизирует `.env`;
+- поднимает stack;
+- materialize-ит bootstrap;
+- собирает release binary;
+- пишет готовый MCP config для клиента.
+
+Если нужен ручной инженерный путь:
 
 ```bash
 cd /home/art/agent-memory-index
@@ -163,6 +179,34 @@ cargo run -- mcp config --client vscode --cwd /path/to/art-memory-agent-index
 
 Подробный user-facing walkthrough:
 - [MCP_INTEGRATION.md](/home/art/agent-memory-index/docs/MCP_INTEGRATION.md)
+
+## Onboarding
+
+Если нужен один более простой вход, без ручной склейки шагов:
+
+```bash
+./scripts/onboard_local.sh --client vscode
+./scripts/onboard_local.sh --client cursor
+./scripts/onboard_local.sh --client codex
+```
+
+По умолчанию onboarding:
+- работает внутри текущего repo root;
+- не трогает глобальные IDE secrets;
+- пишет локальный config в понятный путь.
+
+Текущие default outputs:
+- `vscode` -> `.vscode/mcp.json`
+- `cursor` -> `tmp/onboarding/cursor-mcp.json`
+- `claude-desktop` -> `tmp/onboarding/claude-desktop-mcp.json`
+- `codex` -> `tmp/onboarding/codex-mcp.toml`
+- `generic` -> `tmp/onboarding/generic-mcp.json`
+
+Proof:
+
+```bash
+./scripts/proof_onboarding.sh
+```
 
 ## Hardening proof
 

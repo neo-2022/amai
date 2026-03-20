@@ -60,6 +60,7 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum BootstrapCommand {
     Stack,
+    Onboarding(BootstrapOnboardingArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -352,4 +353,18 @@ pub struct McpConfigArgs {
     pub cwd: Option<PathBuf>,
     #[arg(long)]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BootstrapOnboardingArgs {
+    #[arg(long, default_value = "vscode")]
+    pub client: String,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    #[arg(long)]
+    pub cwd: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    pub skip_release_build: bool,
+    #[arg(long, default_value_t = false)]
+    pub skip_stack: bool,
 }

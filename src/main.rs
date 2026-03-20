@@ -8,6 +8,7 @@ mod language;
 mod mcp;
 mod nats;
 mod observe;
+mod onboarding;
 mod postgres;
 mod qdrant;
 mod retrieval;
@@ -35,17 +36,27 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let cfg = config::AppConfig::from_env()?;
 
     match cli.command {
         Command::Bootstrap { command } => match command {
-            BootstrapCommand::Stack => bootstrap::bootstrap_stack(&cfg).await?,
+            BootstrapCommand::Stack => {
+                let cfg = config::AppConfig::from_env()?;
+                bootstrap::bootstrap_stack(&cfg).await?
+            }
+            BootstrapCommand::Onboarding(args) => onboarding::run(&args).await?,
         },
         Command::Compat { command } => match command {
-            CompatCommand::Check => compatibility::print_report(&cfg).await?,
+            CompatCommand::Check => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::print_report(&cfg).await?
+            }
         },
-        Command::Status => status::print_status(&cfg).await?,
+        Command::Status => {
+            let cfg = config::AppConfig::from_env()?;
+            status::print_status(&cfg).await?
+        }
         Command::Project { command } => {
+            let cfg = config::AppConfig::from_env()?;
             let db = postgres::connect_admin(&cfg).await?;
             match command {
                 ProjectCommand::Register(args) => {
@@ -74,6 +85,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Namespace { command } => {
+            let cfg = config::AppConfig::from_env()?;
             let db = postgres::connect_admin(&cfg).await?;
             match command {
                 NamespaceCommand::Ensure(args) => {
@@ -91,6 +103,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Relation { command } => {
+            let cfg = config::AppConfig::from_env()?;
             let db = postgres::connect_admin(&cfg).await?;
             match command {
                 RelationCommand::Add(args) => {
@@ -115,6 +128,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Context { command } => {
+            let cfg = config::AppConfig::from_env()?;
             compatibility::assert_supported(&cfg).await?;
             let mut db = postgres::connect_admin(&cfg).await?;
             match command {
@@ -126,6 +140,7 @@ async fn main() -> Result<()> {
         }
         Command::Index { command } => match command {
             IndexCommand::Project(args) => {
+                let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 let mut db = postgres::connect_admin(&cfg).await?;
                 let stats = indexer::index_project(&cfg, &mut db, &args).await?;
@@ -156,53 +171,64 @@ async fn main() -> Result<()> {
         },
         Command::Verify { command } => match command {
             VerifyCommand::Benchmark(args) => {
+                let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 let mut db = postgres::connect_admin(&cfg).await?;
                 verify::run_benchmark(&cfg, &mut db, &args).await?;
             }
             VerifyCommand::TokenBenchmark(args) => {
+                let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 let mut db = postgres::connect_admin(&cfg).await?;
                 verify::run_token_benchmark(&cfg, &mut db, &args).await?;
             }
             VerifyCommand::TokenBenchmarkSuite(args) => {
+                let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 let mut db = postgres::connect_admin(&cfg).await?;
                 verify::run_token_benchmark_suite(&cfg, &mut db, &args).await?;
             }
             VerifyCommand::Accuracy(args) => {
+                let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 let mut db = postgres::connect_admin(&cfg).await?;
                 verify::run_accuracy(&cfg, &mut db, &args).await?;
             }
             VerifyCommand::Load(args) => {
+                let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 verify::run_load(&cfg, &args).await?;
             }
             VerifyCommand::Hostile(args) => {
+                let cfg = config::AppConfig::from_env()?;
                 verify::run_hostile(&cfg, &args).await?;
             }
             VerifyCommand::Mcp(args) => {
+                let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 mcp::run_smoke_proof(&cfg, &args).await?;
             }
         },
         Command::Observe { command } => match command {
             ObserveCommand::Snapshot => {
+                let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 observe::print_snapshot(&cfg).await?;
             }
             ObserveCommand::SlaCheck => {
+                let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 observe::run_sla_check(&cfg).await?;
             }
             ObserveCommand::Serve(args) => {
+                let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 observe::serve_metrics(&cfg, &args.bind).await?;
             }
         },
         Command::Mcp { command } => match command {
             McpCommand::Serve => {
+                let cfg = config::AppConfig::from_env()?;
                 mcp::serve(&cfg).await?;
             }
             McpCommand::Config(args) => {

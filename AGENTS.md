@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 16:33 MSK
-Ручная сверка guide/docs: 2026-03-20 16:33 MSK
+modified_at: 2026-03-20 19:38 MSK
+Ручная сверка guide/docs: 2026-03-20 19:38 MSK
 
 # AGENTS.md для Art-memory-agent-index (Amai)
 
@@ -28,7 +28,10 @@ modified_at: 2026-03-20 16:33 MSK
 - `scripts/status.sh`
 
 Если стек ещё не materialized:
-- `scripts/bootstrap_stack.sh`
+- самый простой путь:
+  - `scripts/onboard_local.sh --client vscode`
+- инженерный ручной путь:
+  - `scripts/bootstrap_stack.sh`
 
 ## 3. Главный закон
 
@@ -86,13 +89,16 @@ CLI/binary canonical short name:
 ## 7. Канонический runnable path
 
 Минимальный runnable порядок для нового агента:
-1. `scripts/bootstrap_stack.sh`
-2. `scripts/status.sh`
-3. `cargo run -- compat check`
-4. `cargo run -- project register ...`
-5. `cargo run -- namespace ensure ...`
-6. `cargo run -- index project ...`
-7. `cargo run -- context pack ...`
+1. для простого локального старта:
+   - `scripts/onboard_local.sh --client vscode`
+2. для ручного инженерного пути:
+   - `scripts/bootstrap_stack.sh`
+   - `scripts/status.sh`
+   - `cargo run -- compat check`
+   - `cargo run -- project register ...`
+   - `cargo run -- namespace ensure ...`
+   - `cargo run -- index project ...`
+   - `cargo run -- context pack ...`
 
 Для жёсткого локального proof:
 - `scripts/proof_local.sh`
