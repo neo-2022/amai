@@ -1216,16 +1216,24 @@ fn savings_status(value: Option<u64>) -> &'static str {
 }
 
 fn status_for_metric_prefix(snapshot: &Value, prefix: &str) -> &'static str {
-    let mut current = "unknown";
+    let mut current: Option<&str> = None;
     for check in snapshot["sla"]["checks"].as_array().into_iter().flatten() {
         let metric = check["metric"].as_str().unwrap_or_default();
         if !metric.starts_with(prefix) {
             continue;
         }
         let status = check["status"].as_str().unwrap_or("unknown");
-        current = worst_status(current, status);
+        current = Some(match current {
+            Some(existing) => worst_status(existing, status),
+            None => match status {
+                "pass" => "pass",
+                "alert" => "alert",
+                "critical" => "critical",
+                _ => "unknown",
+            },
+        });
     }
-    current
+    current.unwrap_or("unknown")
 }
 
 fn worst_status(left: &str, right: &str) -> &'static str {
@@ -1250,8 +1258,8 @@ fn status_rank(status: &str) -> u8 {
     match status {
         "critical" => 4,
         "alert" => 3,
-        "unknown" => 2,
-        "pass" => 1,
+        "pass" => 2,
+        "unknown" => 1,
         _ => 0,
     }
 }
@@ -1450,6 +1458,7 @@ mod tests {
     fn critical_status_wins() {
         assert_eq!(worst_status("pass", "critical"), "critical");
         assert_eq!(worst_status("alert", "unknown"), "alert");
+        assert_eq!(worst_status("unknown", "pass"), "pass");
     }
 
     #[test]

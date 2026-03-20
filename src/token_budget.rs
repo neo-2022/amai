@@ -6,12 +6,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tiktoken_rs::{CoreBPE, cl100k_base, o200k_base};
 use tokio_postgres::Client;
+use uuid::Uuid;
 
 const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
 
@@ -32,6 +34,10 @@ struct MeasurementConfig {
     naive_max_bytes_per_file: usize,
     #[serde(default)]
     include_verify_events_by_default: bool,
+    #[serde(default = "default_preliminary_min_events")]
+    preliminary_min_events: u64,
+    #[serde(default = "default_preliminary_min_baseline_tokens")]
+    preliminary_min_baseline_tokens: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,18 +60,35 @@ struct ResolvedProfile {
 #[derive(Debug, Clone)]
 struct TokenBudgetEvent {
     created_at_epoch_ms: i64,
+    event_id: String,
+    timestamp_utc: i64,
     snapshot_kind: String,
     source_kind: String,
+    traffic_class: String,
     project: String,
     namespace: String,
     query: String,
+    query_hash: String,
+    query_type: String,
+    cold_warm_state: String,
+    baseline_strategy: String,
     retrieval_mode: Option<String>,
     tokenizer: String,
     saved_tokens: u64,
     naive_tokens: u64,
     context_tokens: u64,
+    recovery_tokens: u64,
+    effective_saved_tokens: i64,
     savings_factor: f64,
     savings_percent: f64,
+    effective_savings_percent: f64,
+    quality_ok: bool,
+    quality_score: f64,
+    quality_method: String,
+    fallback_triggered: bool,
+    fallback_count: u64,
+    sources_count: u64,
+    chunks_count: u64,
 }
 
 #[derive(Debug)]
@@ -82,6 +105,14 @@ struct NaiveScopeFile {
 struct NaiveScope {
     files: Vec<Value>,
     rendered_files: Vec<NaiveScopeFile>,
+}
+
+fn default_preliminary_min_events() -> u64 {
+    50
+}
+
+fn default_preliminary_min_baseline_tokens() -> u64 {
+    100_000
 }
 
 pub async fn print_report(db: &Client, args: &ObserveTokenReportArgs) -> Result<()> {
@@ -152,11 +183,18 @@ pub async fn record_verify_benchmark_event(db: &Client, benchmark_payload: &Valu
         .ok_or_else(|| anyhow!("token benchmark payload missing token_benchmark root"))?;
     let event = json!({
         "token_budget_event": {
+            "event_id": Uuid::new_v4(),
+            "timestamp_utc": current_epoch_ms()?,
             "source_kind": "verify_token_benchmark",
+            "traffic_class": "verify",
             "payload_origin": "verify_token_benchmark",
             "project": benchmark["project"].clone(),
             "namespace": benchmark["namespace"].clone(),
             "query": benchmark["query"].clone(),
+            "query_hash": hex_sha256(benchmark["query"].as_str().unwrap_or_default().as_bytes()),
+            "query_type": "unknown",
+            "cold_warm_state": "benchmark",
+            "baseline_strategy": "naive_top_files",
             "retrieval_mode": benchmark["retrieval_mode"].clone(),
             "tokenizer": benchmark["tokenizer"].clone(),
             "naive_limit_files": benchmark["naive_limit_files"].clone(),
@@ -164,6 +202,20 @@ pub async fn record_verify_benchmark_event(db: &Client, benchmark_payload: &Valu
             "visible_projects": benchmark["visible_projects"].clone(),
             "naive_scope": benchmark["naive_scope"].clone(),
             "context_pack_render": benchmark["context_pack_render"].clone(),
+            "recovery": {
+                "recovery_tokens": 0,
+                "fallback_triggered": false,
+                "fallback_count": 0,
+            },
+            "quality": {
+                "quality_ok": true,
+                "quality_score": 1.0,
+                "quality_method": "benchmark_assumption",
+            },
+            "shape": {
+                "sources_count": 0,
+                "chunks_count": 0,
+            },
             "savings": benchmark["savings"].clone()
         }
     });
@@ -205,7 +257,7 @@ async fn collect_report(
         .last()
         .map(event_to_json)
         .unwrap_or_else(|| json!(null));
-    let source_breakdown = source_breakdown(&events);
+    let source_breakdown = source_breakdown(&events, &config.measurement);
 
     Ok(json!({
         "token_budget_report": {
@@ -215,18 +267,20 @@ async fn collect_report(
                 "description": profile.description,
                 "session_gap_minutes": profile.session_gap_minutes,
                 "rolling_window_hours": profile.rolling_window_hours,
+                "preliminary_min_events": config.measurement.preliminary_min_events,
+                "preliminary_min_baseline_tokens": config.measurement.preliminary_min_baseline_tokens,
             },
             "filters": {
                 "include_verify_events": include_verify_events,
             },
             "latest_event": latest_event,
-            "current_session": summarize_events(&session_events, now_epoch_ms),
+            "current_session": summarize_events(&session_events, now_epoch_ms, &config.measurement),
             "rolling_window": if profile.rolling_window_hours.is_some() {
-                summarize_events(&rolling_window_events, now_epoch_ms)
+                summarize_events(&rolling_window_events, now_epoch_ms, &config.measurement)
             } else {
                 json!(null)
             },
-            "lifetime": summarize_events(&events, now_epoch_ms),
+            "lifetime": summarize_events(&events, now_epoch_ms, &config.measurement),
             "source_breakdown": source_breakdown,
         }
     }))
@@ -315,31 +369,93 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .or(fallback_source_kind)
         .unwrap_or("unknown")
         .to_string();
+    let traffic_class = node["traffic_class"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| derive_traffic_class(&source_kind));
     let project = node["project"].as_str().unwrap_or_default().to_string();
     let namespace = node["namespace"].as_str().unwrap_or_default().to_string();
     let query = node["query"].as_str().unwrap_or_default().to_string();
+    let query_hash = node["query_hash"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| hex_sha256(query.as_bytes()));
+    let query_type = node["query_type"].as_str().unwrap_or("unknown").to_string();
+    let cold_warm_state = node["cold_warm_state"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    let baseline_strategy = node["baseline_strategy"]
+        .as_str()
+        .unwrap_or("naive_top_files")
+        .to_string();
     let retrieval_mode = node["retrieval_mode"].as_str().map(ToOwned::to_owned);
     let tokenizer = node["tokenizer"].as_str().unwrap_or_default().to_string();
+    let event_id = node["event_id"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("{}-{}", row.snapshot_kind, row.created_at_epoch_ms));
+    let timestamp_utc = node["timestamp_utc"]
+        .as_i64()
+        .unwrap_or(row.created_at_epoch_ms);
     let saved_tokens = node["savings"]["saved_tokens"].as_u64().unwrap_or(0);
     let naive_tokens = node["naive_scope"]["tokens"].as_u64().unwrap_or(0);
     let context_tokens = node["context_pack_render"]["tokens"].as_u64().unwrap_or(0);
+    let recovery_tokens = node["recovery"]["recovery_tokens"].as_u64().unwrap_or(0);
+    let effective_saved_tokens = node["savings"]["effective_saved_tokens"]
+        .as_i64()
+        .unwrap_or_else(|| naive_tokens as i64 - (context_tokens as i64 + recovery_tokens as i64));
     let savings_factor = node["savings"]["savings_factor"].as_f64().unwrap_or(0.0);
     let savings_percent = node["savings"]["savings_percent"].as_f64().unwrap_or(0.0);
+    let effective_savings_percent = node["savings"]["effective_savings_percent"]
+        .as_f64()
+        .unwrap_or_else(|| percent_from_signed(effective_saved_tokens, naive_tokens));
+    let quality_ok = node["quality"]["quality_ok"].as_bool().unwrap_or(false);
+    let quality_score = node["quality"]["quality_score"]
+        .as_f64()
+        .unwrap_or(if quality_ok { 1.0 } else { 0.0 });
+    let quality_method = node["quality"]["quality_method"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    let fallback_triggered = node["recovery"]["fallback_triggered"]
+        .as_bool()
+        .unwrap_or(false);
+    let fallback_count = node["recovery"]["fallback_count"].as_u64().unwrap_or(0);
+    let sources_count = node["shape"]["sources_count"].as_u64().unwrap_or(0);
+    let chunks_count = node["shape"]["chunks_count"].as_u64().unwrap_or(0);
 
     Ok(Some(TokenBudgetEvent {
         created_at_epoch_ms: row.created_at_epoch_ms,
+        event_id,
+        timestamp_utc,
         snapshot_kind: row.snapshot_kind.clone(),
         source_kind,
+        traffic_class,
         project,
         namespace,
         query,
+        query_hash,
+        query_type,
+        cold_warm_state,
+        baseline_strategy,
         retrieval_mode,
         tokenizer,
         saved_tokens,
         naive_tokens,
         context_tokens,
+        recovery_tokens,
+        effective_saved_tokens,
         savings_factor,
         savings_percent,
+        effective_savings_percent,
+        quality_ok,
+        quality_score,
+        quality_method,
+        fallback_triggered,
+        fallback_count,
+        sources_count,
+        chunks_count,
     }))
 }
 
@@ -363,16 +479,31 @@ fn current_session_events(
     session
 }
 
-fn summarize_events(events: &[TokenBudgetEvent], now_epoch_ms: i64) -> Value {
+fn summarize_events(
+    events: &[TokenBudgetEvent],
+    now_epoch_ms: i64,
+    measurement: &MeasurementConfig,
+) -> Value {
     if events.is_empty() {
         return json!({
             "events_total": 0,
+            "events_count": 0,
+            "counted_events": 0,
+            "preliminary": true,
             "total_saved_tokens": 0,
+            "total_effective_saved_tokens": 0,
+            "verified_effective_saved_tokens": 0,
             "total_naive_tokens": 0,
             "total_context_tokens": 0,
+            "total_recovery_tokens": 0,
+            "gross_savings_pct": 0.0,
+            "effective_savings_pct": 0.0,
+            "verified_effective_savings_pct": 0.0,
             "savings_percent": 0.0,
             "savings_factor": 0.0,
             "avg_saved_tokens_per_event": 0.0,
+            "quality_ok_rate": 0.0,
+            "fallback_rate": 0.0,
             "started_at_epoch_ms": Value::Null,
             "ended_at_epoch_ms": Value::Null,
             "age_ms_since_latest": Value::Null,
@@ -382,17 +513,48 @@ fn summarize_events(events: &[TokenBudgetEvent], now_epoch_ms: i64) -> Value {
     let total_saved_tokens = events.iter().map(|event| event.saved_tokens).sum::<u64>();
     let total_naive_tokens = events.iter().map(|event| event.naive_tokens).sum::<u64>();
     let total_context_tokens = events.iter().map(|event| event.context_tokens).sum::<u64>();
-    let savings_percent = if total_naive_tokens == 0 {
+    let total_recovery_tokens = events
+        .iter()
+        .map(|event| event.recovery_tokens)
+        .sum::<u64>();
+    let total_effective_saved_tokens = events
+        .iter()
+        .map(|event| event.effective_saved_tokens)
+        .sum::<i64>();
+    let verified_events = events
+        .iter()
+        .filter(|event| event.traffic_class == "live" && event.quality_ok)
+        .collect::<Vec<_>>();
+    let verified_effective_saved_tokens = verified_events
+        .iter()
+        .map(|event| event.effective_saved_tokens)
+        .sum::<i64>();
+    let verified_baseline_tokens = verified_events
+        .iter()
+        .map(|event| event.naive_tokens)
+        .sum::<u64>();
+    let gross_savings_pct = if total_naive_tokens == 0 {
         0.0
     } else {
         total_saved_tokens as f64 * 100.0 / total_naive_tokens as f64
     };
+    let effective_savings_pct =
+        percent_from_signed(total_effective_saved_tokens, total_naive_tokens);
+    let verified_effective_savings_pct =
+        percent_from_signed(verified_effective_saved_tokens, verified_baseline_tokens);
     let savings_factor = if total_context_tokens == 0 {
         total_naive_tokens as f64
     } else {
         total_naive_tokens as f64 / total_context_tokens as f64
     };
     let avg_saved_tokens_per_event = total_saved_tokens as f64 / events.len() as f64;
+    let quality_ok_events = events.iter().filter(|event| event.quality_ok).count() as f64;
+    let fallback_events = events
+        .iter()
+        .filter(|event| event.fallback_triggered)
+        .count() as f64;
+    let quality_ok_rate = quality_ok_events * 100.0 / events.len() as f64;
+    let fallback_rate = fallback_events * 100.0 / events.len() as f64;
     let started_at_epoch_ms = events
         .first()
         .map(|event| event.created_at_epoch_ms)
@@ -402,21 +564,35 @@ fn summarize_events(events: &[TokenBudgetEvent], now_epoch_ms: i64) -> Value {
         .map(|event| event.created_at_epoch_ms)
         .unwrap_or_default();
 
+    let preliminary = events.len() < measurement.preliminary_min_events as usize
+        || total_naive_tokens < measurement.preliminary_min_baseline_tokens;
+
     json!({
         "events_total": events.len(),
+        "events_count": events.len(),
+        "counted_events": verified_events.len(),
+        "preliminary": preliminary,
         "total_saved_tokens": total_saved_tokens,
+        "total_effective_saved_tokens": total_effective_saved_tokens,
+        "verified_effective_saved_tokens": verified_effective_saved_tokens,
         "total_naive_tokens": total_naive_tokens,
         "total_context_tokens": total_context_tokens,
-        "savings_percent": savings_percent,
+        "total_recovery_tokens": total_recovery_tokens,
+        "gross_savings_pct": gross_savings_pct,
+        "effective_savings_pct": effective_savings_pct,
+        "verified_effective_savings_pct": verified_effective_savings_pct,
+        "savings_percent": gross_savings_pct,
         "savings_factor": savings_factor,
         "avg_saved_tokens_per_event": avg_saved_tokens_per_event,
+        "quality_ok_rate": quality_ok_rate,
+        "fallback_rate": fallback_rate,
         "started_at_epoch_ms": started_at_epoch_ms,
         "ended_at_epoch_ms": ended_at_epoch_ms,
         "age_ms_since_latest": now_epoch_ms.saturating_sub(ended_at_epoch_ms),
     })
 }
 
-fn source_breakdown(events: &[TokenBudgetEvent]) -> Value {
+fn source_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementConfig) -> Value {
     let mut grouped = BTreeMap::<String, Vec<TokenBudgetEvent>>::new();
     for event in events {
         grouped
@@ -430,7 +606,13 @@ fn source_breakdown(events: &[TokenBudgetEvent]) -> Value {
             .map(|(source_kind, items)| {
                 json!({
                     "source_kind": source_kind,
-                    "summary": summarize_events(&items, items.last().map(|item| item.created_at_epoch_ms).unwrap_or_default()),
+                    "summary": summarize_events(
+                        &items,
+                        items.last()
+                            .map(|item| item.created_at_epoch_ms)
+                            .unwrap_or_default(),
+                        measurement,
+                    ),
                 })
             })
             .collect(),
@@ -440,18 +622,35 @@ fn source_breakdown(events: &[TokenBudgetEvent]) -> Value {
 fn event_to_json(event: &TokenBudgetEvent) -> Value {
     json!({
         "created_at_epoch_ms": event.created_at_epoch_ms,
+        "event_id": event.event_id,
+        "timestamp_utc": event.timestamp_utc,
         "snapshot_kind": event.snapshot_kind,
         "source_kind": event.source_kind,
+        "traffic_class": event.traffic_class,
         "project": event.project,
         "namespace": event.namespace,
         "query": event.query,
+        "query_hash": event.query_hash,
+        "query_type": event.query_type,
+        "cold_warm_state": event.cold_warm_state,
+        "baseline_strategy": event.baseline_strategy,
         "retrieval_mode": event.retrieval_mode,
         "tokenizer": event.tokenizer,
         "saved_tokens": event.saved_tokens,
         "naive_tokens": event.naive_tokens,
         "context_tokens": event.context_tokens,
+        "recovery_tokens": event.recovery_tokens,
+        "effective_saved_tokens": event.effective_saved_tokens,
         "savings_factor": event.savings_factor,
         "savings_percent": event.savings_percent,
+        "effective_savings_percent": event.effective_savings_percent,
+        "quality_ok": event.quality_ok,
+        "quality_score": event.quality_score,
+        "quality_method": event.quality_method,
+        "fallback_triggered": event.fallback_triggered,
+        "fallback_count": event.fallback_count,
+        "sources_count": event.sources_count,
+        "chunks_count": event.chunks_count,
     })
 }
 
@@ -472,6 +671,9 @@ fn build_event_payload(
     let naive_tokens = tokenizer.encode_with_special_tokens(&naive_prompt).len();
     let context_tokens = tokenizer.encode_with_special_tokens(&context_prompt).len();
     let saved_tokens = naive_tokens.saturating_sub(context_tokens);
+    let recovery_tokens = 0_u64;
+    let effective_saved_tokens =
+        naive_tokens as i64 - (context_tokens as i64 + recovery_tokens as i64);
     let savings_factor = if context_tokens == 0 {
         naive_tokens as f64
     } else {
@@ -482,14 +684,37 @@ fn build_event_payload(
     } else {
         saved_tokens as f64 * 100.0 / naive_tokens as f64
     };
+    let effective_savings_percent =
+        percent_from_signed(effective_saved_tokens, naive_tokens as u64);
+    let (quality_ok, quality_score, quality_method) = derive_quality_verdict(payload);
+    let fallback_count = count_lexical_fallback_chunks(payload) as u64;
+    let fallback_triggered = fallback_count > 0;
+    let sources_count = count_sources(payload) as u64;
+    let chunks_count = count_chunks(payload) as u64;
+    let event_id = payload["context_pack_id"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let timestamp_utc = current_epoch_ms()?;
 
     Ok(json!({
         "token_budget_event": {
+            "event_id": event_id,
+            "timestamp_utc": timestamp_utc,
             "source_kind": source_kind,
+            "traffic_class": "live",
             "payload_origin": payload_origin,
             "project": payload["project"]["code"].clone(),
             "namespace": payload["namespace"]["code"].clone(),
             "query": payload["query"].clone(),
+            "query_hash": hex_sha256(payload["query"].as_str().unwrap_or_default().as_bytes()),
+            "query_type": "unknown",
+            "cold_warm_state": if payload["retrieval_runtime"]["cache_hit"].as_bool().unwrap_or(false) {
+                "warm"
+            } else {
+                "cold"
+            },
+            "baseline_strategy": "naive_top_files",
             "retrieval_mode": payload["effective_retrieval_mode"].clone(),
             "tokenizer": measurement.tokenizer,
             "naive_limit_files": measurement.naive_limit_files,
@@ -505,13 +730,109 @@ fn build_event_payload(
                 "rendered_bytes": context_prompt.len(),
                 "tokens": context_tokens,
             },
+            "recovery": {
+                "recovery_tokens": recovery_tokens,
+                "fallback_triggered": fallback_triggered,
+                "fallback_count": fallback_count,
+            },
+            "quality": {
+                "quality_ok": quality_ok,
+                "quality_score": quality_score,
+                "quality_method": quality_method,
+            },
+            "shape": {
+                "sources_count": sources_count,
+                "chunks_count": chunks_count,
+            },
             "savings": {
                 "saved_tokens": saved_tokens,
+                "effective_saved_tokens": effective_saved_tokens,
                 "savings_factor": savings_factor,
                 "savings_percent": savings_percent,
+                "effective_savings_percent": effective_savings_percent,
             }
         }
     }))
+}
+
+fn derive_traffic_class(source_kind: &str) -> String {
+    if source_kind.starts_with("live_") {
+        "live".to_string()
+    } else if source_kind.starts_with("verify_") {
+        "verify".to_string()
+    } else if source_kind.starts_with("proof_") {
+        "proof".to_string()
+    } else if source_kind.starts_with("benchmark_") {
+        "benchmark".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn derive_quality_verdict(payload: &Value) -> (bool, f64, &'static str) {
+    let exact_hits = payload["retrieval"]["exact_documents"]
+        .as_array()
+        .map_or(0, Vec::len);
+    let symbol_hits = payload["retrieval"]["symbol_hits"]
+        .as_array()
+        .map_or(0, Vec::len);
+    let lexical_hits = payload["retrieval"]["lexical_chunks"]
+        .as_array()
+        .map_or(0, Vec::len);
+    let semantic_hits = payload["retrieval"]["semantic_chunks"]
+        .as_array()
+        .map_or(0, Vec::len);
+    let semantic_guard_abstained = payload["quality"]["semantic_guard"]["abstained"]
+        .as_bool()
+        .unwrap_or(false);
+    let total_hits = exact_hits + symbol_hits + lexical_hits + semantic_hits;
+    let quality_ok = total_hits > 0 && !semantic_guard_abstained;
+    let quality_score = if quality_ok { 1.0 } else { 0.0 };
+    (quality_ok, quality_score, "retrieval_parity")
+}
+
+fn count_lexical_fallback_chunks(payload: &Value) -> usize {
+    payload["retrieval"]["semantic_chunks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|chunk| chunk["retrieval_strategy"].as_str() == Some("lexical_fallback"))
+        .count()
+}
+
+fn count_sources(payload: &Value) -> usize {
+    let retrieval = &payload["retrieval"];
+    retrieval["exact_documents"].as_array().map_or(0, Vec::len)
+        + retrieval["symbol_hits"].as_array().map_or(0, Vec::len)
+        + retrieval["lexical_chunks"].as_array().map_or(0, Vec::len)
+        + retrieval["semantic_chunks"].as_array().map_or(0, Vec::len)
+}
+
+fn count_chunks(payload: &Value) -> usize {
+    let retrieval = &payload["retrieval"];
+    retrieval["lexical_chunks"].as_array().map_or(0, Vec::len)
+        + retrieval["semantic_chunks"].as_array().map_or(0, Vec::len)
+}
+
+fn current_epoch_ms() -> Result<i64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as i64)
+}
+
+fn percent_from_signed(saved_tokens: i64, baseline_tokens: u64) -> f64 {
+    if baseline_tokens == 0 {
+        0.0
+    } else {
+        saved_tokens as f64 * 100.0 / baseline_tokens as f64
+    }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }
 
 fn collect_naive_scope(
