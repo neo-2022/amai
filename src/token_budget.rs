@@ -343,7 +343,7 @@ async fn load_events(
     let mut events = Vec::new();
     for row in rows {
         if let Some(event) = parse_snapshot_event(&row)? {
-            if !include_verify_events && event.source_kind.starts_with("verify_") {
+            if !include_traffic_class_in_report(&event.traffic_class, include_verify_events) {
                 continue;
             }
             events.push(event);
@@ -771,6 +771,10 @@ fn derive_traffic_class(source_kind: &str) -> String {
     }
 }
 
+fn include_traffic_class_in_report(traffic_class: &str, include_verify_events: bool) -> bool {
+    include_verify_events || traffic_class == "live"
+}
+
 fn derive_query_type(query: &str) -> &'static str {
     let lowered = query.to_lowercase();
 
@@ -1176,7 +1180,7 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_query_type, derive_traffic_class};
+    use super::{derive_query_type, derive_traffic_class, include_traffic_class_in_report};
 
     #[test]
     fn traffic_class_comes_from_source_kind_prefix() {
@@ -1185,6 +1189,17 @@ mod tests {
         assert_eq!(derive_traffic_class("proof_hostile"), "proof");
         assert_eq!(derive_traffic_class("benchmark_hot_path"), "benchmark");
         assert_eq!(derive_traffic_class("custom_unknown"), "unknown");
+    }
+
+    #[test]
+    fn default_product_report_is_live_only() {
+        assert!(include_traffic_class_in_report("live", false));
+        assert!(!include_traffic_class_in_report("verify", false));
+        assert!(!include_traffic_class_in_report("proof", false));
+        assert!(!include_traffic_class_in_report("benchmark", false));
+        assert!(include_traffic_class_in_report("verify", true));
+        assert!(include_traffic_class_in_report("proof", true));
+        assert!(include_traffic_class_in_report("benchmark", true));
     }
 
     #[test]
