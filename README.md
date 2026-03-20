@@ -1,275 +1,76 @@
-modified_at: 2026-03-20 21:53 MSK
-Ручная сверка guide/docs: 2026-03-20 21:53 MSK
+modified_at: 2026-03-20 21:56 MSK
+Ручная сверка guide/docs: 2026-03-20 21:56 MSK
 
 # Art-memory-agent-index (Amai)
 
 ![Amai lockup](brand/amai_lockup.svg)
 
-Amai — это отдельный внешний инструмент для ИИ-агентов.
-Он помогает агентам работать сразу с несколькими репозиториями и при этом не путать их между собой.
+`Amai` — это отдельный внешний инструмент для ИИ-агентов.
+Он нужен для того, чтобы агент:
+- не начинал каждую новую сессию с нуля;
+- не путал один проект с другим;
+- быстро находил код и документы;
+- получал уже собранный полезный контекст вместо лишнего шума.
 
-Проще говоря, Amai делает четыре вещи:
-- запоминает, с каким проектом сейчас работает агент;
-- индексирует код и документы так, чтобы их можно было быстро находить;
-- собирает для агента готовую подборку полезного контекста по запросу;
-- не даёт по умолчанию смешивать данные разных проектов.
+Это не плагин только для одной IDE.
+Это отдельный backend/tooling contour, который можно подключать к:
+- `VS Code`
+- `Cursor`
+- `JetBrains IDE`
+- `CLI`
+- `CI`
+- другим агентным клиентам через `MCP`
 
-Это не плагин для одной IDE.
-Это самостоятельный backend/tooling проект, который можно использовать из VS Code, Cursor, JetBrains, CLI или другого agent runtime.
+## Что это простыми словами
 
-## Это не просто общий чат
+`Amai` — не “один бесконечный общий чат”.
 
-Важно понять главную идею:
+Правильнее думать о нём так:
+- у агента есть `рабочий стол`
+  - короткие важные правила и текущая вводная;
+- есть `архив`
+  - код, документы, история решений и артефакты;
+- есть `общая доска`
+  - важные вещи, которые могут видеть несколько агентов;
+- есть `готовая подборка`
+  - уже собранный контекст под конкретный запрос.
 
-`Amai` не делает “один бесконечный общий чат”.
-Он делает для агента постоянное рабочее пространство с памятью и правилами.
-
-Разница простыми словами:
-- обычный чат
-  - почти каждый новый запуск начинается заново;
-  - важные вещи приходится повторять;
-  - один проект легко перепутать с другим;
-- `Amai`
-  - агент поднимает уже существующий рабочий контур;
-  - знает, с каким проектом он сейчас работает;
-  - знает, что нужно видеть всегда, а что нужно искать по запросу;
-  - не смешивает проекты по умолчанию.
-
-Хорошая бытовая аналогия:
-- обычный чат — это случайный исполнитель, которому каждый раз заново всё объясняют;
-- `Amai` — это постоянный помощник, у которого есть:
-  - рабочий стол;
-  - шкаф с архивом;
-  - общая доска для команды;
-  - быстрый поиск по коду и документам.
-
-## Как память разложена по полочкам
-
-Чтобы не путаться, полезно представлять `Amai` так:
-
-- `память на столе`
-  - это короткие важные правила и текущие рабочие вводные;
-  - агент видит их сразу;
-  - сюда не кладут весь проект целиком.
-- `архив`
-  - это большой запас материалов, который не нужно держать перед глазами всё время;
-  - туда попадают документы, код, история решений, артефакты;
-  - агент идёт туда только когда это действительно нужно.
-- `общая доска`
-  - это память, которой могут пользоваться несколько агентов;
-  - один агент обновил важное правило, другие это сразу увидели.
-- `готовая подборка`
-  - это уже собранный пакет нужных материалов под конкретный запрос;
-  - агент получает не весь проект, а только полезный контекст для следующего шага.
-
-Именно поэтому `Amai` — это не просто “вечный чат”, а “долгоживущая память с порядком”.
+То есть `Amai` делает не “вечную болтовню”, а долговременную память с порядком.
 
 ## Что это даёт обычному человеку
 
-Если говорить без инженерного жаргона, `Amai` нужен затем, чтобы:
-- не повторять одно и то же ИИ снова и снова;
-- не путать один проект с другим;
-- не тратить лишние токены на повторный ввод контекста;
-- быстрее получать полезную подборку материалов;
-- сохранять важные решения между сессиями;
-- подключать один и тот же внешний инструмент к разным IDE и агентам.
+Если без инженерного жаргона, `Amai` полезен тем, что:
+- не нужно повторять ИИ одно и то же снова и снова;
+- меньше шанс, что ИИ перепутает проекты;
+- меньше тратятся токены на повторный ввод контекста;
+- проще подключить один и тот же внешний инструмент к разным IDE;
+- важные решения и правила не пропадают между сессиями.
 
-## Что означают ключевые термины
+## Быстрый путь для обычного пользователя
 
-- `проект`
-  - отдельный репозиторий или рабочий корень, который агент должен видеть как самостоятельную сущность;
-- `рабочая область проекта` (`namespace`)
-  - именованная зона внутри проекта для правил поиска и доступа;
-- `поиск контекста` (`retrieval`)
-  - поиск нужных документов, символов, фрагментов кода и связанных материалов;
-- `поиск по смыслу` (`semantic search`)
-  - поиск не по точному совпадению слов, а по похожему смыслу;
-- `готовая подборка контекста` (`context pack`)
-  - собранный пакет найденных материалов с указанием происхождения каждого фрагмента;
-- `provenance`
-  - явное указание, из какого проекта, файла и места в коде пришёл фрагмент.
-- `MCP`
-  - общий стандарт, через который IDE и ИИ-клиенты могут подключаться к внешнему инструменту как к серверу возможностей.
+Если вы хотите самый простой и понятный сценарий, делайте так:
 
-Клиентами могут быть:
-- VS Code;
-- Cursor;
-- JetBrains IDE;
-- CLI-агенты;
-- CI;
-- web UI;
-- локальные orchestrators.
+1. Откройте терминал в папке `Amai`.
+2. Сначала проверьте, подходит ли машина.
+3. Если всё устраивает, запустите установку.
+4. Когда `Amai` спросит подтверждение, напишите `ДА`.
+5. В конце он сам скажет:
+   - куда записал config;
+   - какой клиент выбрал;
+   - что делать дальше;
+   - что эта машина реально потянет.
 
-## Стек
-
-- `PostgreSQL`
-- `Qdrant`
-- `S3-compatible object storage`
-- `NATS Core + JetStream`
-- `tree-sitter`
-- `SQLite edge cache`
-- `LanceDB` только optional на edge
-- `Milvus` только как future scale-up replacement path
-- `config/observability.toml` как machine-readable SLA / observability профиль
-
-## Parser Baseline
-
-Текущий code-structure слой materialize-ится не через агрегирующий pack, а через прямые Rust grammar crates поверх `tree-sitter`.
-
-Сейчас реальный AST/symbol path покрывает:
-- `rust`
-- `toml`
-- `javascript`
-- `typescript`
-- `tsx`
-- `json`
-
-Для остальных расширений проект пока делает честный `lexical-only fallback`, не ломая весь ingest.
-
-## Карта Файлов Текущего Уровня
-
-- `AGENTS.md`
-  - обязательный вход для любого нового ИИ.
-- `README.md`
-  - краткий вход и карта проекта.
-- `Cargo.toml`
-  - Rust package, зависимости и бинарь `amai`.
-- `compose.yaml`
-  - локальный runnable stack.
-- `.env.example`
-  - обязательный конфигурационный шаблон.
-
-## Карта Поддоменов
-
-- `brand/`
-  - канонический branding contour проекта: lockup, mark, favicon и brand spec.
-- `docs/`
-  - подробная архитектура, схема данных, операции и lifecycle.
-- `config/`
-  - конфиги сервисов, compatibility profile и machine-readable client target registry.
-- `sql/`
-  - каноническая схема PostgreSQL и seed-данные.
-- `scripts/`
-  - bootstrap, status и helper wrappers.
-- `fixtures/`
-  - нейтральные маленькие проекты для hardening и recovery proof.
-- `src/`
-  - Rust CLI и runtime bootstrap/index logic.
-- `docs/MCP_INTEGRATION.md`
-  - простой вход для подключения `Amai` к MCP-клиентам.
-- `tests/`
-  - локальные smoke и unit checks.
-- `state/`
-  - локальные данные контейнеров, не трекаются в git.
-- `tmp/`
-  - временные runtime-артефакты.
-
-## Branding
-
-Brand-pack проекта теперь хранится прямо в repo:
-- [brand/README.md](/home/art/agent-memory-index/brand/README.md)
-- [brand/amai_lockup.svg](/home/art/agent-memory-index/brand/amai_lockup.svg)
-- [brand/amai_mark.svg](/home/art/agent-memory-index/brand/amai_mark.svg)
-- [brand/favicon.ico](/home/art/agent-memory-index/brand/favicon.ico)
-- [brand/amai_brand_spec.md](/home/art/agent-memory-index/brand/amai_brand_spec.md)
-
-Правило использования:
-- `README` и docs используют lockup;
-- favicon и compact icon используют square mark или `favicon.ico`.
-
-## Самый простой старт
-
-Если вам нужен путь “запустить как можно проще”, используйте одну команду:
-
-```bash
-cd /home/art/agent-memory-index
-./scripts/install_amai.sh
-```
-
-Самый короткий product path теперь такой:
-- `./scripts/install_amai.sh`
-  - `Amai` сам пытается определить подходящий клиент;
-  - потом делает install path под него.
-- `./scripts/remove_amai.sh`
-  - симметрично убирает `Amai` из client config.
-
-Если auto-detect выбрал не тот клиент, всегда можно указать явно:
-
-```bash
-./scripts/install_amai.sh --client vscode
-./scripts/install_amai.sh --client cursor
-./scripts/remove_amai.sh --client codex
-```
-
-Если нужен дешёвый удалённый smoke/demo режим на маленьком VPS, используйте явный профиль:
-
-```bash
-./scripts/onboard_lite_vps.sh --client vscode
-```
-
-Что она делает сама:
-- создаёт `.env`, если его ещё нет;
-- досинхронизирует недостающие переменные из `.env.example`;
-- поднимает локальный stack;
-- прогоняет bootstrap схемы и служебных слоёв;
-- собирает `release` binary;
-- создаёт готовый MCP config для выбранного клиента.
-
-Для `VS Code` это почти путь “поднял и пользуйся”:
-- onboarding пишет config в `.vscode/mcp.json`;
-- потом обычно достаточно открыть repo в VS Code и сделать `Reload Window`.
-
-Для других клиентов onboarding тоже упрощает работу:
-- `Cursor` по умолчанию получает auto-install в user config;
-- `Codex` по умолчанию получает auto-install в user config;
-- `Claude Code` получает workspace-local `.mcp.json`;
-- `Claude Desktop` и `generic` пока получают готовый generated file для ручного импорта.
-
-## Профили установки простыми словами
-
-У `Amai` теперь есть не просто “один режим на все случаи”, а два понятных профиля:
-
-- `default`
-  - это нормальный основной режим для сильной локальной машины;
-  - он подходит для:
-    - полного bootstrap;
-    - индексации реальных проектов;
-    - жёстких proof/benchmark контуров;
-    - observability и monitoring path.
-- `lite_vps`
-  - это режим для дешёвого удалённого сервера;
-  - он подходит для:
-    - `remote MCP`;
-    - маленьких fixture-проектов;
-    - smoke/demo/pilot-install;
-    - удалённого SSH-подключения клиента.
-
-Главное отличие простыми словами:
-- `default` = “хочу нормальную рабочую базу и честные сильные проверки”;
-- `lite_vps` = “хочу дешёвый удалённый сервер для жизни продукта, но без обещания рекордных benchmark-цифр”.
-
-`lite_vps` честно **не** обещает:
-- топовые speed-рекорды;
-- большие real-project индексы;
-- heavy monitoring на том же маленьком сервере;
-- canonical `50/100/200 worker` performance baseline.
-
-## Как понять, подходит ли машина
-
-Нормальный пользовательский путь здесь теперь такой:
-- сначала посмотреть понятный вывод о машине;
-- потом, если всё устраивает, запустить установку;
-- во время установки подтвердить решение словом `ДА`.
+## Шаг 1. Проверка машины
 
 ### Linux и macOS
 
-Если терминал открыт в папке `Amai`, вставьте:
+Основной локальный профиль:
 
 ```bash
 ./scripts/preflight.sh --stack-profile default
 ```
 
-Для дешёвого удалённого профиля:
+Дешёвый удалённый профиль:
 
 ```bash
 ./scripts/preflight.sh --stack-profile lite_vps
@@ -277,11 +78,13 @@ cd /home/art/agent-memory-index
 
 ### Windows PowerShell
 
+Основной локальный профиль:
+
 ```powershell
 .\scripts\preflight.ps1 --stack-profile default
 ```
 
-Для дешёвого удалённого профиля:
+Дешёвый удалённый профиль:
 
 ```powershell
 .\scripts\preflight.ps1 --stack-profile lite_vps
@@ -289,126 +92,255 @@ cd /home/art/agent-memory-index
 
 ### Windows CMD
 
+Основной локальный профиль:
+
 ```bat
 scripts\preflight.cmd --stack-profile default
 ```
 
-Для дешёвого удалённого профиля:
+Дешёвый удалённый профиль:
 
 ```bat
 scripts\preflight.cmd --stack-profile lite_vps
 ```
 
-Что показывает эта проверка:
-- какой профиль вы выбрали;
+Что покажет проверка:
+- какой профиль выбран;
 - сколько у машины CPU, памяти и диска;
-- подходит ли машина под минимум;
+- подходит ли машина;
 - где есть риски;
-- чего от такого режима вообще ждать.
+- что можно ожидать от такого режима.
 
-То есть обычному человеку не нужно гадать, “потянет или нет”.
-`Amai` сам объясняет это понятным текстом.
+## Шаг 2. Установка
 
-## Как выглядит установка для обычного человека
-
-Самый короткий и нормальный путь теперь такой:
+Самая короткая установка:
 
 ```bash
 ./scripts/install_amai.sh
 ```
 
-Что произойдёт дальше:
-- `Amai` сначала сам покажет, подходит ли машина;
-- потом простыми словами скажет, что именно будет сделано;
-- затем попросит явное подтверждение:
-  - если согласны, нужно написать `ДА`;
-- только после этого начнётся установка;
-- в конце `Amai` покажет:
-  - куда записался config;
-  - какой клиент был выбран;
-  - что делать дальше;
-  - на что в целом тянет эта машина.
+Что делает эта команда:
+- показывает понятную проверку машины;
+- объясняет, что именно будет сделано;
+- просит подтвердить установку словом `ДА`;
+- создаёт или досинхронизирует `.env`;
+- поднимает stack;
+- собирает binary;
+- пишет MCP config для клиента;
+- печатает финальную сводку.
 
-## Как теперь выглядит путь для обычного человека
-
-Самый простой сценарий теперь такой:
-
-1. скачать `Amai`
-2. перейти в каталог проекта
-3. выполнить:
+Если `auto-detect` выбрал не тот клиент, можно указать явно:
 
 ```bash
-./scripts/install_amai.sh
+./scripts/install_amai.sh --client vscode
+./scripts/install_amai.sh --client cursor
+./scripts/install_amai.sh --client codex
 ```
 
-Что происходит дальше:
-- `Amai` пытается понять, какой клиент у вас наиболее вероятен;
-- сначала проверяет, подходит ли машина под выбранный deployment profile;
-- просит подтверждение словом `ДА`, прежде чем что-то менять;
-- если это локальный path, дособирает `.env`, stack и client config;
-- в конце показывает, что установилось и что делать дальше.
+## Шаг 3. Если нужно удалить
 
-То есть путь уже ближе не к “инженер собери всё руками”, а к:
-- “скачал”
-- “запустил одну команду”
-- “перезагрузил клиент”
-
-Если нужен не Linux-style runner, а другой launcher target:
-- `Amai` теперь умеет генерировать MCP config с учётом платформы launcher'а;
-- это особенно важно для Windows-клиентов.
-
-Примеры:
+Симметричное удаление:
 
 ```bash
-./scripts/onboard_local.sh --client vscode
-./scripts/onboard_local.sh --client cursor
-./scripts/onboard_local.sh --client codex
-./scripts/onboard_local.sh --client cursor --launcher-platform windows-powershell
-./scripts/disconnect_local.sh --client codex
+./scripts/remove_amai.sh
 ```
 
-## Инженерный старт вручную
-
-Если вы хотите пройти тот же путь по шагам и видеть каждое действие отдельно:
-
-1. Скопировать `.env.example` в `.env`
-2. Запустить локальный стек:
+Или явно для конкретного клиента:
 
 ```bash
-cd /home/art/agent-memory-index
-./scripts/bootstrap_stack.sh
+./scripts/remove_amai.sh --client vscode
+./scripts/remove_amai.sh --client codex
 ```
 
-Что важно проверить в `.env` сразу:
-- `AMI_DEFAULT_RETRIEVAL_MODE`
-  - базовый режим изоляции по умолчанию;
-- `AMI_LOCAL_FAST_CACHE_TTL_MS`
-  - окно жизни process-local hot cache в миллисекундах;
-  - этот cache ускоряет повторные `context pack` запросы, но не заменяет PostgreSQL, SQLite и S3 persistence.
-- `AMI_WARMUP_PROJECTS`
-  - необязательный список уже зарегистрированных project codes для автоматического cold-start warmup после `bootstrap_stack.sh`;
-- `AMI_OBSERVE_BIND`
-  - bind-адрес встроенного Rust exporter для Prometheus scrape.
+## Если нужен дешёвый VPS
 
-3. Проверить, что всё поднялось:
+Если вы хотите не сильную локальную машину, а маленький удалённый сервер для:
+- `remote MCP`
+- smoke/demo
+- pilot-install
+
+используйте профиль `lite_vps`.
+
+Простой путь:
 
 ```bash
-./scripts/status.sh
+./scripts/onboard_lite_vps.sh --client vscode
 ```
 
-Если cold-start нужно прогреть сразу после bootstrap:
+Важно понимать честно:
+- `lite_vps` подходит для лёгкого удалённого режима;
+- он не обещает рекордные benchmark-цифры;
+- он не рассчитан на тяжёлый monitoring на том же слабом хосте;
+- он не является профилем для больших real-project индексов.
+
+## Если `Amai` живёт на Linux/VPS, а IDE у вас на Windows или macOS
+
+Это нормальный сценарий.
+
+В таком случае хороший короткий путь:
+
+```bash
+./scripts/onboard_remote_client.sh \
+  --client vscode \
+  --ssh-destination ops@example-host \
+  --remote-repo-root /srv/amai
+```
+
+Что это значит:
+- сам `Amai` живёт на сервере;
+- базы живут рядом с ним;
+- локально у вас только клиент;
+- клиент запускает удалённый `Amai` через `ssh`;
+- наружу не нужно выставлять `PostgreSQL`, `Qdrant`, `NATS` и `S3`.
+
+## Два режима установки
+
+У `Amai` сейчас есть два понятных профиля.
+
+### `default`
+
+Это основной режим для нормальной локальной машины.
+
+Он подходит для:
+- полного локального bootstrap;
+- индексации реальных проектов;
+- жёстких proof и benchmark-контуров;
+- observability и monitoring.
+
+### `lite_vps`
+
+Это режим для дешёвого удалённого сервера.
+
+Он подходит для:
+- `remote MCP`;
+- маленьких fixture-проектов;
+- smoke и demo;
+- лёгкого удалённого product path.
+
+Главная разница простыми словами:
+- `default` = полноценная рабочая база;
+- `lite_vps` = дешёвый удалённый режим без обещания топовых цифр.
+
+## Что `Amai` делает внутри
+
+Внутри у `Amai` есть несколько важных слоёв.
+
+### 1. Изоляция проектов
+
+Это главный закон проекта:
+- новый `repo_root` считается отдельным проектом;
+- смешивать проекты по умолчанию нельзя;
+- чтение другого проекта разрешается только по явным relation/policy правилам.
+
+### 2. Поиск идёт не одним способом
+
+`Amai` не опирается только на embeddings.
+
+Он ищет так:
+1. exact/lexical поиск;
+2. symbols и структура кода;
+3. semantic поиск;
+4. сборка готового `context pack` с указанием источника каждого фрагмента.
+
+### 3. Контекст даётся не всем куском проекта
+
+Агент получает не “весь репозиторий в голову”, а:
+- нужные документы;
+- нужные символы;
+- нужные куски кода;
+- provenance каждого куска;
+- measured token savings contour.
+
+## К чему можно подключать
+
+`Amai` умеет работать через `MCP`.
+
+Это значит, что совместимый клиент может просить у него:
+- список проектов;
+- список namespaces;
+- `context pack`;
+- warmup cache;
+- token benchmark;
+- observability snapshot.
+
+Понятный walkthrough для подключения:
+- [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)
+
+## Честно о скорости и пределах
+
+### Что уже очень сильное
+
+У проекта уже materialized сильный `hot cached retrieval` contour.
+
+На референсной машине:
+- `proof_load.sh`
+  - `p95 = 0.022 ms`
+  - `qps ≈ 62 266`
+- `proof_stress_scale.sh`
+  - `50 workers`
+    - `p95 = 0.026 ms`
+    - `qps ≈ 384 024`
+  - `100 workers`
+    - `p95 = 0.023 ms`
+    - `qps ≈ 434 593`
+  - `200 workers`
+    - `p95 = 0.020 ms`
+    - `qps ≈ 670 016`
+
+### Что важно не путать
+
+Нельзя смешивать:
+- `hot path`
+- `cold path`
+
+Cold path всё ещё измеряется десятками миллисекунд.
+Поэтому для приятного cold-start UX полезен warmup:
 
 ```bash
 ./scripts/warmup_cache.sh --projects project_alpha,project_beta
 ```
 
-Важно:
-- пример выше использует условные project codes;
-- bootstrap не пришит к конкретным продуктам;
-- автоматический warmup сработает только если в `.env` задан `AMI_WARMUP_PROJECTS` и такие проекты уже зарегистрированы;
-- если проектов ещё нет, bootstrap честно пропустит warmup и продолжит поднимать stack.
+### На каком железе это измерялось
 
-Дополнительно можно прогнать:
+Референсная машина:
+- CPU:
+  - `AMD Ryzen 9 7900X 12-Core Processor`
+  - `24` логических CPU
+- RAM:
+  - `62 GiB`
+
+Это не означает, что такие же цифры magically появятся на более слабом железе.
+Но на таком же или более сильном железе эти proof-команды должны повторяться.
+
+## Если нужен ручной инженерный путь
+
+Если вы хотите не product path, а ручной контроль над каждым шагом:
+
+```bash
+cp .env.example .env
+./scripts/bootstrap_stack.sh
+./scripts/status.sh
+```
+
+Потом можно:
+- зарегистрировать проекты;
+- зарегистрировать relation graph;
+- индексировать код;
+- собирать `context pack`;
+- запускать proof-контуры.
+
+Примеры:
+
+```bash
+cargo run -- project register --code project_alpha --display-name "Project Alpha" --repo-root /path/to/project-alpha
+cargo run -- namespace ensure --project project_alpha --code review
+cargo run -- index project --code project_alpha --path /path/to/project-alpha --namespace review
+cargo run -- context pack --project project_alpha --namespace review --query "how configuration is loaded"
+```
+
+## Ключевые proof-команды
+
+Если нужен честный локальный proof:
 
 ```bash
 ./scripts/proof_local.sh
@@ -423,443 +355,70 @@ cd /home/art/agent-memory-index
 ./scripts/proof_onboarding.sh
 ./scripts/proof_client_lifecycle.sh
 ./scripts/proof_stress_scale.sh
-```
-
-4. Зарегистрировать свои проекты:
-
-```bash
-cargo run -- project register --code project_alpha --display-name "Project Alpha" --repo-root /path/to/project-alpha
-cargo run -- project register --code project_beta --display-name "Project Beta" --repo-root /path/to/project-beta
-cargo run -- relation add --source project_alpha --target project_beta --relation-type shared_runtime --shared-contour common_contour --access-mode local_plus_related
-```
-
-Или после первого `cargo build`:
-
-```bash
-./target/debug/amai project register --code project_alpha --display-name "Project Alpha" --repo-root /path/to/project-alpha
-```
-
-## Подключение через MCP
-
-`Amai` теперь materialize-ит и собственный MCP server.
-Это значит, что совместимые клиенты могут запрашивать у него:
-- список зарегистрированных проектов;
-- namespace внутри проекта;
-- context pack;
-- token benchmark;
-- observability snapshot;
-- warmup cache.
-
-Минимальный путь:
-1. самый простой путь:
-   - `./scripts/onboard_local.sh --client vscode`
-2. если нужен ручной путь:
-   - поднять stack через `./scripts/bootstrap_stack.sh`
-   - собрать release binary:
-
-```bash
-cargo build --release
-```
-
-3. сгенерировать config snippet для нужного клиента:
-
-```bash
-./target/release/amai mcp config --client vscode --output .vscode/mcp.json
-./target/release/amai mcp config --client cursor
-./target/release/amai mcp config --client claude-code
-./target/release/amai mcp config --client claude-desktop
-./target/release/amai mcp config --client codex
-```
-
-Что важно:
-- клиенту не нужно хранить DSN, bucket names и другие внутренние runtime детали;
-- клиент запускает `Amai` через `scripts/run_mcp_stdio.sh`;
-- runner сам подтягивает `.env` и стартует `amai mcp serve`.
-- список default install targets теперь живёт не в коде README, а в:
-  - `config/client_targets.toml`
-- platform launcher для MCP теперь тоже управляется явно:
-  - `--launcher-platform auto`
-  - `--launcher-platform linux`
-  - `--launcher-platform macos`
-  - `--launcher-platform windows-cmd`
-  - `--launcher-platform windows-powershell`
-
-## Подключение и удаление
-
-`Amai` теперь умеет не только подключать client config, но и убирать его обратно.
-
-Примеры:
-
-```bash
-./scripts/onboard_local.sh --client vscode
-./scripts/onboard_local.sh --client cursor
-./scripts/onboard_local.sh --client codex
-
-./scripts/disconnect_local.sh --client vscode
-./scripts/disconnect_local.sh --client cursor
-./scripts/disconnect_local.sh --client codex
-```
-
-Для Windows-style MCP launcher generation:
-
-```bash
-./scripts/onboard_local.sh --client cursor --launcher-platform windows-powershell
-./target/release/amai mcp config --client codex --launcher-platform windows-cmd
-```
-
-Для удалённого `VPS` или Linux-сервера:
-
-```bash
-./target/release/amai mcp config \
-  --client vscode \
-  --ssh-destination ops@example-host \
-  --remote-repo-root /srv/amai
-```
-
-Если нужен не просто snippet, а уже готовая установка клиентского конфига под удалённый host:
-
-```bash
-./scripts/onboard_remote_client.sh \
-  --client vscode \
-  --ssh-destination ops@example-host \
-  --remote-repo-root /srv/amai
-```
-
-Что это значит простыми словами:
-- ваш клиент запускает не локальный `Amai`, а удалённый через `ssh`;
-- `PostgreSQL`, `Qdrant`, `NATS` и `S3` остаются рядом с `Amai` на сервере;
-- наружу не нужно торчать внутренними базами;
-- для `VS Code` на Windows/macOS это хороший честный путь, если сам `Amai` живёт на Linux-host.
-- если хочется самый короткий путь именно для клиента, теперь не нужно вручную собирать `mcp config`:
-  - достаточно вызвать `scripts/onboard_remote_client.sh`.
-
-Это важно по двум причинам:
-- обычному пользователю не нужно потом руками вычищать куски config;
-- install/remove превращается в симметричный product lifecycle, а не в одноразовый setup без обратного пути.
-
-Подробный human-readable walkthrough:
-- [docs/MCP_INTEGRATION.md](/home/art/agent-memory-index/docs/MCP_INTEGRATION.md)
-
-## Retrieval law
-
-Правильный retrieval order:
-1. определить активный проект;
-2. понять, можно ли смотреть только его или ещё связанные проекты;
-3. найти точные совпадения в Postgres;
-4. найти подходящие символы через tree-sitter;
-5. найти похожие по смыслу куски через Qdrant;
-6. собрать готовую подборку контекста с источником каждого фрагмента.
-
-## Сравнительный text contour
-
-`Amai` теперь умеет не только искать, но и сравнивать собственные retrieval-стратегии между собой.
-
-Простыми словами:
-- можно измерить, как ведёт себя полный `hybrid` path;
-- можно отдельно посмотреть `lexical-only`;
-- можно отдельно посмотреть `semantic-only`;
-- можно сравнить их с `naive scope`, где в модель почти без сокращения тянут весь видимый корпус.
-
-Это полезно, потому что дальше можно честно отвечать не словами “кажется лучше”, а цифрами:
-- где точность выше;
-- где coverage лучше;
-- сколько токенов реально экономится.
-
-Быстрый fixture proof:
-
-```bash
 ./scripts/proof_text_compare.sh
 ```
 
-## Измерения на референсном железе
+## Что означают ключевые слова
 
-Ниже не “красивые обещания”, а реальные локальные замеры на машине, где этот baseline materialize-ился:
+- `проект`
+  - отдельный репозиторий или рабочий корень;
+- `namespace`
+  - именованная рабочая зона внутри проекта;
+- `retrieval`
+  - поиск нужного контекста;
+- `semantic search`
+  - поиск по смыслу;
+- `context pack`
+  - готовая подборка нужных материалов;
+- `provenance`
+  - откуда именно пришёл каждый фрагмент;
+- `MCP`
+  - стандарт подключения внешнего инструмента к IDE и ИИ-клиентам.
 
-- CPU:
-  - `AMD Ryzen 9 7900X 12-Core Processor`
-  - `24` логических CPU
-- RAM:
-  - `62 GiB`
+## Карта Файлов Текущего Уровня
 
-Важно:
-- это не означает, что те же цифры magically появятся на более слабом железе;
-- но на таком же или более сильном железе эти proof-команды должны подтверждаться повторно.
+- `AGENTS.md`
+  - вход для нового ИИ-агента;
+- `README.md`
+  - главный человеческий вход;
+- `Cargo.toml`
+  - Rust package и binary `amai`;
+- `compose.yaml`
+  - локальный stack;
+- `.env.example`
+  - шаблон конфигурации.
 
-Текущий честный measured baseline:
-- `proof_load.sh`
-  - `execution_mode = hot_cache_only`
-  - `p95 = 0.022 ms`
-  - `qps ≈ 62 266`
-- `proof_stress_scale.sh`
-  - `50 workers`
-    - `p95 = 0.026 ms`
-    - `qps ≈ 384 024`
-  - `100 workers`
-    - `p95 = 0.023 ms`
-    - `qps ≈ 434 593`
-  - `200 workers`
-    - `p95 = 0.020 ms`
-    - `qps ≈ 670 016`
-- `cold retrieval`
-  - practical fixture baseline остаётся на десятках миллисекунд, а не на hot-cache цифрах;
-  - для честного low-latency UX cold-start стоит прогревать через `warmup_cache.sh`.
+## Карта Поддоменов
 
-## Важный guard: hot path не трогать
+- `brand/`
+  - branding contour проекта;
+- `docs/`
+  - подробная архитектура, lifecycle и операции;
+- `config/`
+  - machine-readable registry и профили;
+- `sql/`
+  - схема PostgreSQL;
+- `scripts/`
+  - пользовательские и инженерные launcher-скрипты;
+- `fixtures/`
+  - нейтральные test fixtures;
+- `src/`
+  - Rust CLI и runtime логика;
+- `tests/`
+  - локальные проверки;
+- `state/`
+  - локальные runtime-данные;
+- `tmp/`
+  - временные артефакты.
 
-Сейчас у `Amai` есть особенно сильный выигранный контур:
-- process-local `hot cached retrieval`
-- без лишних Postgres connections на каждого worker
-- с честным `scope_signature = local_fast_cache`
+## Куда идти дальше
 
-Это означает:
-- для `hot` path не нужно снова лезть в PostgreSQL, если ответ уже лежит в process-local fast cache;
-- любые будущие refactor-изменения обязаны сохранять этот fast path;
-- если новый код снова заставит `verify load` открывать DB connection на каждого worker, это считается регрессом, а не “архитектурной чисткой”.
-
-Простыми словами:
-- cold path можно улучшать отдельно;
-- hot path уже топовый, его нельзя случайно испортить ради красивого рефактора.
-
-Ручной запуск:
-
-```bash
-cargo run -- verify text-compare \
-  --project project_alpha \
-  --namespace review \
-  --retrieval-mode local_plus_related \
-  --cases-file fixtures/text_compare_cases.jsonl
-```
-
-Важно:
-- unsupported parser language не должен валить индексирующий проход целиком;
-- сначала сохраняется lexical/provenance baseline, затем по мере появления grammar coverage расширяется AST contour.
-- запрошенный `namespace` внутри проекта тоже является частью границы поиска:
-  - `default` не должен молча подтягивать результаты из `smoke`;
-  - related project участвует только если у него есть такой же `namespace` code.
-
-## Context Pack
-
-`Amai` теперь materialize-ит не только indexing, но и agent-facing retrieval/context-pack contour:
-
-```bash
-cargo run -- context pack \
-  --project project_alpha \
-  --namespace review \
-  --query "how configuration is loaded" \
-  --retrieval-mode local_strict
-```
-
-Команда:
-- делает exact lookup по documents;
-- делает symbol lookup;
-- делает lexical chunk lookup;
-- сначала пытается сделать semantic chunk recall через Qdrant;
-- если vector tier временно не даёт usable hits, честно деградирует в lexical fallback вместо пустого semantic слоя;
-- если нет exact/symbol/lexical evidence и semantic hits не перекрывают query terms по path/content, `Amai` честно возвращает пустой semantic слой вместо слабого шума;
-- собирает provenance-rich context pack;
-- пишет его в PostgreSQL, SQLite edge cache и S3 context bucket.
-
-## Verification contour
-
-В проекте теперь есть отдельный verification layer, а не только smoke-скрипты.
-
-Прямые Rust-команды:
-
-```bash
-cargo run -- verify benchmark \
-  --project project_alpha \
-  --namespace review \
-  --query "shared_runtime_marker" \
-  --retrieval-mode local_plus_related \
-  --warmup 1 \
-  --iterations 5 \
-  --persist
-
-cargo run -- verify accuracy \
-  --project project_alpha \
-  --related-project project_beta \
-  --namespace review
-
-cargo run -- verify load \
-  --project project_alpha \
-  --namespace review \
-  --query "shared_runtime_marker" \
-  --retrieval-mode local_plus_related \
-  --workers 2 \
-  --iterations-per-worker 25
-
-cargo run -- verify token-benchmark \
-  --project project_alpha \
-  --namespace review \
-  --query "shared_runtime_marker" \
-  --retrieval-mode local_plus_related \
-  --tokenizer o200k_base
-
-cargo run -- verify token-benchmark-suite \
-  --project project_alpha \
-  --namespace review \
-  --retrieval-mode local_plus_related \
-  --queries-file fixtures/token_benchmark_queries.txt \
-  --tokenizer o200k_base
-
-cargo run -- verify hostile --scenario all
-```
-
-Что они доказывают:
-- `verify benchmark`
-  - мерит живой `context pack` path по времени;
-  - выдаёт `mean/p50/p95/max`;
-  - считает время в микросекундах и публикует его как дробные миллисекунды, чтобы быстрый hot-path не схлопывался в ложный `0ms`;
-  - может fail-ить при нарушении заданных latency thresholds;
-- `verify hostile`
-  - проверяет fail-closed реакцию на partial-service loss;
-  - проверяет recovery после возврата сервиса;
-  - отдельно проверяет drift в `stack_meta`.
-- `verify accuracy`
-  - доказывает `cross_project_leakage = 0`;
-  - мерит `symbol_precision` и `semantic_precision`;
-  - сохраняет snapshot `retrieval_accuracy`.
-- `verify load`
-  - мерит concurrent hot-load contour;
-  - выдаёт `qps`, `error_rate`, `p50/p95/p99/max`;
-  - сохраняет snapshot `retrieval_load_hot`.
-- `verify token-benchmark`
-  - мерит, сколько токенов потребовал бы наивный полный scope без retrieval reduction;
-  - сравнивает это с компактным LLM-ready render текущего `context pack`;
-  - сохраняет snapshot `token_benchmark`;
-  - даёт продуктовую цифру реальной экономии контекста для пользователя.
-- `verify token-benchmark-suite`
-  - гоняет не один запрос, а список типовых запросов на одном и том же stack contour;
-  - считает `mean/p50/p95` по `saved_tokens`, `savings_factor`, `savings_percent`;
-  - сохраняет snapshot `token_benchmark_suite`;
-  - нужен для более честного product proof, который другой инженер сможет повторить не на одной удачной фразе, а на серии запросов.
-
-Текущий materialized guardrail:
-- `hot retrieval p95 < 10ms`
-- `concurrent hot-load p95 < 10ms`
-- `concurrent hot-load qps >= 5000`
-- `cross_project_leakage = 0`
-
-## Observability contour
-
-Теперь в проекте materialized и отдельный observability/SLA слой:
-
-```bash
-cargo run --release -- observe snapshot
-cargo run --release -- observe sla-check
-./scripts/run_observe_exporter.sh
-./scripts/monitoring_up.sh
-```
-
-Что он делает:
-- снимает live snapshot по `PostgreSQL`, `Qdrant`, `NATS` и `S3-compatible storage`;
-- подтягивает последние benchmark/index snapshots из PostgreSQL;
-- считает SLA-статусы по machine-readable профилю [observability.toml](/home/art/agent-memory-index/config/observability.toml);
-- отделяет `hot retrieval` от `cold retrieval`, чтобы не подменять одно другим.
-- публикует Prometheus metrics через встроенный Rust exporter, не делая write-side persistence на каждый scrape.
-
-Сейчас snapshot показывает как минимум:
-- `PostgreSQL`
-  - `connection_usage_ratio`
-  - `query_probe_p95_ms`
-  - `transactions_total`
-  - `deadlocks_total`
-  - `wal_bytes_total`
-- `Qdrant`
-  - `collections_vector_total`
-  - `running_optimizations`
-  - `update_queue_length`
-  - `memory_resident_bytes`
-  - cold retrieval `semantic_search_ms p95` через последний cold benchmark
-- `NATS / JetStream`
-  - `publish_probe_p95_ms`
-  - `consumer_lag_msgs`
-  - `jetstream_disk_usage_ratio`
-- `Retrieval`
-  - отдельные `hot` и `cold` benchmark snapshots
-- `Indexing`
-  - `files_per_min`
-  - `parser_coverage_ratio`
-  - `language_breakdown`
-- `Accuracy`
-  - `cross_project_leakage`
-  - `symbol_precision`
-  - `semantic_precision`
-- `Load`
-  - `hot_qps`
-  - `hot_error_rate`
-
-Production monitoring profile materialized в repo:
-- [config/prometheus/prometheus.yml](/home/art/agent-memory-index/config/prometheus/prometheus.yml)
-- [config/prometheus/rules/alerts.yml](/home/art/agent-memory-index/config/prometheus/rules/alerts.yml)
-- [config/grafana/dashboards/amai_stack.json](/home/art/agent-memory-index/config/grafana/dashboards/amai_stack.json)
-- [scripts/render_monitoring_config.sh](/home/art/agent-memory-index/scripts/render_monitoring_config.sh)
-
-Ключевые runtime metrics, которые теперь есть в `/metrics`:
-- `amai_qdrant_index_optimize_queue`
-- `amai_nats_consumer_lag_msgs`
-- `amai_postgres_replica_lag_seconds`
-- `amai_retrieval_hot_p95_ms`
-- `amai_retrieval_cold_p95_ms`
-- `amai_load_hot_qps`
-- `amai_parser_coverage_ratio`
-- `amai_accuracy_cross_project_leakage`
-- `amai_tokens_naive_scope_total`
-- `amai_tokens_context_pack_total`
-- `amai_tokens_saved_total`
-- `amai_tokens_savings_factor`
-- `amai_tokens_savings_percent`
-
-Важно:
-- monitoring config не должен держать runtime ports/targets в жёстких литералах;
-- поэтому Prometheus/Grafana datasource config рендерятся из `.env` через `render_monitoring_config.sh` перед запуском monitoring profile.
-
-Важно:
-- `hot retrieval` означает работающий result-cache contour;
-- `cold retrieval` означает живой retrieval path без result-cache bypassing;
-- быстрый hot-path в `Amai` опирается на process-local fast cache с TTL из `.env`, но не отменяет durable persistence в PostgreSQL, SQLite edge cache и S3;
-- оба режима нужны одновременно, иначе нельзя честно оценить ни UX-скорость, ни реальную цену полного retrieval path.
-
-## Benchmark hardware baseline
-
-Текущие репозиторные цифры были materialized на локальном single-node host:
-- CPU: `AMD Ryzen 9 7900X`
-- topology: `12` физических ядер / `24` потока
-- max clock: `~5.7 GHz`
-- RAM: `62 GiB`
-- storage: `NVMe HS-SSD-G4000 2048G`
-- architecture: `x86_64`
-
-Это важно:
-- hot/cold цифры нужно сравнивать только с тем же proof contour;
-- если другой инженер запускает те же команды на железе не хуже, результаты должны подтверждаться в том же порядке величин;
-- scrape path и monitoring path специально отделены от hot retrieval path, чтобы observability не размывала latency baseline.
-
-## Защита от version drift
-
-В `Amai` есть отдельный compatibility contour:
-- machine-readable профиль: [compatibility.toml](/home/art/agent-memory-index/config/compatibility.toml)
-- live проверка:
-
-```bash
-cargo run -- compat check
-```
-
-Инструмент fail-closed ловит несовместимый drift по:
-- `PostgreSQL`
-- `Qdrant`
-- `NATS`
-- `stack_meta` schema/profile state
-
-Для S3-compatible слоя сейчас удерживается API-совместимость и family-check без жёсткой блокировки по vendor string.
-
-## Быстрый индексирующий smoke
-
-```bash
-cargo run -- index project \
-  --code project_alpha \
-  --path /path/to/project-alpha/src \
-  --namespace review \
-  --limit-files 5 \
-  --skip-embeddings
-```
+Если вам нужен:
+- понятный пользовательский путь:
+  - [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)
+- инженерный lifecycle:
+  - [docs/OPERATIONS.md](docs/OPERATIONS.md)
+- архитектурная глубина:
+  - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- branding:
+  - [brand/README.md](brand/README.md)
