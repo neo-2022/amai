@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 16:33 MSK
-Ручная сверка guide/docs: 2026-03-20 16:33 MSK
+modified_at: 2026-03-20 16:54 MSK
+Ручная сверка guide/docs: 2026-03-20 16:54 MSK
 
 # Operations
 
@@ -15,6 +15,13 @@ cd /home/art/agent-memory-index
 cp .env.example .env
 ./scripts/bootstrap_stack.sh
 ```
+
+Критичные `.env` поля:
+- `AMI_DEFAULT_RETRIEVAL_MODE`
+  - режим видимости по умолчанию;
+- `AMI_LOCAL_FAST_CACHE_TTL_MS`
+  - TTL для process-local hot cache;
+  - увеличивать его без нужды не стоит, потому что слишком длинное окно хуже для реактивности на relation/config drift.
 
 ## Status
 
@@ -124,6 +131,7 @@ cargo run -- context pack \
 - индексирует fixture-проекты с эмбеддингами;
 - гоняет и `hot`, и `cold` retrieval path;
 - мерит `mean/p50/p95/p99/max`;
+- считает hot-path в микросекундах и публикует его как дробные миллисекунды;
 - fail-ит, если practical latency baseline выходит за заданные thresholds.
 
 Прямая Rust-команда:
@@ -156,6 +164,10 @@ cargo run --release -- verify benchmark \
 Важно:
 - без `--disable-cache` измеряется `hot retrieval`;
 - с `--disable-cache` измеряется `cold retrieval`.
+
+Текущий репозиторный guard:
+- hot benchmark должен удерживать `p95 < 10ms`
+- hot benchmark должен удерживать `max < 15ms`
 
 ## Accuracy proof
 
@@ -199,6 +211,11 @@ cargo run --release -- verify load \
 - мерит concurrent hot-load contour;
 - выдаёт `qps`, `error_rate`, `p50/p95/p99/max`;
 - сохраняет snapshot `retrieval_load_hot`.
+
+Текущий репозиторный guard:
+- `qps >= 5000`
+- `p95 < 10ms`
+- `error_rate = 0`
 
 ## Hostile proof
 
@@ -274,6 +291,8 @@ cargo run --release -- observe sla-check
 - последние `index_project` и `retrieval_benchmark` snapshots;
 - последние `retrieval_accuracy` и `retrieval_load_hot` snapshots;
 - SLA-оценку по [observability.toml](/home/art/agent-memory-index/config/observability.toml).
+
+Сейчас hot retrieval stretch-goal в SLA считается только по реальному measured `p95_ms`, а не по округлению до целых миллисекунд.
 
 Сейчас `observe sla-check` fail-ит только если:
 - есть `critical` нарушение;

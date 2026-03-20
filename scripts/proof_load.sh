@@ -58,6 +58,6 @@ cargo run --release --quiet -- verify load \
   --workers 2 \
   --iterations-per-worker 25 \
   --warmup-per-worker 1 \
-  --min-qps 80 \
-  --max-p95-ms 40 \
+  --min-qps 5000 \
+  --max-p95-ms 10 \
   --max-error-rate 0

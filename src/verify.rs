@@ -28,7 +28,7 @@ pub async fn run_benchmark(
         retrieval::execute_context_pack(cfg, db, &args.context, args.persist).await?;
     }
 
-    let mut samples_ms = Vec::with_capacity(args.iterations);
+    let mut samples_us = Vec::with_capacity(args.iterations);
     let mut resolve_scope_samples = Vec::with_capacity(args.iterations);
     let mut cache_lookup_samples = Vec::with_capacity(args.iterations);
     let mut exact_lookup_samples = Vec::with_capacity(args.iterations);
@@ -43,7 +43,7 @@ pub async fn run_benchmark(
     for _ in 0..args.iterations {
         let started = Instant::now();
         let stats = retrieval::execute_context_pack(cfg, db, &args.context, args.persist).await?;
-        samples_ms.push(started.elapsed().as_millis());
+        samples_us.push(started.elapsed().as_micros());
         resolve_scope_samples.push(stats.timings.resolve_scope_ms);
         cache_lookup_samples.push(stats.timings.cache_lookup_ms);
         exact_lookup_samples.push(stats.timings.exact_lookup_ms);
@@ -58,7 +58,7 @@ pub async fn run_benchmark(
     }
 
     let last_stats = last_stats.ok_or_else(|| anyhow!("benchmark produced no samples"))?;
-    let mut sorted = samples_ms.clone();
+    let mut sorted = samples_us.clone();
     sorted.sort_unstable();
     let resolve_scope_p95_ms = sort_and_percentile(resolve_scope_samples, 95);
     let cache_lookup_p95_ms = sort_and_percentile(cache_lookup_samples, 95);
@@ -71,18 +71,20 @@ pub async fn run_benchmark(
     let serialize_p95_ms = sort_and_percentile(serialize_samples, 95);
     let persist_p95_ms = sort_and_percentile(persist_samples, 95);
 
-    let mean_ms = samples_ms.iter().sum::<u128>() as f64 / samples_ms.len() as f64;
-    let p50_ms = percentile_ms(&sorted, 50);
-    let p95_ms = percentile_ms(&sorted, 95);
-    let p99_ms = percentile_ms(&sorted, 99);
-    let max_ms = *sorted
-        .last()
-        .ok_or_else(|| anyhow!("benchmark sample set is unexpectedly empty"))?;
-    let total_elapsed_ms = samples_ms.iter().sum::<u128>();
-    let qps = if total_elapsed_ms == 0 {
-        args.iterations as f64 * 1000.0
+    let total_elapsed_us = samples_us.iter().sum::<u128>();
+    let mean_ms = sample_us_to_ms(total_elapsed_us) / samples_us.len() as f64;
+    let p50_ms = sample_us_to_ms(percentile_sample(&sorted, 50));
+    let p95_ms = sample_us_to_ms(percentile_sample(&sorted, 95));
+    let p99_ms = sample_us_to_ms(percentile_sample(&sorted, 99));
+    let max_ms = sample_us_to_ms(
+        *sorted
+            .last()
+            .ok_or_else(|| anyhow!("benchmark sample set is unexpectedly empty"))?,
+    );
+    let qps = if total_elapsed_us == 0 {
+        args.iterations as f64 * 1_000_000.0
     } else {
-        args.iterations as f64 * 1000.0 / total_elapsed_ms as f64
+        args.iterations as f64 * 1_000_000.0 / total_elapsed_us as f64
     };
 
     enforce_benchmark_thresholds(args, mean_ms, p95_ms, p99_ms, max_ms)?;
@@ -97,7 +99,7 @@ pub async fn run_benchmark(
             "persist": args.persist,
             "warmup": args.warmup,
             "iterations": args.iterations,
-            "samples_ms": samples_ms,
+            "samples_us": samples_us,
             "mean_ms": mean_ms,
             "p50_ms": p50_ms,
             "p95_ms": p95_ms,
@@ -323,14 +325,14 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
         let persist = args.persist;
         handles.push(tokio::spawn(async move {
             let mut db = postgres::connect_admin(&cfg).await?;
-            let mut samples_ms = Vec::with_capacity(iterations);
+            let mut samples_us = Vec::with_capacity(iterations);
             let mut error_count = 0_usize;
             let mut last_stats = None;
             for _ in 0..iterations {
                 let op_started = Instant::now();
                 match retrieval::execute_context_pack(&cfg, &mut db, &context, persist).await {
                     Ok(stats) => {
-                        samples_ms.push(op_started.elapsed().as_millis());
+                        samples_us.push(op_started.elapsed().as_micros());
                         last_stats = Some(stats);
                     }
                     Err(_) => {
@@ -338,7 +340,7 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
                     }
                 }
             }
-            Result::<_, anyhow::Error>::Ok((samples_ms, error_count, last_stats))
+            Result::<_, anyhow::Error>::Ok((samples_us, error_count, last_stats))
         }));
     }
 
@@ -353,7 +355,7 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
             last_stats = Some(stats);
         }
     }
-    let wall_clock_ms = started.elapsed().as_millis();
+    let wall_clock_us = started.elapsed().as_micros();
     let success_count = all_samples.len();
     let total_attempts = args.workers * args.iterations_per_worker;
     let error_rate = total_errors as f64 / total_attempts as f64;
@@ -363,17 +365,20 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
     }
     let mut sorted = all_samples.clone();
     sorted.sort_unstable();
-    let mean_ms = all_samples.iter().sum::<u128>() as f64 / all_samples.len() as f64;
-    let p50_ms = percentile_ms(&sorted, 50);
-    let p95_ms = percentile_ms(&sorted, 95);
-    let p99_ms = percentile_ms(&sorted, 99);
-    let max_ms = *sorted
-        .last()
-        .ok_or_else(|| anyhow!("load sample set is unexpectedly empty"))?;
-    let qps = if wall_clock_ms == 0 {
-        success_count as f64 * 1000.0
+    let total_elapsed_us = all_samples.iter().sum::<u128>();
+    let mean_ms = sample_us_to_ms(total_elapsed_us) / all_samples.len() as f64;
+    let p50_ms = sample_us_to_ms(percentile_sample(&sorted, 50));
+    let p95_ms = sample_us_to_ms(percentile_sample(&sorted, 95));
+    let p99_ms = sample_us_to_ms(percentile_sample(&sorted, 99));
+    let max_ms = sample_us_to_ms(
+        *sorted
+            .last()
+            .ok_or_else(|| anyhow!("load sample set is unexpectedly empty"))?,
+    );
+    let qps = if wall_clock_us == 0 {
+        success_count as f64 * 1_000_000.0
     } else {
-        success_count as f64 * 1000.0 / wall_clock_ms as f64
+        success_count as f64 * 1_000_000.0 / wall_clock_us as f64
     };
 
     enforce_load_thresholds(args, p95_ms, qps, error_rate)?;
@@ -394,7 +399,8 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
             "success_count": success_count,
             "error_count": total_errors,
             "error_rate": error_rate,
-            "wall_clock_ms": wall_clock_ms,
+            "wall_clock_ms": sample_us_to_ms(wall_clock_us),
+            "samples_us": all_samples,
             "mean_ms": mean_ms,
             "p50_ms": p50_ms,
             "p95_ms": p95_ms,
@@ -543,7 +549,7 @@ async fn docker_compose(args: &[&str]) -> Result<()> {
     ))
 }
 
-fn percentile_ms(sorted_samples: &[u128], percentile: usize) -> u128 {
+fn percentile_sample(sorted_samples: &[u128], percentile: usize) -> u128 {
     if sorted_samples.is_empty() {
         return 0;
     }
@@ -555,36 +561,40 @@ fn percentile_ms(sorted_samples: &[u128], percentile: usize) -> u128 {
 
 fn sort_and_percentile(mut samples: Vec<u128>, percentile: usize) -> u128 {
     samples.sort_unstable();
-    percentile_ms(&samples, percentile)
+    percentile_sample(&samples, percentile)
+}
+
+fn sample_us_to_ms(sample_us: u128) -> f64 {
+    sample_us as f64 / 1000.0
 }
 
 fn enforce_benchmark_thresholds(
     args: &VerifyBenchmarkArgs,
     mean_ms: f64,
-    p95_ms: u128,
-    p99_ms: u128,
-    max_ms: u128,
+    p95_ms: f64,
+    p99_ms: f64,
+    max_ms: f64,
 ) -> Result<()> {
     let mut violations = Vec::new();
     if let Some(limit) = args.max_mean_ms
         && mean_ms > limit as f64
     {
-        violations.push(format!("mean_ms={mean_ms:.2} exceeds {limit}"));
+        violations.push(format!("mean_ms={mean_ms:.3} exceeds {limit}"));
     }
     if let Some(limit) = args.max_p95_ms
-        && p95_ms > limit
+        && p95_ms > limit as f64
     {
-        violations.push(format!("p95_ms={p95_ms} exceeds {limit}"));
+        violations.push(format!("p95_ms={p95_ms:.3} exceeds {limit}"));
     }
     if let Some(limit) = args.max_p99_ms
-        && p99_ms > limit
+        && p99_ms > limit as f64
     {
-        violations.push(format!("p99_ms={p99_ms} exceeds {limit}"));
+        violations.push(format!("p99_ms={p99_ms:.3} exceeds {limit}"));
     }
     if let Some(limit) = args.max_max_ms
-        && max_ms > limit
+        && max_ms > limit as f64
     {
-        violations.push(format!("max_ms={max_ms} exceeds {limit}"));
+        violations.push(format!("max_ms={max_ms:.3} exceeds {limit}"));
     }
 
     if violations.is_empty() {
@@ -599,15 +609,15 @@ fn enforce_benchmark_thresholds(
 
 fn enforce_load_thresholds(
     args: &VerifyLoadArgs,
-    p95_ms: u128,
+    p95_ms: f64,
     qps: f64,
     error_rate: f64,
 ) -> Result<()> {
     let mut violations = Vec::new();
     if let Some(limit) = args.max_p95_ms
-        && p95_ms > limit
+        && p95_ms > limit as f64
     {
-        violations.push(format!("p95_ms={p95_ms} exceeds {limit}"));
+        violations.push(format!("p95_ms={p95_ms:.3} exceeds {limit}"));
     }
     if let Some(limit) = args.min_qps
         && qps < limit
@@ -683,19 +693,19 @@ fn precision_ratio(items: &Value, predicate: impl Fn(&Value) -> bool) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{item_belongs_to_project, percentile_ms, precision_ratio};
+    use super::{item_belongs_to_project, percentile_sample, precision_ratio};
     use serde_json::json;
 
     #[test]
     fn percentile_uses_ceil_rank() {
         let samples = vec![10_u128, 20, 30, 40, 50];
-        assert_eq!(percentile_ms(&samples, 50), 30);
-        assert_eq!(percentile_ms(&samples, 95), 50);
+        assert_eq!(percentile_sample(&samples, 50), 30);
+        assert_eq!(percentile_sample(&samples, 95), 50);
     }
 
     #[test]
     fn percentile_handles_empty_input() {
-        assert_eq!(percentile_ms(&[], 95), 0);
+        assert_eq!(percentile_sample(&[], 95), 0);
     }
 
     #[test]

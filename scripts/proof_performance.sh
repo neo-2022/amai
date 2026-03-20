@@ -58,10 +58,10 @@ cargo run --release --quiet -- verify benchmark \
   --warmup 1 \
   --iterations 10 \
   --persist \
-  --max-mean-ms 20 \
-  --max-p95-ms 20 \
-  --max-p99-ms 25 \
-  --max-max-ms 30
+  --max-mean-ms 10 \
+  --max-p95-ms 10 \
+  --max-p99-ms 10 \
+  --max-max-ms 15
 
 cargo run --release --quiet -- verify benchmark \
   --project project_alpha \

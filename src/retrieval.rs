@@ -80,6 +80,7 @@ struct LocalContextPackEntry {
     lexical_chunks: usize,
     semantic_chunks: usize,
     durably_persisted: bool,
+    cached_at_epoch_ms: u128,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -102,6 +103,8 @@ struct CacheHydrationContext<'a> {
 
 static QUERY_EMBEDDER: OnceLock<Mutex<Option<CachedQueryEmbedder>>> = OnceLock::new();
 static LOCAL_CONTEXT_PACK_CACHE: OnceLock<Mutex<HashMap<String, LocalContextPackEntry>>> =
+    OnceLock::new();
+static LOCAL_FAST_CONTEXT_PACK_CACHE: OnceLock<Mutex<HashMap<String, LocalContextPackEntry>>> =
     OnceLock::new();
 
 pub async fn build_context_pack(
@@ -148,11 +151,23 @@ pub async fn execute_context_pack_capture(
     args: &ContextPackArgs,
     persist: bool,
 ) -> Result<ContextPackResult> {
+    if !args.disable_cache
+        && let Some(effective_mode) = args.retrieval_mode.as_deref()
+    {
+        let cache_key = cache_key(cfg, args, effective_mode);
+        if let Some(cached) =
+            local_fast_context_pack_cache_get(&cache_key, cfg.local_fast_cache_ttl_ms)?
+            && (!persist || cached.durably_persisted)
+        {
+            return Ok(context_pack_result_from_local_entry(cached));
+        }
+    }
     let mut prepared = prepare_context_pack(cfg, db, args).await?;
     if persist {
         ensure_context_pack_persisted(cfg, db, args, &mut prepared).await?;
     }
-    cache_context_pack_entry(cfg, args, &prepared, persist || prepared.durably_persisted)?;
+    let durably_persisted = persist || prepared.durably_persisted;
+    cache_context_pack_entry(cfg, args, &prepared, durably_persisted)?;
     Ok(ContextPackResult {
         payload: prepared.payload.as_ref().clone(),
         stats: prepared.stats,
@@ -274,6 +289,7 @@ async fn prepare_context_pack(
         &visible_projects,
         &args.query,
         args.limit_semantic_chunks,
+        &chunks,
     )
     .await?;
     let visible_projects_json = json!(
@@ -486,6 +502,10 @@ fn cache_context_pack_entry(
         &prepared.scope_signature,
         &local_entry_from_prepared(prepared, durably_persisted),
     )?;
+    local_fast_context_pack_cache_put(
+        &prepared.cache_key,
+        &local_entry_from_prepared(prepared, durably_persisted),
+    )?;
     Ok(())
 }
 
@@ -538,6 +558,7 @@ async fn semantic_chunks(
     visible_projects: &[VisibleProjectRecord],
     query: &str,
     limit: usize,
+    lexical_fallback_chunks: &[ChunkHit],
 ) -> Result<(Vec<Value>, SemanticTimings)> {
     if limit == 0 {
         return Ok((Vec::new(), SemanticTimings::default()));
@@ -611,6 +632,36 @@ async fn semantic_chunks(
         );
         seen.insert(key)
     });
+    if hits.is_empty() && !lexical_fallback_chunks.is_empty() {
+        let exact_matches = lexical_fallback_chunks
+            .iter()
+            .filter(|chunk| chunk.content.contains(query))
+            .collect::<Vec<_>>();
+        let query_lower = query.to_lowercase();
+        let case_folded_matches = lexical_fallback_chunks
+            .iter()
+            .filter(|chunk| chunk.content.to_lowercase().contains(&query_lower))
+            .collect::<Vec<_>>();
+        let fallback_hits = if !exact_matches.is_empty() {
+            exact_matches
+        } else if !case_folded_matches.is_empty() {
+            case_folded_matches
+        } else {
+            lexical_fallback_chunks.iter().collect::<Vec<_>>()
+        };
+        return Ok((
+            fallback_hits
+                .iter()
+                .take(limit)
+                .map(|chunk| semantic_chunk_fallback_to_json(chunk))
+                .collect(),
+            SemanticTimings {
+                query_embed_ms,
+                search_ms,
+                hydrate_ms,
+            },
+        ));
+    }
     hits.truncate(limit);
     Ok((
         hits,
@@ -625,6 +676,34 @@ async fn semantic_chunks(
 fn semantic_chunk_to_json(chunk: &ChunkHit) -> Value {
     json!({
         "score": chunk.score,
+        "retrieval_strategy": "vector_search",
+        "project_code": chunk.project_code,
+        "namespace_code": chunk.namespace_code,
+        "relative_path": chunk.relative_path,
+        "content": chunk.content,
+        "provenance": {
+            "source_project": chunk.project_code,
+            "repo_root": chunk.repo_root,
+            "commit_sha": Value::Null,
+            "path": chunk.relative_path,
+            "symbol": Value::Null,
+            "chunk_id": chunk.chunk_id,
+            "source_kind": "code_chunk",
+            "trust_level": "local_repo"
+        },
+        "chunk": {
+            "chunk_index": chunk.chunk_index,
+            "start_line": chunk.start_line,
+            "end_line": chunk.end_line,
+            "metadata": chunk.metadata
+        }
+    })
+}
+
+fn semantic_chunk_fallback_to_json(chunk: &ChunkHit) -> Value {
+    json!({
+        "score": chunk.score,
+        "retrieval_strategy": "lexical_fallback",
         "project_code": chunk.project_code,
         "namespace_code": chunk.namespace_code,
         "relative_path": chunk.relative_path,
@@ -798,6 +877,7 @@ fn local_entry_from_prepared(
         lexical_chunks: prepared.stats.lexical_chunks,
         semantic_chunks: prepared.stats.semantic_chunks,
         durably_persisted,
+        cached_at_epoch_ms: now_epoch_ms(),
     }
 }
 
@@ -825,7 +905,68 @@ fn local_entry_from_edge(
         payload: Arc::new(payload),
         payload_json: Arc::from(cached.payload_json),
         durably_persisted: cached.durably_persisted,
+        cached_at_epoch_ms: now_epoch_ms(),
     })
+}
+
+fn context_pack_result_from_local_entry(cached: LocalContextPackEntry) -> ContextPackResult {
+    ContextPackResult {
+        payload: cached.payload.as_ref().clone(),
+        stats: ContextPackStats {
+            context_pack_id: cached.context_pack_id,
+            exact_documents: cached.exact_documents,
+            symbol_hits: cached.symbol_hits,
+            lexical_chunks: cached.lexical_chunks,
+            semantic_chunks: cached.semantic_chunks,
+            cache_hit: true,
+            scope_signature: "local_fast_cache".to_string(),
+            timings: ContextPackTimings {
+                resolve_scope_ms: 0,
+                cache_lookup_ms: 0,
+                exact_lookup_ms: 0,
+                symbol_lookup_ms: 0,
+                lexical_lookup_ms: 0,
+                query_embed_ms: 0,
+                semantic_search_ms: 0,
+                semantic_hydrate_ms: 0,
+                serialize_ms: 0,
+                persist_ms: 0,
+            },
+        },
+    }
+}
+
+fn local_fast_context_pack_cache_get(
+    cache_key: &str,
+    ttl_ms: u128,
+) -> Result<Option<LocalContextPackEntry>> {
+    let cache = LOCAL_FAST_CONTEXT_PACK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache
+        .lock()
+        .map_err(|_| anyhow!("local fast context-pack cache lock poisoned"))?;
+    let Some(entry) = guard.get(cache_key).cloned() else {
+        return Ok(None);
+    };
+    if now_epoch_ms().saturating_sub(entry.cached_at_epoch_ms) > ttl_ms {
+        guard.remove(cache_key);
+        return Ok(None);
+    }
+    Ok(Some(entry))
+}
+
+fn local_fast_context_pack_cache_put(cache_key: &str, entry: &LocalContextPackEntry) -> Result<()> {
+    let cache = LOCAL_FAST_CONTEXT_PACK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache
+        .lock()
+        .map_err(|_| anyhow!("local fast context-pack cache lock poisoned"))?;
+    guard.insert(cache_key.to_string(), entry.clone());
+    Ok(())
+}
+
+fn now_epoch_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis())
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {

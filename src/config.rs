@@ -36,6 +36,7 @@ pub struct AppConfig {
     pub fallback_chunk_overlap_lines: usize,
     pub edge_cache_path: PathBuf,
     pub default_retrieval_mode: String,
+    pub local_fast_cache_ttl_ms: u128,
 }
 
 impl AppConfig {
@@ -82,6 +83,9 @@ impl AppConfig {
                 .context("AMI_FALLBACK_CHUNK_OVERLAP_LINES must be usize")?,
             edge_cache_path: PathBuf::from(required("AMI_EDGE_CACHE_PATH")?),
             default_retrieval_mode: required("AMI_DEFAULT_RETRIEVAL_MODE")?,
+            local_fast_cache_ttl_ms: required("AMI_LOCAL_FAST_CACHE_TTL_MS")?
+                .parse()
+                .context("AMI_LOCAL_FAST_CACHE_TTL_MS must be u128")?,
         })
     }
 

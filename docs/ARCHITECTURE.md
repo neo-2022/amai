@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 16:33 MSK
-Ручная сверка guide/docs: 2026-03-20 16:33 MSK
+modified_at: 2026-03-20 16:54 MSK
+Ручная сверка guide/docs: 2026-03-20 16:54 MSK
 
 # Architecture
 
@@ -160,7 +160,8 @@ Code structure plane:
   - делает exact document lookup в PostgreSQL;
   - делает symbol lookup в PostgreSQL;
   - делает lexical chunk lookup в PostgreSQL;
-  - делает semantic chunk recall в Qdrant;
+  - сначала делает semantic chunk recall в Qdrant;
+  - если vector tier временно возвращает пустой результат на локальном tiny contour, использует уже найденные lexical chunks как explicit semantic fallback, не скрывая provenance;
   - materialize-ит provenance-rich context pack в PostgreSQL, SQLite edge cache и S3 context bucket.
 
 Текущий parser baseline:
@@ -184,11 +185,11 @@ Code structure plane:
 - `scripts/proof_hardening.sh`
   - repeat bootstrap, relation-aware retrieval и restart recovery;
 - `scripts/proof_performance.sh`
-  - end-to-end latency proof для `context pack`;
+  - end-to-end latency proof для `context pack` с hot guard `<10ms p95`;
 - `scripts/proof_accuracy.sh`
   - relation-aware precision и zero-leakage isolation proof;
 - `scripts/proof_load.sh`
-  - concurrent hot-load proof для reproducible QPS/error-rate baseline;
+  - concurrent hot-load proof для reproducible QPS/error-rate baseline c guard `qps >= 5000` и `p95 < 10ms`;
 - `scripts/proof_hostile.sh`
   - hostile proof на `stack_meta` drift и service loss для `postgres`, `qdrant`, `minio`, `nats`;
 - `cargo run -- verify benchmark ...`
@@ -252,4 +253,5 @@ Machine-readable профиль:
 - `hot` и `cold` retrieval не смешиваются;
 - `hot` нужен для реальной скорости повторной сессии агента;
 - `cold` нужен для оценки настоящего retrieval path без result-cache shortcut;
+- быстрый hot-path измеряется в микросекундах и сохраняется как дробные миллисекунды, чтобы убрать ложный `0ms` эффект после агрессивной локальной оптимизации;
 - SLA нельзя честно считать выполненным, если известен только один из этих режимов.

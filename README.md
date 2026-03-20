@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 16:33 MSK
-Ручная сверка guide/docs: 2026-03-20 16:33 MSK
+modified_at: 2026-03-20 16:54 MSK
+Ручная сверка guide/docs: 2026-03-20 16:54 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -126,6 +126,13 @@ cd /home/art/agent-memory-index
 ./scripts/bootstrap_stack.sh
 ```
 
+Что важно проверить в `.env` сразу:
+- `AMI_DEFAULT_RETRIEVAL_MODE`
+  - базовый режим изоляции по умолчанию;
+- `AMI_LOCAL_FAST_CACHE_TTL_MS`
+  - окно жизни process-local hot cache в миллисекундах;
+  - этот cache ускоряет повторные `context pack` запросы, но не заменяет PostgreSQL, SQLite и S3 persistence.
+
 3. Проверить, что всё поднялось:
 
 ```bash
@@ -188,7 +195,8 @@ cargo run -- context pack \
 - делает exact lookup по documents;
 - делает symbol lookup;
 - делает lexical chunk lookup;
-- делает semantic chunk recall через Qdrant;
+- сначала пытается сделать semantic chunk recall через Qdrant;
+- если vector tier временно не даёт usable hits, честно деградирует в lexical fallback вместо пустого semantic слоя;
 - собирает provenance-rich context pack;
 - пишет его в PostgreSQL, SQLite edge cache и S3 context bucket.
 
@@ -228,6 +236,7 @@ cargo run -- verify hostile --scenario all
 - `verify benchmark`
   - мерит живой `context pack` path по времени;
   - выдаёт `mean/p50/p95/max`;
+  - считает время в микросекундах и публикует его как дробные миллисекунды, чтобы быстрый hot-path не схлопывался в ложный `0ms`;
   - может fail-ить при нарушении заданных latency thresholds;
 - `verify hostile`
   - проверяет fail-closed реакцию на partial-service loss;
@@ -241,6 +250,12 @@ cargo run -- verify hostile --scenario all
   - мерит concurrent hot-load contour;
   - выдаёт `qps`, `error_rate`, `p50/p95/p99/max`;
   - сохраняет snapshot `retrieval_load_hot`.
+
+Текущий materialized guardrail:
+- `hot retrieval p95 < 10ms`
+- `concurrent hot-load p95 < 10ms`
+- `concurrent hot-load qps >= 5000`
+- `cross_project_leakage = 0`
 
 ## Observability contour
 
@@ -291,6 +306,7 @@ cargo run --release -- observe sla-check
 Важно:
 - `hot retrieval` означает работающий result-cache contour;
 - `cold retrieval` означает живой retrieval path без result-cache bypassing;
+- быстрый hot-path в `Amai` опирается на process-local fast cache с TTL из `.env`, но не отменяет durable persistence в PostgreSQL, SQLite edge cache и S3;
 - оба режима нужны одновременно, иначе нельзя честно оценить ни UX-скорость, ни реальную цену полного retrieval path.
 
 ## Защита от version drift
