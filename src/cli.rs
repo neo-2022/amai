@@ -98,6 +98,7 @@ pub enum IndexCommand {
 pub enum VerifyCommand {
     Benchmark(Box<VerifyBenchmarkArgs>),
     TokenBenchmark(Box<VerifyTokenBenchmarkArgs>),
+    TokenBenchmarkSuite(Box<VerifyTokenBenchmarkSuiteArgs>),
     Accuracy(VerifyAccuracyArgs),
     Load(Box<VerifyLoadArgs>),
     Hostile(VerifyHostileArgs),
@@ -275,6 +276,40 @@ pub struct VerifyTokenBenchmarkArgs {
     pub min_savings_factor: f64,
     #[arg(long, default_value_t = 50.0)]
     pub min_savings_percent: f64,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct VerifyTokenBenchmarkSuiteArgs {
+    #[arg(long)]
+    pub project: String,
+    #[arg(long, default_value = "default")]
+    pub namespace: String,
+    #[arg(long)]
+    pub retrieval_mode: Option<String>,
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub query: Vec<String>,
+    #[arg(long)]
+    pub queries_file: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    pub disable_cache: bool,
+    #[arg(long, default_value_t = 5)]
+    pub limit_documents: usize,
+    #[arg(long, default_value_t = 8)]
+    pub limit_symbols: usize,
+    #[arg(long, default_value_t = 8)]
+    pub limit_chunks: usize,
+    #[arg(long, default_value_t = 8)]
+    pub limit_semantic_chunks: usize,
+    #[arg(long, default_value = "o200k_base")]
+    pub tokenizer: String,
+    #[arg(long, default_value_t = 200)]
+    pub naive_limit_files: usize,
+    #[arg(long, default_value_t = 32768)]
+    pub naive_max_bytes_per_file: usize,
+    #[arg(long, default_value_t = 1.2)]
+    pub min_mean_savings_factor: f64,
+    #[arg(long, default_value_t = 15.0)]
+    pub min_mean_savings_percent: f64,
 }
 
 #[derive(Debug, Args)]

@@ -22,3 +22,5 @@ state/sqlite/*
 
 tmp/*
 !tmp/.gitkeep
+
+.vscode/

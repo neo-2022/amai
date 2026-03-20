@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 18:30 MSK
-Ручная сверка guide/docs: 2026-03-20 18:30 MSK
+modified_at: 2026-03-20 18:49 MSK
+Ручная сверка guide/docs: 2026-03-20 18:49 MSK
 
 # Architecture
 
@@ -198,6 +198,8 @@ Code structure plane:
   - concurrent hot-load proof для reproducible QPS/error-rate baseline c guard `qps >= 5000` и `p95 < 10ms`;
 - `scripts/proof_token_benchmark.sh`
   - measured token-economy proof для naivе scope vs compact context-pack render;
+- `scripts/proof_token_benchmark_suite.sh`
+  - multi-query token-economy proof, который мерит уже не один удачный prompt, а серию запросов и агрегирует `mean/p50/p95`;
 - `scripts/proof_mcp.sh`
   - end-to-end MCP handshake/tool/prompt proof на живом fixture stack;
 - `scripts/proof_hostile.sh`
@@ -210,6 +212,8 @@ Code structure plane:
   - Rust-native concurrent load verifier для `qps/error_rate/p95`;
 - `cargo run -- verify token-benchmark ...`
   - Rust-native measured token-economy verifier;
+- `cargo run -- verify token-benchmark-suite ...`
+  - Rust-native verifier для набора запросов с честным агрегированием продуктовой экономии токенов;
 - `cargo run -- verify mcp ...`
   - Rust-native verifier, который сам проходит MCP handshake, tools, prompts и tool calls;
 - `cargo run -- verify hostile ...`

@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 18:30 MSK
-Ручная сверка guide/docs: 2026-03-20 18:30 MSK
+modified_at: 2026-03-20 18:49 MSK
+Ручная сверка guide/docs: 2026-03-20 18:49 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -294,6 +294,13 @@ cargo run -- verify token-benchmark \
   --retrieval-mode local_plus_related \
   --tokenizer o200k_base
 
+cargo run -- verify token-benchmark-suite \
+  --project project_alpha \
+  --namespace review \
+  --retrieval-mode local_plus_related \
+  --queries-file fixtures/token_benchmark_queries.txt \
+  --tokenizer o200k_base
+
 cargo run -- verify hostile --scenario all
 ```
 
@@ -320,6 +327,11 @@ cargo run -- verify hostile --scenario all
   - сравнивает это с компактным LLM-ready render текущего `context pack`;
   - сохраняет snapshot `token_benchmark`;
   - даёт продуктовую цифру реальной экономии контекста для пользователя.
+- `verify token-benchmark-suite`
+  - гоняет не один запрос, а список типовых запросов на одном и том же stack contour;
+  - считает `mean/p50/p95` по `saved_tokens`, `savings_factor`, `savings_percent`;
+  - сохраняет snapshot `token_benchmark_suite`;
+  - нужен для более честного product proof, который другой инженер сможет повторить не на одной удачной фразе, а на серии запросов.
 
 Текущий materialized guardrail:
 - `hot retrieval p95 < 10ms`

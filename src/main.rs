@@ -165,6 +165,11 @@ async fn main() -> Result<()> {
                 let mut db = postgres::connect_admin(&cfg).await?;
                 verify::run_token_benchmark(&cfg, &mut db, &args).await?;
             }
+            VerifyCommand::TokenBenchmarkSuite(args) => {
+                compatibility::assert_supported(&cfg).await?;
+                let mut db = postgres::connect_admin(&cfg).await?;
+                verify::run_token_benchmark_suite(&cfg, &mut db, &args).await?;
+            }
             VerifyCommand::Accuracy(args) => {
                 compatibility::assert_supported(&cfg).await?;
                 let mut db = postgres::connect_admin(&cfg).await?;

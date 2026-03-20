@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 18:30 MSK
-Ручная сверка guide/docs: 2026-03-20 18:30 MSK
+modified_at: 2026-03-20 18:49 MSK
+Ручная сверка guide/docs: 2026-03-20 18:49 MSK
 
 # Operations
 
@@ -280,6 +280,7 @@ cargo run --release -- verify load \
 
 ```bash
 ./scripts/proof_token_benchmark.sh
+./scripts/proof_token_benchmark_suite.sh
 ```
 
 Или напрямую:
@@ -298,6 +299,33 @@ cargo run --release -- verify token-benchmark \
 - строит компактный LLM-ready render текущего `context pack`;
 - сравнивает оба результата на одном tokenizer;
 - сохраняет snapshot `token_benchmark`.
+
+## Token benchmark suite proof
+
+```bash
+./scripts/proof_token_benchmark_suite.sh
+```
+
+Или напрямую:
+
+```bash
+cargo run --release -- verify token-benchmark-suite \
+  --project project_alpha \
+  --namespace review \
+  --retrieval-mode local_plus_related \
+  --queries-file "$PWD/fixtures/token_benchmark_queries.txt" \
+  --tokenizer o200k_base \
+  --naive-limit-files 20 \
+  --naive-max-bytes-per-file 32768 \
+  --min-mean-savings-factor 1.2 \
+  --min-mean-savings-percent 15
+```
+
+Этот proof:
+- берёт список запросов, а не один удачный пример;
+- строит агрегированный `token_benchmark_suite` snapshot;
+- считает `mean/p50/p95` по `saved_tokens`, `savings_factor`, `savings_percent`;
+- нужен как более честный product contour, который другой пользователь сможет воспроизвести на том же fixture наборе.
 
 ## MCP proof
 

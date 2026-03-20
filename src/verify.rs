@@ -1,7 +1,7 @@
 use crate::bootstrap;
 use crate::cli::{
     ContextPackArgs, VerifyAccuracyArgs, VerifyBenchmarkArgs, VerifyHostileArgs, VerifyLoadArgs,
-    VerifyTokenBenchmarkArgs,
+    VerifyTokenBenchmarkArgs, VerifyTokenBenchmarkSuiteArgs,
 };
 use crate::compatibility;
 use crate::config::AppConfig;
@@ -445,6 +445,134 @@ pub async fn run_token_benchmark(
     Ok(())
 }
 
+pub async fn run_token_benchmark_suite(
+    cfg: &AppConfig,
+    db: &mut Client,
+    args: &VerifyTokenBenchmarkSuiteArgs,
+) -> Result<()> {
+    let queries = collect_suite_queries(&args.query, args.queries_file.as_deref())?;
+    if queries.is_empty() {
+        return Err(anyhow!(
+            "token benchmark suite requires at least one query via --query or --queries-file"
+        ));
+    }
+
+    let mut runs = Vec::with_capacity(queries.len());
+    let mut factor_samples = Vec::with_capacity(queries.len());
+    let mut percent_samples = Vec::with_capacity(queries.len());
+    let mut saved_token_samples = Vec::with_capacity(queries.len());
+    let mut naive_token_samples = Vec::with_capacity(queries.len());
+    let mut context_token_samples = Vec::with_capacity(queries.len());
+
+    for query in queries {
+        let payload = collect_token_benchmark(
+            cfg,
+            db,
+            &VerifyTokenBenchmarkArgs {
+                context: ContextPackArgs {
+                    project: args.project.clone(),
+                    namespace: args.namespace.clone(),
+                    query: query.clone(),
+                    retrieval_mode: args.retrieval_mode.clone(),
+                    disable_cache: args.disable_cache,
+                    limit_documents: args.limit_documents,
+                    limit_symbols: args.limit_symbols,
+                    limit_chunks: args.limit_chunks,
+                    limit_semantic_chunks: args.limit_semantic_chunks,
+                },
+                tokenizer: args.tokenizer.clone(),
+                naive_limit_files: args.naive_limit_files,
+                naive_max_bytes_per_file: args.naive_max_bytes_per_file,
+                min_savings_factor: 0.0,
+                min_savings_percent: 0.0,
+            },
+        )
+        .await?;
+
+        let benchmark = &payload["token_benchmark"];
+        let savings = &benchmark["savings"];
+        let naive_scope = &benchmark["naive_scope"];
+        let compact = &benchmark["context_pack_render"];
+
+        let savings_factor = savings["savings_factor"]
+            .as_f64()
+            .ok_or_else(|| anyhow!("token benchmark payload missing savings_factor"))?;
+        let savings_percent = savings["savings_percent"]
+            .as_f64()
+            .ok_or_else(|| anyhow!("token benchmark payload missing savings_percent"))?;
+        let saved_tokens = savings["saved_tokens"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("token benchmark payload missing saved_tokens"))?;
+        let naive_tokens = naive_scope["tokens"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("token benchmark payload missing naive tokens"))?;
+        let context_tokens = compact["tokens"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("token benchmark payload missing compact tokens"))?;
+
+        factor_samples.push(savings_factor);
+        percent_samples.push(savings_percent);
+        saved_token_samples.push(saved_tokens as f64);
+        naive_token_samples.push(naive_tokens as f64);
+        context_token_samples.push(context_tokens as f64);
+        runs.push(benchmark.clone());
+    }
+
+    let mean_savings_factor = mean_f64(&factor_samples);
+    let mean_savings_percent = mean_f64(&percent_samples);
+    let mean_saved_tokens = mean_f64(&saved_token_samples);
+    let mean_naive_tokens = mean_f64(&naive_token_samples);
+    let mean_context_tokens = mean_f64(&context_token_samples);
+    let p50_savings_factor = percentile_f64(&factor_samples, 50);
+    let p95_savings_factor = percentile_f64(&factor_samples, 95);
+    let p50_savings_percent = percentile_f64(&percent_samples, 50);
+    let p95_savings_percent = percentile_f64(&percent_samples, 95);
+
+    let mut violations = Vec::new();
+    if mean_savings_factor < args.min_mean_savings_factor {
+        violations.push(format!(
+            "mean_savings_factor={mean_savings_factor:.3} below {:.3}",
+            args.min_mean_savings_factor
+        ));
+    }
+    if mean_savings_percent < args.min_mean_savings_percent {
+        violations.push(format!(
+            "mean_savings_percent={mean_savings_percent:.3} below {:.3}",
+            args.min_mean_savings_percent
+        ));
+    }
+    if !violations.is_empty() {
+        return Err(anyhow!(
+            "token benchmark suite thresholds violated: {}",
+            violations.join("; ")
+        ));
+    }
+
+    let payload = json!({
+        "token_benchmark_suite": {
+            "project": args.project,
+            "namespace": args.namespace,
+            "retrieval_mode": args.retrieval_mode,
+            "tokenizer": args.tokenizer,
+            "disable_cache": args.disable_cache,
+            "queries_total": runs.len(),
+            "mean_savings_factor": mean_savings_factor,
+            "p50_savings_factor": p50_savings_factor,
+            "p95_savings_factor": p95_savings_factor,
+            "mean_savings_percent": mean_savings_percent,
+            "p50_savings_percent": p50_savings_percent,
+            "p95_savings_percent": p95_savings_percent,
+            "mean_saved_tokens": mean_saved_tokens,
+            "mean_naive_tokens": mean_naive_tokens,
+            "mean_context_tokens": mean_context_tokens,
+            "runs": runs,
+        }
+    });
+    let _ = postgres::insert_observability_snapshot(db, "token_benchmark_suite", &payload).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
 pub async fn collect_token_benchmark(
     cfg: &AppConfig,
     db: &mut Client,
@@ -743,6 +871,58 @@ fn enforce_token_benchmark_thresholds(
         "token benchmark thresholds violated: {}",
         violations.join("; ")
     ))
+}
+
+fn collect_suite_queries(
+    inline_queries: &[String],
+    queries_file: Option<&Path>,
+) -> Result<Vec<String>> {
+    let mut seen = HashSet::new();
+    let mut queries = Vec::new();
+
+    for query in inline_queries {
+        let normalized = query.trim();
+        if normalized.is_empty() || !seen.insert(normalized.to_string()) {
+            continue;
+        }
+        queries.push(normalized.to_string());
+    }
+
+    if let Some(path) = queries_file {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read queries file {}", path.display()))?;
+        for line in content.lines() {
+            let normalized = line.trim();
+            if normalized.is_empty() || normalized.starts_with('#') {
+                continue;
+            }
+            if !seen.insert(normalized.to_string()) {
+                continue;
+            }
+            queries.push(normalized.to_string());
+        }
+    }
+
+    Ok(queries)
+}
+
+fn mean_f64(samples: &[f64]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    samples.iter().sum::<f64>() / samples.len() as f64
+}
+
+fn percentile_f64(samples: &[f64], percentile: usize) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let percentile = percentile.min(100);
+    let rank = (percentile * sorted.len()).div_ceil(100);
+    let index = rank.saturating_sub(1).min(sorted.len() - 1);
+    sorted[index]
 }
 
 #[derive(Debug)]
