@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:14 MSK
-Ручная сверка guide/docs: 2026-03-20 20:14 MSK
+modified_at: 2026-03-20 20:23 MSK
+Ручная сверка guide/docs: 2026-03-20 20:23 MSK
 
 # Operations
 
@@ -185,6 +185,15 @@ cargo run -- mcp config --client cursor --launcher-platform windows-powershell
 cargo run -- mcp config --client codex --launcher-platform windows-cmd
 ```
 
+Если `Amai` уже живёт на удалённом Linux/VPS-host:
+
+```bash
+cargo run -- mcp config \
+  --client vscode \
+  --ssh-destination ops@example-host \
+  --remote-repo-root /srv/amai
+```
+
 Если auto-discovery корня не сработал:
 
 ```bash
@@ -261,6 +270,7 @@ scripts/run_mcp_stdio.cmd
 - Linux/macOS path можно обслуживать shell launcher'ом;
 - Windows path можно обслуживать через `cmd` или `PowerShell`;
 - client config generation теперь умеет честно учитывать platform launcher, а не только Unix-style путь.
+- удалённый Linux/VPS-host теперь можно подключать через `ssh` как stdio-transport, не выставляя внутренние базы наружу.
 
 ## Hardening proof
 
@@ -435,6 +445,12 @@ cargo run --release -- verify token-benchmark-suite \
 
 ```bash
 ./scripts/proof_mcp.sh
+```
+
+Отдельный proof для удалённого `ssh` config generation:
+
+```bash
+./scripts/proof_remote_ssh_config.sh
 ```
 
 Или напрямую:

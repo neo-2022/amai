@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:14 MSK
-Ручная сверка guide/docs: 2026-03-20 20:14 MSK
+modified_at: 2026-03-20 20:23 MSK
+Ручная сверка guide/docs: 2026-03-20 20:23 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -356,6 +356,21 @@ cargo build --release
 ./scripts/onboard_local.sh --client cursor --launcher-platform windows-powershell
 ./target/release/amai mcp config --client codex --launcher-platform windows-cmd
 ```
+
+Для удалённого `VPS` или Linux-сервера:
+
+```bash
+./target/release/amai mcp config \
+  --client vscode \
+  --ssh-destination ops@example-host \
+  --remote-repo-root /srv/amai
+```
+
+Что это значит простыми словами:
+- ваш клиент запускает не локальный `Amai`, а удалённый через `ssh`;
+- `PostgreSQL`, `Qdrant`, `NATS` и `S3` остаются рядом с `Amai` на сервере;
+- наружу не нужно торчать внутренними базами;
+- для `VS Code` на Windows/macOS это хороший честный путь, если сам `Amai` живёт на Linux-host.
 
 Это важно по двум причинам:
 - обычному пользователю не нужно потом руками вычищать куски config;

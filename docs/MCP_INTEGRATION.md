@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 20:14 MSK
-Ручная сверка guide/docs: 2026-03-20 20:14 MSK
+modified_at: 2026-03-20 20:23 MSK
+Ручная сверка guide/docs: 2026-03-20 20:23 MSK
 
 # MCP Integration
 
@@ -82,6 +82,15 @@ cargo build --release
 ./target/release/amai mcp config --client codex --launcher-platform windows-cmd
 ```
 
+Если `Amai` уже стоит на удалённом Linux/VPS-host, можно сгенерировать `ssh`-launcher вместо локального runner:
+
+```bash
+./target/release/amai mcp config \
+  --client vscode \
+  --ssh-destination ops@example-host \
+  --remote-repo-root /srv/amai
+```
+
 4. Если onboarding уже запускался, часть этой работы уже сделана автоматически.
 
 ## Как отключить клиента обратно
@@ -114,6 +123,17 @@ cargo build --release
 
 Это ещё не полный polished cross-platform installer, но это уже реальный materialized шаг, а не обещание на будущее.
 
+Отдельно для удалённого режима:
+- `Amai` можно держать на Linux/VPS;
+- клиент на Windows/macOS может запускать его через `ssh`;
+- в этом режиме MCP остаётся `stdio`, просто transport идёт поверх `ssh`, а не через локальный shell runner;
+- это безопаснее, чем выставлять `PostgreSQL/Qdrant/NATS/S3` наружу напрямую.
+
+Для такого режима достаточно:
+- чтобы `Amai` уже был поднят на удалённой машине;
+- чтобы клиент умел выполнять `ssh user@host`;
+- чтобы вы знали путь до repo на сервере, например `/srv/amai`.
+
 ## Почему клиентский config маленький
 
 Клиент не должен хранить:
@@ -124,6 +144,7 @@ cargo build --release
 
 Вместо этого клиент запускает только:
 - `scripts/run_mcp_stdio.sh`
+- или `ssh user@host 'cd /srv/amai && ./scripts/run_mcp_stdio.sh'`
 
 Этот runner:
 - подтягивает `.env`;
@@ -172,4 +193,10 @@ cargo build --release
 
 ```bash
 ./scripts/proof_client_lifecycle.sh
+```
+
+Для remote `ssh` config generation:
+
+```bash
+./scripts/proof_remote_ssh_config.sh
 ```

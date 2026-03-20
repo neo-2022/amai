@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 19:57 MSK
-Ручная сверка guide/docs: 2026-03-20 19:57 MSK
+modified_at: 2026-03-20 20:23 MSK
+Ручная сверка guide/docs: 2026-03-20 20:23 MSK
 
 # AGENTS.md для Art-memory-agent-index (Amai)
 
@@ -30,6 +30,8 @@ modified_at: 2026-03-20 19:57 MSK
 Если стек ещё не materialized:
 - самый простой путь:
   - `scripts/onboard_local.sh --client vscode`
+- если `Amai` уже стоит на удалённом Linux/VPS-host:
+  - `cargo run -- mcp config --client vscode --ssh-destination user@host --remote-repo-root /srv/amai`
 - инженерный ручной путь:
   - `scripts/bootstrap_stack.sh`
 - симметричное отключение клиента:

@@ -162,6 +162,8 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             client: client.to_string(),
             server_name: "amai".to_string(),
             launcher_platform: "auto".to_string(),
+            ssh_destination: None,
+            remote_repo_root: None,
             command: Some("/tmp/run_mcp_stdio.sh".to_string()),
             cwd: Some(PathBuf::from("/tmp/amai")),
             output: None,
@@ -1187,7 +1189,13 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
     let client = args.client.trim().to_ascii_lowercase();
     let repo_root = args.cwd.clone().unwrap_or(discover_repo_root()?);
     let cwd = repo_root.display().to_string();
-    let launcher = resolve_launcher(&repo_root, &args.launcher_platform, args.command.as_deref())?;
+    let launcher = resolve_launcher(
+        &repo_root,
+        &args.launcher_platform,
+        args.command.as_deref(),
+        args.ssh_destination.as_deref(),
+        args.remote_repo_root.as_deref(),
+    )?;
     let server_name = args.server_name.trim();
     if server_name.is_empty() {
         return Err(anyhow!("MCP server name must not be empty"));
@@ -1261,11 +1269,27 @@ fn resolve_launcher(
     repo_root: &Path,
     launcher_platform: &str,
     explicit_command: Option<&str>,
+    ssh_destination: Option<&str>,
+    remote_repo_root: Option<&Path>,
 ) -> Result<LauncherCommand> {
     if let Some(command) = explicit_command {
         return Ok(LauncherCommand {
             command: command.to_string(),
             args: Vec::new(),
+        });
+    }
+
+    if let Some(destination) = ssh_destination {
+        let remote_repo_root = remote_repo_root.ok_or_else(|| {
+            anyhow!("--remote-repo-root is required when --ssh-destination is used")
+        })?;
+        let remote_command = format!(
+            "cd {} && ./scripts/run_mcp_stdio.sh",
+            shell_escape_single_quotes(&remote_repo_root.display().to_string())
+        );
+        return Ok(LauncherCommand {
+            command: "ssh".to_string(),
+            args: vec![destination.to_string(), remote_command],
         });
     }
 
@@ -1326,6 +1350,20 @@ fn format_toml_string_array(items: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{rendered}]")
+}
+
+fn shell_escape_single_quotes(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            escaped.push_str("'\"'\"'");
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped.push('\'');
+    escaped
 }
 
 fn merge_existing_config(
@@ -1635,6 +1673,8 @@ mod tests {
             client: "vscode".to_string(),
             server_name: "amai".to_string(),
             launcher_platform: "auto".to_string(),
+            ssh_destination: None,
+            remote_repo_root: None,
             command: Some("/tmp/run_mcp_stdio.sh".to_string()),
             cwd: Some(PathBuf::from("/tmp/amai")),
             output: None,
@@ -1652,6 +1692,8 @@ mod tests {
             client: "codex".to_string(),
             server_name: "amai".to_string(),
             launcher_platform: "auto".to_string(),
+            ssh_destination: None,
+            remote_repo_root: None,
             command: Some("/tmp/run_mcp_stdio.sh".to_string()),
             cwd: Some(PathBuf::from("/tmp/amai")),
             output: None,
@@ -1670,6 +1712,8 @@ mod tests {
             client: "cursor".to_string(),
             server_name: "amai".to_string(),
             launcher_platform: "windows-powershell".to_string(),
+            ssh_destination: None,
+            remote_repo_root: None,
             command: None,
             cwd: Some(PathBuf::from("/tmp/amai")),
             output: None,
@@ -1685,5 +1729,28 @@ mod tests {
             args.iter()
                 .any(|item| item.as_str() == Some("\\tmp\\amai\\scripts\\run_mcp_stdio.ps1"))
         );
+    }
+
+    #[test]
+    fn renders_remote_ssh_config() {
+        let config = render_client_config(&McpConfigArgs {
+            client: "cursor".to_string(),
+            server_name: "amai".to_string(),
+            launcher_platform: "auto".to_string(),
+            ssh_destination: Some("ops@example-host".to_string()),
+            remote_repo_root: Some(PathBuf::from("/srv/amai")),
+            command: None,
+            cwd: Some(PathBuf::from("/tmp/amai")),
+            output: None,
+        })
+        .expect("render should succeed");
+        let json: serde_json::Value =
+            serde_json::from_str(&config).expect("config must be valid JSON");
+        assert_eq!(json["mcpServers"]["amai"]["command"], "ssh");
+        let args = json["mcpServers"]["amai"]["args"]
+            .as_array()
+            .expect("args must be array");
+        assert_eq!(args[0], "ops@example-host");
+        assert_eq!(args[1], "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh");
     }
 }
