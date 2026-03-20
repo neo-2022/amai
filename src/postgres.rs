@@ -773,6 +773,33 @@ pub async fn status_counts(client: &Client) -> Result<(i64, i64, i64)> {
     Ok((row.get(0), row.get(1), row.get(2)))
 }
 
+pub async fn upsert_stack_meta(client: &Client, key: &str, value: &Value) -> Result<()> {
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.stack_meta(meta_key, meta_value, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (meta_key) DO UPDATE SET
+                meta_value = EXCLUDED.meta_value,
+                updated_at = now()
+            "#,
+            &[&key, value],
+        )
+        .await
+        .context("failed to upsert stack meta")?;
+    Ok(())
+}
+
+pub async fn get_stack_meta(client: &Client, key: &str) -> Result<Option<Value>> {
+    let row = client
+        .query_opt(
+            "SELECT meta_value FROM ami.stack_meta WHERE meta_key = $1",
+            &[&key],
+        )
+        .await?;
+    Ok(row.map(|row| row.get(0)))
+}
+
 fn sql_ident(input: &str) -> Result<String> {
     if input.is_empty()
         || !input

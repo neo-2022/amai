@@ -192,6 +192,12 @@ CREATE TABLE IF NOT EXISTS ami.artifact_refs (
     UNIQUE (bucket, object_key)
 );
 
+CREATE TABLE IF NOT EXISTS ami.stack_meta (
+    meta_key TEXT PRIMARY KEY,
+    meta_value JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS ami.context_packs (
     context_pack_id UUID PRIMARY KEY,
     project_id UUID NOT NULL REFERENCES ami.projects(project_id) ON DELETE CASCADE,

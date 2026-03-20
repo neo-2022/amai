@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 14:08 MSK
-Ручная сверка guide/docs: 2026-03-20 14:08 MSK
+modified_at: 2026-03-20 15:06 MSK
+Ручная сверка guide/docs: 2026-03-20 15:06 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -82,11 +82,13 @@ Amai — это отдельный внешний инструмент для И
 - `docs/`
   - подробная архитектура, схема данных, операции и lifecycle.
 - `config/`
-  - конфиги сервисов, сейчас прежде всего NATS.
+  - конфиги сервисов и compatibility profile.
 - `sql/`
   - каноническая схема PostgreSQL и seed-данные.
 - `scripts/`
   - bootstrap, status и helper wrappers.
+- `fixtures/`
+  - нейтральные маленькие проекты для hardening и recovery proof.
 - `src/`
   - Rust CLI и runtime bootstrap/index logic.
 - `tests/`
@@ -110,6 +112,13 @@ cd /home/art/agent-memory-index
 
 ```bash
 ./scripts/status.sh
+```
+
+Дополнительно можно прогнать:
+
+```bash
+./scripts/proof_local.sh
+./scripts/proof_hardening.sh
 ```
 
 4. Зарегистрировать свои проекты:
@@ -159,6 +168,24 @@ cargo run -- context pack \
 - делает semantic chunk recall через Qdrant;
 - собирает provenance-rich context pack;
 - пишет его в PostgreSQL, SQLite edge cache и S3 context bucket.
+
+## Защита от version drift
+
+В `Amai` есть отдельный compatibility contour:
+- machine-readable профиль: [compatibility.toml](/home/art/agent-memory-index/config/compatibility.toml)
+- live проверка:
+
+```bash
+cargo run -- compat check
+```
+
+Инструмент fail-closed ловит несовместимый drift по:
+- `PostgreSQL`
+- `Qdrant`
+- `NATS`
+- `stack_meta` schema/profile state
+
+Для S3-compatible слоя сейчас удерживается API-совместимость и family-check без жёсткой блокировки по vendor string.
 
 ## Быстрый индексирующий smoke
 

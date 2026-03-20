@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 14:08 MSK
-Ручная сверка guide/docs: 2026-03-20 14:08 MSK
+modified_at: 2026-03-20 15:06 MSK
+Ручная сверка guide/docs: 2026-03-20 15:06 MSK
 
 # Operations
 
@@ -21,6 +21,19 @@ cp .env.example .env
 ```bash
 ./scripts/status.sh
 ```
+
+Важно:
+- для `Qdrant` и `NATS` канонический health source в этом проекте — не Docker health flag, а именно `status.sh` и `compat check`;
+- это сделано специально, чтобы не зависеть от наличия `wget/curl/sh` внутри сторонних контейнерных образов.
+
+## Compatibility check
+
+```bash
+cargo run -- compat check
+```
+
+Если здесь `FAIL`, дальше нельзя честно считать stack стабильным.
+Сначала нужно убрать drift между поддерживаемым профилем и live версиями сервисов.
 
 ## Register a project
 
@@ -79,6 +92,27 @@ cargo run -- context pack \
 - кэшируется в SQLite;
 - сохраняется в PostgreSQL;
 - выгружается в S3 context bucket.
+
+## Hardening proof
+
+Быстрый локальный proof:
+
+```bash
+./scripts/proof_local.sh
+```
+
+Более жёсткий proof:
+
+```bash
+./scripts/proof_hardening.sh
+```
+
+Он дополнительно проверяет:
+- повторный bootstrap;
+- compatibility profile;
+- multi-project isolation на fixture-проектах;
+- controlled cross-project reading;
+- restart recovery после `docker compose restart`.
 
 Текущий AST coverage:
 - `rust`

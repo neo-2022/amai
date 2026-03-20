@@ -1,4 +1,4 @@
-use crate::{config::AppConfig, edge_cache, nats, postgres, qdrant, s3};
+use crate::{compatibility, config::AppConfig, edge_cache, nats, postgres, qdrant, s3};
 use anyhow::{Result, anyhow};
 use std::future::Future;
 use std::time::Duration;
@@ -8,6 +8,7 @@ pub async fn bootstrap_stack(cfg: &AppConfig) -> Result<()> {
     let db = retry_async("postgres bootstrap", 30, Duration::from_secs(2), || async {
         let db = postgres::connect_admin(cfg).await?;
         postgres::bootstrap_schema(&db, cfg).await?;
+        compatibility::bootstrap_meta(cfg, &db).await?;
         Ok(db)
     })
     .await?;
@@ -34,6 +35,7 @@ pub async fn bootstrap_stack(cfg: &AppConfig) -> Result<()> {
     .await?;
 
     edge_cache::ensure(&cfg.edge_cache_path)?;
+    compatibility::assert_supported(cfg).await?;
     tracing::info!(
         postgres = true,
         qdrant = true,

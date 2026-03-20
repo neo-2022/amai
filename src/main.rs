@@ -1,5 +1,6 @@
 mod bootstrap;
 mod cli;
+mod compatibility;
 mod config;
 mod edge_cache;
 mod indexer;
@@ -15,8 +16,8 @@ mod syntax;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    BootstrapCommand, Cli, Command, ContextCommand, IndexCommand, NamespaceCommand, ProjectCommand,
-    RelationCommand,
+    BootstrapCommand, Cli, Command, CompatCommand, ContextCommand, IndexCommand, NamespaceCommand,
+    ProjectCommand, RelationCommand,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -35,6 +36,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Bootstrap { command } => match command {
             BootstrapCommand::Stack => bootstrap::bootstrap_stack(&cfg).await?,
+        },
+        Command::Compat { command } => match command {
+            CompatCommand::Check => compatibility::print_report(&cfg).await?,
         },
         Command::Status => status::print_status(&cfg).await?,
         Command::Project { command } => {
@@ -107,6 +111,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Context { command } => {
+            compatibility::assert_supported(&cfg).await?;
             let mut db = postgres::connect_admin(&cfg).await?;
             match command {
                 ContextCommand::Pack(args) => {
@@ -116,6 +121,7 @@ async fn main() -> Result<()> {
         }
         Command::Index { command } => match command {
             IndexCommand::Project(args) => {
+                compatibility::assert_supported(&cfg).await?;
                 let mut db = postgres::connect_admin(&cfg).await?;
                 indexer::index_project(&cfg, &mut db, &args).await?;
             }

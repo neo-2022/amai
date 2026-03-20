@@ -5,4 +5,5 @@ cd "$(dirname "$0")/.."
 
 cargo fmt --all --check
 cargo test --quiet
+cargo run --quiet -- compat check
 cargo run --quiet -- status

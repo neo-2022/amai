@@ -1,4 +1,4 @@
-use crate::{config::AppConfig, nats, postgres, qdrant, s3};
+use crate::{compatibility, config::AppConfig, nats, postgres, qdrant, s3};
 use anyhow::Result;
 use reqwest::StatusCode;
 
@@ -41,5 +41,19 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
     );
     println!("memory_embed_model: {}", cfg.memory_embed_model);
     println!("edge_cache: {}", cfg.edge_cache_path.display());
+    let compatibility = compatibility::check(cfg).await?;
+    println!(
+        "compatibility: {} (profile={}, postgres={}, qdrant={}, nats={}, s3={})",
+        if compatibility.compatible() {
+            "ok"
+        } else {
+            "FAIL"
+        },
+        compatibility.profile,
+        compatibility.postgres.raw_version,
+        compatibility.qdrant.raw_version,
+        compatibility.nats.raw_version,
+        compatibility.s3.raw_version
+    );
     Ok(())
 }

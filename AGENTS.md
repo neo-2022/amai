@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 14:08 MSK
-Ручная сверка guide/docs: 2026-03-20 14:08 MSK
+modified_at: 2026-03-20 15:06 MSK
+Ручная сверка guide/docs: 2026-03-20 15:06 MSK
 
 # AGENTS.md для Art-memory-agent-index (Amai)
 
@@ -88,7 +88,12 @@ CLI/binary canonical short name:
 Минимальный runnable порядок для нового агента:
 1. `scripts/bootstrap_stack.sh`
 2. `scripts/status.sh`
-3. `cargo run -- project register ...`
-4. `cargo run -- namespace ensure ...`
-5. `cargo run -- index project ...`
-6. `cargo run -- context pack ...`
+3. `cargo run -- compat check`
+4. `cargo run -- project register ...`
+5. `cargo run -- namespace ensure ...`
+6. `cargo run -- index project ...`
+7. `cargo run -- context pack ...`
+
+Для жёсткого локального proof:
+- `scripts/proof_local.sh`
+- `scripts/proof_hardening.sh`

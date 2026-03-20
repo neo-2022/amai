@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 14:08 MSK
-Ручная сверка guide/docs: 2026-03-20 14:08 MSK
+modified_at: 2026-03-20 15:06 MSK
+Ручная сверка guide/docs: 2026-03-20 15:06 MSK
 
 # Architecture
 
@@ -112,6 +112,26 @@ Code structure plane:
 - `chunk_id`
 - `source_kind`
 - `trust_level`
+
+## Compatibility contour
+
+Чтобы стек не ломался молча при частичном обновлении компонентов, в `Amai` есть отдельный compatibility contour.
+
+Он делает три вещи:
+- хранит machine-readable профиль совместимости;
+- проверяет live версии ключевых сервисов;
+- сверяет профиль в коде с profile/schema записью в PostgreSQL.
+
+Сейчас compatibility профиль удерживает:
+- schema version;
+- поддерживаемый major для `PostgreSQL`;
+- поддерживаемый major/minor для `Qdrant`;
+- поддерживаемый major/minor для `NATS`;
+- S3-family check без жёсткой блокировки по vendor string.
+
+Принцип fail-closed:
+- если стек вышел за поддерживаемый профиль, `Amai` не должен молча продолжать indexing/context-pack operations;
+- сначала оператор должен увидеть drift и либо вернуть совместимую версию, либо осознанно обновить compatibility manifest.
 
 ## Materialized baseline
 

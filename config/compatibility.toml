@@ -1,0 +1,17 @@
+schema_version = 1
+compatibility_profile = "amai-1"
+
+[postgres]
+supported_major = 16
+
+[qdrant]
+supported_major = 1
+supported_minor = 17
+
+[nats]
+supported_major = 2
+supported_minor = 11
+
+[s3]
+expected_server_family = "MinIO"
+strict_server_family = false

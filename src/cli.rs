@@ -18,6 +18,10 @@ pub enum Command {
         #[command(subcommand)]
         command: BootstrapCommand,
     },
+    Compat {
+        #[command(subcommand)]
+        command: CompatCommand,
+    },
     Status,
     Project {
         #[command(subcommand)]
@@ -44,6 +48,11 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum BootstrapCommand {
     Stack,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CompatCommand {
+    Check,
 }
 
 #[derive(Debug, Subcommand)]
