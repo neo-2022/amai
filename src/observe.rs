@@ -154,6 +154,10 @@ pub async fn collect_snapshot(cfg: &AppConfig) -> Result<Value> {
     build_snapshot(cfg, true).await
 }
 
+pub async fn collect_snapshot_preview(cfg: &AppConfig) -> Result<Value> {
+    build_snapshot(cfg, false).await
+}
+
 async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value> {
     let profile = load_profile()?;
     let db = postgres::connect_admin(cfg).await?;

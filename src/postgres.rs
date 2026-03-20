@@ -364,6 +364,33 @@ pub async fn get_namespace_by_code(
     })
 }
 
+pub async fn list_namespaces_for_project(
+    client: &Client,
+    project_id: Uuid,
+) -> Result<Vec<NamespaceRecord>> {
+    let rows = client
+        .query(
+            r#"
+            SELECT namespace_id, code, display_name, retrieval_mode
+            FROM ami.namespaces
+            WHERE project_id = $1
+            ORDER BY code
+            "#,
+            &[&project_id],
+        )
+        .await
+        .context("failed to list namespaces for project")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| NamespaceRecord {
+            namespace_id: row.get(0),
+            code: row.get(1),
+            display_name: row.get(2),
+            retrieval_mode: row.get(3),
+        })
+        .collect())
+}
+
 pub async fn add_relation(
     client: &Client,
     source_code: &str,

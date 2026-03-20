@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 14:30 MSK
-Ручная сверка guide/docs: 2026-03-20 14:30 MSK
+modified_at: 2026-03-20 18:30 MSK
+Ручная сверка guide/docs: 2026-03-20 18:30 MSK
 
 # Tests
 
@@ -14,11 +14,13 @@ modified_at: 2026-03-20 14:30 MSK
 ./scripts/proof_local.sh
 ./scripts/proof_hardening.sh
 ./scripts/proof_performance.sh
+./scripts/proof_mcp.sh
 ./scripts/proof_hostile.sh
 ```
 
 Отдельно materialized Rust-native verification commands:
 - `cargo run -- verify benchmark ...`
+- `cargo run -- verify mcp ...`
 - `cargo run -- verify hostile ...`
 
 Когда появятся отдельные integration tests с поднимаемым stack fixture, они materialize-ятся именно здесь.

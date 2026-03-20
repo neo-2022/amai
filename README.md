@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 18:06 MSK
-Ручная сверка guide/docs: 2026-03-20 18:06 MSK
+modified_at: 2026-03-20 18:30 MSK
+Ручная сверка guide/docs: 2026-03-20 18:30 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -31,6 +31,8 @@ Amai — это отдельный внешний инструмент для И
   - собранный пакет найденных материалов с указанием происхождения каждого фрагмента;
 - `provenance`
   - явное указание, из какого проекта, файла и места в коде пришёл фрагмент.
+- `MCP`
+  - общий стандарт, через который IDE и ИИ-клиенты могут подключаться к внешнему инструменту как к серверу возможностей.
 
 Клиентами могут быть:
 - VS Code;
@@ -96,6 +98,8 @@ Amai — это отдельный внешний инструмент для И
   - нейтральные маленькие проекты для hardening и recovery proof.
 - `src/`
   - Rust CLI и runtime bootstrap/index logic.
+- `docs/MCP_INTEGRATION.md`
+  - простой вход для подключения `Amai` к MCP-клиентам.
 - `tests/`
   - локальные smoke и unit checks.
 - `state/`
@@ -166,6 +170,7 @@ cd /home/art/agent-memory-index
 ./scripts/proof_hostile.sh
 ./scripts/proof_token_benchmark.sh
 ./scripts/proof_observability.sh
+./scripts/proof_mcp.sh
 ```
 
 4. Зарегистрировать свои проекты:
@@ -181,6 +186,42 @@ cargo run -- relation add --source project_alpha --target project_beta --relatio
 ```bash
 ./target/debug/amai project register --code project_alpha --display-name "Project Alpha" --repo-root /path/to/project-alpha
 ```
+
+## Подключение через MCP
+
+`Amai` теперь materialize-ит и собственный MCP server.
+Это значит, что совместимые клиенты могут запрашивать у него:
+- список зарегистрированных проектов;
+- namespace внутри проекта;
+- context pack;
+- token benchmark;
+- observability snapshot;
+- warmup cache.
+
+Минимальный путь:
+1. поднять stack через `./scripts/bootstrap_stack.sh`;
+2. собрать release binary:
+
+```bash
+cargo build --release
+```
+
+3. сгенерировать config snippet для нужного клиента:
+
+```bash
+./target/release/amai mcp config --client vscode --output .vscode/mcp.json
+./target/release/amai mcp config --client cursor
+./target/release/amai mcp config --client claude-desktop
+./target/release/amai mcp config --client codex
+```
+
+Что важно:
+- клиенту не нужно хранить DSN, bucket names и другие внутренние runtime детали;
+- клиент запускает `Amai` через `scripts/run_mcp_stdio.sh`;
+- runner сам подтягивает `.env` и стартует `amai mcp serve`.
+
+Подробный human-readable walkthrough:
+- [docs/MCP_INTEGRATION.md](/home/art/agent-memory-index/docs/MCP_INTEGRATION.md)
 
 ## Retrieval law
 

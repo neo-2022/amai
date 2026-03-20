@@ -5,6 +5,7 @@ mod config;
 mod edge_cache;
 mod indexer;
 mod language;
+mod mcp;
 mod nats;
 mod observe;
 mod postgres;
@@ -19,8 +20,8 @@ mod warmup;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    BootstrapCommand, Cli, Command, CompatCommand, ContextCommand, IndexCommand, NamespaceCommand,
-    ObserveCommand, ProjectCommand, RelationCommand, VerifyCommand,
+    BootstrapCommand, Cli, Command, CompatCommand, ContextCommand, IndexCommand, McpCommand,
+    NamespaceCommand, ObserveCommand, ProjectCommand, RelationCommand, VerifyCommand,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -176,6 +177,10 @@ async fn main() -> Result<()> {
             VerifyCommand::Hostile(args) => {
                 verify::run_hostile(&cfg, &args).await?;
             }
+            VerifyCommand::Mcp(args) => {
+                compatibility::assert_supported(&cfg).await?;
+                mcp::run_smoke_proof(&cfg, &args).await?;
+            }
         },
         Command::Observe { command } => match command {
             ObserveCommand::Snapshot => {
@@ -189,6 +194,14 @@ async fn main() -> Result<()> {
             ObserveCommand::Serve(args) => {
                 compatibility::assert_supported(&cfg).await?;
                 observe::serve_metrics(&cfg, &args.bind).await?;
+            }
+        },
+        Command::Mcp { command } => match command {
+            McpCommand::Serve => {
+                mcp::serve(&cfg).await?;
+            }
+            McpCommand::Config(args) => {
+                mcp::write_client_config(&args)?;
             }
         },
     }

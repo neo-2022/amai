@@ -51,6 +51,10 @@ pub enum Command {
         #[command(subcommand)]
         command: ObserveCommand,
     },
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -97,6 +101,7 @@ pub enum VerifyCommand {
     Accuracy(VerifyAccuracyArgs),
     Load(Box<VerifyLoadArgs>),
     Hostile(VerifyHostileArgs),
+    Mcp(Box<VerifyMcpArgs>),
 }
 
 #[derive(Debug, Subcommand)]
@@ -104,6 +109,12 @@ pub enum ObserveCommand {
     Snapshot,
     SlaCheck,
     Serve(ObserveServeArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    Serve,
+    Config(McpConfigArgs),
 }
 
 #[derive(Debug, Args)]
@@ -273,7 +284,37 @@ pub struct VerifyHostileArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct VerifyMcpArgs {
+    #[command(flatten)]
+    pub context: ContextPackArgs,
+    #[arg(long, default_value = "o200k_base")]
+    pub tokenizer: String,
+    #[arg(long, default_value_t = 20)]
+    pub naive_limit_files: usize,
+    #[arg(long, default_value_t = 32768)]
+    pub naive_max_bytes_per_file: usize,
+    #[arg(long, default_value_t = 1.2)]
+    pub min_savings_factor: f64,
+    #[arg(long, default_value_t = 15.0)]
+    pub min_savings_percent: f64,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct ObserveServeArgs {
     #[arg(long, default_value = "0.0.0.0:9464")]
     pub bind: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct McpConfigArgs {
+    #[arg(long, default_value = "generic")]
+    pub client: String,
+    #[arg(long, default_value = "amai")]
+    pub server_name: String,
+    #[arg(long)]
+    pub command: Option<String>,
+    #[arg(long)]
+    pub cwd: Option<PathBuf>,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }

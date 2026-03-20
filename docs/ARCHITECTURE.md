@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 18:06 MSK
-Ручная сверка guide/docs: 2026-03-20 18:06 MSK
+modified_at: 2026-03-20 18:30 MSK
+Ручная сверка guide/docs: 2026-03-20 18:30 MSK
 
 # Architecture
 
@@ -163,6 +163,12 @@ Code structure plane:
   - сначала делает semantic chunk recall в Qdrant;
   - если vector tier временно возвращает пустой результат на локальном tiny contour, использует уже найденные lexical chunks как explicit semantic fallback, не скрывая provenance;
   - materialize-ит provenance-rich context pack в PostgreSQL, SQLite edge cache и S3 context bucket.
+- `mcp serve`
+  - materialize-ит stdio MCP server поверх уже существующего retrieval/observability baseline;
+  - отдаёт tools для `list projects`, `list namespaces`, `context pack`, `token benchmark`, `observe snapshot`, `warm cache`;
+  - отдаёт prompts, которые сразу объясняют новому ИИ, что `Amai` делает и почему по умолчанию нужен `local_strict`.
+- `mcp config`
+  - генерирует client-specific config snippets без ручного копирования внутренних runtime настроек в IDE.
 
 Текущий parser baseline:
 - полноценный AST/symbol contour для `rust`, `toml`, `javascript`, `typescript`, `tsx`, `json`;
@@ -192,6 +198,8 @@ Code structure plane:
   - concurrent hot-load proof для reproducible QPS/error-rate baseline c guard `qps >= 5000` и `p95 < 10ms`;
 - `scripts/proof_token_benchmark.sh`
   - measured token-economy proof для naivе scope vs compact context-pack render;
+- `scripts/proof_mcp.sh`
+  - end-to-end MCP handshake/tool/prompt proof на живом fixture stack;
 - `scripts/proof_hostile.sh`
   - hostile proof на `stack_meta` drift и service loss для `postgres`, `qdrant`, `minio`, `nats`;
 - `cargo run -- verify benchmark ...`
@@ -202,6 +210,8 @@ Code structure plane:
   - Rust-native concurrent load verifier для `qps/error_rate/p95`;
 - `cargo run -- verify token-benchmark ...`
   - Rust-native measured token-economy verifier;
+- `cargo run -- verify mcp ...`
+  - Rust-native verifier, который сам проходит MCP handshake, tools, prompts и tool calls;
 - `cargo run -- verify hostile ...`
   - Rust-native hostile verifier с fail-closed and recovery proof.
 

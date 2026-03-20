@@ -440,6 +440,16 @@ pub async fn run_token_benchmark(
     db: &mut Client,
     args: &VerifyTokenBenchmarkArgs,
 ) -> Result<()> {
+    let payload = collect_token_benchmark(cfg, db, args).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+pub async fn collect_token_benchmark(
+    cfg: &AppConfig,
+    db: &mut Client,
+    args: &VerifyTokenBenchmarkArgs,
+) -> Result<Value> {
     let pack = retrieval::execute_context_pack_capture(cfg, db, &args.context, false).await?;
     let tokenizer = build_tokenizer(&args.tokenizer)?;
     let naive_scope = collect_naive_scope(
@@ -493,8 +503,7 @@ pub async fn run_token_benchmark(
         }
     });
     let _ = postgres::insert_observability_snapshot(db, "token_benchmark", &payload).await?;
-    println!("{}", serde_json::to_string_pretty(&payload)?);
-    Ok(())
+    Ok(payload)
 }
 
 pub async fn run_hostile(cfg: &AppConfig, args: &VerifyHostileArgs) -> Result<()> {

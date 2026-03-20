@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 18:06 MSK
-Ручная сверка guide/docs: 2026-03-20 18:06 MSK
+modified_at: 2026-03-20 18:30 MSK
+Ручная сверка guide/docs: 2026-03-20 18:30 MSK
 
 # Operations
 
@@ -118,6 +118,46 @@ cargo run -- context pack \
 - кэшируется в SQLite;
 - сохраняется в PostgreSQL;
 - выгружается в S3 context bucket.
+
+## MCP server
+
+Локальный MCP server:
+
+```bash
+cargo run -- mcp serve
+```
+
+Практический runner для IDE и других клиентов:
+
+```bash
+./scripts/run_mcp_stdio.sh
+```
+
+Этот runner:
+- поднимает `.env`;
+- не заставляет клиента дублировать внутренние credentials;
+- стартует `amai mcp serve` как stdio MCP server.
+
+## MCP client config
+
+Сгенерировать client-specific snippet можно прямо из `Amai`:
+
+```bash
+cargo run -- mcp config --client generic
+cargo run -- mcp config --client vscode --output .vscode/mcp.json
+cargo run -- mcp config --client cursor
+cargo run -- mcp config --client claude-desktop
+cargo run -- mcp config --client codex
+```
+
+Если auto-discovery корня не сработал:
+
+```bash
+cargo run -- mcp config --client vscode --cwd /path/to/art-memory-agent-index
+```
+
+Подробный user-facing walkthrough:
+- [MCP_INTEGRATION.md](/home/art/agent-memory-index/docs/MCP_INTEGRATION.md)
 
 ## Hardening proof
 
@@ -258,6 +298,35 @@ cargo run --release -- verify token-benchmark \
 - строит компактный LLM-ready render текущего `context pack`;
 - сравнивает оба результата на одном tokenizer;
 - сохраняет snapshot `token_benchmark`.
+
+## MCP proof
+
+```bash
+./scripts/proof_mcp.sh
+```
+
+Или напрямую:
+
+```bash
+cargo run --release -- verify mcp \
+  --project project_alpha \
+  --namespace review \
+  --query "shared_runtime_marker" \
+  --retrieval-mode local_plus_related
+```
+
+Этот proof:
+- поднимает child MCP server;
+- проходит `initialize`;
+- проверяет `tools/list`;
+- проверяет `prompts/list` и `prompts/get`;
+- вызывает через MCP:
+  - `amai_list_projects`
+  - `amai_list_namespaces`
+  - `amai_context_pack`
+  - `amai_token_benchmark`
+  - `amai_observe_snapshot`
+  - `amai_warm_cache`.
 
 Важно:
 - на маленьких fixture-проектах экономия токенов будет честно умеренной;
