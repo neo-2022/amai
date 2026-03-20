@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 16:54 MSK
-Ручная сверка guide/docs: 2026-03-20 16:54 MSK
+modified_at: 2026-03-20 18:06 MSK
+Ручная сверка guide/docs: 2026-03-20 18:06 MSK
 
 # Operations
 
@@ -22,6 +22,25 @@ cp .env.example .env
 - `AMI_LOCAL_FAST_CACHE_TTL_MS`
   - TTL для process-local hot cache;
   - увеличивать его без нужды не стоит, потому что слишком длинное окно хуже для реактивности на relation/config drift.
+- `AMI_WARMUP_PROJECTS`
+  - список project codes для автоматического warmup после bootstrap;
+- `AMI_OBSERVE_BIND`
+  - bind-адрес Rust exporter для Prometheus scrape;
+- `AMI_PROMETHEUS_PORT` и `AMI_GRAFANA_PORT`
+  - локальные порты monitoring profile.
+
+## Warmup after bootstrap
+
+Если cold-start нужно ускорить сразу после поднятия стека:
+
+```bash
+./scripts/warmup_cache.sh --projects project_alpha,project_beta
+```
+
+Если в `.env` задан `AMI_WARMUP_PROJECTS`, то:
+- `bootstrap_stack.sh` сам вызовет `warmup_cache.sh`;
+- warmup будет best-effort;
+- незарегистрированные проекты будут честно перечислены в `skipped`, а bootstrap не сорвётся.
 
 ## Status
 
@@ -217,6 +236,34 @@ cargo run --release -- verify load \
 - `p95 < 10ms`
 - `error_rate = 0`
 
+## Token benchmark proof
+
+```bash
+./scripts/proof_token_benchmark.sh
+```
+
+Или напрямую:
+
+```bash
+cargo run --release -- verify token-benchmark \
+  --project project_alpha \
+  --namespace review \
+  --query "shared_runtime_marker" \
+  --retrieval-mode local_plus_related \
+  --tokenizer o200k_base
+```
+
+Этот proof:
+- считает, сколько токенов потребовал бы наивный полный scope без retrieval reduction;
+- строит компактный LLM-ready render текущего `context pack`;
+- сравнивает оба результата на одном tokenizer;
+- сохраняет snapshot `token_benchmark`.
+
+Важно:
+- на маленьких fixture-проектах экономия токенов будет честно умеренной;
+- на больших реальных репозиториях этот contour должен расти заметно сильнее;
+- proof нужен именно затем, чтобы показывать пользователю measured effect, а не обещание.
+
 ## Hostile proof
 
 ```bash
@@ -290,10 +337,72 @@ cargo run --release -- observe sla-check
 - live snapshot по `PostgreSQL`, `Qdrant`, `NATS`, `S3-compatible storage`;
 - последние `index_project` и `retrieval_benchmark` snapshots;
 - последние `retrieval_accuracy` и `retrieval_load_hot` snapshots;
+- последний `token_benchmark` snapshot;
 - SLA-оценку по [observability.toml](/home/art/agent-memory-index/config/observability.toml).
+- Prometheus-ready `/metrics` exporter без persistence на каждый scrape.
 
 Сейчас hot retrieval stretch-goal в SLA считается только по реальному measured `p95_ms`, а не по округлению до целых миллисекунд.
 
 Сейчас `observe sla-check` fail-ит только если:
 - есть `critical` нарушение;
 - или есть `unknown`, то есть обязательный контур ещё не был измерен.
+
+## Monitoring profile
+
+Встроенный exporter:
+
+```bash
+./scripts/run_observe_exporter.sh
+```
+
+Prometheus + Grafana:
+
+```bash
+./scripts/render_monitoring_config.sh
+./scripts/monitoring_up.sh
+```
+
+После этого доступны:
+- `Prometheus`: `http://127.0.0.1:${AMI_PROMETHEUS_PORT:-59090}`
+- `Grafana`: `http://127.0.0.1:${AMI_GRAFANA_PORT:-53000}`
+
+Канонические файлы:
+- [config/prometheus/prometheus.yml](/home/art/agent-memory-index/config/prometheus/prometheus.yml)
+- [config/prometheus/rules/alerts.yml](/home/art/agent-memory-index/config/prometheus/rules/alerts.yml)
+- [config/grafana/dashboards/amai_stack.json](/home/art/agent-memory-index/config/grafana/dashboards/amai_stack.json)
+- [scripts/render_monitoring_config.sh](/home/art/agent-memory-index/scripts/render_monitoring_config.sh)
+
+Базовые алерты уже materialized:
+- `AmaiQdrantIndexOptimizeQueueHigh`
+- `AmaiNatsConsumerLagHigh`
+- `AmaiPostgresReplicaLagHigh`
+- `AmaiRetrievalHotBudgetMiss`
+- `AmaiCrossProjectLeakageDetected`
+- `AmaiPostgresDeadlocksDetected`
+
+Ключевой engineering law:
+- scrape path не должен менять operational truth;
+- поэтому `/metrics` собирает live snapshot read-only и не пишет `system_snapshot` в PostgreSQL на каждый Prometheus scrape;
+- persistence остаётся только у явных `observe snapshot` и `observe sla-check`.
+- runtime scrape targets и monitoring ports не должны быть вшиты в конфиг как абсолютные литералы;
+- поэтому monitoring profile рендерится из `.env` перед `docker compose --profile monitoring up`.
+- token-economy metrics тоже приходят в exporter из последнего `token_benchmark` snapshot:
+  - `amai_tokens_naive_scope_total`
+  - `amai_tokens_context_pack_total`
+  - `amai_tokens_saved_total`
+  - `amai_tokens_savings_factor`
+  - `amai_tokens_savings_percent`
+
+## Hardware baseline
+
+Текущий репозиторный latency/load baseline materialized на таком host:
+- CPU: `AMD Ryzen 9 7900X`
+- `12c / 24t`
+- RAM: `62 GiB`
+- storage: `NVMe HS-SSD-G4000 2048G`
+- architecture: `x86_64`
+
+Повторная проверка другими инженерами должна делаться:
+- на железе не хуже;
+- теми же proof-командами;
+- с тем же разделением `hot` и `cold` contours.

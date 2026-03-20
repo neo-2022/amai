@@ -82,6 +82,7 @@ pub enum RelationCommand {
 #[derive(Debug, Subcommand)]
 pub enum ContextCommand {
     Pack(ContextPackArgs),
+    Warm(WarmupCacheArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -92,6 +93,7 @@ pub enum IndexCommand {
 #[derive(Debug, Subcommand)]
 pub enum VerifyCommand {
     Benchmark(Box<VerifyBenchmarkArgs>),
+    TokenBenchmark(Box<VerifyTokenBenchmarkArgs>),
     Accuracy(VerifyAccuracyArgs),
     Load(Box<VerifyLoadArgs>),
     Hostile(VerifyHostileArgs),
@@ -101,6 +103,7 @@ pub enum VerifyCommand {
 pub enum ObserveCommand {
     Snapshot,
     SlaCheck,
+    Serve(ObserveServeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -160,6 +163,26 @@ pub struct ContextPackArgs {
     #[arg(long, default_value_t = 8)]
     pub limit_chunks: usize,
     #[arg(long, default_value_t = 8)]
+    pub limit_semantic_chunks: usize,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WarmupCacheArgs {
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
+    pub projects: Vec<String>,
+    #[arg(long, default_value = "default")]
+    pub namespace: String,
+    #[arg(long, default_value = "README")]
+    pub query: String,
+    #[arg(long)]
+    pub retrieval_mode: Option<String>,
+    #[arg(long, default_value_t = 4)]
+    pub limit_documents: usize,
+    #[arg(long, default_value_t = 4)]
+    pub limit_symbols: usize,
+    #[arg(long, default_value_t = 4)]
+    pub limit_chunks: usize,
+    #[arg(long, default_value_t = 4)]
     pub limit_semantic_chunks: usize,
 }
 
@@ -227,8 +250,30 @@ pub struct VerifyLoadArgs {
     pub max_error_rate: Option<f64>,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct VerifyTokenBenchmarkArgs {
+    #[command(flatten)]
+    pub context: ContextPackArgs,
+    #[arg(long, default_value = "o200k_base")]
+    pub tokenizer: String,
+    #[arg(long, default_value_t = 200)]
+    pub naive_limit_files: usize,
+    #[arg(long, default_value_t = 32768)]
+    pub naive_max_bytes_per_file: usize,
+    #[arg(long, default_value_t = 3.0)]
+    pub min_savings_factor: f64,
+    #[arg(long, default_value_t = 50.0)]
+    pub min_savings_percent: f64,
+}
+
 #[derive(Debug, Args)]
 pub struct VerifyHostileArgs {
     #[arg(long, default_value = "all")]
     pub scenario: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveServeArgs {
+    #[arg(long, default_value = "0.0.0.0:9464")]
+    pub bind: String,
 }

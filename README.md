@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 16:54 MSK
-Ручная сверка guide/docs: 2026-03-20 16:54 MSK
+modified_at: 2026-03-20 18:06 MSK
+Ручная сверка guide/docs: 2026-03-20 18:06 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -132,12 +132,28 @@ cd /home/art/agent-memory-index
 - `AMI_LOCAL_FAST_CACHE_TTL_MS`
   - окно жизни process-local hot cache в миллисекундах;
   - этот cache ускоряет повторные `context pack` запросы, но не заменяет PostgreSQL, SQLite и S3 persistence.
+- `AMI_WARMUP_PROJECTS`
+  - необязательный список уже зарегистрированных project codes для автоматического cold-start warmup после `bootstrap_stack.sh`;
+- `AMI_OBSERVE_BIND`
+  - bind-адрес встроенного Rust exporter для Prometheus scrape.
 
 3. Проверить, что всё поднялось:
 
 ```bash
 ./scripts/status.sh
 ```
+
+Если cold-start нужно прогреть сразу после bootstrap:
+
+```bash
+./scripts/warmup_cache.sh --projects project_alpha,project_beta
+```
+
+Важно:
+- пример выше использует условные project codes;
+- bootstrap не пришит к конкретным продуктам;
+- автоматический warmup сработает только если в `.env` задан `AMI_WARMUP_PROJECTS` и такие проекты уже зарегистрированы;
+- если проектов ещё нет, bootstrap честно пропустит warmup и продолжит поднимать stack.
 
 Дополнительно можно прогнать:
 
@@ -148,6 +164,7 @@ cd /home/art/agent-memory-index
 ./scripts/proof_accuracy.sh
 ./scripts/proof_load.sh
 ./scripts/proof_hostile.sh
+./scripts/proof_token_benchmark.sh
 ./scripts/proof_observability.sh
 ```
 
@@ -229,6 +246,13 @@ cargo run -- verify load \
   --workers 2 \
   --iterations-per-worker 25
 
+cargo run -- verify token-benchmark \
+  --project project_alpha \
+  --namespace review \
+  --query "shared_runtime_marker" \
+  --retrieval-mode local_plus_related \
+  --tokenizer o200k_base
+
 cargo run -- verify hostile --scenario all
 ```
 
@@ -250,6 +274,11 @@ cargo run -- verify hostile --scenario all
   - мерит concurrent hot-load contour;
   - выдаёт `qps`, `error_rate`, `p50/p95/p99/max`;
   - сохраняет snapshot `retrieval_load_hot`.
+- `verify token-benchmark`
+  - мерит, сколько токенов потребовал бы наивный полный scope без retrieval reduction;
+  - сравнивает это с компактным LLM-ready render текущего `context pack`;
+  - сохраняет snapshot `token_benchmark`;
+  - даёт продуктовую цифру реальной экономии контекста для пользователя.
 
 Текущий materialized guardrail:
 - `hot retrieval p95 < 10ms`
@@ -264,6 +293,8 @@ cargo run -- verify hostile --scenario all
 ```bash
 cargo run --release -- observe snapshot
 cargo run --release -- observe sla-check
+./scripts/run_observe_exporter.sh
+./scripts/monitoring_up.sh
 ```
 
 Что он делает:
@@ -271,6 +302,7 @@ cargo run --release -- observe sla-check
 - подтягивает последние benchmark/index snapshots из PostgreSQL;
 - считает SLA-статусы по machine-readable профилю [observability.toml](/home/art/agent-memory-index/config/observability.toml);
 - отделяет `hot retrieval` от `cold retrieval`, чтобы не подменять одно другим.
+- публикует Prometheus metrics через встроенный Rust exporter, не делая write-side persistence на каждый scrape.
 
 Сейчас snapshot показывает как минимум:
 - `PostgreSQL`
@@ -303,11 +335,51 @@ cargo run --release -- observe sla-check
   - `hot_qps`
   - `hot_error_rate`
 
+Production monitoring profile materialized в repo:
+- [config/prometheus/prometheus.yml](/home/art/agent-memory-index/config/prometheus/prometheus.yml)
+- [config/prometheus/rules/alerts.yml](/home/art/agent-memory-index/config/prometheus/rules/alerts.yml)
+- [config/grafana/dashboards/amai_stack.json](/home/art/agent-memory-index/config/grafana/dashboards/amai_stack.json)
+- [scripts/render_monitoring_config.sh](/home/art/agent-memory-index/scripts/render_monitoring_config.sh)
+
+Ключевые runtime metrics, которые теперь есть в `/metrics`:
+- `amai_qdrant_index_optimize_queue`
+- `amai_nats_consumer_lag_msgs`
+- `amai_postgres_replica_lag_seconds`
+- `amai_retrieval_hot_p95_ms`
+- `amai_retrieval_cold_p95_ms`
+- `amai_load_hot_qps`
+- `amai_parser_coverage_ratio`
+- `amai_accuracy_cross_project_leakage`
+- `amai_tokens_naive_scope_total`
+- `amai_tokens_context_pack_total`
+- `amai_tokens_saved_total`
+- `amai_tokens_savings_factor`
+- `amai_tokens_savings_percent`
+
+Важно:
+- monitoring config не должен держать runtime ports/targets в жёстких литералах;
+- поэтому Prometheus/Grafana datasource config рендерятся из `.env` через `render_monitoring_config.sh` перед запуском monitoring profile.
+
 Важно:
 - `hot retrieval` означает работающий result-cache contour;
 - `cold retrieval` означает живой retrieval path без result-cache bypassing;
 - быстрый hot-path в `Amai` опирается на process-local fast cache с TTL из `.env`, но не отменяет durable persistence в PostgreSQL, SQLite edge cache и S3;
 - оба режима нужны одновременно, иначе нельзя честно оценить ни UX-скорость, ни реальную цену полного retrieval path.
+
+## Benchmark hardware baseline
+
+Текущие репозиторные цифры были materialized на локальном single-node host:
+- CPU: `AMD Ryzen 9 7900X`
+- topology: `12` физических ядер / `24` потока
+- max clock: `~5.7 GHz`
+- RAM: `62 GiB`
+- storage: `NVMe HS-SSD-G4000 2048G`
+- architecture: `x86_64`
+
+Это важно:
+- hot/cold цифры нужно сравнивать только с тем же proof contour;
+- если другой инженер запускает те же команды на железе не хуже, результаты должны подтверждаться в том же порядке величин;
+- scrape path и monitoring path специально отделены от hot retrieval path, чтобы observability не размывала latency baseline.
 
 ## Защита от version drift
 

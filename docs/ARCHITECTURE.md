@@ -1,5 +1,5 @@
-modified_at: 2026-03-20 16:54 MSK
-Ручная сверка guide/docs: 2026-03-20 16:54 MSK
+modified_at: 2026-03-20 18:06 MSK
+Ручная сверка guide/docs: 2026-03-20 18:06 MSK
 
 # Architecture
 
@@ -190,6 +190,8 @@ Code structure plane:
   - relation-aware precision и zero-leakage isolation proof;
 - `scripts/proof_load.sh`
   - concurrent hot-load proof для reproducible QPS/error-rate baseline c guard `qps >= 5000` и `p95 < 10ms`;
+- `scripts/proof_token_benchmark.sh`
+  - measured token-economy proof для naivе scope vs compact context-pack render;
 - `scripts/proof_hostile.sh`
   - hostile proof на `stack_meta` drift и service loss для `postgres`, `qdrant`, `minio`, `nats`;
 - `cargo run -- verify benchmark ...`
@@ -198,6 +200,8 @@ Code structure plane:
   - Rust-native verifier для `cross_project_leakage`, `symbol_precision`, `semantic_precision`;
 - `cargo run -- verify load ...`
   - Rust-native concurrent load verifier для `qps/error_rate/p95`;
+- `cargo run -- verify token-benchmark ...`
+  - Rust-native measured token-economy verifier;
 - `cargo run -- verify hostile ...`
   - Rust-native hostile verifier с fail-closed and recovery proof.
 
@@ -214,6 +218,7 @@ Code structure plane:
 Канонические команды:
 - `cargo run -- observe snapshot`
 - `cargo run -- observe sla-check`
+- `cargo run -- observe serve --bind 0.0.0.0:9464`
 
 Machine-readable профиль:
 - [observability.toml](/home/art/agent-memory-index/config/observability.toml)
@@ -241,9 +246,14 @@ Machine-readable профиль:
    - cross-project leakage
    - symbol precision
    - semantic precision
- - `Load`
-   - hot qps
-   - hot error rate
+- `Load`
+  - hot qps
+  - hot error rate
+- `Token economy`
+  - naive visible-scope tokens
+  - context-pack tokens
+  - saved tokens
+  - savings factor / savings percent
   - parser coverage ratio
 - `Retrieval`
   - `hot benchmark`
@@ -254,4 +264,26 @@ Machine-readable профиль:
 - `hot` нужен для реальной скорости повторной сессии агента;
 - `cold` нужен для оценки настоящего retrieval path без result-cache shortcut;
 - быстрый hot-path измеряется в микросекундах и сохраняется как дробные миллисекунды, чтобы убрать ложный `0ms` эффект после агрессивной локальной оптимизации;
-- SLA нельзя честно считать выполненным, если известен только один из этих режимов.
+- SLA нельзя честно считать выполненным, если известен только один из этих режимов;
+- scrape path Prometheus exporter обязан быть read-only;
+- exporter не должен писать `system_snapshot` в PostgreSQL на каждый scrape, иначе monitoring сам начнёт искажать state и latency baseline.
+
+## Monitoring profile
+
+Поверх observability plane materialized и monitoring profile:
+- Prometheus rules;
+- Grafana dashboard;
+- встроенный Rust exporter `/metrics`.
+
+Роли:
+- `observe snapshot`
+  - снимает и сохраняет canonical snapshot в PostgreSQL;
+- `observe sla-check`
+  - снимает snapshot и fail-ит при `critical`/`unknown`;
+- `observe serve`
+  - только публикует Prometheus metrics;
+  - не становится source of truth и не подменяет explicit snapshots.
+
+Таким образом monitoring разделён на два слоя:
+- stateful evidence layer;
+- read-only scrape layer.

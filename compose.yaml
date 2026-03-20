@@ -58,3 +58,46 @@ services:
     volumes:
       - ./config/nats/server.conf:/etc/nats/server.conf:ro
       - ./state/nats:/data/jetstream
+
+  prometheus:
+    profiles: ["monitoring"]
+    image: ${AMI_PROMETHEUS_IMAGE}
+    container_name: ami-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "${AMI_PROMETHEUS_PORT}:9090"
+    volumes:
+      - ./tmp/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus/rules:/etc/prometheus/rules:ro
+      - amai-prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - qdrant
+      - nats
+
+  grafana:
+    profiles: ["monitoring"]
+    image: ${AMI_GRAFANA_IMAGE}
+    container_name: ami-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${AMI_GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${AMI_GRAFANA_ADMIN_PASSWORD}
+    ports:
+      - "${AMI_GRAFANA_PORT}:3000"
+    volumes:
+      - ./tmp/monitoring/grafana/provisioning/datasources/prometheus.yaml:/etc/grafana/provisioning/datasources/prometheus.yaml:ro
+      - ./config/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - amai-grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  amai-prometheus-data:
+  amai-grafana-data:

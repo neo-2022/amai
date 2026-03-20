@@ -1,12 +1,25 @@
 use crate::config::AppConfig;
 use crate::{nats, postgres, s3};
 use anyhow::{Context, Result, anyhow};
+use axum::{
+    Router,
+    extract::State,
+    http::{HeaderValue, StatusCode, header},
+    response::IntoResponse,
+    routing::get,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[derive(Clone)]
+struct ObserveState {
+    cfg: AppConfig,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct ObservabilityProfile {
@@ -34,10 +47,16 @@ struct PostgresThresholds {
     target_query_probe_p95_ms: f64,
     alert_query_probe_p95_ms: f64,
     critical_query_probe_p95_ms: f64,
+    target_replica_lag_seconds: f64,
+    alert_replica_lag_seconds: f64,
+    critical_replica_lag_seconds: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct QdrantThresholds {
+    target_index_optimize_queue: f64,
+    alert_index_optimize_queue: f64,
+    critical_index_optimize_queue: f64,
     target_search_p95_ms: f64,
     alert_search_p95_ms: f64,
     critical_search_p95_ms: f64,
@@ -114,7 +133,28 @@ pub async fn run_sla_check(cfg: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-async fn collect_snapshot(cfg: &AppConfig) -> Result<Value> {
+pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
+    let addr: SocketAddr = bind
+        .parse()
+        .with_context(|| format!("invalid observe bind address: {bind}"))?;
+    let app = Router::new()
+        .route("/metrics", get(metrics_handler))
+        .route("/healthz", get(healthz_handler))
+        .with_state(ObserveState { cfg: cfg.clone() });
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind observe exporter on {bind}"))?;
+    println!("observe exporter listening: http://{bind}/metrics");
+    axum::serve(listener, app)
+        .await
+        .context("observe exporter stopped unexpectedly")
+}
+
+pub async fn collect_snapshot(cfg: &AppConfig) -> Result<Value> {
+    build_snapshot(cfg, true).await
+}
+
+async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value> {
     let profile = load_profile()?;
     let db = postgres::connect_admin(cfg).await?;
     let previous = postgres::latest_observability_snapshot(&db, "system_snapshot").await?;
@@ -146,6 +186,8 @@ async fn collect_snapshot(cfg: &AppConfig) -> Result<Value> {
         postgres::latest_observability_snapshot(&db, "retrieval_load_hot").await?;
     let latest_load_cold =
         postgres::latest_observability_snapshot(&db, "retrieval_load_cold").await?;
+    let latest_token_benchmark =
+        postgres::latest_observability_snapshot(&db, "token_benchmark").await?;
 
     let payload = json!({
         "captured_at_epoch_ms": captured_at_epoch_ms,
@@ -160,6 +202,7 @@ async fn collect_snapshot(cfg: &AppConfig) -> Result<Value> {
         "latest_retrieval_accuracy": latest_accuracy,
         "latest_retrieval_load_hot": latest_load_hot,
         "latest_retrieval_load_cold": latest_load_cold,
+        "latest_token_benchmark": latest_token_benchmark,
     });
     let sla = evaluate_sla(&payload, &profile);
     let snapshot = json!({
@@ -175,10 +218,61 @@ async fn collect_snapshot(cfg: &AppConfig) -> Result<Value> {
         "latest_retrieval_accuracy": payload["latest_retrieval_accuracy"].clone(),
         "latest_retrieval_load_hot": payload["latest_retrieval_load_hot"].clone(),
         "latest_retrieval_load_cold": payload["latest_retrieval_load_cold"].clone(),
+        "latest_token_benchmark": payload["latest_token_benchmark"].clone(),
         "sla": sla,
     });
-    let _ = postgres::insert_observability_snapshot(&db, "system_snapshot", &snapshot).await?;
+    if persist_snapshot {
+        let _ = postgres::insert_observability_snapshot(&db, "system_snapshot", &snapshot).await?;
+    }
     Ok(snapshot)
+}
+
+async fn metrics_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+    match build_snapshot(&state.cfg, false).await {
+        Ok(snapshot) => {
+            let body = render_prometheus_metrics(&snapshot);
+            let headers = [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+            )];
+            (StatusCode::OK, headers, body).into_response()
+        }
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("observe exporter failed to collect snapshot: {error:#}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn healthz_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+    match build_snapshot(&state.cfg, false).await {
+        Ok(snapshot) => {
+            let summary = &snapshot["sla"]["summary"];
+            let critical = summary["critical"].as_u64().unwrap_or(0);
+            let unknown = summary["unknown"].as_u64().unwrap_or(0);
+            let status = if critical == 0 && unknown == 0 {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            let headers = [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            )];
+            (
+                status,
+                headers,
+                serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+            )
+                .into_response()
+        }
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn collect_postgres_live(
@@ -218,6 +312,19 @@ async fn collect_postgres_live(
         )
         .await?
         .get::<_, i64>(0) as u64;
+    let replica_lag_seconds = db
+        .query_one(
+            r#"
+            SELECT COALESCE(
+                MAX(EXTRACT(EPOCH FROM COALESCE(replay_lag, flush_lag, write_lag))),
+                0
+            )::double precision
+            FROM pg_stat_replication
+            "#,
+            &[],
+        )
+        .await?
+        .get::<_, f64>(0);
 
     let mut probe_samples = Vec::with_capacity(profile.postgres_query_probe_iterations);
     for _ in 0..profile.postgres_query_probe_iterations {
@@ -235,6 +342,7 @@ async fn collect_postgres_live(
         "transactions_total": transactions_total,
         "deadlocks_total": deadlocks_total,
         "wal_bytes_total": wal_bytes_total,
+        "replica_lag_seconds": replica_lag_seconds,
         "query_probe_p95_ms": query_probe_p95_ms,
         "query_probe_samples_ms": probe_samples,
     }))
@@ -306,6 +414,7 @@ async fn collect_qdrant_live(cfg: &AppConfig, http: &reqwest::Client) -> Result<
     Ok(json!({
         "collections_total": metric_value(&metrics, "collections_total"),
         "collections_vector_total": metric_value(&metrics, "collections_vector_total"),
+        "index_optimize_queue": metric_value(&metrics, "collection_update_queue_length"),
         "running_optimizations": metric_value(&metrics, "collection_running_optimizations"),
         "update_queue_length": metric_value(&metrics, "collection_update_queue_length"),
         "memory_resident_bytes": metric_value(&metrics, "memory_resident_bytes"),
@@ -403,9 +512,23 @@ fn evaluate_sla(snapshot: &Value, profile: &ObservabilityProfile) -> Value {
             profile.postgres.alert_query_probe_p95_ms,
             profile.postgres.critical_query_probe_p95_ms,
         ),
+        max_check(
+            "postgres.replica_lag_seconds",
+            snapshot["postgres"]["replica_lag_seconds"].as_f64(),
+            profile.postgres.target_replica_lag_seconds,
+            profile.postgres.alert_replica_lag_seconds,
+            profile.postgres.critical_replica_lag_seconds,
+        ),
         zero_check(
             "postgres.deadlocks_total",
             snapshot["postgres"]["deadlocks_total"].as_f64(),
+        ),
+        max_check(
+            "qdrant.index_optimize_queue",
+            snapshot["qdrant"]["index_optimize_queue"].as_f64(),
+            profile.qdrant.target_index_optimize_queue,
+            profile.qdrant.alert_index_optimize_queue,
+            profile.qdrant.critical_index_optimize_queue,
         ),
         max_check(
             "qdrant.update_queue_length",
@@ -733,4 +856,220 @@ fn delta_rate(current: f64, previous: Option<f64>, dt_s: f64) -> Option<f64> {
         return None;
     }
     Some((current - previous) / dt_s)
+}
+
+fn render_prometheus_metrics(snapshot: &Value) -> String {
+    let mut output = String::new();
+
+    push_metric(
+        &mut output,
+        "amai_postgres_connection_usage_ratio",
+        "PostgreSQL connection usage ratio.",
+        snapshot["postgres"]["connection_usage_ratio"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_postgres_query_probe_p95_ms",
+        "PostgreSQL SELECT 1 probe latency p95 in milliseconds.",
+        snapshot["postgres"]["query_probe_p95_ms"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_postgres_transactions_per_sec",
+        "PostgreSQL transactions per second between the latest system snapshots.",
+        snapshot["postgres"]["transactions_per_sec"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_postgres_deadlocks_total",
+        "PostgreSQL deadlocks total for the active database.",
+        snapshot["postgres"]["deadlocks_total"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_postgres_wal_bytes_per_sec",
+        "PostgreSQL WAL bytes per second between the latest system snapshots.",
+        snapshot["postgres"]["wal_bytes_per_sec"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_postgres_replica_lag_seconds",
+        "PostgreSQL replica lag in seconds.",
+        snapshot["postgres"]["replica_lag_seconds"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_qdrant_index_optimize_queue",
+        "Qdrant index optimization queue length.",
+        snapshot["qdrant"]["index_optimize_queue"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_qdrant_update_queue_length",
+        "Qdrant update queue length.",
+        snapshot["qdrant"]["update_queue_length"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_qdrant_search_stage_p95_ms",
+        "Qdrant semantic search stage p95 from the latest cold retrieval benchmark.",
+        snapshot["latest_retrieval_cold"]["retrieval_runtime"]["stage_p95_ms"]["semantic_search_ms"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_qdrant_memory_resident_bytes",
+        "Qdrant resident memory in bytes.",
+        snapshot["qdrant"]["memory_resident_bytes"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_nats_publish_probe_p95_ms",
+        "NATS publish+flush probe latency p95 in milliseconds.",
+        snapshot["nats"]["publish_probe_p95_ms"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_nats_consumer_lag_msgs",
+        "JetStream consumer lag in messages.",
+        snapshot["nats"]["consumer_lag_msgs"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_nats_jetstream_disk_usage_ratio",
+        "JetStream disk usage ratio.",
+        snapshot["nats"]["jetstream_disk_usage_ratio"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_retrieval_hot_p95_ms",
+        "Hot retrieval benchmark p95 in milliseconds.",
+        snapshot["latest_retrieval_hot"]["benchmark"]["p95_ms"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_retrieval_cold_p95_ms",
+        "Cold retrieval benchmark p95 in milliseconds.",
+        snapshot["latest_retrieval_cold"]["benchmark"]["p95_ms"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_index_files_per_min",
+        "Latest indexing throughput in files per minute.",
+        snapshot["latest_index_project"]["index_project"]["files_per_min"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_parser_coverage_ratio",
+        "Latest parser coverage ratio.",
+        snapshot["latest_index_project"]["index_project"]["parser_coverage_ratio"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_accuracy_cross_project_leakage",
+        "Cross-project leakage count from the latest accuracy verification.",
+        snapshot["latest_retrieval_accuracy"]["accuracy_verification"]["cross_project_leakage"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_accuracy_symbol_precision",
+        "Symbol precision from the latest accuracy verification.",
+        snapshot["latest_retrieval_accuracy"]["accuracy_verification"]["symbol_precision"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_accuracy_semantic_precision",
+        "Semantic precision from the latest accuracy verification.",
+        snapshot["latest_retrieval_accuracy"]["accuracy_verification"]["semantic_precision"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_load_hot_qps",
+        "Concurrent hot retrieval QPS from the latest load verification.",
+        snapshot["latest_retrieval_load_hot"]["load_verification"]["qps"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_load_hot_error_rate",
+        "Concurrent hot retrieval error rate from the latest load verification.",
+        snapshot["latest_retrieval_load_hot"]["load_verification"]["error_rate"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_naive_scope_total",
+        "Naive visible-scope token count from the latest token benchmark.",
+        snapshot["latest_token_benchmark"]["token_benchmark"]["naive_scope"]["tokens"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_context_pack_total",
+        "Context-pack token count from the latest token benchmark.",
+        snapshot["latest_token_benchmark"]["token_benchmark"]["context_pack_render"]["tokens"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_saved_total",
+        "Saved tokens from the latest token benchmark.",
+        snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["saved_tokens"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_savings_factor",
+        "Naive-scope to context-pack token reduction factor from the latest token benchmark.",
+        snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_factor"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_savings_percent",
+        "Token savings percent from the latest token benchmark.",
+        snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_percent"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_sla_pass_total",
+        "Count of SLA checks currently passing.",
+        snapshot["sla"]["summary"]["pass"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_sla_alert_total",
+        "Count of SLA checks currently in alert state.",
+        snapshot["sla"]["summary"]["alert"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_sla_critical_total",
+        "Count of SLA checks currently in critical state.",
+        snapshot["sla"]["summary"]["critical"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_sla_unknown_total",
+        "Count of SLA checks currently unknown.",
+        snapshot["sla"]["summary"]["unknown"].as_f64(),
+    );
+
+    output
+}
+
+fn push_metric(output: &mut String, name: &str, help: &str, value: Option<f64>) {
+    let Some(value) = value.filter(|value| value.is_finite()) else {
+        return;
+    };
+    output.push_str("# HELP ");
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(help);
+    output.push('\n');
+    output.push_str("# TYPE ");
+    output.push_str(name);
+    output.push_str(" gauge\n");
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(&value.to_string());
+    output.push('\n');
 }

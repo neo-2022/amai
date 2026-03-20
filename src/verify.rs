@@ -1,16 +1,21 @@
 use crate::bootstrap;
 use crate::cli::{
     ContextPackArgs, VerifyAccuracyArgs, VerifyBenchmarkArgs, VerifyHostileArgs, VerifyLoadArgs,
+    VerifyTokenBenchmarkArgs,
 };
 use crate::compatibility;
 use crate::config::AppConfig;
+use crate::language;
 use crate::postgres;
 use crate::retrieval;
 use anyhow::{Context, Result, anyhow};
+use ignore::WalkBuilder;
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
+use tiktoken_rs::{CoreBPE, cl100k_base, o200k_base};
 use tokio::process::Command as ProcessCommand;
 use tokio::time::sleep;
 use tokio_postgres::Client;
@@ -430,6 +435,68 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
     Ok(())
 }
 
+pub async fn run_token_benchmark(
+    cfg: &AppConfig,
+    db: &mut Client,
+    args: &VerifyTokenBenchmarkArgs,
+) -> Result<()> {
+    let pack = retrieval::execute_context_pack_capture(cfg, db, &args.context, false).await?;
+    let tokenizer = build_tokenizer(&args.tokenizer)?;
+    let naive_scope = collect_naive_scope(
+        &pack.payload,
+        args.naive_limit_files,
+        args.naive_max_bytes_per_file,
+    )?;
+    let naive_prompt = render_naive_scope_prompt(&pack.payload, &naive_scope);
+    let context_prompt = render_context_pack_prompt(&pack.payload);
+
+    let naive_tokens = tokenizer.encode_with_special_tokens(&naive_prompt).len();
+    let context_tokens = tokenizer.encode_with_special_tokens(&context_prompt).len();
+    let saved_tokens = naive_tokens.saturating_sub(context_tokens);
+    let savings_factor = if context_tokens == 0 {
+        naive_tokens as f64
+    } else {
+        naive_tokens as f64 / context_tokens as f64
+    };
+    let savings_percent = if naive_tokens == 0 {
+        0.0
+    } else {
+        saved_tokens as f64 * 100.0 / naive_tokens as f64
+    };
+    enforce_token_benchmark_thresholds(args, savings_factor, savings_percent)?;
+
+    let payload = json!({
+        "token_benchmark": {
+            "project": args.context.project,
+            "namespace": args.context.namespace,
+            "query": args.context.query,
+            "retrieval_mode": args.context.retrieval_mode,
+            "tokenizer": args.tokenizer,
+            "naive_limit_files": args.naive_limit_files,
+            "naive_max_bytes_per_file": args.naive_max_bytes_per_file,
+            "visible_projects": pack.payload["visible_projects"].clone(),
+            "naive_scope": {
+                "files_considered": naive_scope.files.len(),
+                "files": naive_scope.files,
+                "rendered_bytes": naive_prompt.len(),
+                "tokens": naive_tokens,
+            },
+            "context_pack_render": {
+                "rendered_bytes": context_prompt.len(),
+                "tokens": context_tokens,
+            },
+            "savings": {
+                "saved_tokens": saved_tokens,
+                "savings_factor": savings_factor,
+                "savings_percent": savings_percent,
+            }
+        }
+    });
+    let _ = postgres::insert_observability_snapshot(db, "token_benchmark", &payload).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
 pub async fn run_hostile(cfg: &AppConfig, args: &VerifyHostileArgs) -> Result<()> {
     bootstrap::bootstrap_stack(cfg).await?;
     compatibility::assert_supported(cfg).await?;
@@ -640,6 +707,297 @@ fn enforce_load_thresholds(
     ))
 }
 
+fn enforce_token_benchmark_thresholds(
+    args: &VerifyTokenBenchmarkArgs,
+    savings_factor: f64,
+    savings_percent: f64,
+) -> Result<()> {
+    let mut violations = Vec::new();
+    if savings_factor < args.min_savings_factor {
+        violations.push(format!(
+            "savings_factor={savings_factor:.3} below {:.3}",
+            args.min_savings_factor
+        ));
+    }
+    if savings_percent < args.min_savings_percent {
+        violations.push(format!(
+            "savings_percent={savings_percent:.3} below {:.3}",
+            args.min_savings_percent
+        ));
+    }
+
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "token benchmark thresholds violated: {}",
+        violations.join("; ")
+    ))
+}
+
+#[derive(Debug)]
+struct NaiveScopeFile {
+    project_code: String,
+    relative_path: String,
+    original_bytes: usize,
+    bytes_used: usize,
+    truncated: bool,
+    content: String,
+}
+
+#[derive(Debug)]
+struct NaiveScope {
+    files: Vec<Value>,
+    rendered_files: Vec<NaiveScopeFile>,
+}
+
+fn collect_naive_scope(
+    payload: &Value,
+    limit_files: usize,
+    max_bytes_per_file: usize,
+) -> Result<NaiveScope> {
+    let mut files = Vec::new();
+    for project in payload["visible_projects"].as_array().into_iter().flatten() {
+        let Some(project_code) = project["project_code"].as_str() else {
+            continue;
+        };
+        let Some(repo_root) = project["repo_root"].as_str() else {
+            continue;
+        };
+        for path in collect_scope_files(Path::new(repo_root), limit_files)? {
+            let relative_path = path
+                .strip_prefix(repo_root)
+                .unwrap_or(path.as_path())
+                .display()
+                .to_string();
+            let bytes = fs::read(&path)
+                .with_context(|| format!("failed to read naive scope file {}", path.display()))?;
+            let original_bytes = bytes.len();
+            let bytes_used = original_bytes.min(max_bytes_per_file);
+            let content = safe_lossy_prefix(&bytes, bytes_used);
+            files.push(NaiveScopeFile {
+                project_code: project_code.to_string(),
+                relative_path,
+                original_bytes,
+                bytes_used: content.len(),
+                truncated: original_bytes > content.len(),
+                content,
+            });
+        }
+    }
+
+    files.sort_by(|left, right| {
+        left.project_code
+            .cmp(&right.project_code)
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    if limit_files > 0 {
+        files.truncate(limit_files);
+    }
+
+    let metadata = files
+        .iter()
+        .map(|file| {
+            json!({
+                "project_code": file.project_code,
+                "relative_path": file.relative_path,
+                "original_bytes": file.original_bytes,
+                "bytes_used": file.bytes_used,
+                "truncated": file.truncated,
+            })
+        })
+        .collect();
+
+    Ok(NaiveScope {
+        files: metadata,
+        rendered_files: files,
+    })
+}
+
+fn collect_scope_files(root: &Path, limit_files: usize) -> Result<Vec<std::path::PathBuf>> {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .standard_filters(true)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true);
+    let mut files = builder
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+        })
+        .map(|entry| entry.into_path())
+        .filter(|path| language::detect(path).is_some())
+        .collect::<Vec<_>>();
+    files.sort();
+    if limit_files > 0 {
+        files.truncate(limit_files);
+    }
+    Ok(files)
+}
+
+fn safe_lossy_prefix(bytes: &[u8], max_bytes: usize) -> String {
+    let slice = &bytes[..bytes.len().min(max_bytes)];
+    String::from_utf8_lossy(slice).into_owned()
+}
+
+fn render_naive_scope_prompt(payload: &Value, scope: &NaiveScope) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("NAIVE_SCOPE\n");
+    prompt.push_str(
+        "This bundle represents the visible project scope without retrieval reduction.\n",
+    );
+    prompt.push_str("Query: ");
+    prompt.push_str(payload["query"].as_str().unwrap_or_default());
+    prompt.push_str("\nVisible projects:\n");
+    for project in payload["visible_projects"].as_array().into_iter().flatten() {
+        prompt.push_str("- ");
+        prompt.push_str(project["project_code"].as_str().unwrap_or_default());
+        prompt.push_str(" :: ");
+        prompt.push_str(project["repo_root"].as_str().unwrap_or_default());
+        prompt.push('\n');
+    }
+    prompt.push('\n');
+    for file in &scope.rendered_files {
+        prompt.push_str("## PROJECT ");
+        prompt.push_str(&file.project_code);
+        prompt.push('\n');
+        prompt.push_str("### FILE ");
+        prompt.push_str(&file.relative_path);
+        prompt.push('\n');
+        prompt.push_str(&file.content);
+        prompt.push_str("\n\n");
+    }
+    prompt
+}
+
+fn render_context_pack_prompt(payload: &Value) -> String {
+    let mut excerpt_paths = HashSet::new();
+    let mut exact_lines = Vec::new();
+    let mut symbol_lines = Vec::new();
+    let mut seen_symbols = HashSet::new();
+    for item in payload["retrieval"]["symbol_hits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let line = format!(
+            "[{}] {} :: {} :: {}",
+            item["provenance"]["source_project"]
+                .as_str()
+                .unwrap_or_default(),
+            item["relative_path"].as_str().unwrap_or_default(),
+            item["name"].as_str().unwrap_or_default(),
+            item["kind"].as_str().unwrap_or_default(),
+        );
+        if seen_symbols.insert(line.clone()) {
+            symbol_lines.push(line);
+        }
+    }
+
+    let mut excerpt_lines = Vec::new();
+    let mut seen_excerpts = HashSet::new();
+    for section in ["lexical_chunks", "semantic_chunks"] {
+        for item in payload["retrieval"][section]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let line = format!(
+                "[{}] {} :: {}",
+                item["provenance"]["source_project"]
+                    .as_str()
+                    .or_else(|| item["project_code"].as_str())
+                    .unwrap_or_default(),
+                item["relative_path"].as_str().unwrap_or_default(),
+                item["content"].as_str().unwrap_or_default(),
+            );
+            if seen_excerpts.insert(line.clone()) {
+                excerpt_lines.push(line);
+            }
+            excerpt_paths.insert(format!(
+                "{}::{}",
+                item["provenance"]["source_project"]
+                    .as_str()
+                    .or_else(|| item["project_code"].as_str())
+                    .unwrap_or_default(),
+                item["relative_path"].as_str().unwrap_or_default(),
+            ));
+        }
+    }
+
+    let mut seen_exact = HashSet::new();
+    for item in payload["retrieval"]["exact_documents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let path_key = format!(
+            "{}::{}",
+            item["project_code"].as_str().unwrap_or_default(),
+            item["relative_path"].as_str().unwrap_or_default(),
+        );
+        if excerpt_paths.contains(&path_key) {
+            continue;
+        }
+        let line = format!(
+            "[{}] {} {}",
+            item["project_code"].as_str().unwrap_or_default(),
+            item["relative_path"].as_str().unwrap_or_default(),
+            item["snippet"].as_str().unwrap_or_default(),
+        );
+        if seen_exact.insert(line.clone()) {
+            exact_lines.push(line);
+        }
+    }
+
+    let mut prompt = String::new();
+    prompt.push('Q');
+    prompt.push(':');
+    prompt.push_str(payload["query"].as_str().unwrap_or_default());
+    prompt.push('\n');
+    prompt.push('P');
+    prompt.push(':');
+    prompt.push_str(payload["project"]["code"].as_str().unwrap_or_default());
+    prompt.push('\n');
+    prompt.push('M');
+    prompt.push(':');
+    prompt.push_str(
+        payload["effective_retrieval_mode"]
+            .as_str()
+            .unwrap_or_default(),
+    );
+    prompt.push_str("\n\n");
+    push_compact_lines(&mut prompt, "D", &exact_lines);
+    push_compact_lines(&mut prompt, "S", &symbol_lines);
+    push_compact_lines(&mut prompt, "E", &excerpt_lines);
+    prompt
+}
+
+fn push_compact_lines(prompt: &mut String, title: &str, lines: &[String]) {
+    prompt.push_str(title);
+    prompt.push('\n');
+    for line in lines {
+        prompt.push_str(line);
+        prompt.push('\n');
+    }
+    prompt.push('\n');
+}
+
+fn build_tokenizer(name: &str) -> Result<CoreBPE> {
+    match name {
+        "o200k_base" => o200k_base().context("failed to initialize o200k_base tokenizer"),
+        "cl100k_base" => cl100k_base().context("failed to initialize cl100k_base tokenizer"),
+        other => Err(anyhow!("unsupported tokenizer: {other}")),
+    }
+}
+
 fn collect_visible_projects(payload: &Value) -> Vec<String> {
     payload["visible_projects"]
         .as_array()
@@ -693,7 +1051,10 @@ fn precision_ratio(items: &Value, predicate: impl Fn(&Value) -> bool) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{item_belongs_to_project, percentile_sample, precision_ratio};
+    use super::{
+        item_belongs_to_project, percentile_sample, precision_ratio, render_context_pack_prompt,
+        safe_lossy_prefix,
+    };
     use serde_json::json;
 
     #[test]
@@ -734,5 +1095,31 @@ mod tests {
             &json!({"project_code":"beta","provenance":{"source_project":"beta"}}),
             "alpha"
         ));
+    }
+
+    #[test]
+    fn safe_lossy_prefix_truncates_bytes() {
+        let content = safe_lossy_prefix("abcdef".as_bytes(), 3);
+        assert_eq!(content, "abc");
+    }
+
+    #[test]
+    fn context_prompt_renders_sections() {
+        let payload = json!({
+            "query": "needle",
+            "project": {"code": "alpha"},
+            "effective_retrieval_mode": "local_strict",
+            "retrieval": {
+                "exact_documents": [{"project_code":"alpha","relative_path":"README.md","snippet":"needle"}],
+                "symbol_hits": [{"provenance":{"source_project":"alpha"},"relative_path":"src/lib.rs","name":"run","kind":"fn"}],
+                "lexical_chunks": [{"project_code":"alpha","relative_path":"src/lib.rs","content":"needle"}],
+                "semantic_chunks": [{"provenance":{"source_project":"alpha"},"relative_path":"src/lib.rs","content":"needle"}]
+            }
+        });
+        let prompt = render_context_pack_prompt(&payload);
+        assert!(prompt.contains("Q:needle"));
+        assert!(prompt.contains("D\n[alpha] README.md needle"));
+        assert!(prompt.contains("S\n[alpha] src/lib.rs :: run :: fn"));
+        assert!(prompt.contains("E\n[alpha] src/lib.rs :: needle"));
     }
 }

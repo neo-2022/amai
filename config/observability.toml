@@ -1,5 +1,5 @@
-modified_at = "2026-03-20 16:56 MSK"
-"Ручная сверка guide/docs" = "2026-03-20 16:56 MSK"
+modified_at = "2026-03-20 17:21 MSK"
+"Ручная сверка guide/docs" = "2026-03-20 17:21 MSK"
 
 [snapshot]
 postgres_query_probe_iterations = 20
@@ -12,8 +12,14 @@ critical_connection_usage_ratio = 0.95
 target_query_probe_p95_ms = 50.0
 alert_query_probe_p95_ms = 100.0
 critical_query_probe_p95_ms = 250.0
+target_replica_lag_seconds = 0.5
+alert_replica_lag_seconds = 1.0
+critical_replica_lag_seconds = 5.0
 
 [qdrant]
+target_index_optimize_queue = 10.0
+alert_index_optimize_queue = 100.0
+critical_index_optimize_queue = 500.0
 target_search_p95_ms = 100.0
 alert_search_p95_ms = 250.0
 critical_search_p95_ms = 500.0

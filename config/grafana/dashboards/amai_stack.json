@@ -1,0 +1,287 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "amai-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "amai_retrieval_hot_p95_ms",
+          "legendFormat": "hot p95",
+          "refId": "A"
+        },
+        {
+          "expr": "amai_retrieval_cold_p95_ms",
+          "legendFormat": "cold p95",
+          "refId": "B"
+        }
+      ],
+      "title": "Retrieval P95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "amai-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "amai_qdrant_index_optimize_queue",
+          "legendFormat": "optimize queue",
+          "refId": "A"
+        },
+        {
+          "expr": "amai_nats_consumer_lag_msgs",
+          "legendFormat": "consumer lag",
+          "refId": "B"
+        }
+      ],
+      "title": "Queue Pressure",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "amai-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "amai_postgres_replica_lag_seconds",
+          "legendFormat": "replica lag",
+          "refId": "A"
+        },
+        {
+          "expr": "amai_postgres_query_probe_p95_ms / 1000",
+          "legendFormat": "query probe",
+          "refId": "B"
+        }
+      ],
+      "title": "PostgreSQL Lag / Probe",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "amai-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "amai_load_hot_qps",
+          "legendFormat": "hot qps",
+          "refId": "A"
+        },
+        {
+          "expr": "amai_index_files_per_min",
+          "legendFormat": "files/min",
+          "refId": "B"
+        }
+      ],
+      "title": "Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "amai-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "amai_parser_coverage_ratio",
+          "legendFormat": "parser coverage",
+          "refId": "A"
+        },
+        {
+          "expr": "amai_accuracy_symbol_precision",
+          "legendFormat": "symbol precision",
+          "refId": "B"
+        },
+        {
+          "expr": "amai_accuracy_semantic_precision",
+          "legendFormat": "semantic precision",
+          "refId": "C"
+        }
+      ],
+      "title": "Coverage / Precision",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "amai-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "amai_accuracy_cross_project_leakage",
+          "legendFormat": "leakage",
+          "refId": "A"
+        },
+        {
+          "expr": "amai_sla_critical_total",
+          "legendFormat": "sla critical",
+          "refId": "B"
+        },
+        {
+          "expr": "amai_sla_unknown_total",
+          "legendFormat": "sla unknown",
+          "refId": "C"
+        }
+      ],
+      "title": "Isolation / SLA",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "amai",
+    "observability"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timezone": "",
+  "title": "Amai Stack",
+  "uid": "amai-stack",
+  "version": 1
+}

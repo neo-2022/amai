@@ -1,0 +1,65 @@
+groups:
+  - name: amai-runtime
+    rules:
+      - alert: AmaiObserveExporterDown
+        expr: up{job="amai"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Amai observe exporter недоступен"
+          description: "Prometheus не может scrape-ить /metrics у Amai exporter."
+
+      - alert: AmaiQdrantIndexOptimizeQueueHigh
+        expr: amai_qdrant_index_optimize_queue > 100
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qdrant optimization queue вырос"
+          description: "amai_qdrant_index_optimize_queue > 100 дольше 1 минуты."
+
+      - alert: AmaiNatsConsumerLagHigh
+        expr: amai_nats_consumer_lag_msgs > 1000
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "JetStream consumer lag вырос"
+          description: "amai_nats_consumer_lag_msgs > 1000 дольше 1 минуты."
+
+      - alert: AmaiPostgresReplicaLagHigh
+        expr: amai_postgres_replica_lag_seconds > 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL replica lag превысил 1 секунду"
+          description: "amai_postgres_replica_lag_seconds > 1 дольше 1 минуты."
+
+      - alert: AmaiRetrievalHotBudgetMiss
+        expr: amai_retrieval_hot_p95_ms > 10
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Hot retrieval вышел за 10ms p95"
+          description: "amai_retrieval_hot_p95_ms > 10 дольше 1 минуты."
+
+      - alert: AmaiCrossProjectLeakageDetected
+        expr: amai_accuracy_cross_project_leakage > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Обнаружено cross-project leakage"
+          description: "accuracy.cross_project_leakage должен быть строго равен 0."
+
+      - alert: AmaiPostgresDeadlocksDetected
+        expr: amai_postgres_deadlocks_total > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Обнаружены PostgreSQL deadlocks"
+          description: "deadlocks в Amai имеют zero-tolerance policy."

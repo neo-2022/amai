@@ -14,6 +14,7 @@ mod s3;
 mod status;
 mod syntax;
 mod verify;
+mod warmup;
 
 use anyhow::Result;
 use clap::Parser;
@@ -119,6 +120,7 @@ async fn main() -> Result<()> {
                 ContextCommand::Pack(args) => {
                     retrieval::build_context_pack(&cfg, &mut db, &args).await?
                 }
+                ContextCommand::Warm(args) => warmup::run(&cfg, &mut db, &args).await?,
             }
         }
         Command::Index { command } => match command {
@@ -157,6 +159,11 @@ async fn main() -> Result<()> {
                 let mut db = postgres::connect_admin(&cfg).await?;
                 verify::run_benchmark(&cfg, &mut db, &args).await?;
             }
+            VerifyCommand::TokenBenchmark(args) => {
+                compatibility::assert_supported(&cfg).await?;
+                let mut db = postgres::connect_admin(&cfg).await?;
+                verify::run_token_benchmark(&cfg, &mut db, &args).await?;
+            }
             VerifyCommand::Accuracy(args) => {
                 compatibility::assert_supported(&cfg).await?;
                 let mut db = postgres::connect_admin(&cfg).await?;
@@ -178,6 +185,10 @@ async fn main() -> Result<()> {
             ObserveCommand::SlaCheck => {
                 compatibility::assert_supported(&cfg).await?;
                 observe::run_sla_check(&cfg).await?;
+            }
+            ObserveCommand::Serve(args) => {
+                compatibility::assert_supported(&cfg).await?;
+                observe::serve_metrics(&cfg, &args.bind).await?;
             }
         },
     }
