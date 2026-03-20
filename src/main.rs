@@ -2,6 +2,7 @@ mod bootstrap;
 mod cli;
 mod compatibility;
 mod config;
+mod continuity;
 mod dashboard;
 mod deployment;
 mod edge_cache;
@@ -25,8 +26,9 @@ mod warmup;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    BootstrapCommand, Cli, Command, CompatCommand, ContextCommand, DeploymentCommand, IndexCommand,
-    McpCommand, NamespaceCommand, ObserveCommand, ProjectCommand, RelationCommand, VerifyCommand,
+    BootstrapCommand, Cli, Command, CompatCommand, ContextCommand, ContinuityCommand,
+    DeploymentCommand, IndexCommand, McpCommand, NamespaceCommand, ObserveCommand, ProjectCommand,
+    RelationCommand, VerifyCommand,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -42,6 +44,18 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Continuity { command } => match command {
+            ContinuityCommand::Import(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                continuity::import_sources(&cfg, &args).await?;
+            }
+            ContinuityCommand::Startup(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                continuity::print_startup(&cfg, &args).await?;
+            }
+        },
         Command::Deployment { command } => {
             let repo_root = config::discover_repo_root(None)?;
             match command {

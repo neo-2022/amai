@@ -77,6 +77,10 @@ step "verify human dashboard endpoints"
 curl -fsS "http://127.0.0.1:${observe_port}/" | rg 'Amai Human Dashboard|Главная польза прямо сейчас|Польза проекта видна сразу' >/dev/null
 curl -fsS "http://127.0.0.1:${observe_port}/api/dashboard" | rg '"top_cards"|"service_cards"|"glossary"' >/dev/null
 curl -fsS "http://127.0.0.1:${observe_port}/api/snapshot" | rg '"sla"|"postgres"|"token_budget_report"' >/dev/null
+curl -fsS "http://127.0.0.1:${observe_port}/" | rg '/brand/amai_mark.svg|/favicon.ico' >/dev/null
+curl -fsS "http://127.0.0.1:${observe_port}/brand/amai_mark.svg" | rg '<svg' >/dev/null
+curl -fsS "http://127.0.0.1:${observe_port}/brand/amai_lockup.svg" | rg '<svg' >/dev/null
+curl -fsS "http://127.0.0.1:${observe_port}/favicon.ico" >/dev/null
 
 step "start monitoring profile"
 ./scripts/monitoring_up.sh

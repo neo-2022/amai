@@ -149,6 +149,9 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
     let app = Router::new()
         .route("/", get(dashboard_page_handler))
         .route("/dashboard", get(dashboard_page_handler))
+        .route("/brand/amai_mark.svg", get(brand_mark_handler))
+        .route("/brand/amai_lockup.svg", get(brand_lockup_handler))
+        .route("/favicon.ico", get(favicon_handler))
         .route("/api/dashboard", get(dashboard_api_handler))
         .route("/api/snapshot", get(snapshot_api_handler))
         .route("/metrics", get(metrics_handler))
@@ -281,6 +284,30 @@ async fn metrics_handler(State(state): State<ObserveState>) -> impl IntoResponse
 async fn dashboard_page_handler(State(state): State<ObserveState>) -> impl IntoResponse {
     let html = dashboard::render_html(state.dashboard_refresh_ms);
     Html(html).into_response()
+}
+
+async fn brand_mark_handler() -> impl IntoResponse {
+    let headers = [(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("image/svg+xml; charset=utf-8"),
+    )];
+    (StatusCode::OK, headers, dashboard::brand_mark_svg()).into_response()
+}
+
+async fn brand_lockup_handler() -> impl IntoResponse {
+    let headers = [(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("image/svg+xml; charset=utf-8"),
+    )];
+    (StatusCode::OK, headers, dashboard::brand_lockup_svg()).into_response()
+}
+
+async fn favicon_handler() -> impl IntoResponse {
+    let headers = [(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("image/x-icon"),
+    )];
+    (StatusCode::OK, headers, dashboard::favicon_ico()).into_response()
 }
 
 async fn dashboard_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {

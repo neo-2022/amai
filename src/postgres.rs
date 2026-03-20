@@ -316,6 +316,32 @@ pub async fn get_project_by_code(client: &Client, code: &str) -> Result<ProjectR
     })
 }
 
+pub async fn get_project_by_repo_root(client: &Client, repo_root: &str) -> Result<ProjectRecord> {
+    let row = client
+        .query_opt(
+            r#"
+            SELECT
+                project_id,
+                code,
+                display_name,
+                repo_root,
+                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+            FROM ami.projects
+            WHERE repo_root = $1
+            "#,
+            &[&repo_root],
+        )
+        .await?
+        .ok_or_else(|| anyhow!("project not found for repo_root: {repo_root}"))?;
+    Ok(ProjectRecord {
+        project_id: row.get(0),
+        code: row.get(1),
+        display_name: row.get(2),
+        repo_root: row.get(3),
+        updated_at: row.get(4),
+    })
+}
+
 pub async fn ensure_namespace(
     client: &Client,
     project_id: Uuid,

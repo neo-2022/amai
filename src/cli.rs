@@ -14,6 +14,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Continuity {
+        #[command(subcommand)]
+        command: ContinuityCommand,
+    },
     Deployment {
         #[command(subcommand)]
         command: DeploymentCommand,
@@ -66,6 +70,12 @@ pub enum DeploymentCommand {
     List,
     Explain(DeploymentTargetArgs),
     Preflight(DeploymentTargetArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContinuityCommand {
+    Import(ContinuityImportArgs),
+    Startup(ContinuityStartupArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -140,6 +150,36 @@ pub enum McpCommand {
 pub struct DeploymentTargetArgs {
     #[arg(long)]
     pub target: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ContinuityImportArgs {
+    #[arg(long)]
+    pub project: String,
+    #[arg(long)]
+    pub display_name: String,
+    #[arg(long)]
+    pub repo_root: PathBuf,
+    #[arg(long, default_value = "continuity")]
+    pub namespace: String,
+    #[arg(long)]
+    pub bootstrap_file: PathBuf,
+    #[arg(long)]
+    pub active_workline_file: PathBuf,
+    #[arg(long)]
+    pub memory_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub transcript_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ContinuityStartupArgs {
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub repo_root: Option<PathBuf>,
+    #[arg(long, default_value = "continuity")]
+    pub namespace: String,
 }
 
 #[derive(Debug, Args)]

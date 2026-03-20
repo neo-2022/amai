@@ -31,6 +31,18 @@ pub fn browser_base_url(bind: &str) -> String {
     format!("http://{normalized_host}:{port}")
 }
 
+pub fn brand_mark_svg() -> &'static str {
+    include_str!("../brand/amai_mark.svg")
+}
+
+pub fn brand_lockup_svg() -> &'static str {
+    include_str!("../brand/amai_lockup.svg")
+}
+
+pub fn favicon_ico() -> &'static [u8] {
+    include_bytes!("../brand/favicon.ico")
+}
+
 pub fn render_html(refresh_ms: u64) -> String {
     const TEMPLATE: &str = r#"<!doctype html>
 <html lang="ru">
@@ -38,6 +50,7 @@ pub fn render_html(refresh_ms: u64) -> String {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Amai Human Dashboard</title>
+  <link rel="icon" href="/favicon.ico">
   <style>
     :root {
       color-scheme: light;
@@ -102,6 +115,21 @@ pub fn render_html(refresh_ms: u64) -> String {
       padding: 18px 20px;
       position: relative;
       overflow: hidden;
+    }
+
+    .brand-line {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      flex: 0 0 auto;
+      box-shadow: 0 10px 26px rgba(11, 16, 32, 0.12);
     }
 
     .hero-main::after {
@@ -348,7 +376,10 @@ pub fn render_html(refresh_ms: u64) -> String {
     <div id="error-banner" class="error-banner"></div>
     <section class="hero">
       <div class="panel hero-main">
-        <div class="eyebrow">Amai Human Dashboard</div>
+        <div class="brand-line">
+          <img class="brand-mark" src="/brand/amai_mark.svg" alt="Amai">
+          <div class="eyebrow">Amai Human Dashboard</div>
+        </div>
         <h1>Amai: живая польза на одной странице.</h1>
         <p class="lead">
           Здесь без инженерного шума видно главное: насколько быстро отвечает <code>Amai</code>,
@@ -654,7 +685,7 @@ fn build_top_cards(snapshot: &Value) -> Vec<Value> {
             "Экономия токенов за текущую сессию",
             format_u64(snapshot["token_budget_report"]["token_budget_report"]["current_session"]["total_saved_tokens"].as_u64()),
             format!(
-                "Сессия здесь = непрерывная работа без паузы дольше {}. Текущая сессия длится {} и сейчас в неё вошло {} запросов. Экономия: {}.",
+                "Сессия здесь = непрерывная работа без паузы дольше {}. Текущая сессия длится {} и сейчас в неё вошло {} запросов. Экономия: {}. Если новых запросов к Amai сейчас нет, число временно не меняется — и это нормально.",
                 human_minutes(session_gap_minutes),
                 elapsed_since_epoch_label(current_session_started, captured_at_epoch_ms),
                 format_u64(current_session_events),
@@ -666,7 +697,7 @@ fn build_top_cards(snapshot: &Value) -> Vec<Value> {
             "Экономия токенов за всё время записи",
             format_u64(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["total_saved_tokens"].as_u64()),
             format!(
-                "Это итог за всё время, пока Amai ведёт эту статистику: {}. Сейчас в сумме учтено {} запросов. Экономия: {}.",
+                "Это итог за всё время, пока Amai ведёт эту статистику: {}. Сейчас в сумме учтено {} запросов. Экономия: {}. Этот блок растёт только когда появляются новые события использования.",
                 elapsed_since_epoch_label(lifetime_started, captured_at_epoch_ms),
                 format_u64(lifetime_events),
                 format_percent(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["savings_percent"].as_f64())
@@ -954,6 +985,11 @@ fn build_links(base_url: &str) -> Vec<Value> {
 
     let prometheus_port = env::var("AMI_PROMETHEUS_PORT").unwrap_or_else(|_| "59090".to_string());
     let grafana_port = env::var("AMI_GRAFANA_PORT").unwrap_or_else(|_| "53000".to_string());
+    let grafana_admin_user =
+        env::var("AMI_GRAFANA_ADMIN_USER").unwrap_or_else(|_| "admin".to_string());
+    let grafana_default_password = env::var("AMI_GRAFANA_ADMIN_PASSWORD")
+        .map(|value| value == "admin_change_me")
+        .unwrap_or(false);
     let prometheus_available = tcp_port_is_open("127.0.0.1", &prometheus_port);
     let grafana_available = tcp_port_is_open("127.0.0.1", &grafana_port);
     links.push(json!({
@@ -969,9 +1005,13 @@ fn build_links(base_url: &str) -> Vec<Value> {
         "label": "Grafana",
         "url": if grafana_available { Value::from(monitoring_url(base_url, &grafana_port)) } else { Value::Null },
         "note": if grafana_available {
-            "Готовый инженерный dashboard уже доступен."
+            if grafana_default_password {
+                format!("Готовый инженерный dashboard уже доступен. Логин: {}. Пароль сейчас стандартный из .env: admin_change_me. Лучше сменить его в AMI_GRAFANA_ADMIN_PASSWORD.", grafana_admin_user)
+            } else {
+                format!("Готовый инженерный dashboard уже доступен. Логин: {}. Текущий пароль задан в .env через AMI_GRAFANA_ADMIN_PASSWORD.", grafana_admin_user)
+            }
         } else {
-            "Grafana поднимается вместе с monitoring profile. Сначала запустите ./scripts/monitoring_up.sh."
+            "Grafana поднимается вместе с monitoring profile. Сначала запустите ./scripts/monitoring_up.sh.".to_string()
         }
     }));
     links

@@ -50,5 +50,53 @@ if ([string]::IsNullOrWhiteSpace($bind)) {
     $bind = "0.0.0.0:9464"
 }
 
-cargo run --release --quiet -- observe serve --bind $bind
-exit $LASTEXITCODE
+$parts = $bind.Split(":", 2)
+$host = $parts[0]
+$port = $parts[1]
+if ([string]::IsNullOrWhiteSpace($host) -or $host -eq "0.0.0.0" -or $host -eq "::") {
+    $browserHost = "127.0.0.1"
+} else {
+    $browserHost = $host
+}
+
+$dashboardUrl = "http://$browserHost`:$port/"
+$healthUrl = "http://$browserHost`:$port/healthz"
+$pidPath = Join-Path $repoRoot "state\human_dashboard.pid"
+$logPath = Join-Path $repoRoot "tmp\human_dashboard.log"
+
+New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot "state") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot "tmp") | Out-Null
+
+try {
+    Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 2 | Out-Null
+    Write-Output "Amai human dashboard already running"
+    Write-Output "URL: $dashboardUrl"
+    if (Test-Path $pidPath) {
+        Write-Output ("PID: " + (Get-Content $pidPath -Raw).Trim())
+    }
+    exit 0
+} catch {
+}
+
+$process = Start-Process -FilePath "cargo" -ArgumentList @("run", "--release", "--quiet", "--", "observe", "serve", "--bind", $bind) -WorkingDirectory $repoRoot -RedirectStandardOutput $logPath -RedirectStandardError $logPath -WindowStyle Hidden -PassThru
+Set-Content -Path $pidPath -Value $process.Id
+
+for ($i = 0; $i -lt 120; $i++) {
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 2 | Out-Null
+        Write-Output "Amai human dashboard started"
+        Write-Output "URL: $dashboardUrl"
+        Write-Output "PID: $($process.Id)"
+        Write-Output "Log: $logPath"
+        exit 0
+    } catch {
+        if ($process.HasExited) {
+            Write-Error "Amai human dashboard failed to start. See $logPath"
+            exit 1
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+Write-Error "Amai human dashboard did not become healthy in time. See $logPath"
+exit 1

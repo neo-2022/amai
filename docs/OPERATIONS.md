@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 02:09 MSK
-Ручная сверка guide/docs: 2026-03-21 02:09 MSK
+modified_at: 2026-03-21 01:09 MSK
+Ручная сверка guide/docs: 2026-03-21 01:09 MSK
 
 # Operations
 
@@ -101,6 +101,44 @@ cp .env.example .env
   - bind-адрес Rust exporter для Prometheus scrape;
 - `AMI_PROMETHEUS_PORT` и `AMI_GRAFANA_PORT`
   - локальные порты monitoring profile.
+
+## Continuity migration from previous toolchain
+
+Если проект уже использовал старую continuity-схему вне `Amai`, её можно не выбрасывать, а аккуратно втянуть внутрь `Amai`.
+
+Канонические generic команды:
+
+```bash
+cd /home/art/agent-memory-index
+./scripts/import_continuity.sh \
+  --project project_alpha \
+  --display-name "Project Alpha" \
+  --repo-root /path/to/project-alpha \
+  --namespace continuity \
+  --bootstrap-file /path/to/project-alpha/.codex/project-bootstrap.md \
+  --active-workline-file /path/to/project-alpha/.codex/ACTIVE_WORKLINE.md \
+  --memory-dir /path/to/echovault/project-alpha
+```
+
+После этого новый startup-contour уже может идти через `Amai`:
+
+```bash
+cd /home/art/agent-memory-index
+./scripts/continuity_startup.sh --project project_alpha --namespace continuity
+```
+
+Что это materialize-ит:
+- полный raw continuity-content сохраняется в artifact storage;
+- searchable continuity-layer режется до безопасного размера для `PostgreSQL tsvector` и lexical chunks;
+- observability получает отдельный snapshot `continuity_import`;
+- startup-summary потом читается не из нескольких разрозненных источников, а из `Amai`.
+
+Важно:
+- старые источники при этом не обязаны сразу исчезать;
+- безопасный migration path такой:
+  - продолжать писать `EchoVault` / handoff-файл / transcript mirror;
+  - после содержательной работы обновлять continuity import в `Amai`;
+  - новый session-start уже поднимать через `Amai continuity startup`.
 
 ## Warmup after bootstrap
 
@@ -805,18 +843,21 @@ cargo run --release -- observe sla-check
 
 ```bash
 ./scripts/human_dashboard.sh
+./scripts/human_dashboard_down.sh
 ```
 
 Windows PowerShell:
 
 ```powershell
 .\scripts\human_dashboard.ps1
+.\scripts\human_dashboard_down.ps1
 ```
 
 Windows CMD:
 
 ```bat
 scripts\human_dashboard.cmd
+scripts\human_dashboard_down.cmd
 ```
 
 Это поднимает тот же `observe serve`, но теперь он отдаёт сразу несколько уровней:
@@ -835,6 +876,12 @@ scripts\human_dashboard.cmd
 - сначала открыть human dashboard;
 - а уже потом при необходимости идти глубже в Prometheus/Grafana.
 
+Launcher human dashboard теперь:
+- сам поднимает observe-server в фоне;
+- пишет PID в `state/human_dashboard.pid`;
+- складывает лог в `tmp/human_dashboard.log`;
+- не требует держать терминал открытым только ради живой панели.
+
 Встроенный exporter:
 
 ```bash
@@ -851,6 +898,14 @@ Prometheus + Grafana:
 После этого доступны:
 - `Prometheus`: `http://127.0.0.1:${AMI_PROMETHEUS_PORT:-59090}`
 - `Grafana`: `http://127.0.0.1:${AMI_GRAFANA_PORT:-53000}`
+
+Grafana login берётся из `.env`:
+- user: `AMI_GRAFANA_ADMIN_USER`
+- password: `AMI_GRAFANA_ADMIN_PASSWORD`
+
+По умолчанию в dev baseline:
+- user: `admin`
+- password: `admin_change_me`
 
 Канонические файлы:
 - [config/prometheus/prometheus.yml](/home/art/agent-memory-index/config/prometheus/prometheus.yml)

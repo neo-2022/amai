@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 02:09 MSK
-Ручная сверка guide/docs: 2026-03-21 02:09 MSK
+modified_at: 2026-03-21 01:09 MSK
+Ручная сверка guide/docs: 2026-03-21 01:09 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -241,19 +241,25 @@ scripts\install_amai.cmd --client codex
 
 ```bash
 ./scripts/human_dashboard.sh
+./scripts/human_dashboard_down.sh
 ```
 
 ### Windows PowerShell
 
 ```powershell
 .\scripts\human_dashboard.ps1
+.\scripts\human_dashboard_down.ps1
 ```
 
 ### Windows CMD
 
 ```bat
 scripts\human_dashboard.cmd
+scripts\human_dashboard_down.cmd
 ```
+
+После запуска `human_dashboard` теперь не держится за открытый терминал.
+Он сам поднимает observe-server в фоне, пишет PID и путь к логу, а затем возвращает URL.
 
 После запуска откройте в браузере:
 
@@ -262,6 +268,8 @@ http://127.0.0.1:9464/
 ```
 
 Если у вас поменян `AMI_OBSERVE_BIND`, адрес будет таким же, но с вашим портом.
+
+Если потом нужно остановить human dashboard, используйте симметричную команду `human_dashboard_down`.
 
 Что показывает эта панель:
 - сколько токенов `Amai` сэкономил за текущую сессию;
@@ -308,6 +316,59 @@ http://127.0.0.1:9464/
 ./scripts/remove_amai.sh --client vscode
 ./scripts/remove_amai.sh --client codex
 ```
+
+## Если у вас уже есть старая continuity-схема
+
+Если проект уже жил не в `Amai`, это не означает, что нужно всё начинать с нуля.
+
+`Amai` умеет забрать в себя старую continuity-линию из внешних источников, например:
+- заметки `EchoVault`;
+- bootstrap-файл continuity;
+- текущий `ACTIVE_WORKLINE`;
+- сохранённые rendered transcripts.
+
+Простыми словами это значит так:
+- старые источники не выбрасываются;
+- `Amai` забирает из них всё важное;
+- после этого новый старт можно делать уже через `Amai`, а не через ручное склеивание нескольких файлов.
+
+### Шаг 1. Импортировать старую continuity-линию
+
+```bash
+./scripts/import_continuity.sh \
+  --project project_alpha \
+  --display-name "Project Alpha" \
+  --repo-root /path/to/project-alpha \
+  --namespace continuity \
+  --bootstrap-file /path/to/project-alpha/.codex/project-bootstrap.md \
+  --active-workline-file /path/to/project-alpha/.codex/ACTIVE_WORKLINE.md \
+  --memory-dir /path/to/echovault/project-alpha
+```
+
+Что делает эта команда:
+- читает старые continuity-источники;
+- складывает полный raw-content в artifact layer;
+- делает безопасный searchable слой для retrieval;
+- фиксирует import snapshot, чтобы потом новый старт не зависел от ручной сборки.
+
+### Шаг 2. Запустить continuity-startup уже через `Amai`
+
+```bash
+./scripts/continuity_startup.sh \
+  --project project_alpha \
+  --namespace continuity
+```
+
+Что вы увидите:
+- текущую активную линию;
+- ближайший обязательный следующий шаг;
+- сколько файлов памяти уже импортировано;
+- какой последний rendered transcript считался источником continuity.
+
+Простыми словами:
+- старая память не потерялась;
+- она стала доступна через новый контур `Amai`;
+- следующий чат можно поднимать уже через `Amai continuity startup`.
 
 ## Если нужен дешёвый VPS
 
