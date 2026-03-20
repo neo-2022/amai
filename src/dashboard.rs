@@ -728,74 +728,87 @@ fn build_top_cards(snapshot: &Value) -> Vec<Value> {
 }
 
 fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
-    let captured_at_epoch_ms = snapshot["captured_at_epoch_ms"].as_u64();
-    let session_gap_minutes =
-        snapshot["token_budget_report"]["token_budget_report"]["profile"]["session_gap_minutes"]
-            .as_u64();
-    let current_session_events =
-        snapshot["token_budget_report"]["token_budget_report"]["current_session"]["events_total"]
-            .as_u64();
-    let current_session_started =
-        snapshot["token_budget_report"]["token_budget_report"]["current_session"]
-            ["started_at_epoch_ms"]
-            .as_u64();
-    let current_session_preliminary =
-        snapshot["token_budget_report"]["token_budget_report"]["current_session"]["preliminary"]
-            .as_bool()
-            .unwrap_or(false);
-    let lifetime_events =
-        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["events_total"].as_u64();
-    let lifetime_started =
-        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["started_at_epoch_ms"]
-            .as_u64();
-    let lifetime_preliminary =
-        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["preliminary"]
-            .as_bool()
-            .unwrap_or(false);
+    let report = &snapshot["token_budget_report"]["token_budget_report"];
+    let current_session = &report["current_session"];
+    let lifetime = &report["lifetime"];
+    let rolling_window = &report["rolling_window"];
+    let session_events = current_session["events_total"].as_u64().unwrap_or(0);
+    let session_saved = current_session["total_effective_saved_tokens"].as_i64();
+    let session_percent = current_session["effective_savings_pct"].as_f64();
+    let session_started = current_session["started_at_epoch_ms"].as_u64();
+    let session_ended = current_session["ended_at_epoch_ms"].as_u64();
+    let lifetime_events = lifetime["events_total"].as_u64().unwrap_or(0);
+    let lifetime_saved = lifetime["total_effective_saved_tokens"].as_i64();
+    let lifetime_percent = lifetime["effective_savings_pct"].as_f64();
+    let lifetime_started = lifetime["started_at_epoch_ms"].as_u64();
+    let lifetime_ended = lifetime["ended_at_epoch_ms"].as_u64();
+    let rolling_events = rolling_window["events_total"].as_u64().unwrap_or(0);
+    let rolling_saved = rolling_window["total_effective_saved_tokens"].as_i64();
+    let rolling_percent = rolling_window["effective_savings_pct"].as_f64();
+    let rolling_window_label = report["profile"]["display_name"]
+        .as_str()
+        .unwrap_or("рабочее окно");
+    let benchmark_savings_percent =
+        snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_percent"]
+            .as_f64();
+    let benchmark_savings_factor =
+        snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_factor"].as_f64();
 
     vec![
         card(
             "Экономия токенов за текущую сессию",
-            format_u64(snapshot["token_budget_report"]["token_budget_report"]["current_session"]["total_saved_tokens"].as_u64()),
-            format!(
-                "Сессия без паузы дольше {}. Длительность: {}. Учтённых Amai-замеров: {}. Это не число всех сообщений в IDE или чате. Сырьевая экономия: {}. {}",
-                human_minutes(session_gap_minutes),
-                elapsed_since_epoch_label(current_session_started, captured_at_epoch_ms),
-                format_u64(current_session_events),
-                format_percent(snapshot["token_budget_report"]["token_budget_report"]["current_session"]["savings_percent"].as_f64()),
-                if current_session_preliminary {
-                    "Пока предварительно: выборка ещё маленькая."
-                } else {
-                    "Выборка уже достаточно большая."
-                }
-            ),
-            savings_status(snapshot["token_budget_report"]["token_budget_report"]["current_session"]["total_saved_tokens"].as_u64()),
+            format_signed_count(session_saved),
+            if session_events > 0 {
+                format!(
+                    "Сессия здесь = непрерывная работа без паузы дольше 30 минут. Длительность: {}. Учтено Amai-запросов: {}. Реальная экономия по ним: {}.",
+                    elapsed_since_epoch_label(session_started, session_ended),
+                    format_u64(Some(session_events)),
+                    format_percent(session_percent)
+                )
+            } else {
+                "В текущей непрерывной сессии Amai ещё не накопил ни одного учтённого запроса, поэтому реальную экономию пока рано показывать.".to_string()
+            },
+            savings_status(session_saved, session_events),
         ),
         card(
             "Экономия токенов за всё время записи",
-            format_u64(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["total_saved_tokens"].as_u64()),
-            format!(
-                "С начала учёта: {}. Учтённых Amai-замеров: {}. Это не число всех сообщений в истории чатов, а только измеренные события retrieval/token-ledger. Сырьевая экономия: {}. {}",
-                elapsed_since_epoch_label(lifetime_started, captured_at_epoch_ms),
-                format_u64(lifetime_events),
-                format_percent(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["savings_percent"].as_f64()),
-                if lifetime_preliminary {
-                    "Пока предварительно: выборка ещё маленькая."
-                } else {
-                    "Выборка уже достаточно большая."
-                }
-            ),
-            savings_status(snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["total_saved_tokens"].as_u64()),
+            format_signed_count(lifetime_saved),
+            if lifetime_events > 0 {
+                format!(
+                    "Это итог с первого учтённого Amai-запроса в этой установке. Период: {}. Учтено Amai-запросов: {}. Реальная экономия: {}.",
+                    elapsed_since_epoch_label(lifetime_started, lifetime_ended),
+                    format_u64(Some(lifetime_events)),
+                    format_percent(lifetime_percent)
+                )
+            } else {
+                "После установки Amai ещё не накопил учтённых запросов, поэтому здесь пока нет итоговой живой статистики.".to_string()
+            },
+            savings_status(lifetime_saved, lifetime_events),
         ),
         card(
             "Экономия на последнем честном замере",
-            format_percent(snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_percent"].as_f64()),
-            format!(
-                "Последний контрольный замер показал {} относительно наивной полной подачи контекста.",
-                format_factor(snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_factor"].as_f64())
-            ),
-            if snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_percent"].as_f64().is_some() {
+            if benchmark_savings_percent.is_some() {
+                format_percent(benchmark_savings_percent)
+            } else {
+                format_signed_count(rolling_saved)
+            },
+            if benchmark_savings_percent.is_some() {
+                format!(
+                    "Последний контрольный замер показал, что Amai передал модели {} относительно обычной широкой подачи контекста. Это ориентир на одном замере, а не сумма за всё время.",
+                    format_factor(benchmark_savings_factor)
+                )
+            } else {
+                format!(
+                    "Отдельный контрольный замер ещё не прогонялся, поэтому здесь временно показано {}: {} учтённых Amai-запросов и реальная экономия {}.",
+                    rolling_window_label,
+                    format_u64(Some(rolling_events)),
+                    format_percent(rolling_percent)
+                )
+            },
+            if benchmark_savings_percent.is_some() {
                 "pass"
+            } else if rolling_events > 0 {
+                savings_status(rolling_saved, rolling_events)
             } else {
                 "unknown"
             },
@@ -1225,11 +1238,13 @@ fn status_label(status: &str) -> &'static str {
     }
 }
 
-fn savings_status(value: Option<u64>) -> &'static str {
-    match value {
-        Some(value) if value > 0 => "pass",
-        Some(_) => "alert",
-        None => "unknown",
+fn savings_status(saved_tokens: Option<i64>, events_total: u64) -> &'static str {
+    if events_total == 0 {
+        "unknown"
+    } else if saved_tokens.unwrap_or_default() < 0 {
+        "alert"
+    } else {
+        "pass"
     }
 }
 
@@ -1381,6 +1396,12 @@ fn format_u64(value: Option<u64>) -> String {
         .unwrap_or_else(|| "ещё нет данных".to_string())
 }
 
+fn format_signed_count(value: Option<i64>) -> String {
+    value
+        .map(|number| number.to_string())
+        .unwrap_or_else(|| "ещё нет данных".to_string())
+}
+
 fn format_f64_count(value: Option<f64>) -> String {
     value
         .map(|number| format!("{number:.0}"))
@@ -1413,12 +1434,6 @@ fn human_bytes(value: f64) -> String {
 
 fn human_bytes_per_sec(value: f64) -> String {
     format!("{}/s", human_bytes(value))
-}
-
-fn human_minutes(value: Option<u64>) -> String {
-    value
-        .map(|minutes| format!("{minutes} минут"))
-        .unwrap_or_else(|| "ещё нет данных".to_string())
 }
 
 fn elapsed_since_epoch_label(start_epoch_ms: Option<u64>, end_epoch_ms: Option<u64>) -> String {
