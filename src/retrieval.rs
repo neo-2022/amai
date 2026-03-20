@@ -154,32 +154,37 @@ pub async fn build_context_pack(
     )
     .await?;
 
+    let artifact_metadata = json!({
+        "context_pack_id": context_pack_id,
+        "query": args.query,
+        "effective_retrieval_mode": effective_mode
+    });
     let artifact_ref_id = postgres::insert_artifact_ref(
         db,
-        project.project_id,
-        namespace.namespace_id,
-        "context_pack",
-        &cfg.s3_bucket_context,
-        &object_key,
-        Some("application/json"),
-        &json!({
-            "context_pack_id": context_pack_id,
-            "query": args.query,
-            "effective_retrieval_mode": effective_mode
-        }),
+        &postgres::ArtifactRefInsert {
+            project_id: project.project_id,
+            namespace_id: namespace.namespace_id,
+            artifact_kind: "context_pack",
+            bucket: &cfg.s3_bucket_context,
+            object_key: &object_key,
+            content_type: Some("application/json"),
+            metadata: &artifact_metadata,
+        },
     )
     .await?;
 
     postgres::insert_context_pack(
         db,
-        context_pack_id,
-        project.project_id,
-        namespace.namespace_id,
-        &effective_mode,
-        &args.query,
-        &visible_projects_json,
-        &payload,
-        Some(artifact_ref_id),
+        &postgres::ContextPackInsert {
+            context_pack_id,
+            project_id: project.project_id,
+            namespace_id: namespace.namespace_id,
+            retrieval_mode: &effective_mode,
+            query_text: &args.query,
+            visible_projects: &visible_projects_json,
+            payload: &payload,
+            artifact_ref_id: Some(artifact_ref_id),
+        },
     )
     .await?;
 
@@ -341,9 +346,7 @@ fn build_query_embedder(cfg: &AppConfig) -> Result<TextEmbedding> {
         "multilingual_e5_base" => EmbeddingModel::MultilingualE5Base,
         other => return Err(anyhow!("unsupported code embedding model: {other}")),
     };
-    Ok(TextEmbedding::try_new(
-        InitOptions::new(model).with_show_download_progress(true),
-    )?)
+    TextEmbedding::try_new(InitOptions::new(model).with_show_download_progress(true))
 }
 
 fn mode_rank(mode: &str) -> Result<u8> {

@@ -48,6 +48,16 @@ struct ChunkBlueprint {
     metadata: Value,
 }
 
+type TreeSitterAnalysis = (
+    Value,
+    Value,
+    Value,
+    Value,
+    Vec<SymbolRecord>,
+    Vec<ChunkBlueprint>,
+    Value,
+);
+
 pub async fn index_project(
     cfg: &AppConfig,
     db: &mut Client,
@@ -146,9 +156,7 @@ fn build_code_embedder(cfg: &AppConfig) -> Result<TextEmbedding> {
         "multilingual_e5_base" => EmbeddingModel::MultilingualE5Base,
         other => return Err(anyhow!("unsupported code embedding model: {other}")),
     };
-    Ok(TextEmbedding::try_new(
-        InitOptions::new(model).with_show_download_progress(true),
-    )?)
+    TextEmbedding::try_new(InitOptions::new(model).with_show_download_progress(true))
 }
 
 fn collect_files(root: &Path, limit: Option<usize>) -> Result<Vec<PathBuf>> {
@@ -244,15 +252,7 @@ fn parse_with_tree_sitter(
     cfg: &AppConfig,
     language: &str,
     content: &str,
-) -> Result<(
-    Value,
-    Value,
-    Value,
-    Value,
-    Vec<SymbolRecord>,
-    Vec<ChunkBlueprint>,
-    Value,
-)> {
+) -> Result<TreeSitterAnalysis> {
     let analysis = syntax::analyze(cfg, language, content)?;
     let chunk_blueprints = if analysis.chunks.is_empty() {
         fallback_chunks(cfg, content)
@@ -433,7 +433,7 @@ fn to_chunk_records(
 ) -> Vec<ChunkRecord> {
     blueprints
         .iter()
-        .zip(points.into_iter())
+        .zip(points)
         .map(|(chunk, point)| ChunkRecord {
             chunk_id: Uuid::new_v4(),
             qdrant_point_id: Some(point.point_id),

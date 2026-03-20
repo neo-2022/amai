@@ -120,6 +120,29 @@ pub struct ChunkHit {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct ArtifactRefInsert<'a> {
+    pub project_id: Uuid,
+    pub namespace_id: Uuid,
+    pub artifact_kind: &'a str,
+    pub bucket: &'a str,
+    pub object_key: &'a str,
+    pub content_type: Option<&'a str>,
+    pub metadata: &'a Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextPackInsert<'a> {
+    pub context_pack_id: Uuid,
+    pub project_id: Uuid,
+    pub namespace_id: Uuid,
+    pub retrieval_mode: &'a str,
+    pub query_text: &'a str,
+    pub visible_projects: &'a Value,
+    pub payload: &'a Value,
+    pub artifact_ref_id: Option<Uuid>,
+}
+
 pub async fn connect_admin(cfg: &AppConfig) -> Result<Client> {
     connect(&cfg.postgres_dsn).await
 }
@@ -570,16 +593,7 @@ pub async fn get_chunk_by_qdrant_point_id(
     }))
 }
 
-pub async fn insert_artifact_ref(
-    client: &Client,
-    project_id: Uuid,
-    namespace_id: Uuid,
-    artifact_kind: &str,
-    bucket: &str,
-    object_key: &str,
-    content_type: Option<&str>,
-    metadata: &Value,
-) -> Result<Uuid> {
+pub async fn insert_artifact_ref(client: &Client, record: &ArtifactRefInsert<'_>) -> Result<Uuid> {
     let row = client
         .query_one(
             r#"
@@ -593,13 +607,13 @@ pub async fn insert_artifact_ref(
             RETURNING artifact_ref_id
             "#,
             &[
-                &project_id,
-                &namespace_id,
-                &artifact_kind,
-                &bucket,
-                &object_key,
-                &content_type,
-                metadata,
+                &record.project_id,
+                &record.namespace_id,
+                &record.artifact_kind,
+                &record.bucket,
+                &record.object_key,
+                &record.content_type,
+                record.metadata,
             ],
         )
         .await
@@ -607,17 +621,7 @@ pub async fn insert_artifact_ref(
     Ok(row.get(0))
 }
 
-pub async fn insert_context_pack(
-    client: &Client,
-    context_pack_id: Uuid,
-    project_id: Uuid,
-    namespace_id: Uuid,
-    retrieval_mode: &str,
-    query_text: &str,
-    visible_projects: &Value,
-    payload: &Value,
-    artifact_ref_id: Option<Uuid>,
-) -> Result<()> {
+pub async fn insert_context_pack(client: &Client, record: &ContextPackInsert<'_>) -> Result<()> {
     client
         .execute(
             r#"
@@ -628,14 +632,14 @@ pub async fn insert_context_pack(
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
             &[
-                &context_pack_id,
-                &project_id,
-                &namespace_id,
-                &retrieval_mode,
-                &query_text,
-                visible_projects,
-                payload,
-                &artifact_ref_id,
+                &record.context_pack_id,
+                &record.project_id,
+                &record.namespace_id,
+                &record.retrieval_mode,
+                &record.query_text,
+                record.visible_projects,
+                record.payload,
+                &record.artifact_ref_id,
             ],
         )
         .await
