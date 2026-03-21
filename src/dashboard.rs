@@ -1011,7 +1011,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
             "Быстрый путь под нагрузкой",
             "Это benchmark-карточка. Здесь нет живой телеметрии текущей сессии: показан только последний сохранённый hot-load прогон по прогретому быстрому пути."
                 .to_string(),
-            hot_load_benchmark_status(snapshot, hot_load, thresholds),
+            hot_load_benchmark_status(hot_load, thresholds),
             Some(source_label(
                 "Источник: benchmark. Последний сохранённый hot-load verification snapshot; live-данные страницы сюда не подмешиваются",
                 hot_load["captured_at_epoch_ms"].as_u64(),
@@ -2038,30 +2038,32 @@ fn metric_row(label: &str, value: String, tooltip: Option<&str>) -> Value {
     })
 }
 
-fn hot_load_benchmark_status(
-    snapshot: &Value,
-    hot_load: &Value,
-    thresholds: &Value,
-) -> &'static str {
-    let qps_status = status_for_metric_name(snapshot, "load.hot_qps");
-    let error_status = status_for_metric_name(snapshot, "load.hot_error_rate");
-    let p50_status = status_at_most(
+fn hot_load_benchmark_status(hot_load: &Value, thresholds: &Value) -> &'static str {
+    let qps_status = status_strict_more_than(
+        hot_load["qps"].as_f64(),
+        thresholds["load"]["hot_qps"]["target"].as_f64(),
+    );
+    let error_status = status_at_most_or_equal(
+        hot_load["error_rate"].as_f64(),
+        thresholds["load"]["hot_error_rate"]["target"].as_f64(),
+    );
+    let p50_status = status_strict_less_than(
         hot_load["p50_ms"].as_f64(),
         thresholds["load"]["hot_benchmark_table"]["target_p50_ms"].as_f64(),
     );
-    let p95_status = status_at_most(
+    let p95_status = status_strict_less_than(
         hot_load["p95_ms"].as_f64(),
         thresholds["load"]["hot_benchmark_table"]["target_p95_ms"].as_f64(),
     );
-    let p99_status = status_at_most(
+    let p99_status = status_strict_less_than(
         hot_load["p99_ms"].as_f64(),
         thresholds["load"]["hot_benchmark_table"]["target_p99_ms"].as_f64(),
     );
-    let max_status = status_at_most(
+    let max_status = status_strict_less_than(
         hot_load["max_ms"].as_f64(),
         thresholds["load"]["hot_benchmark_table"]["target_max_ms"].as_f64(),
     );
-    let workers_status = status_at_least(
+    let workers_status = status_strict_more_than(
         hot_load["workers"].as_f64(),
         thresholds["load"]["hot_benchmark_table"]["target_workers"].as_f64(),
     );
@@ -2069,7 +2071,7 @@ fn hot_load_benchmark_status(
         .as_u64()
         .zip(hot_load["error_count"].as_u64())
         .map(|(success, errors)| (success + errors) as f64);
-    let sample_status = status_at_least(
+    let sample_status = status_strict_more_than(
         sample_count,
         thresholds["load"]["hot_benchmark_table"]["target_sample_count"].as_f64(),
     );
@@ -2085,17 +2087,25 @@ fn hot_load_benchmark_status(
     ])
 }
 
-fn status_at_most(current: Option<f64>, target: Option<f64>) -> &'static str {
+fn status_strict_less_than(current: Option<f64>, target: Option<f64>) -> &'static str {
     match (current, target) {
-        (Some(current), Some(target)) if current <= target => "pass",
+        (Some(current), Some(target)) if current < target => "pass",
         (Some(_), Some(_)) => "critical",
         _ => "unknown",
     }
 }
 
-fn status_at_least(current: Option<f64>, target: Option<f64>) -> &'static str {
+fn status_strict_more_than(current: Option<f64>, target: Option<f64>) -> &'static str {
     match (current, target) {
-        (Some(current), Some(target)) if current >= target => "pass",
+        (Some(current), Some(target)) if current > target => "pass",
+        (Some(_), Some(_)) => "critical",
+        _ => "unknown",
+    }
+}
+
+fn status_at_most_or_equal(current: Option<f64>, target: Option<f64>) -> &'static str {
+    match (current, target) {
+        (Some(current), Some(target)) if current <= target => "pass",
         (Some(_), Some(_)) => "critical",
         _ => "unknown",
     }

@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 21:37 MSK
-Ручная сверка guide/docs: 2026-03-21 21:37 MSK
+modified_at: 2026-03-21 21:42 MSK
+Ручная сверка guide/docs: 2026-03-21 21:42 MSK
 
 # Operations
 
@@ -803,14 +803,14 @@ cargo run --release -- verify load \
 - сохраняет snapshot `retrieval_load_hot`.
 
 Текущий репозиторный guard:
-- `qps >= 5000`
-- `p50 <= 10ms`
-- `p95 < 10ms`
-- `p99 <= 10ms`
-- `max <= 15ms`
+- `qps > 35000`
+- `p50 < 0.012ms`
+- `p95 < 0.015ms`
+- `p99 < 0.020ms`
+- `max < 0.5ms`
 - `error_rate = 0`
-- `workers >= 8`
-- `sample_count >= 2000`
+- `workers > 8`
+- `sample_count > 10000`
 
 Важно:
 - если после warmup `verify load` пишет `execution_mode = hot_cache_only`, это правильный и желаемый режим;
@@ -1463,6 +1463,15 @@ Grafana login берётся из `.env`:
   - `error rate`;
   - `workers`;
   - `sample_count`;
+- для неё сейчас действует именно такой benchmark-эталон:
+  - `QPS > 35000`
+  - `P50 < 0.012 ms`
+  - `P95 < 0.015 ms`
+  - `P99 < 0.020 ms`
+  - `Max < 0.5 ms`
+  - `error rate < 0.00%`
+  - `workers > 8`
+  - `sample_count > 10000`
 - спецтермины и англицизмы на human dashboard теперь имеют русскую подсказку при наведении курсора на сам термин, без отдельного значка `?`.
 - runtime scrape targets и monitoring ports не должны быть вшиты в конфиг как абсолютные литералы;
 - поэтому monitoring profile рендерится из `.env` перед `docker compose --profile monitoring up`.

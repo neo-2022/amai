@@ -55,9 +55,9 @@ cargo run --release --quiet -- verify load \
   --limit-symbols 8 \
   --limit-chunks 8 \
   --limit-semantic-chunks 8 \
-  --workers 8 \
-  --iterations-per-worker 250 \
+  --workers 9 \
+  --iterations-per-worker 1200 \
   --warmup-per-worker 2 \
-  --min-qps 5000 \
-  --max-p95-ms 10 \
+  --min-qps 35000 \
+  --max-p95-ms 1 \
   --max-error-rate 0
