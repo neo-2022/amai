@@ -1,5 +1,5 @@
-modified_at = "2026-03-21 22:06 MSK"
-"Ручная сверка guide/docs" = "2026-03-21 22:06 MSK"
+modified_at = "2026-03-21 22:39 MSK"
+"Ручная сверка guide/docs" = "2026-03-21 22:39 MSK"
 
 [source]
 display_name = "Amai external benchmark dataset catalog"
@@ -32,7 +32,7 @@ distance = "cosine"
 dimensions = 768
 local_filename = "snowflake-msmarco-arctic-embed-m-v1.5-angular.hdf5"
 download_url = "https://storage.googleapis.com/ann-datasets/custom/snowflake-msmarco-arctic-embed-m-v1.5-angular.hdf5"
-usage_scope = ["vectordbbench", "ann_benchmarks"]
+usage_scope = ["vectordbbench"]
 why_useful = [
   "Даёт второй semantic/text retrieval профиль, а не один-единственный dataset.",
   "Полезен для richer recall/latency comparison на text-heavy embeddings."
@@ -62,7 +62,7 @@ distance = "cosine"
 dimensions = 768
 local_filename = "sphere-10M-meta-dpr.hdf5"
 download_url = "https://storage.googleapis.com/ann-datasets/custom/sphere-10M-meta-dpr.hdf5"
-usage_scope = ["vectordbbench", "ann_benchmarks", "filtered_ann_datasets"]
+usage_scope = ["vectordbbench", "filtered_ann_datasets"]
 why_useful = [
   "Даёт более тяжёлый большой dataset для pressure-тестов.",
   "Полезен как мост между core ANN compare и более тяжёлым filtered/payload слоем."

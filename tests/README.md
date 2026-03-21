@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 22:13 MSK
-Ручная сверка guide/docs: 2026-03-21 22:13 MSK
+modified_at: 2026-03-21 22:37 MSK
+Ручная сверка guide/docs: 2026-03-21 22:37 MSK
 
 # Tests
 
@@ -55,5 +55,10 @@ modified_at: 2026-03-21 22:13 MSK
 - `cargo run -- benchmark external-adapter --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular`
 - `cargo run -- verify mcp-matrix --matrix live_mcpbench_local ...`
 - `cargo run -- verify mcp-matrix --matrix mcp_universe_local ...`
+
+Для `external-adapter` важный инвариант теперь такой:
+- `run_external.sh` должен быть реальным безопасным launch-path, а не `echo`-заглушкой;
+- для `ann-benchmarks` это означает `.venv + requirements + install.py + run.py`;
+- ложный `docker compose up` без явного compose-файла больше не считается допустимым proof-path.
 
 Когда появятся отдельные integration tests с поднимаемым stack fixture, они materialize-ятся именно здесь.

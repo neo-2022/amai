@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 22:13 MSK
-Ручная сверка guide/docs: 2026-03-21 22:13 MSK
+modified_at: 2026-03-21 22:37 MSK
+Ручная сверка guide/docs: 2026-03-21 22:37 MSK
 
 # Operations
 
@@ -964,15 +964,24 @@ config/external_benchmark_datasets.toml
   - Rust-контур для скачивания одного dataset-а или всего manifest-а;
 - `external-adapter`
   - готовит реальный run workspace:
-    - `summary.json`
-    - `report.md`
-    - `run_external.sh`
+  - `summary.json`
+  - `report.md`
+  - `run_external.sh`
+  - для `ann-benchmarks` `run_external.sh` теперь идёт безопасным upstream path:
+    - локальный `.venv`
+    - `pip install -r requirements.txt`
+    - symlink dataset в `data/<dataset>.hdf5`
+    - `python install.py --algorithm qdrant`
+    - `python run.py --dataset ... --algorithm qdrant`
+  - `docker compose up` здесь больше не является каноническим launch-path, потому что при отсутствии compose-файла upstream он может по ошибке подцепить parent compose другого проекта;
   - если dataset подходит напрямую, workspace помечается как `prepared`;
   - если dataset не скачан, это честно помечается как `blocked_dataset_missing`;
   - если benchmark требует другой формат данных, это честно помечается как `blocked_conversion_required`.
 
 Текущий важный инвариант:
 - `ann-benchmarks` принимает HDF5 datasets напрямую;
+- но только если upstream уже знает этот dataset по имени в своём `DATASETS` registry;
+- если файл существует, но dataset не поддержан upstream напрямую, `Amai` обязан пометить contour как `blocked_unsupported_dataset`;
 - `VectorDBBench` custom dataset contour не должен притворяться, что принимает те же HDF5 без подготовки;
 - поэтому для `VectorDBBench` runner сейчас fail-closed пишет, что нужен Parquet bundle `train/test/neighbors`.
 

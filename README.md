@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 22:13 MSK
-Ручная сверка guide/docs: 2026-03-21 22:13 MSK
+modified_at: 2026-03-21 22:37 MSK
+Ручная сверка guide/docs: 2026-03-21 22:37 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1085,6 +1085,13 @@ cargo run -- benchmark external-adapter --benchmark ann_benchmarks --dataset dbp
   - `summary.json`
   - `report.md`
   - `run_external.sh`
+- для `ann-benchmarks` workspace теперь строит безопасный upstream path:
+  - `python3 -m venv .venv`
+  - `pip install -r requirements.txt`
+  - symlink dataset в `data/<dataset>.hdf5`
+  - `python install.py --algorithm qdrant`
+  - `python run.py --dataset ... --algorithm qdrant`
+  - без ложного `docker compose up`, который мог бы случайно зацепить родительский compose другого проекта;
 - разводит 3 разных слоя:
   - `VectorDBBench`
     - общий framework `engine + dataset + scenario`;
@@ -1103,6 +1110,13 @@ cargo run -- benchmark external-adapter --benchmark ann_benchmarks --dataset dbp
 HDF5-датасеты, которые уже зафиксированы как стартовый каталог:
 - `dbpedia-openai-1000k-angular`
 - `snowflake-msmarco-arctic-embed-m-v1.5-angular`
+- `sift-128-euclidean`
+- `sphere-10M-meta-dpr`
+
+Важный инвариант этого слоя:
+- `ann-benchmarks` нельзя считать универсальным входом для любого HDF5 только потому, что файл существует;
+- сейчас `ann-benchmarks` честно готовится только там, где upstream уже знает этот dataset по имени;
+- если dataset не поддержан upstream напрямую, `Amai` adapter обязан fail-closed пометить его как `blocked_unsupported_dataset`, а не выдавать ложное `prepared`.
 - `sift-128-euclidean`
 - `sphere-10M-meta-dpr`
 

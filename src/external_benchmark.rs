@@ -68,6 +68,7 @@ struct ExternalDatasetEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdapterStatus {
     Prepared,
+    BlockedUnsupportedDataset,
     BlockedConversionRequired,
     BlockedDatasetMissing,
 }
@@ -333,10 +334,13 @@ pub fn print_external_plan(repo_root: &Path, benchmark_query: &str) -> Result<()
     println!("- После этого рядом прогнать внутренний end-to-end cold/hot benchmark.");
     println!();
     if code == "ann_benchmarks" {
-        println!("Полезная стартовая команда для HDF5-style контура:");
+        println!("Полезная стартовая связка для HDF5-style контура:");
         println!(
-            "- DATASET={}/dbpedia-openai-1000k-angular.hdf5 DISTANCE=cosine docker compose up --abort-on-container-exit",
-            dataset_root.display()
+            "- cargo run -- benchmark external-adapter --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular"
+        );
+        println!(
+            "- bash {}/state/external-benchmarks/runs/ann_benchmarks/dbpedia_openai_1000k_angular/latest/run_external.sh",
+            repo_root.display()
         );
         println!();
     }
@@ -419,18 +423,8 @@ pub async fn run_external_adapter(
         download_dataset_file(dataset, &dataset_path).await?;
     }
 
-    let adapter_kind = if benchmark_code == "vectordbbench" {
-        "conversion_required"
-    } else {
-        "direct_hdf5"
-    };
-    let status = if adapter_kind == "conversion_required" {
-        AdapterStatus::BlockedConversionRequired
-    } else if !dataset_path.exists() {
-        AdapterStatus::BlockedDatasetMissing
-    } else {
-        AdapterStatus::Prepared
-    };
+    let adapter_kind = adapter_kind_for(benchmark_code);
+    let status = determine_adapter_status(benchmark_code, dataset, dataset_path.exists());
     let output_dir = output_dir_override
         .map(|path| path.to_path_buf())
         .unwrap_or_else(|| {
@@ -516,6 +510,12 @@ pub async fn run_external_adapter(
     println!("Run script: {}", script_path.display());
     if status == AdapterStatus::BlockedDatasetMissing {
         println!("Причина: dataset пока не скачан. Можно повторить с `--download-missing`.");
+    }
+    if status == AdapterStatus::BlockedUnsupportedDataset {
+        println!(
+            "Причина: {} сейчас не принимает dataset {} как канонический input без отдельного adapter/patch слоя.",
+            benchmark.display_name, dataset.display_name
+        );
     }
     if status == AdapterStatus::BlockedConversionRequired {
         println!(
@@ -615,6 +615,37 @@ fn recommended_datasets<'a>(
     entries
 }
 
+fn benchmark_supports_dataset(benchmark_code: &str, dataset: &ExternalDatasetEntry) -> bool {
+    dataset
+        .usage_scope
+        .iter()
+        .any(|scope| normalize_key(scope) == normalize_key(benchmark_code))
+}
+
+fn adapter_kind_for(benchmark_code: &str) -> &'static str {
+    if benchmark_code == "vectordbbench" {
+        "conversion_required"
+    } else {
+        "direct_hdf5"
+    }
+}
+
+fn determine_adapter_status(
+    benchmark_code: &str,
+    dataset: &ExternalDatasetEntry,
+    dataset_exists: bool,
+) -> AdapterStatus {
+    if !benchmark_supports_dataset(benchmark_code, dataset) {
+        AdapterStatus::BlockedUnsupportedDataset
+    } else if adapter_kind_for(benchmark_code) == "conversion_required" {
+        AdapterStatus::BlockedConversionRequired
+    } else if !dataset_exists {
+        AdapterStatus::BlockedDatasetMissing
+    } else {
+        AdapterStatus::Prepared
+    }
+}
+
 fn build_launch_commands(
     benchmark_code: &str,
     upstream_dir: &Path,
@@ -622,18 +653,32 @@ fn build_launch_commands(
     dataset: &ExternalDatasetEntry,
 ) -> Vec<String> {
     match benchmark_code {
-        "ann_benchmarks" => vec![
-            format!(
-                "git clone https://github.com/erikbern/ann-benchmarks.git {}",
-                upstream_dir.display()
-            ),
-            format!("cd {}", upstream_dir.display()),
-            format!(
-                "DATASET={} DISTANCE={} docker compose up --abort-on-container-exit",
-                dataset_path.display(),
-                dataset.distance
-            ),
-        ],
+        "ann_benchmarks" => {
+            let dataset_name = ann_benchmark_dataset_name(dataset);
+            let linked_dataset_path = upstream_dir
+                .join("data")
+                .join(format!("{dataset_name}.hdf5"));
+            vec![
+                format!(
+                    "if [ ! -d {git_dir} ]; then git clone https://github.com/erikbern/ann-benchmarks.git {clone_dir}; fi",
+                    git_dir = shell_quote(&upstream_dir.join(".git").display().to_string()),
+                    clone_dir = shell_quote(&upstream_dir.display().to_string()),
+                ),
+                format!("cd {}", shell_quote(&upstream_dir.display().to_string())),
+                "python3 -m venv .venv".to_owned(),
+                "./.venv/bin/pip install -r requirements.txt".to_owned(),
+                "mkdir -p data".to_owned(),
+                format!(
+                    "ln -sf {source} {target}",
+                    source = shell_quote(&dataset_path.display().to_string()),
+                    target = shell_quote(&linked_dataset_path.display().to_string()),
+                ),
+                "./.venv/bin/python install.py --algorithm qdrant".to_owned(),
+                format!(
+                    "./.venv/bin/python run.py --dataset {dataset_name} --algorithm qdrant --runs 1 --parallelism 1 --force"
+                ),
+            ]
+        }
         "vectordbbench" => vec![
             format!(
                 "git clone https://github.com/zilliztech/VectorDBBench.git {}",
@@ -656,6 +701,7 @@ fn build_launch_commands(
 fn adapter_status_code(status: AdapterStatus) -> &'static str {
     match status {
         AdapterStatus::Prepared => "prepared",
+        AdapterStatus::BlockedUnsupportedDataset => "blocked_unsupported_dataset",
         AdapterStatus::BlockedConversionRequired => "blocked_conversion_required",
         AdapterStatus::BlockedDatasetMissing => "blocked_dataset_missing",
     }
@@ -664,6 +710,7 @@ fn adapter_status_code(status: AdapterStatus) -> &'static str {
 fn adapter_status_label(status: AdapterStatus) -> &'static str {
     match status {
         AdapterStatus::Prepared => "готов к следующему запуску",
+        AdapterStatus::BlockedUnsupportedDataset => "dataset пока не поддержан этим benchmark-ом",
         AdapterStatus::BlockedConversionRequired => "нужна конвертация dataset",
         AdapterStatus::BlockedDatasetMissing => "dataset ещё не скачан",
     }
@@ -723,14 +770,29 @@ captured_at_epoch_s: {captured_at}\n\n\
 
 fn render_adapter_script(ctx: &AdapterRenderContext<'_>) -> String {
     let body = if ctx.status == AdapterStatus::Prepared {
-        ctx.launch_commands
-            .iter()
-            .map(|line| format!("echo \"{}\"\n", shell_escape_echo(line)))
-            .collect::<String>()
+        format!(
+            "echo \"Amai external benchmark launch: {benchmark} / {dataset}\"\n\
+echo \"Источник: подготовленный adapter workspace; запускается реальный upstream path, а не echo-заглушка.\"\n\
+{}\n",
+            ctx.launch_commands.join("\n"),
+            benchmark = shell_escape_echo(ctx.benchmark.display_name.as_str()),
+            dataset = shell_escape_echo(ctx.dataset.display_name.as_str()),
+        )
     } else if ctx.status == AdapterStatus::BlockedDatasetMissing {
         format!(
             "echo \"Dataset ещё не скачан: {}\"\nexit 2\n",
             ctx.dataset_path.display()
+        )
+    } else if ctx.status == AdapterStatus::BlockedUnsupportedDataset {
+        format!(
+            "echo \"Dataset {} пока не поддержан benchmark-ом {} без отдельного adapter/patch слоя.\"\n\
+echo \"Исходный файл: {}\"\n\
+echo \"Upstream repo: {}\"\n\
+exit 4\n",
+            ctx.dataset.display_name,
+            ctx.benchmark.display_name,
+            ctx.dataset_path.display(),
+            ctx.upstream_dir.display()
         )
     } else {
         format!(
@@ -755,6 +817,18 @@ exit 3\n",
 
 fn shell_escape_echo(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn ann_benchmark_dataset_name(dataset: &ExternalDatasetEntry) -> String {
+    dataset
+        .local_filename
+        .strip_suffix(".hdf5")
+        .unwrap_or(dataset.display_name.as_str())
+        .to_owned()
 }
 
 fn inspect_tool(tool: &str) -> ToolCheck {
@@ -914,11 +988,13 @@ async fn download_dataset_file(dataset: &ExternalDatasetEntry, path: &Path) -> R
 #[cfg(test)]
 mod tests {
     use super::{
-        ExternalBenchmarkEntry, ExternalBenchmarkFile, ExternalBenchmarkSource,
-        ExternalDatasetEntry, ExternalDatasetFile, ExternalDatasetStorage, normalize_key,
+        AdapterStatus, ExternalBenchmarkEntry, ExternalBenchmarkFile, ExternalBenchmarkSource,
+        ExternalDatasetEntry, ExternalDatasetFile, ExternalDatasetStorage,
+        ann_benchmark_dataset_name, build_launch_commands, determine_adapter_status, normalize_key,
         ordered_benchmarks, recommended_datasets, resolve_benchmark, resolve_dataset,
     };
     use std::collections::BTreeMap;
+    use std::path::Path;
 
     #[test]
     fn resolve_benchmark_accepts_aliases_and_display_name() {
@@ -957,6 +1033,42 @@ mod tests {
         let catalog = sample_catalog();
         let (code, _) = resolve_dataset(&catalog, "sift").expect("alias");
         assert_eq!(code, "sift_128_euclidean");
+    }
+
+    #[test]
+    fn ann_launch_commands_use_safe_python_workflow_instead_of_docker_compose() {
+        let catalog = sample_catalog();
+        let dataset = &catalog.datasets["dbpedia_openai_1000k_angular"];
+        let commands = build_launch_commands(
+            "ann_benchmarks",
+            Path::new("/tmp/ann_benchmarks"),
+            Path::new("/tmp/datasets/dbpedia-openai-1000k-angular.hdf5"),
+            dataset,
+        );
+        let joined = commands.join("\n");
+        assert!(joined.contains("python3 -m venv .venv"));
+        assert!(joined.contains("./.venv/bin/pip install -r requirements.txt"));
+        assert!(joined.contains("./.venv/bin/python install.py --algorithm qdrant"));
+        assert!(joined.contains("./.venv/bin/python run.py --dataset dbpedia-openai-1000k-angular --algorithm qdrant --runs 1 --parallelism 1 --force"));
+        assert!(!joined.contains("docker compose up"));
+    }
+
+    #[test]
+    fn unsupported_dataset_blocks_ann_adapter_honestly() {
+        let catalog = sample_catalog();
+        let dataset = &catalog.datasets["sphere_10m_meta_dpr"];
+        let status = determine_adapter_status("ann_benchmarks", dataset, true);
+        assert_eq!(status, AdapterStatus::BlockedUnsupportedDataset);
+    }
+
+    #[test]
+    fn ann_dataset_name_comes_from_hdf5_filename() {
+        let catalog = sample_catalog();
+        let dataset = &catalog.datasets["dbpedia_openai_1000k_angular"];
+        assert_eq!(
+            ann_benchmark_dataset_name(dataset),
+            "dbpedia-openai-1000k-angular"
+        );
     }
 
     fn sample_registry() -> ExternalBenchmarkFile {
@@ -1031,6 +1143,21 @@ mod tests {
                 local_filename: "sift-128-euclidean.hdf5".to_owned(),
                 download_url: "https://example.com/sift".to_owned(),
                 usage_scope: vec!["ann_benchmarks".to_owned()],
+                why_useful: vec!["why".to_owned()],
+            },
+        );
+        datasets.insert(
+            "sphere_10m_meta_dpr".to_owned(),
+            ExternalDatasetEntry {
+                order: 3,
+                display_name: "sphere-10M-meta-dpr".to_owned(),
+                aliases: vec!["sphere".to_owned()],
+                family: "hdf5".to_owned(),
+                distance: "cosine".to_owned(),
+                dimensions: 768,
+                local_filename: "sphere-10M-meta-dpr.hdf5".to_owned(),
+                download_url: "https://example.com/sphere".to_owned(),
+                usage_scope: vec!["vectordbbench".to_owned()],
                 why_useful: vec!["why".to_owned()],
             },
         );
