@@ -978,6 +978,27 @@ pub async fn insert_observability_snapshot(
     Ok(row.get(0))
 }
 
+pub async fn delete_observability_snapshots_by_scope(
+    client: &Client,
+    snapshot_kind: &str,
+    payload_root: &str,
+    project_code: &str,
+    namespace_code: &str,
+) -> Result<u64> {
+    let sql = format!(
+        r#"
+        DELETE FROM ami.observability_snapshots
+        WHERE snapshot_kind = $1
+          AND payload->'{payload_root}'->'project'->>'code' = $2
+          AND payload->'{payload_root}'->'namespace'->>'code' = $3
+        "#
+    );
+    client
+        .execute(&sql, &[&snapshot_kind, &project_code, &namespace_code])
+        .await
+        .context("failed to delete scoped observability snapshots")
+}
+
 pub async fn latest_observability_snapshot(
     client: &Client,
     snapshot_kind: &str,

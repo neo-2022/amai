@@ -28,6 +28,7 @@ pub async fn record_handoff_event(
 ) -> Result<()> {
     let recorded_at_epoch_ms = now_epoch_ms()?;
     let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let thread_id = current_thread_id();
     let session_id = resolve_session_id(
         db,
         &project.code,
@@ -45,6 +46,7 @@ pub async fn record_handoff_event(
             "event_kind": "continuity_handoff",
             "session_id": session_id,
             "agent_scope": agent_scope,
+            "thread_id": thread_id,
             "source_kind": "continuity_handoff",
             "headline": headline,
             "next_step_hint": next_step,
@@ -127,6 +129,7 @@ pub async fn record_context_pack_event(db: &Client, payload: &Value) -> Result<(
     };
     let recorded_at_epoch_ms = now_epoch_ms()?;
     let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let thread_id = current_thread_id();
     let session_id = resolve_session_id(
         db,
         &project.code,
@@ -147,6 +150,7 @@ pub async fn record_context_pack_event(db: &Client, payload: &Value) -> Result<(
             "event_kind": "retrieval_context_pack",
             "session_id": session_id,
             "agent_scope": agent_scope,
+            "thread_id": thread_id,
             "source_kind": "context_pack",
             "headline": format!("Рабочий запрос: {}", query),
             "next_step_hint": derive_retrieval_next_step(&active_files, target_kind),
@@ -404,6 +408,7 @@ fn compose_restore_bundle(
             "namespace": namespace,
             "captured_at_epoch_ms": now_epoch_ms().unwrap_or(latest_recorded_at),
             "agent_scope": latest["agent_scope"].as_str().unwrap_or("shared"),
+            "thread_id": latest["thread_id"].as_str().unwrap_or_default(),
             "session_id": session_id,
             "session_age_ms": now_epoch_ms().unwrap_or(latest_recorded_at).saturating_sub(latest_recorded_at),
             "events_count": events.len(),
@@ -556,6 +561,13 @@ fn current_agent_scope_for(project_code: &str, namespace_code: &str) -> String {
         }
     }
     format!("{project_code}::{namespace_code}::default")
+}
+
+fn current_thread_id() -> Option<String> {
+    env::var("CODEX_THREAD_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn project_json(project: &ProjectRecord) -> Value {

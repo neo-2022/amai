@@ -1,5 +1,6 @@
 mod bootstrap;
 mod cli;
+mod codex_threads;
 mod compatibility;
 mod config;
 mod continuity;

@@ -193,6 +193,10 @@ pub struct ContinuityAnswerArgs {
     pub startup: ContinuityStartupArgs,
     #[arg(long, default_value = "last_chat")]
     pub intent: String,
+    #[arg(long, default_value_t = false)]
+    pub include_previous_chat_messages: bool,
+    #[arg(long, default_value_t = 2)]
+    pub messages_count: usize,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 11:47 MSK
-Ручная сверка guide/docs: 2026-03-21 11:47 MSK
+modified_at: 2026-03-21 12:32 MSK
+Ручная сверка guide/docs: 2026-03-21 12:32 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -277,6 +277,7 @@ scripts\install_amai.cmd --client codex
 
 ```bash
 ./scripts/continuity_answer.sh --project art --namespace continuity --intent last_chat
+./scripts/continuity_answer.sh --project art --namespace continuity --intent last_chat --include-previous-chat-messages --messages-count 2
 ./scripts/continuity_startup.sh --project art --namespace continuity
 ./scripts/continuity_restore.sh --project art --namespace continuity
 ```
@@ -285,6 +286,7 @@ scripts\install_amai.cmd --client codex
 - `continuity answer`
   - печатает уже готовый короткий ответ для continuity-вопросов вроде `на чём остановились`;
   - это read-only путь без нового handoff;
+  - если добавить `--include-previous-chat-messages`, он ещё поднимет хвост предыдущего чата и последние сообщения;
 - `continuity startup`
   - печатает human-readable стартовую сводку для нового чата;
 - `continuity restore`
@@ -298,6 +300,13 @@ AMAI_AGENT_SCOPE=agent_beta  ./scripts/continuity_startup.sh --project art --nam
 ```
 
 Так каждый агент будет продолжать только свою линию.
+
+Если клиент даёт `CODEX_THREAD_ID`, `Amai` теперь может отличать текущий chat thread от предыдущего.
+Это нужно, чтобы вопрос вида `на чём закончился прошлый чат, какие были последние два сообщения` не уходил в случайный старый transcript.
+Смысл слова `прошлый` здесь строгий:
+- это не “что-то старое по смыслу”;
+- это ближайший соседний chat thread по времени внутри того же `project + namespace + agent_scope`;
+- archived thread тоже считается нормальным кандидатом, потому что прошлый чат обычно уже архивный.
 
 ## Как смотреть пользу онлайн без терминала
 

@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 11:47 MSK
-Ручная сверка guide/docs: 2026-03-21 11:47 MSK
+modified_at: 2026-03-21 12:32 MSK
+Ручная сверка guide/docs: 2026-03-21 12:32 MSK
 
 # Operations
 
@@ -189,6 +189,22 @@ cd /home/art/agent-memory-index
 - отдаёт сразу готовый короткий ответ;
 - не требует отдельной цепочки `startup -> restore/context`;
 - не должен порождать новый handoff.
+
+Если нужен именно предыдущий чат и его хвост:
+
+```bash
+./scripts/continuity_answer.sh \
+  --project project_alpha \
+  --namespace continuity \
+  --intent last_chat \
+  --include-previous-chat-messages \
+  --messages-count 2
+```
+
+Если runtime даёт `CODEX_THREAD_ID`, `Amai` использует его как first-class chat scope,
+чтобы не спутать текущий thread с предыдущим внутри одного project-space.
+`previous chat` при этом означает ближайший thread по времени в том же
+`project + namespace + agent_scope`, включая уже архивные чаты.
 
 Пример:
 

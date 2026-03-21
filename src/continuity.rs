@@ -1,6 +1,7 @@
 use crate::cli::{
     ContinuityAnswerArgs, ContinuityHandoffArgs, ContinuityImportArgs, ContinuityStartupArgs,
 };
+use crate::codex_threads;
 use crate::config::AppConfig;
 use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, ProjectRecord};
 use crate::s3;
@@ -60,6 +61,14 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
     }
 
     let _deleted = postgres::delete_namespace_documents(&db, namespace.namespace_id).await?;
+    let _ = postgres::delete_observability_snapshots_by_scope(
+        &db,
+        "continuity_thread_index",
+        "continuity_thread_index",
+        &project.code,
+        &namespace.code,
+    )
+    .await?;
 
     let import_started_epoch_ms = now_epoch_ms()?;
     let import_batch_id = Uuid::new_v4();
@@ -70,6 +79,45 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
             .with_context(|| format!("failed to read {}", source.original_path.display()))?;
         let (searchable_content, truncated_bytes) =
             truncate_utf8_by_bytes(&content, MAX_SEARCHABLE_CONTINUITY_BYTES);
+
+        if source.source_kind == "continuity_rendered_transcript"
+            && let Some(summary) = codex_threads::rendered_transcript_summary(
+                &content,
+                &source.original_path.display().to_string(),
+                Some(&project.repo_root),
+            )
+        {
+            let payload = json!({
+                "continuity_thread_index": {
+                    "project": {
+                        "code": project.code,
+                        "display_name": project.display_name,
+                        "repo_root": project.repo_root,
+                    },
+                    "namespace": {
+                        "code": namespace.code,
+                        "display_name": namespace.display_name,
+                    },
+                    "thread_id": summary["thread_id"].clone(),
+                    "title": summary["title"].clone(),
+                    "cwd": summary["cwd"].clone(),
+                    "first_user_message": summary["first_user_message"].clone(),
+                    "started_at": summary["started_at"].clone(),
+                    "ended_at": summary["ended_at"].clone(),
+                    "messages_count": summary["messages_count"].clone(),
+                    "last_user_message": summary["last_user_message"].clone(),
+                    "last_assistant_message": summary["last_assistant_message"].clone(),
+                    "rendered_transcript": summary["rendered_transcript"].clone(),
+                    "source_rollout": summary["source_rollout"].clone(),
+                    "created_at_epoch_s": summary["created_at_epoch_s"].clone(),
+                    "updated_at_epoch_s": summary["updated_at_epoch_s"].clone(),
+                }
+            });
+            let _ =
+                postgres::insert_observability_snapshot(&db, "continuity_thread_index", &payload)
+                    .await?;
+        }
+
         let metadata = json!({
             "continuity_kind": source.source_kind,
             "original_path": source.original_path.display().to_string(),
@@ -365,9 +413,33 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
         .await?
         .unwrap_or_else(|| continuity["active_workline_summary"]["details"].clone());
     let restore = working_state::build_restore_bundle(&db, &project, &namespace).await?;
+    let previous_chat_tail = if args.include_previous_chat_messages {
+        let thread_index_snapshots = postgres::list_observability_snapshots_by_kinds(
+            &db,
+            &["continuity_thread_index"],
+            Some(200),
+        )
+        .await?;
+        codex_threads::previous_chat_tail(&project.repo_root, args.messages_count)?.or(
+            codex_threads::previous_chat_tail_from_snapshots(
+                &thread_index_snapshots,
+                &project.code,
+                &namespace.code,
+                codex_threads::current_thread_id().as_deref(),
+                args.messages_count,
+            ),
+        )
+    } else {
+        None
+    };
     println!(
         "{}",
-        render_direct_answer(&handoff_summary, restore.as_ref(), &args.intent)
+        render_direct_answer(
+            &handoff_summary,
+            restore.as_ref(),
+            previous_chat_tail.as_ref(),
+            &args.intent,
+        )
     );
     Ok(())
 }
@@ -451,10 +523,16 @@ pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> R
     Ok(())
 }
 
-fn render_direct_answer(handoff_summary: &Value, restore: Option<&Value>, intent: &str) -> String {
+fn render_direct_answer(
+    handoff_summary: &Value,
+    restore: Option<&Value>,
+    previous_chat_tail: Option<&codex_threads::PreviousChatTail>,
+    intent: &str,
+) -> String {
     let heading = match intent {
         "continue" => "Продолжаем с этой линии:",
         "handoff" => "Текущий handoff в Amai:",
+        "previous_chat" => "Текущая активная линия:",
         _ => "На чём остановились:",
     };
     let headline = handoff_summary["headline"]
@@ -465,7 +543,9 @@ fn render_direct_answer(handoff_summary: &Value, restore: Option<&Value>, intent
         .unwrap_or("ещё нет данных");
 
     let mut lines = vec![format!("{heading} {headline}")];
-    if let Some(restore_node) = restore.map(|value| &value["working_state_restore"]) {
+    if intent != "previous_chat"
+        && let Some(restore_node) = restore.map(|value| &value["working_state_restore"])
+    {
         if let Some(summary) = summarize_materialized_notes(&restore_node["materialized_notes"]) {
             lines.push(format!("Что уже materialized: {summary}"));
         }
@@ -480,6 +560,25 @@ fn render_direct_answer(handoff_summary: &Value, restore: Option<&Value>, intent
                 "Статус continuity: предварительно, потому что живая выборка ещё маленькая."
                     .to_string(),
             );
+        }
+    }
+    if let Some(previous_chat_tail) = previous_chat_tail {
+        let title = if previous_chat_tail.title.trim().is_empty() {
+            previous_chat_tail.thread_id.as_str()
+        } else {
+            previous_chat_tail.title.as_str()
+        };
+        lines.push(format!("Предыдущий чат по времени: {title}"));
+        if !previous_chat_tail.messages.is_empty() {
+            lines.push("Последние сообщения предыдущего чата:".to_string());
+            for message in &previous_chat_tail.messages {
+                let role = if message.role == "user" {
+                    "Ваше"
+                } else {
+                    "Моё"
+                };
+                lines.push(format!("- {role}: {}", message.text));
+            }
         }
     }
     lines.push(format!("Ближайший обязательный следующий шаг: {next_step}"));
@@ -985,7 +1084,7 @@ mod tests {
             }
         });
 
-        let answer = render_direct_answer(&handoff, Some(&restore), "last_chat");
+        let answer = render_direct_answer(&handoff, Some(&restore), None, "last_chat");
 
         assert!(
             answer
