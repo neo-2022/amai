@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 03:07 MSK
-Ручная сверка guide/docs: 2026-03-21 03:07 MSK
+modified_at: 2026-03-21 03:21 MSK
+Ручная сверка guide/docs: 2026-03-21 03:21 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -541,6 +541,10 @@ cargo run -- deployment explain --target kubernetes_server
 - сколько токенов `Amai` сэкономил за текущую рабочую сессию;
 - сколько токенов сэкономлено за текущее окно лимита;
 - сколько токенов сэкономлено за всё время;
+- срезы по типам запросов:
+  - где `Amai` экономит на `code_lookup`;
+  - где на `docs_lookup`;
+  - где на `symbol_lookup`;
 - откуда пришли цифры:
   - живые `context pack` вызовы;
   - verification/benchmark события, если вы их явно включили.
@@ -572,6 +576,23 @@ cargo run --release -- observe reverify-token-ledger --apply
 - `reverify-token-ledger`
   - заново прогоняет старые live-запросы через текущий retrieval contour;
   - поднимает их из `legacy_unverified` в quality-gated live-выборку, если retrieval реально проходит.
+
+После этого в live-отчёте у события появляются уже более сильные поля:
+- `target_kind`
+  - что именно система считала целью запроса:
+    - файл;
+    - символ;
+    - документ;
+    - трассу между файлами;
+    - набор доказательств для более широкого вопроса;
+- `amai_hit_target`
+  - действительно ли `Amai` попал в нужный тип результата;
+- `baseline_hit_target`
+  - был ли у baseline вообще шанс честно покрыть этот запрос;
+- `latency_ms`
+  - сколько реально занял этот retrieval event;
+- `query_slices`
+  - отдельная сводка по типам запросов, а не одна усреднённая куча.
 
 ## Честно о скорости и пределах
 

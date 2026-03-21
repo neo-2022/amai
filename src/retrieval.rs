@@ -91,7 +91,6 @@ struct CachedQueryEmbedder {
 struct LocalContextPackEntry {
     context_pack_id: Uuid,
     payload: Arc<Value>,
-    payload_json: Arc<str>,
     exact_documents: usize,
     symbol_hits: usize,
     lexical_chunks: usize,
@@ -450,7 +449,8 @@ async fn prepare_context_pack(
             "chunk_id",
             "source_kind",
             "trust_level"
-        ]
+        ],
+        "retrieval_runtime": runtime_json(&stats)
     });
     let payload_json: Arc<str> = Arc::from(serde_json::to_string(&payload)?);
     let mut stats = stats;
@@ -1044,15 +1044,18 @@ fn prepared_from_cached_payload(
             persist_ms: 0,
         },
     };
+    let mut payload = cached.payload.as_ref().clone();
+    payload["retrieval_runtime"] = runtime_json(&stats);
+    let payload_json: Arc<str> = Arc::from(serde_json::to_string(&payload)?);
 
     Ok(PreparedContextPack {
         context_pack_id: cached.context_pack_id,
         project: context.project.clone(),
         namespace_id: context.namespace_id,
         effective_mode: context.effective_mode.to_string(),
-        visible_projects_json: cached.payload["visible_projects"].clone(),
-        payload: cached.payload,
-        payload_json: cached.payload_json,
+        visible_projects_json: payload["visible_projects"].clone(),
+        payload: Arc::new(payload),
+        payload_json,
         stats,
         cache_key: context.cache_key,
         scope_signature: context.scope_signature,
@@ -1094,7 +1097,6 @@ fn local_entry_from_prepared(
     LocalContextPackEntry {
         context_pack_id: prepared.context_pack_id,
         payload: Arc::clone(&prepared.payload),
-        payload_json: Arc::clone(&prepared.payload_json),
         exact_documents: prepared.stats.exact_documents,
         symbol_hits: prepared.stats.symbol_hits,
         lexical_chunks: prepared.stats.lexical_chunks,
@@ -1126,37 +1128,64 @@ fn local_entry_from_edge(
             .as_array()
             .map_or(0, Vec::len),
         payload: Arc::new(payload),
-        payload_json: Arc::from(cached.payload_json),
         durably_persisted: cached.durably_persisted,
         cached_at_epoch_ms: now_epoch_ms(),
     })
 }
 
 fn context_pack_result_from_local_entry(cached: LocalContextPackEntry) -> ContextPackResult {
-    ContextPackResult {
-        payload: cached.payload.as_ref().clone(),
-        stats: ContextPackStats {
-            context_pack_id: cached.context_pack_id,
-            exact_documents: cached.exact_documents,
-            symbol_hits: cached.symbol_hits,
-            lexical_chunks: cached.lexical_chunks,
-            semantic_chunks: cached.semantic_chunks,
-            cache_hit: true,
-            scope_signature: "local_fast_cache".to_string(),
-            timings: ContextPackTimings {
-                resolve_scope_ms: 0,
-                cache_lookup_ms: 0,
-                exact_lookup_ms: 0,
-                symbol_lookup_ms: 0,
-                lexical_lookup_ms: 0,
-                query_embed_ms: 0,
-                semantic_search_ms: 0,
-                semantic_hydrate_ms: 0,
-                serialize_ms: 0,
-                persist_ms: 0,
-            },
+    let stats = ContextPackStats {
+        context_pack_id: cached.context_pack_id,
+        exact_documents: cached.exact_documents,
+        symbol_hits: cached.symbol_hits,
+        lexical_chunks: cached.lexical_chunks,
+        semantic_chunks: cached.semantic_chunks,
+        cache_hit: true,
+        scope_signature: "local_fast_cache".to_string(),
+        timings: ContextPackTimings {
+            resolve_scope_ms: 0,
+            cache_lookup_ms: 0,
+            exact_lookup_ms: 0,
+            symbol_lookup_ms: 0,
+            lexical_lookup_ms: 0,
+            query_embed_ms: 0,
+            semantic_search_ms: 0,
+            semantic_hydrate_ms: 0,
+            serialize_ms: 0,
+            persist_ms: 0,
         },
-    }
+    };
+    let mut payload = cached.payload.as_ref().clone();
+    payload["retrieval_runtime"] = runtime_json(&stats);
+    ContextPackResult { payload, stats }
+}
+
+fn runtime_json(stats: &ContextPackStats) -> Value {
+    let timings = &stats.timings;
+    let total_ms = timings.resolve_scope_ms
+        + timings.cache_lookup_ms
+        + timings.exact_lookup_ms
+        + timings.symbol_lookup_ms
+        + timings.lexical_lookup_ms
+        + timings.query_embed_ms
+        + timings.semantic_search_ms
+        + timings.semantic_hydrate_ms
+        + timings.serialize_ms
+        + timings.persist_ms;
+    json!({
+        "cache_hit": stats.cache_hit,
+        "resolve_scope_ms": timings.resolve_scope_ms as f64,
+        "cache_lookup_ms": timings.cache_lookup_ms as f64,
+        "exact_lookup_ms": timings.exact_lookup_ms as f64,
+        "symbol_lookup_ms": timings.symbol_lookup_ms as f64,
+        "lexical_lookup_ms": timings.lexical_lookup_ms as f64,
+        "query_embed_ms": timings.query_embed_ms as f64,
+        "semantic_search_ms": timings.semantic_search_ms as f64,
+        "semantic_hydrate_ms": timings.semantic_hydrate_ms as f64,
+        "serialize_ms": timings.serialize_ms as f64,
+        "persist_ms": timings.persist_ms as f64,
+        "total_ms": total_ms as f64
+    })
 }
 
 fn local_fast_context_pack_cache_get(

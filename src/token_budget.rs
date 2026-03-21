@@ -71,10 +71,14 @@ struct TokenBudgetEvent {
     query: String,
     query_hash: String,
     query_type: String,
+    target_kind: String,
+    baseline_hit_target: bool,
+    amai_hit_target: bool,
     cold_warm_state: String,
     baseline_strategy: String,
     retrieval_mode: Option<String>,
     tokenizer: String,
+    latency_ms: f64,
     saved_tokens: u64,
     naive_tokens: u64,
     context_tokens: u64,
@@ -86,10 +90,29 @@ struct TokenBudgetEvent {
     quality_ok: bool,
     quality_score: f64,
     quality_method: String,
+    needed_followup: bool,
+    followup_count: u64,
     fallback_triggered: bool,
     fallback_count: u64,
+    document_hits: u64,
+    symbol_hits_count: u64,
+    file_hits: u64,
     sources_count: u64,
     chunks_count: u64,
+    pack_token_count: u64,
+    deduped_token_count: u64,
+}
+
+#[derive(Debug, Clone)]
+struct QualityVerdict {
+    target_kind: &'static str,
+    baseline_hit_target: bool,
+    amai_hit_target: bool,
+    quality_ok: bool,
+    quality_score: f64,
+    quality_method: &'static str,
+    needed_followup: bool,
+    followup_count: u64,
 }
 
 #[derive(Debug)]
@@ -352,6 +375,7 @@ async fn collect_report(
         .map(event_to_json)
         .unwrap_or_else(|| json!(null));
     let source_breakdown = source_breakdown(&events, &config.measurement);
+    let query_slices = query_slice_breakdown(&events, &config.measurement);
     let current_session_summary =
         summarize_events(&session_events, now_epoch_ms, &config.measurement);
     let rolling_window_summary = if profile.rolling_window_hours.is_some() {
@@ -389,6 +413,7 @@ async fn collect_report(
             "rolling_window": rolling_window_summary,
             "lifetime": lifetime_summary,
             "source_breakdown": source_breakdown,
+            "query_slices": query_slices,
         }
     }))
 }
@@ -492,6 +517,13 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .filter(|value| !value.is_empty() && *value != "unknown")
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| derive_query_type(&query).to_string());
+    let target_kind = node["target_kind"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown")
+        .to_string();
+    let baseline_hit_target = node["baseline_hit_target"].as_bool().unwrap_or(false);
+    let amai_hit_target = node["amai_hit_target"].as_bool().unwrap_or(false);
     let cold_warm_state = node["cold_warm_state"]
         .as_str()
         .unwrap_or("unknown")
@@ -503,6 +535,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .unwrap_or_else(|| derive_baseline_strategy(&query_type).to_string());
     let retrieval_mode = node["retrieval_mode"].as_str().map(ToOwned::to_owned);
     let tokenizer = node["tokenizer"].as_str().unwrap_or_default().to_string();
+    let latency_ms = node["latency_ms"].as_f64().unwrap_or(0.0);
     let event_id = node["event_id"]
         .as_str()
         .map(ToOwned::to_owned)
@@ -534,12 +567,25 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
             "legacy_unverified"
         })
         .to_string();
+    let needed_followup = node["followup"]["needed_followup"]
+        .as_bool()
+        .unwrap_or(!quality_ok);
+    let followup_count = node["followup"]["followup_count"].as_u64().unwrap_or(0);
     let fallback_triggered = node["recovery"]["fallback_triggered"]
         .as_bool()
         .unwrap_or(false);
     let fallback_count = node["recovery"]["fallback_count"].as_u64().unwrap_or(0);
+    let document_hits = node["shape"]["document_hits"].as_u64().unwrap_or(0);
+    let symbol_hits_count = node["shape"]["symbol_hits"].as_u64().unwrap_or(0);
+    let file_hits = node["shape"]["file_hits"].as_u64().unwrap_or(0);
     let sources_count = node["shape"]["sources_count"].as_u64().unwrap_or(0);
     let chunks_count = node["shape"]["chunks_count"].as_u64().unwrap_or(0);
+    let pack_token_count = node["shape"]["pack_token_count"]
+        .as_u64()
+        .unwrap_or(context_tokens);
+    let deduped_token_count = node["shape"]["deduped_token_count"]
+        .as_u64()
+        .unwrap_or(context_tokens);
 
     Ok(Some(TokenBudgetEvent {
         created_at_epoch_ms: row.created_at_epoch_ms,
@@ -553,10 +599,14 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         query,
         query_hash,
         query_type,
+        target_kind,
+        baseline_hit_target,
+        amai_hit_target,
         cold_warm_state,
         baseline_strategy,
         retrieval_mode,
         tokenizer,
+        latency_ms,
         saved_tokens,
         naive_tokens,
         context_tokens,
@@ -568,10 +618,17 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         quality_ok,
         quality_score,
         quality_method,
+        needed_followup,
+        followup_count,
         fallback_triggered,
         fallback_count,
+        document_hits,
+        symbol_hits_count,
+        file_hits,
         sources_count,
         chunks_count,
+        pack_token_count,
+        deduped_token_count,
     }))
 }
 
@@ -592,7 +649,18 @@ fn needs_live_reverification(payload: &Value) -> bool {
         .as_str()
         .unwrap_or_default();
     let quality_ok = node["quality"]["quality_ok"].as_bool().unwrap_or(false);
-    quality_method == "legacy_unverified" || (quality_method.is_empty() && !quality_ok)
+    let needs_shape_upgrade = node["target_kind"]
+        .as_str()
+        .map(|value| value.is_empty() || value == "unknown")
+        .unwrap_or(true)
+        || node.get("latency_ms").is_none()
+        || node["shape"].get("pack_token_count").is_none()
+        || node["shape"].get("deduped_token_count").is_none()
+        || node["followup"].is_null()
+        || node["shape"].get("file_hits").is_none();
+    quality_method == "legacy_unverified"
+        || (quality_method.is_empty() && !quality_ok)
+        || needs_shape_upgrade
 }
 
 async fn reverify_live_event_payload(
@@ -875,6 +943,7 @@ fn summarize_events(
             "avg_saved_tokens_per_event": 0.0,
             "quality_ok_rate": 0.0,
             "fallback_rate": 0.0,
+            "p95_latency_ms": 0.0,
             "started_at_epoch_ms": Value::Null,
             "ended_at_epoch_ms": Value::Null,
             "age_ms_since_latest": Value::Null,
@@ -928,6 +997,14 @@ fn summarize_events(
         .iter()
         .filter(|event| event.fallback_triggered)
         .count() as f64;
+    let mut latency_values = events
+        .iter()
+        .map(|event| event.latency_ms)
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    latency_values
+        .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let p95_latency_ms = percentile_from_sorted(&latency_values, 0.95);
     let quality_ok_rate = quality_ok_events * 100.0 / events.len() as f64;
     let fallback_rate = fallback_events * 100.0 / events.len() as f64;
     let started_at_epoch_ms = events
@@ -962,6 +1039,7 @@ fn summarize_events(
         "avg_saved_tokens_per_event": avg_saved_tokens_per_event,
         "quality_ok_rate": quality_ok_rate,
         "fallback_rate": fallback_rate,
+        "p95_latency_ms": p95_latency_ms,
         "started_at_epoch_ms": started_at_epoch_ms,
         "ended_at_epoch_ms": ended_at_epoch_ms,
         "age_ms_since_latest": now_epoch_ms.saturating_sub(ended_at_epoch_ms),
@@ -1069,6 +1147,49 @@ fn source_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementConfig
     )
 }
 
+fn query_slice_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementConfig) -> Value {
+    let mut grouped = BTreeMap::<String, Vec<TokenBudgetEvent>>::new();
+    for event in events {
+        grouped
+            .entry(event.query_type.clone())
+            .or_default()
+            .push(event.clone());
+    }
+    Value::Array(
+        grouped
+            .into_iter()
+            .map(|(query_type, items)| {
+                let summary = summarize_events(
+                    &items,
+                    items
+                        .last()
+                        .map(|item| item.created_at_epoch_ms)
+                        .unwrap_or_default(),
+                    measurement,
+                );
+                json!({
+                    "query_type": query_type,
+                    "events_count": summary["events_count"],
+                    "counted_events": summary["counted_events"],
+                    "verified_effective_savings_pct": summary["verified_effective_savings_pct"],
+                    "quality_ok_rate": summary["quality_ok_rate"],
+                    "fallback_rate": summary["fallback_rate"],
+                    "p95_latency_ms": summary["p95_latency_ms"],
+                })
+            })
+            .collect(),
+    )
+}
+
+fn percentile_from_sorted(values: &[f64], percentile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let percentile = percentile.clamp(0.0, 1.0);
+    let index = ((values.len() - 1) as f64 * percentile).ceil() as usize;
+    values[index.min(values.len() - 1)]
+}
+
 fn event_to_json(event: &TokenBudgetEvent) -> Value {
     json!({
         "created_at_epoch_ms": event.created_at_epoch_ms,
@@ -1082,10 +1203,14 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
         "query": event.query,
         "query_hash": event.query_hash,
         "query_type": event.query_type,
+        "target_kind": event.target_kind,
+        "baseline_hit_target": event.baseline_hit_target,
+        "amai_hit_target": event.amai_hit_target,
         "cold_warm_state": event.cold_warm_state,
         "baseline_strategy": event.baseline_strategy,
         "retrieval_mode": event.retrieval_mode,
         "tokenizer": event.tokenizer,
+        "latency_ms": event.latency_ms,
         "saved_tokens": event.saved_tokens,
         "naive_tokens": event.naive_tokens,
         "context_tokens": event.context_tokens,
@@ -1097,10 +1222,17 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
         "quality_ok": event.quality_ok,
         "quality_score": event.quality_score,
         "quality_method": event.quality_method,
+        "needed_followup": event.needed_followup,
+        "followup_count": event.followup_count,
         "fallback_triggered": event.fallback_triggered,
         "fallback_count": event.fallback_count,
+        "document_hits": event.document_hits,
+        "symbol_hits_count": event.symbol_hits_count,
+        "file_hits": event.file_hits,
         "sources_count": event.sources_count,
         "chunks_count": event.chunks_count,
+        "pack_token_count": event.pack_token_count,
+        "deduped_token_count": event.deduped_token_count,
     })
 }
 
@@ -1141,9 +1273,16 @@ fn build_event_payload(
     };
     let effective_savings_percent =
         percent_from_signed(effective_saved_tokens, naive_tokens as u64);
-    let (quality_ok, quality_score, quality_method) = derive_quality_verdict(payload);
+    let quality = derive_quality_verdict(payload, query_type, &naive_scope);
     let fallback_count = count_lexical_fallback_chunks(payload) as u64;
     let fallback_triggered = fallback_count > 0;
+    let document_hits = payload["retrieval"]["exact_documents"]
+        .as_array()
+        .map_or(0, Vec::len) as u64;
+    let symbol_hits = payload["retrieval"]["symbol_hits"]
+        .as_array()
+        .map_or(0, Vec::len) as u64;
+    let file_hits = unique_file_hit_count(payload) as u64;
     let sources_count = count_sources(payload) as u64;
     let chunks_count = count_chunks(payload) as u64;
     let traffic_class = derive_traffic_class(source_kind);
@@ -1152,6 +1291,7 @@ fn build_event_payload(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let timestamp_utc = current_epoch_ms()?;
+    let latency_ms = total_latency_ms(payload);
 
     Ok(json!({
         "token_budget_event": {
@@ -1165,6 +1305,9 @@ fn build_event_payload(
             "query": payload["query"].clone(),
             "query_hash": hex_sha256(query.as_bytes()),
             "query_type": query_type,
+            "target_kind": quality.target_kind,
+            "baseline_hit_target": quality.baseline_hit_target,
+            "amai_hit_target": quality.amai_hit_target,
             "cold_warm_state": if payload["retrieval_runtime"]["cache_hit"].as_bool().unwrap_or(false) {
                 "warm"
             } else {
@@ -1173,6 +1316,7 @@ fn build_event_payload(
             "baseline_strategy": baseline_strategy,
             "retrieval_mode": payload["effective_retrieval_mode"].clone(),
             "tokenizer": measurement.tokenizer,
+            "latency_ms": latency_ms,
             "naive_limit_files": measurement.naive_limit_files,
             "naive_max_bytes_per_file": measurement.naive_max_bytes_per_file,
             "visible_projects": payload["visible_projects"].clone(),
@@ -1192,13 +1336,22 @@ fn build_event_payload(
                 "fallback_count": fallback_count,
             },
             "quality": {
-                "quality_ok": quality_ok,
-                "quality_score": quality_score,
-                "quality_method": quality_method,
+                "quality_ok": quality.quality_ok,
+                "quality_score": quality.quality_score,
+                "quality_method": quality.quality_method,
+            },
+            "followup": {
+                "needed_followup": quality.needed_followup,
+                "followup_count": quality.followup_count,
             },
             "shape": {
+                "document_hits": document_hits,
+                "symbol_hits": symbol_hits,
+                "file_hits": file_hits,
                 "sources_count": sources_count,
                 "chunks_count": chunks_count,
+                "pack_token_count": context_tokens,
+                "deduped_token_count": context_tokens,
             },
             "savings": {
                 "saved_tokens": saved_tokens,
@@ -1321,7 +1474,11 @@ fn derive_query_type(query: &str) -> &'static str {
     }
 }
 
-fn derive_quality_verdict(payload: &Value) -> (bool, f64, &'static str) {
+fn derive_quality_verdict(
+    payload: &Value,
+    query_type: &str,
+    naive_scope: &NaiveScope,
+) -> QualityVerdict {
     let exact_hits = payload["retrieval"]["exact_documents"]
         .as_array()
         .map_or(0, Vec::len);
@@ -1338,9 +1495,64 @@ fn derive_quality_verdict(payload: &Value) -> (bool, f64, &'static str) {
         .as_bool()
         .unwrap_or(false);
     let total_hits = exact_hits + symbol_hits + lexical_hits + semantic_hits;
-    let quality_ok = total_hits > 0 && !semantic_guard_abstained;
-    let quality_score = if quality_ok { 1.0 } else { 0.0 };
-    (quality_ok, quality_score, "retrieval_parity")
+    let target_kind = match query_type {
+        "onboarding_query" | "docs_lookup" => "document",
+        "config_lookup" | "code_lookup" => "file",
+        "symbol_lookup" => "symbol",
+        "cross_file_trace" => "cross_file_trace",
+        "architecture_question" | "bugfix_context" => "evidence_bundle",
+        _ => "file",
+    };
+    let baseline_hit_target = !naive_scope.files.is_empty();
+    let amai_hit_target = match target_kind {
+        "document" => exact_hits > 0 || lexical_hits > 0,
+        "file" => exact_hits > 0 || lexical_hits > 0 || symbol_hits > 0,
+        "symbol" => symbol_hits > 0,
+        "cross_file_trace" => {
+            (symbol_hits > 0 && lexical_hits > 0)
+                || (symbol_hits + lexical_hits + semantic_hits >= 2)
+        }
+        "evidence_bundle" => total_hits >= 2,
+        _ => total_hits > 0,
+    };
+    let quality_ok = baseline_hit_target && amai_hit_target && !semantic_guard_abstained;
+    let quality_score = match target_kind {
+        "cross_file_trace" => {
+            if quality_ok {
+                1.0
+            } else if total_hits > 0 && !semantic_guard_abstained {
+                0.5
+            } else {
+                0.0
+            }
+        }
+        "evidence_bundle" => {
+            if quality_ok {
+                1.0
+            } else if total_hits > 0 && !semantic_guard_abstained {
+                0.6
+            } else {
+                0.0
+            }
+        }
+        _ => {
+            if quality_ok {
+                1.0
+            } else {
+                0.0
+            }
+        }
+    };
+    QualityVerdict {
+        target_kind,
+        baseline_hit_target,
+        amai_hit_target,
+        quality_ok,
+        quality_score,
+        quality_method: "hybrid_retrieval_parity",
+        needed_followup: !quality_ok,
+        followup_count: 0,
+    }
 }
 
 fn count_lexical_fallback_chunks(payload: &Value) -> usize {
@@ -1360,6 +1572,35 @@ fn count_sources(payload: &Value) -> usize {
         + retrieval["semantic_chunks"].as_array().map_or(0, Vec::len)
 }
 
+fn unique_file_hit_count(payload: &Value) -> usize {
+    let mut files = HashSet::new();
+    for section in [
+        "exact_documents",
+        "symbol_hits",
+        "lexical_chunks",
+        "semantic_chunks",
+    ] {
+        for item in payload["retrieval"][section]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let project_code = item["project_code"]
+                .as_str()
+                .or_else(|| item["provenance"]["source_project"].as_str())
+                .unwrap_or_default();
+            let relative_path = item["relative_path"]
+                .as_str()
+                .or_else(|| item["provenance"]["path"].as_str())
+                .unwrap_or_default();
+            if !project_code.is_empty() || !relative_path.is_empty() {
+                files.insert(format!("{project_code}::{relative_path}"));
+            }
+        }
+    }
+    files.len()
+}
+
 fn count_chunks(payload: &Value) -> usize {
     let retrieval = &payload["retrieval"];
     retrieval["lexical_chunks"].as_array().map_or(0, Vec::len)
@@ -1371,6 +1612,28 @@ fn current_epoch_ms() -> Result<i64> {
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
         .as_millis() as i64)
+}
+
+fn total_latency_ms(payload: &Value) -> f64 {
+    let runtime = &payload["retrieval_runtime"];
+    if let Some(value) = runtime["total_ms"].as_f64() {
+        return value;
+    }
+    [
+        "resolve_scope_ms",
+        "cache_lookup_ms",
+        "exact_lookup_ms",
+        "symbol_lookup_ms",
+        "lexical_lookup_ms",
+        "query_embed_ms",
+        "semantic_search_ms",
+        "semantic_hydrate_ms",
+        "serialize_ms",
+        "persist_ms",
+    ]
+    .iter()
+    .map(|key| runtime[*key].as_f64().unwrap_or(0.0))
+    .sum()
 }
 
 fn percent_from_signed(saved_tokens: i64, baseline_tokens: u64) -> f64 {
@@ -1728,10 +1991,10 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MeasurementConfig, TokenBudgetEvent, apply_reverification_metadata, build_product_headline,
-        derive_baseline_strategy, derive_query_type, derive_traffic_class,
-        include_traffic_class_in_report, needs_live_reverification,
-        repair_legacy_token_event_payload, summarize_events,
+        MeasurementConfig, NaiveScope, TokenBudgetEvent, apply_reverification_metadata,
+        build_product_headline, derive_baseline_strategy, derive_quality_verdict,
+        derive_query_type, derive_traffic_class, include_traffic_class_in_report,
+        needs_live_reverification, repair_legacy_token_event_payload, summarize_events,
     };
     use serde_json::json;
 
@@ -1793,6 +2056,36 @@ mod tests {
             derive_query_type("Где лежит нужный файл для MCP integration?"),
             "code_lookup"
         );
+    }
+
+    #[test]
+    fn quality_verdict_uses_target_kind_specific_rules() {
+        let payload = json!({
+            "retrieval": {
+                "exact_documents": [],
+                "symbol_hits": [{"name": "run"}],
+                "lexical_chunks": [],
+                "semantic_chunks": []
+            },
+            "quality": {
+                "semantic_guard": {
+                    "abstained": false
+                }
+            }
+        });
+        let verdict = derive_quality_verdict(
+            &payload,
+            "symbol_lookup",
+            &NaiveScope {
+                files: vec![json!({"relative_path": "src/main.rs"})],
+                rendered_files: Vec::new(),
+            },
+        );
+        assert_eq!(verdict.target_kind, "symbol");
+        assert!(verdict.baseline_hit_target);
+        assert!(verdict.amai_hit_target);
+        assert!(verdict.quality_ok);
+        assert_eq!(verdict.quality_method, "hybrid_retrieval_parity");
     }
 
     #[test]
@@ -1883,6 +2176,18 @@ mod tests {
                 }
             }
         })));
+        assert!(needs_live_reverification(&json!({
+            "token_budget_event": {
+                "source_kind": "live_context_pack",
+                "traffic_class": "live",
+                "target_kind": "unknown",
+                "quality": {
+                    "quality_ok": true,
+                    "quality_method": "reverified_retrieval_parity"
+                },
+                "shape": {}
+            }
+        })));
         assert!(!needs_live_reverification(&json!({
             "token_budget_event": {
                 "source_kind": "verify_token_benchmark",
@@ -1897,9 +2202,20 @@ mod tests {
             "token_budget_event": {
                 "source_kind": "live_context_pack",
                 "traffic_class": "live",
+                "target_kind": "file",
+                "latency_ms": 12.0,
                 "quality": {
                     "quality_ok": true,
                     "quality_method": "retrieval_parity"
+                },
+                "followup": {
+                    "needed_followup": false,
+                    "followup_count": 0
+                },
+                "shape": {
+                    "file_hits": 1,
+                    "pack_token_count": 100,
+                    "deduped_token_count": 100
                 }
             }
         })));
@@ -1968,10 +2284,14 @@ mod tests {
                 query: "explain token savings".to_string(),
                 query_hash: "hash".to_string(),
                 query_type: "architecture_question".to_string(),
+                target_kind: "evidence_bundle".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
                 cold_warm_state: "warm".to_string(),
                 baseline_strategy: "naive_top_files".to_string(),
                 retrieval_mode: Some("local_strict".to_string()),
                 tokenizer: "o200k_base".to_string(),
+                latency_ms: 12.0,
                 saved_tokens: 150_000,
                 naive_tokens: 160_000,
                 context_tokens: 10_000,
@@ -1983,10 +2303,17 @@ mod tests {
                 quality_ok: true,
                 quality_score: 1.0,
                 quality_method: "retrieval_parity".to_string(),
+                needed_followup: false,
+                followup_count: 0,
                 fallback_triggered: false,
                 fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 2,
+                file_hits: 3,
                 sources_count: 5,
                 chunks_count: 4,
+                pack_token_count: 10_000,
+                deduped_token_count: 10_000,
             }],
             20,
             &measurement,

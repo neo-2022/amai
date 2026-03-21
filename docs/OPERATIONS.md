@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 03:07 MSK
-Ручная сверка guide/docs: 2026-03-21 03:07 MSK
+modified_at: 2026-03-21 03:21 MSK
+Ручная сверка guide/docs: 2026-03-21 03:21 MSK
 
 # Operations
 
@@ -692,6 +692,13 @@ cargo run --release -- verify token-benchmark-suite \
   - откуда пришли цифры:
     - живые `context pack` вызовы;
     - benchmark-события, если вы их явно включили.
+- `query_slices`
+  - отдельные срезы по типам запросов:
+    - `code_lookup`
+    - `docs_lookup`
+    - `symbol_lookup`
+    - `architecture_question`
+    - и другие, если они реально накоплены в live-потоке.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе:
@@ -715,6 +722,20 @@ cargo run --release -- observe reverify-token-ledger --apply
   - повторно прогоняет старые live-запросы через текущий retrieval contour;
   - если retrieval реально находит достаточный контекст, событие становится `quality_ok = true`;
   - после этого headline может перейти из `предварительно` в полноценную `Проверенную реальную экономию`.
+
+После `reverify` live event теперь должен нести richer fields:
+- `target_kind`
+  - какой тип результата нужен запросу;
+- `baseline_hit_target`
+  - был ли у baseline честный шанс закрыть задачу;
+- `amai_hit_target`
+  - попал ли `Amai` в нужный тип результата;
+- `latency_ms`
+  - время retrieval event;
+- `file_hits`, `document_hits`, `symbol_hits`
+  - какие типы результатов реально пришли;
+- `pack_token_count`, `deduped_token_count`
+  - сколько токенов реально дошло до prompt после компактной сборки.
 
 Важно:
 - headline снимает пометку `предварительно`, если набран хотя бы один из двух порогов:
