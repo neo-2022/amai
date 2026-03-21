@@ -717,11 +717,23 @@ fn render_direct_answer(
     let headline = handoff_summary["headline"]
         .as_str()
         .unwrap_or("ещё нет данных");
-    let next_step = handoff_summary["next_step"]
+    let project_next_step = handoff_summary["next_step"]
         .as_str()
         .unwrap_or("ещё нет данных");
+    let thread_headline = if matches!(intent, "previous_chat" | "chat_at_time") {
+        chat_tail.and_then(summarize_chat_tail_headline)
+    } else {
+        None
+    };
+    let thread_next_step = if matches!(intent, "previous_chat" | "chat_at_time") {
+        chat_tail.and_then(extract_chat_tail_next_step)
+    } else {
+        None
+    };
+    let answer_headline = thread_headline.as_deref().unwrap_or(headline);
+    let answer_next_step = thread_next_step.as_deref().unwrap_or(project_next_step);
 
-    let mut lines = vec![format!("{heading} {headline}")];
+    let mut lines = vec![format!("{heading} {answer_headline}")];
     if intent != "previous_chat"
         && intent != "chat_at_time"
         && let Some(restore_node) = restore.map(|value| &value["working_state_restore"])
@@ -775,8 +787,79 @@ fn render_direct_answer(
             }
         }
     }
-    lines.push(format!("Ближайший обязательный следующий шаг: {next_step}"));
+    if matches!(intent, "previous_chat" | "chat_at_time")
+        && headline != "ещё нет данных"
+        && headline != answer_headline
+    {
+        lines.push(format!("Текущая активная линия проекта сейчас: {headline}"));
+    }
+    lines.push(format!(
+        "Ближайший обязательный следующий шаг: {answer_next_step}"
+    ));
     lines.join("\n")
+}
+
+fn summarize_chat_tail_headline(chat_tail: &codex_threads::ChatTail) -> Option<String> {
+    let assistant = chat_tail
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")?;
+    Some(collapse_answer_text(&assistant.text, 220))
+}
+
+fn extract_chat_tail_next_step(chat_tail: &codex_threads::ChatTail) -> Option<String> {
+    let assistant = chat_tail
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")?;
+    extract_next_step_from_text(&assistant.text)
+}
+
+fn collapse_answer_text(text: &str, max_chars: usize) -> String {
+    let stripped = text
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed != "AGENTS.md прочитан" && trimmed != "AGENTS.md не прочитан"
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut collapsed = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+    for prefix in ["AGENTS.md прочитан", "AGENTS.md не прочитан"] {
+        if let Some(value) = collapsed.strip_prefix(prefix) {
+            collapsed = value
+                .trim_start_matches(|ch: char| {
+                    ch == '.' || ch == ':' || ch == '-' || ch.is_whitespace()
+                })
+                .trim()
+                .to_string();
+            break;
+        }
+    }
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    collapsed.chars().take(max_chars).collect::<String>() + "..."
+}
+
+fn extract_next_step_from_text(text: &str) -> Option<String> {
+    for label in [
+        "Ближайший обязательный следующий шаг:",
+        "Ближайший обязательный следующий шаг был такой:",
+        "Следующий обязательный следующий шаг:",
+        "Следующий обязательный шаг:",
+        "Nearest mandatory next step:",
+    ] {
+        if let Some((_, value)) = text.split_once(label) {
+            let next_step = value.lines().next().unwrap_or("").trim();
+            if !next_step.is_empty() {
+                return Some(next_step.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn summarize_materialized_notes(value: &Value) -> Option<String> {
@@ -1334,11 +1417,44 @@ mod tests {
             Some("2026-03-19T12:00:00+03:00"),
         );
 
-        assert!(answer.contains("Что было в чате на этот момент: Temporal lookup materialized"));
+        assert!(answer.contains("Что было в чате на этот момент: про temporal lookup"));
         assert!(answer.contains("Целевой момент времени: 2026-03-19T12:00:00+03:00"));
         assert!(answer.contains("Подходящий chat thread: чат про continuity"));
+        assert!(
+            answer.contains("Текущая активная линия проекта сейчас: Temporal lookup materialized")
+        );
         assert!(answer.contains("Ближайшие сообщения к этому моменту:"));
         assert!(answer.contains("- Ваше: о чём говорили?"));
         assert!(answer.contains("- Моё: про temporal lookup"));
+    }
+
+    #[test]
+    fn render_direct_answer_uses_thread_next_step_when_available() {
+        let handoff = json!({
+            "headline": "Current project line",
+            "next_step": "Current project next step."
+        });
+        let chat_tail = ChatTail {
+            thread_id: "thread-2".to_string(),
+            title: "чат про continuity".to_string(),
+            messages: vec![
+                TranscriptMessage {
+                    role: "user".to_string(),
+                    text: "на чем закончили?".to_string(),
+                },
+                TranscriptMessage {
+                    role: "assistant".to_string(),
+                    text: "Закончили на temporal contour.\nБлижайший обязательный следующий шаг: Проверить новый чат ещё раз.".to_string(),
+                },
+            ],
+        };
+
+        let answer = render_direct_answer(&handoff, None, Some(&chat_tail), "previous_chat", None);
+
+        assert!(answer.contains("На чём закончился прошлый чат: Закончили на temporal contour."));
+        assert!(
+            answer.contains("Ближайший обязательный следующий шаг: Проверить новый чат ещё раз.")
+        );
+        assert!(answer.contains("Текущая активная линия проекта сейчас: Current project line"));
     }
 }
