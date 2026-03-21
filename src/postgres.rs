@@ -896,6 +896,16 @@ pub async fn replace_document_index(
     Ok(document_id)
 }
 
+pub async fn delete_namespace_documents(client: &Client, namespace_id: Uuid) -> Result<u64> {
+    client
+        .execute(
+            "DELETE FROM ami.code_documents WHERE namespace_id = $1",
+            &[&namespace_id],
+        )
+        .await
+        .context("failed to delete namespace documents")
+}
+
 pub async fn status_counts(client: &Client) -> Result<(i64, i64, i64)> {
     let row = client
         .query_one(

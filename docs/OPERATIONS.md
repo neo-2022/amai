@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 04:35 MSK
-Ручная сверка guide/docs: 2026-03-21 04:35 MSK
+modified_at: 2026-03-21 04:48 MSK
+Ручная сверка guide/docs: 2026-03-21 04:48 MSK
 
 # Operations
 
@@ -115,9 +115,15 @@ cd /home/art/agent-memory-index
   --display-name "Project Alpha" \
   --repo-root /path/to/project-alpha \
   --namespace continuity \
-  --bootstrap-file /path/to/project-alpha/.codex/project-bootstrap.md \
-  --active-workline-file /path/to/project-alpha/.codex/ACTIVE_WORKLINE.md \
-  --memory-dir /path/to/echovault/project-alpha
+  --bootstrap-file /path/to/project-alpha/.codex/amai-project-bootstrap.md \
+  --active-workline-file /path/to/project-alpha/.codex/ACTIVE_WORKLINE.md
+```
+
+Если у проекта есть старый внешний memory-export, который ещё нужен для аудита или совместимости
+с рантаймом клиента, его можно добавить отдельно:
+
+```bash
+  --memory-dir /path/to/project-alpha/optional-memory-bridge
 ```
 
 После этого новый startup-contour уже может идти через `Amai`:
@@ -128,6 +134,7 @@ cd /home/art/agent-memory-index
 ```
 
 Что это materialize-ит:
+- текущий continuity namespace перед импортом очищается от прошлых continuity docs, чтобы старые snapshot-path не оставались призраками в retrieval;
 - полный raw continuity-content сохраняется в artifact storage;
 - searchable continuity-layer режется до безопасного размера для `PostgreSQL tsvector` и lexical chunks;
 - observability получает отдельный snapshot `continuity_import`;
@@ -136,7 +143,8 @@ cd /home/art/agent-memory-index
 Важно:
 - старые источники при этом не обязаны сразу исчезать;
 - безопасный migration path такой:
-  - продолжать писать `EchoVault` / handoff-файл / transcript mirror;
+  - продолжать писать handoff-файл / transcript mirror;
+  - при необходимости держать отдельный внешний memory bridge только как compatibility-layer;
   - после содержательной работы обновлять continuity import в `Amai`;
   - новый session-start уже поднимать через `Amai continuity startup`.
 

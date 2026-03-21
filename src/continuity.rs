@@ -52,6 +52,8 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
         bail!("no continuity sources were found to import");
     }
 
+    let _deleted = postgres::delete_namespace_documents(&db, namespace.namespace_id).await?;
+
     let import_started_epoch_ms = now_epoch_ms()?;
     let import_batch_id = Uuid::new_v4();
     let mut imported = Vec::new();
@@ -219,9 +221,15 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
         continuity["documents_imported"].as_u64().unwrap_or(0)
     );
     println!(
-        "Файлы памяти EchoVault: {}",
-        continuity["session_memory_files"].as_u64().unwrap_or(0)
+        "Continuity snapshot: {}",
+        continuity["bootstrap_summary"]["bootstrap_file"]
+            .as_str()
+            .unwrap_or("ещё нет данных")
     );
+    let bridge_files = continuity["session_memory_files"].as_u64().unwrap_or(0);
+    if bridge_files > 0 {
+        println!("Дополнительные bridge-notes: {}", bridge_files);
+    }
     println!(
         "Rendered transcripts: {}",
         continuity["rendered_transcript_files"]
@@ -289,7 +297,7 @@ fn collect_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<Vec<C
 
     sources.push(ContinuitySource {
         original_path: bootstrap_path.clone(),
-        relative_path: ".amai-continuity/bootstrap/echovault-project-bootstrap.md".to_string(),
+        relative_path: ".amai-continuity/bootstrap/continuity-snapshot.md".to_string(),
         source_kind: "continuity_bootstrap".to_string(),
         artifact_bucket: cfg.s3_bucket_artifacts.clone(),
         artifact_kind: "continuity_bootstrap".to_string(),
@@ -318,7 +326,7 @@ fn collect_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<Vec<C
                 .to_string();
             sources.push(ContinuitySource {
                 original_path: path,
-                relative_path: format!(".amai-continuity/echovault-session-memory/{file_name}"),
+                relative_path: format!(".amai-continuity/external-memory-bridge/{file_name}"),
                 source_kind: "continuity_session_memory".to_string(),
                 artifact_bucket: cfg.s3_bucket_artifacts.clone(),
                 artifact_kind: "continuity_session_memory".to_string(),
