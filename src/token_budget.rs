@@ -8,7 +8,7 @@ use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -665,8 +665,16 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| derive_traffic_class(&source_kind));
-    let project = node["project"].as_str().unwrap_or_default().to_string();
-    let namespace = node["namespace"].as_str().unwrap_or_default().to_string();
+    let project = node["project"]
+        .as_str()
+        .or_else(|| node["project_code"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    let namespace = node["namespace"]
+        .as_str()
+        .or_else(|| node["namespace_code"].as_str())
+        .unwrap_or_default()
+        .to_string();
     let query = node["query"].as_str().unwrap_or_default().to_string();
     let query_hash = node["query_hash"]
         .as_str()
@@ -712,14 +720,23 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_i64()
         .unwrap_or(row.created_at_epoch_ms);
     let saved_tokens = node["savings"]["saved_tokens"].as_u64().unwrap_or(0);
-    let naive_tokens = node["naive_scope"]["tokens"].as_u64().unwrap_or(0);
-    let context_tokens = node["context_pack_render"]["tokens"].as_u64().unwrap_or(0);
+    let naive_tokens = node["naive_scope"]["tokens"]
+        .as_u64()
+        .or_else(|| node["baseline_tokens"].as_u64())
+        .unwrap_or(0);
+    let context_tokens = node["context_pack_render"]["tokens"]
+        .as_u64()
+        .or_else(|| node["delivered_tokens"].as_u64())
+        .unwrap_or(0);
     let recovery_tokens = node["recovery"]["recovery_tokens"].as_u64().unwrap_or(0);
     let effective_saved_tokens = node["savings"]["effective_saved_tokens"]
         .as_i64()
         .unwrap_or_else(|| naive_tokens as i64 - (context_tokens as i64 + recovery_tokens as i64));
     let savings_factor = node["savings"]["savings_factor"].as_f64().unwrap_or(0.0);
-    let savings_percent = node["savings"]["savings_percent"].as_f64().unwrap_or(0.0);
+    let savings_percent = node["savings"]["savings_percent"]
+        .as_f64()
+        .or_else(|| node["gross_savings_pct"].as_f64())
+        .unwrap_or(0.0);
     let effective_savings_percent = node["savings"]["effective_savings_percent"]
         .as_f64()
         .unwrap_or_else(|| percent_from_signed(effective_saved_tokens, naive_tokens));
@@ -1277,6 +1294,10 @@ fn summarize_events(
             "counted_events": 0,
             "legacy_unverified_events": 0,
             "preliminary": true,
+            "baseline_tokens": 0,
+            "delivered_tokens": 0,
+            "recovery_tokens": 0,
+            "effective_saved_tokens": 0,
             "total_saved_tokens": 0,
             "total_effective_saved_tokens": 0,
             "verified_effective_saved_tokens": 0,
@@ -1381,6 +1402,10 @@ fn summarize_events(
         "counted_events": verified_events.len(),
         "legacy_unverified_events": legacy_unverified_events,
         "preliminary": preliminary,
+        "baseline_tokens": total_naive_tokens,
+        "delivered_tokens": total_context_tokens,
+        "recovery_tokens": total_recovery_tokens,
+        "effective_saved_tokens": total_effective_saved_tokens,
         "total_saved_tokens": total_saved_tokens,
         "total_effective_saved_tokens": total_effective_saved_tokens,
         "verified_effective_saved_tokens": verified_effective_saved_tokens,
@@ -1619,7 +1644,15 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
     );
     object.insert("project".to_string(), Value::String(event.project.clone()));
     object.insert(
+        "project_code".to_string(),
+        Value::String(event.project.clone()),
+    );
+    object.insert(
         "namespace".to_string(),
+        Value::String(event.namespace.clone()),
+    );
+    object.insert(
+        "namespace_code".to_string(),
         Value::String(event.namespace.clone()),
     );
     object.insert("query".to_string(), Value::String(event.query.clone()));
@@ -1667,7 +1700,15 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
     object.insert("saved_tokens".to_string(), Value::from(event.saved_tokens));
     object.insert("naive_tokens".to_string(), Value::from(event.naive_tokens));
     object.insert(
+        "baseline_tokens".to_string(),
+        Value::from(event.naive_tokens),
+    );
+    object.insert(
         "context_tokens".to_string(),
+        Value::from(event.context_tokens),
+    );
+    object.insert(
+        "delivered_tokens".to_string(),
         Value::from(event.context_tokens),
     );
     object.insert(
@@ -1684,6 +1725,10 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
     );
     object.insert(
         "savings_percent".to_string(),
+        Value::from(event.savings_percent),
+    );
+    object.insert(
+        "gross_savings_pct".to_string(),
         Value::from(event.savings_percent),
     );
     object.insert(
@@ -1821,7 +1866,9 @@ fn build_event_payload(
             "traffic_class": traffic_class,
             "payload_origin": payload_origin,
             "project": payload["project"]["code"].clone(),
+            "project_code": payload["project"]["code"].clone(),
             "namespace": payload["namespace"]["code"].clone(),
+            "namespace_code": payload["namespace"]["code"].clone(),
             "query": payload["query"].clone(),
             "query_hash": hex_sha256(query.as_bytes()),
             "query_type": query_type,
@@ -1837,6 +1884,9 @@ fn build_event_payload(
             "retrieval_mode": payload["effective_retrieval_mode"].clone(),
             "tokenizer": measurement.tokenizer,
             "latency_ms": latency_ms,
+            "baseline_tokens": naive_tokens,
+            "delivered_tokens": context_tokens,
+            "gross_savings_pct": savings_percent,
             "naive_limit_files": measurement.naive_limit_files,
             "naive_max_bytes_per_file": measurement.naive_max_bytes_per_file,
             "visible_projects": payload["visible_projects"].clone(),
@@ -1906,7 +1956,10 @@ fn include_traffic_class_in_report(traffic_class: &str, include_verify_events: b
 
 fn derive_baseline_strategy(query_type: &str) -> &'static str {
     match query_type {
-        "config_lookup" | "docs_lookup" | "symbol_lookup" | "cross_file_trace" => "grep_top_files",
+        "onboarding_query" => "legacy_pre_amai",
+        "config_lookup" | "symbol_lookup" | "code_lookup" => "ide_search_top_files",
+        "docs_lookup" | "cross_file_trace" => "grep_top_files",
+        "architecture_question" | "bugfix_context" => "semantic_top_k",
         _ => "naive_top_files",
     }
 }
@@ -2180,38 +2233,39 @@ fn collect_naive_scope(
     query: &str,
 ) -> Result<NaiveScope> {
     let mut files = Vec::new();
-    for project in payload["visible_projects"].as_array().into_iter().flatten() {
-        let Some(project_code) = project["project_code"].as_str() else {
-            continue;
-        };
-        let Some(repo_root) = project["repo_root"].as_str() else {
-            continue;
-        };
-        for path in collect_scope_files_by_strategy(
-            Path::new(repo_root),
-            query,
-            baseline_strategy,
-            limit_files,
-            max_bytes_per_file.min(16 * 1024),
-        )? {
-            let relative_path = path
-                .strip_prefix(repo_root)
-                .unwrap_or(path.as_path())
-                .display()
-                .to_string();
-            let bytes = fs::read(&path)
-                .with_context(|| format!("failed to read naive scope file {}", path.display()))?;
-            let original_bytes = bytes.len();
-            let bytes_used = original_bytes.min(max_bytes_per_file);
-            let content = safe_lossy_prefix(&bytes, bytes_used);
-            files.push(NaiveScopeFile {
-                project_code: project_code.to_string(),
-                relative_path,
-                original_bytes,
-                bytes_used: content.len(),
-                truncated: original_bytes > content.len(),
-                content,
-            });
+    let strategy_files =
+        collect_payload_scope_files_by_strategy(payload, baseline_strategy, limit_files)?;
+    if !strategy_files.is_empty() {
+        for (project_code, repo_root, path) in strategy_files {
+            files.push(read_scope_file(
+                &project_code,
+                &repo_root,
+                &path,
+                max_bytes_per_file,
+            )?);
+        }
+    } else {
+        for project in payload["visible_projects"].as_array().into_iter().flatten() {
+            let Some(project_code) = project["project_code"].as_str() else {
+                continue;
+            };
+            let Some(repo_root) = project["repo_root"].as_str() else {
+                continue;
+            };
+            for path in collect_scope_files_by_strategy(
+                Path::new(repo_root),
+                query,
+                baseline_strategy,
+                limit_files,
+                max_bytes_per_file.min(16 * 1024),
+            )? {
+                files.push(read_scope_file(
+                    project_code,
+                    Path::new(repo_root),
+                    &path,
+                    max_bytes_per_file,
+                )?);
+            }
         }
     }
 
@@ -2243,6 +2297,85 @@ fn collect_naive_scope(
     })
 }
 
+fn read_scope_file(
+    project_code: &str,
+    repo_root: &Path,
+    path: &Path,
+    max_bytes_per_file: usize,
+) -> Result<NaiveScopeFile> {
+    let relative_path = path
+        .strip_prefix(repo_root)
+        .unwrap_or(path)
+        .display()
+        .to_string();
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read naive scope file {}", path.display()))?;
+    let original_bytes = bytes.len();
+    let bytes_used = original_bytes.min(max_bytes_per_file);
+    let content = safe_lossy_prefix(&bytes, bytes_used);
+    Ok(NaiveScopeFile {
+        project_code: project_code.to_string(),
+        relative_path,
+        original_bytes,
+        bytes_used: content.len(),
+        truncated: original_bytes > content.len(),
+        content,
+    })
+}
+
+fn collect_payload_scope_files_by_strategy(
+    payload: &Value,
+    baseline_strategy: &str,
+    limit_files: usize,
+) -> Result<Vec<(String, PathBuf, PathBuf)>> {
+    let sections: &[&str] = match baseline_strategy {
+        "ide_search_top_files" => &["exact_documents", "symbol_hits", "lexical_chunks"],
+        "semantic_top_k" => &["semantic_chunks"],
+        _ => return Ok(Vec::new()),
+    };
+    let repo_roots = payload["visible_projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|project| {
+            Some((
+                project["project_code"].as_str()?.to_string(),
+                PathBuf::from(project["repo_root"].as_str()?),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::new();
+    let mut files = Vec::new();
+    for section in sections {
+        for item in payload["retrieval"][section]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let Some(project_code) = ledger_item_project_code(item) else {
+                continue;
+            };
+            let Some(relative_path) = ledger_item_relative_path(item) else {
+                continue;
+            };
+            let Some(repo_root) = repo_roots.get(project_code) else {
+                continue;
+            };
+            let path = repo_root.join(relative_path);
+            if !path.is_file() {
+                continue;
+            }
+            if seen.insert(format!("{project_code}::{relative_path}")) {
+                files.push((project_code.to_string(), repo_root.clone(), path));
+            }
+        }
+    }
+    if limit_files > 0 {
+        files.truncate(limit_files);
+    }
+    Ok(files)
+}
+
 fn collect_scope_files_by_strategy(
     root: &Path,
     query: &str,
@@ -2253,6 +2386,9 @@ fn collect_scope_files_by_strategy(
     match baseline_strategy {
         "grep_top_files" => {
             collect_grep_scope_files(root, query, limit_files, score_bytes_per_file)
+        }
+        "legacy_pre_amai" => {
+            collect_legacy_scope_files(root, query, limit_files, score_bytes_per_file)
         }
         _ => collect_scope_files(root, limit_files),
     }
@@ -2330,6 +2466,64 @@ fn collect_grep_scope_files(
         files.truncate(limit_files);
     }
     Ok(files)
+}
+
+fn collect_legacy_scope_files(
+    root: &Path,
+    query: &str,
+    limit_files: usize,
+    score_bytes_per_file: usize,
+) -> Result<Vec<PathBuf>> {
+    let files = collect_scope_files(root, 0)?;
+    let terms = extract_query_terms(query);
+    let mut scored = Vec::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path.as_path())
+            .display()
+            .to_string()
+            .to_lowercase();
+        let docs_bias = if relative.contains("readme")
+            || relative.contains("docs/")
+            || relative.contains("guide")
+            || relative.contains("install")
+            || relative.contains("setup")
+        {
+            12
+        } else {
+            0
+        };
+        let mut score = docs_bias + text_match_score(&relative, &terms) * 6;
+        let bytes = fs::read(&path)
+            .with_context(|| format!("failed to read legacy scope file {}", path.display()))?;
+        let content = safe_lossy_prefix(&bytes, score_bytes_per_file).to_lowercase();
+        score += text_match_score(&content, &terms);
+        if score > 0 {
+            scored.push((score, path));
+        }
+    }
+    if scored.is_empty() {
+        return collect_scope_files(root, limit_files);
+    }
+    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    let mut files = scored.into_iter().map(|(_, path)| path).collect::<Vec<_>>();
+    if limit_files > 0 {
+        files.truncate(limit_files);
+    }
+    Ok(files)
+}
+
+fn ledger_item_project_code(item: &Value) -> Option<&str> {
+    item["project_code"]
+        .as_str()
+        .or_else(|| item["provenance"]["source_project"].as_str())
+}
+
+fn ledger_item_relative_path(item: &Value) -> Option<&str> {
+    item["relative_path"]
+        .as_str()
+        .or_else(|| item["provenance"]["path"].as_str())
 }
 
 fn extract_query_terms(query: &str) -> Vec<String> {
@@ -2515,11 +2709,13 @@ mod tests {
     use super::{
         MeasurementConfig, NaiveScope, TokenBudgetEvent, apply_reverification_metadata,
         build_product_headline, derive_baseline_strategy, derive_quality_verdict,
-        derive_query_type, derive_traffic_class, followup_queries_related,
-        include_traffic_class_in_report, needs_live_reverification, reconcile_followup_recovery,
-        repair_legacy_token_event_payload, summarize_events,
+        derive_query_type, derive_traffic_class, event_to_json, followup_queries_related,
+        include_traffic_class_in_report, needs_live_reverification, parse_snapshot_event,
+        reconcile_followup_recovery, repair_legacy_token_event_payload, summarize_events,
     };
+    use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
+    use uuid::Uuid;
 
     #[test]
     fn traffic_class_comes_from_source_kind_prefix() {
@@ -2542,19 +2738,33 @@ mod tests {
     }
 
     #[test]
-    fn baseline_strategy_uses_grep_for_exact_lookup_shapes() {
-        assert_eq!(derive_baseline_strategy("config_lookup"), "grep_top_files");
+    fn baseline_strategy_matches_realistic_non_amai_workflows() {
+        assert_eq!(
+            derive_baseline_strategy("onboarding_query"),
+            "legacy_pre_amai"
+        );
+        assert_eq!(
+            derive_baseline_strategy("config_lookup"),
+            "ide_search_top_files"
+        );
+        assert_eq!(
+            derive_baseline_strategy("code_lookup"),
+            "ide_search_top_files"
+        );
+        assert_eq!(
+            derive_baseline_strategy("symbol_lookup"),
+            "ide_search_top_files"
+        );
         assert_eq!(derive_baseline_strategy("docs_lookup"), "grep_top_files");
-        assert_eq!(derive_baseline_strategy("symbol_lookup"), "grep_top_files");
         assert_eq!(
             derive_baseline_strategy("cross_file_trace"),
             "grep_top_files"
         );
         assert_eq!(
             derive_baseline_strategy("architecture_question"),
-            "naive_top_files"
+            "semantic_top_k"
         );
-        assert_eq!(derive_baseline_strategy("code_lookup"), "naive_top_files");
+        assert_eq!(derive_baseline_strategy("bugfix_context"), "semantic_top_k");
     }
 
     #[test]
@@ -2609,6 +2819,135 @@ mod tests {
         assert!(verdict.amai_hit_target);
         assert!(verdict.quality_ok);
         assert_eq!(verdict.quality_method, "hybrid_retrieval_parity");
+    }
+
+    #[test]
+    fn event_json_exposes_canonical_token_ledger_aliases() {
+        let event = TokenBudgetEvent {
+            created_at_epoch_ms: 10,
+            event_id: "event-1".to_string(),
+            session_id: "session-1".to_string(),
+            rolling_window_profile: "codex_5h".to_string(),
+            timestamp_utc: 10,
+            snapshot_kind: "token_budget_event".to_string(),
+            source_kind: "live_context_pack".to_string(),
+            traffic_class: "live".to_string(),
+            project: "art".to_string(),
+            namespace: "continuity".to_string(),
+            query: "token report".to_string(),
+            query_hash: "hash".to_string(),
+            query_type: "architecture_question".to_string(),
+            target_kind: "evidence_bundle".to_string(),
+            baseline_hit_target: true,
+            amai_hit_target: true,
+            cold_warm_state: "warm".to_string(),
+            baseline_strategy: "grep_top_files".to_string(),
+            retrieval_mode: Some("local_strict".to_string()),
+            tokenizer: "o200k_base".to_string(),
+            latency_ms: 3.0,
+            saved_tokens: 700,
+            naive_tokens: 1000,
+            context_tokens: 300,
+            recovery_tokens: 20,
+            effective_saved_tokens: 680,
+            savings_factor: 3.33,
+            savings_percent: 70.0,
+            effective_savings_percent: 68.0,
+            quality_ok: true,
+            quality_score: 1.0,
+            quality_method: "hybrid_task_success".to_string(),
+            needed_followup: false,
+            followup_count: 1,
+            followup_of_event_id: Some("event-0".to_string()),
+            resolved_by_event_id: None,
+            fallback_triggered: true,
+            fallback_count: 1,
+            document_hits: 1,
+            symbol_hits_count: 0,
+            file_hits: 1,
+            sources_count: 2,
+            chunks_count: 2,
+            pack_token_count: 300,
+            deduped_token_count: 300,
+        };
+
+        let payload = event_to_json(&event);
+        assert_eq!(payload["project_code"], "art");
+        assert_eq!(payload["namespace_code"], "continuity");
+        assert_eq!(payload["baseline_tokens"], 1000);
+        assert_eq!(payload["delivered_tokens"], 300);
+        assert_eq!(payload["gross_savings_pct"], 70.0);
+    }
+
+    #[test]
+    fn parse_snapshot_event_accepts_canonical_alias_fields() {
+        let row = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: "token_budget_event".to_string(),
+            created_at_epoch_ms: 1234,
+            payload: json!({
+                "token_budget_event": {
+                    "event_id": "event-1",
+                    "source_kind": "live_context_pack",
+                    "traffic_class": "live",
+                    "project_code": "art",
+                    "namespace_code": "continuity",
+                    "query": "token report",
+                    "query_hash": "hash",
+                    "query_type": "code_lookup",
+                    "target_kind": "file",
+                    "baseline_hit_target": true,
+                    "amai_hit_target": true,
+                    "cold_warm_state": "warm",
+                    "baseline_strategy": "grep_top_files",
+                    "tokenizer": "o200k_base",
+                    "latency_ms": 2.0,
+                    "baseline_tokens": 1500,
+                    "delivered_tokens": 400,
+                    "gross_savings_pct": 73.3333333333,
+                    "recovery": {
+                        "recovery_tokens": 40,
+                        "fallback_triggered": false,
+                        "fallback_count": 0
+                    },
+                    "quality": {
+                        "quality_ok": true,
+                        "quality_score": 1.0,
+                        "quality_method": "hybrid_task_success"
+                    },
+                    "followup": {
+                        "needed_followup": false,
+                        "followup_count": 1,
+                        "followup_of_event_id": "event-0",
+                        "resolved_by_event_id": null
+                    },
+                    "shape": {
+                        "document_hits": 1,
+                        "symbol_hits": 0,
+                        "file_hits": 1,
+                        "sources_count": 2,
+                        "chunks_count": 2,
+                        "pack_token_count": 400,
+                        "deduped_token_count": 400
+                    },
+                    "savings": {
+                        "saved_tokens": 1100,
+                        "effective_saved_tokens": 1060,
+                        "savings_factor": 3.75,
+                        "effective_savings_percent": 70.6666666667
+                    }
+                }
+            }),
+        };
+
+        let parsed = parse_snapshot_event(&row)
+            .expect("parse should succeed")
+            .expect("event should exist");
+        assert_eq!(parsed.project, "art");
+        assert_eq!(parsed.namespace, "continuity");
+        assert_eq!(parsed.naive_tokens, 1500);
+        assert_eq!(parsed.context_tokens, 400);
+        assert_eq!(parsed.savings_percent, 73.3333333333);
     }
 
     #[test]

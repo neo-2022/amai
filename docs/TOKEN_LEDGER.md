@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 03:48 MSK
-Ручная сверка guide/docs: 2026-03-21 03:48 MSK
+modified_at: 2026-03-21 04:07 MSK
+Ручная сверка guide/docs: 2026-03-21 04:07 MSK
 
 # Token Ledger
 
@@ -46,6 +46,11 @@ Baseline должен быть реалистичным.
 - `ide_search_top_files`
 - `semantic_top_k`
 - `legacy_pre_amai`
+
+В текущем runtime `Amai` уже старается выбирать baseline class по типу вопроса, а не держать почти всё на одном `naive_top_files`:
+- `ide_search_top_files` для file/config/symbol lookup;
+- `semantic_top_k` для architecture/bugfix path;
+- `legacy_pre_amai` для onboarding path.
 
 Запрещённые baseline-классы:
 - `entire_repo`
@@ -96,6 +101,13 @@ Ledger не имеет права смешивать:
 - `latency_ms`
 - `sources_count`
 - `chunks_count`
+
+В текущем runtime `Amai` старается писать эти канонические поля прямо в событие, а не держать их только как внутренние alias:
+- `project_code`
+- `namespace_code`
+- `baseline_tokens`
+- `delivered_tokens`
+- `gross_savings_pct`
 
 Сильно желательные поля:
 - `target_kind`

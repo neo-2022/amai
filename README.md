@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 03:48 MSK
-Ручная сверка guide/docs: 2026-03-21 03:48 MSK
+modified_at: 2026-03-21 04:07 MSK
+Ручная сверка guide/docs: 2026-03-21 04:07 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -613,6 +613,12 @@ cargo run --release -- observe reverify-token-ledger --apply
   - к какой непрерывной рабочей сессии относится событие;
 - `rolling_window_profile`
   - в каком лимитном профиле это событие считается.
+- `baseline_tokens` и `delivered_tokens`
+  - прямые канонические числа для сравнения “сколько было бы без Amai” против “сколько реально отправил Amai”.
+- realistic baseline classes теперь materialized и в runtime:
+  - `ide_search_top_files` для file/config/symbol lookup;
+  - `semantic_top_k` для architecture/bugfix вопросов;
+  - `legacy_pre_amai` для onboarding path.
 
 Это важно не для красоты, а для честности:
 - если `Amai` сначала сэкономил токены, но потом заставил делать follow-up, retry или correction, эти токены теперь идут в штраф;

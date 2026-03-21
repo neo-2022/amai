@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 03:48 MSK
-Ручная сверка guide/docs: 2026-03-21 03:48 MSK
+modified_at: 2026-03-21 04:07 MSK
+Ручная сверка guide/docs: 2026-03-21 04:07 MSK
 
 # Operations
 
@@ -720,6 +720,11 @@ cargo run --release -- verify token-benchmark-suite \
 - в текущем runtime это уже materialized не только на уровне отчёта:
   - live events получают `session_id`;
   - получают `rolling_window_profile`;
+  - пишут канонические alias-поля `project_code`, `namespace_code`, `baseline_tokens`, `delivered_tokens`, `gross_savings_pct`;
+  - и baseline strategy больше не схлопывается почти в одну ветку:
+    - `ide_search_top_files` для file/config/symbol path;
+    - `semantic_top_k` для architecture/bugfix path;
+    - `legacy_pre_amai` для onboarding path;
   - успешный recovery-follow-up может получить `quality_method = hybrid_task_success`;
   - и его `recovery_tokens` уже включают стоимость предыдущего промаха.
 
