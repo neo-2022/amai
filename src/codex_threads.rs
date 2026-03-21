@@ -19,6 +19,8 @@ pub struct TranscriptMessage {
 pub struct ChatTail {
     pub thread_id: String,
     pub title: String,
+    pub summary_headline: Option<String>,
+    pub summary_next_step: Option<String>,
     pub messages: Vec<TranscriptMessage>,
 }
 
@@ -48,6 +50,8 @@ struct RolloutSummary {
     messages_count: usize,
     last_user_message: String,
     last_assistant_message: String,
+    summary_headline: Option<String>,
+    summary_next_step: Option<String>,
     tail_messages: Vec<TranscriptMessage>,
 }
 
@@ -130,6 +134,16 @@ pub fn previous_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTa
     Ok(Some(ChatTail {
         thread_id: entry.thread_id,
         title: sanitize_chat_title(&entry.title, &messages),
+        summary_headline: messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant")
+            .and_then(|message| compact_headline_from_text(&message.text, 220)),
+        summary_next_step: messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant")
+            .and_then(|message| compact_next_step_from_text(&message.text)),
         messages,
     }))
 }
@@ -190,6 +204,16 @@ pub fn current_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTai
     Ok(Some(ChatTail {
         thread_id: entry.thread_id,
         title: sanitize_chat_title(&entry.title, &messages),
+        summary_headline: messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant")
+            .and_then(|message| compact_headline_from_text(&message.text, 220)),
+        summary_next_step: messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant")
+            .and_then(|message| compact_next_step_from_text(&message.text)),
         messages,
     }))
 }
@@ -226,6 +250,14 @@ pub fn previous_chat_tail_from_snapshots(
     Some(ChatTail {
         thread_id: node["thread_id"].as_str().unwrap_or_default().to_string(),
         title: sanitize_chat_title(node["title"].as_str().unwrap_or_default(), &messages),
+        summary_headline: node["summary_headline"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        summary_next_step: node["summary_next_step"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
         messages,
     })
 }
@@ -271,6 +303,14 @@ pub fn current_chat_tail_from_snapshots(
     Some(ChatTail {
         thread_id: node["thread_id"].as_str().unwrap_or_default().to_string(),
         title: sanitize_chat_title(node["title"].as_str().unwrap_or_default(), &messages),
+        summary_headline: node["summary_headline"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        summary_next_step: node["summary_next_step"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
         messages,
     })
 }
@@ -356,6 +396,14 @@ pub fn chat_tail_at_time_from_snapshots(
         return Ok(Some(ChatTail {
             thread_id: node["thread_id"].as_str().unwrap_or_default().to_string(),
             title: sanitize_chat_title(node["title"].as_str().unwrap_or_default(), &messages),
+            summary_headline: node["summary_headline"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+            summary_next_step: node["summary_next_step"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
             messages,
         }));
     }
@@ -363,6 +411,14 @@ pub fn chat_tail_at_time_from_snapshots(
     Ok(Some(ChatTail {
         thread_id: node["thread_id"].as_str().unwrap_or_default().to_string(),
         title: sanitize_chat_title(node["title"].as_str().unwrap_or_default(), &messages),
+        summary_headline: node["summary_headline"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        summary_next_step: node["summary_next_step"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
         messages,
     }))
 }
@@ -457,6 +513,14 @@ pub fn rendered_transcript_summary(
                 .map(|message| message.text.clone())
         })
         .unwrap_or_default();
+    let summary_headline = rollout_summary
+        .as_ref()
+        .and_then(|summary| summary.summary_headline.clone())
+        .or_else(|| compact_headline_from_text(&last_assistant_message, 220));
+    let summary_next_step = rollout_summary
+        .as_ref()
+        .and_then(|summary| summary.summary_next_step.clone())
+        .or_else(|| compact_next_step_from_text(&last_assistant_message));
 
     Some(json!({
         "thread_id": thread_id,
@@ -468,6 +532,8 @@ pub fn rendered_transcript_summary(
         "messages_count": messages_count,
         "last_user_message": last_user_message,
         "last_assistant_message": last_assistant_message,
+        "summary_headline": summary_headline,
+        "summary_next_step": summary_next_step,
         "rendered_transcript": transcript_path,
         "source_rollout": source_rollout,
         "created_at_epoch_s": record.as_ref().map(|item| item.created_at_epoch_s).unwrap_or_default(),
@@ -622,6 +688,8 @@ fn build_previous_chat_tail(
     Ok(ChatTail {
         thread_id: thread_id.to_string(),
         title: sanitize_chat_title(title, &summary.tail_messages),
+        summary_headline: summary.summary_headline,
+        summary_next_step: summary.summary_next_step,
         messages: summary.tail_messages,
     })
 }
@@ -636,6 +704,8 @@ fn build_chat_tail_at_time(
     Ok(ChatTail {
         thread_id: record.thread_id.clone(),
         title: sanitize_chat_title(&record.title, &summary.tail_messages),
+        summary_headline: summary.summary_headline,
+        summary_next_step: summary.summary_next_step,
         messages: summary.tail_messages,
     })
 }
@@ -665,6 +735,156 @@ fn looks_like_noisy_title(title: &str) -> bool {
         || normalized.starts_with("continue strictly")
         || normalized.contains("перед любой содержательной работой")
         || normalized.contains("<instructions>")
+}
+
+fn compact_headline_from_text(text: &str, max_chars: usize) -> Option<String> {
+    let stripped = text
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed != "AGENTS.md прочитан" && trimmed != "AGENTS.md не прочитан"
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut collapsed = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+    for prefix in ["AGENTS.md прочитан", "AGENTS.md не прочитан"] {
+        if let Some(value) = collapsed.strip_prefix(prefix) {
+            collapsed = value
+                .trim_start_matches(|ch: char| {
+                    ch == '.' || ch == ':' || ch == '-' || ch.is_whitespace()
+                })
+                .trim()
+                .to_string();
+            break;
+        }
+    }
+    let collapsed = collapsed
+        .trim_matches(['`', '"', '\'', '«', '»'])
+        .trim()
+        .to_string();
+    if collapsed.is_empty() {
+        return None;
+    }
+    for label in [
+        "На чём закончился прошлый чат:",
+        "На чём остановились:",
+        "Продолжаем с этой линии:",
+        "Текущий handoff в Amai:",
+        "Последний зафиксированный handoff:",
+        "активная линия тогда была",
+        "активная линия была",
+        "active line was",
+        "headline:",
+    ] {
+        if let Some((_, rest)) = collapsed.split_once(label) {
+            if let Some(value) = extract_backticked_value(rest) {
+                return Some(truncate_compact_value(&value, max_chars));
+            }
+            if let Some(value) = compact_sentence(rest, max_chars) {
+                return Some(value);
+            }
+        }
+    }
+    compact_sentence(&collapsed, max_chars)
+}
+
+fn extract_backticked_value(value: &str) -> Option<String> {
+    let (_, rest) = value.split_once('`')?;
+    let (candidate, _) = rest.split_once('`')?;
+    let candidate = candidate.trim();
+    (!candidate.is_empty()).then_some(candidate.to_string())
+}
+
+fn truncate_compact_value(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value.to_string()
+    } else {
+        value.chars().take(max_chars).collect::<String>() + "..."
+    }
+}
+
+fn compact_sentence(value: &str, max_chars: usize) -> Option<String> {
+    let value = value
+        .trim_start_matches(|ch: char| ch == ':' || ch == '-' || ch.is_whitespace())
+        .trim_matches(['`', '"', '\'', '«', '»'])
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    let first_sentence = find_sentence_boundary(value)
+        .map(|index| value[..=index].trim())
+        .unwrap_or(value);
+    Some(truncate_compact_value(first_sentence, max_chars))
+}
+
+fn find_sentence_boundary(value: &str) -> Option<usize> {
+    for (index, ch) in value.char_indices() {
+        if !matches!(ch, '.' | '!' | '?') {
+            continue;
+        }
+        let mut tail = value[index + ch.len_utf8()..].chars().peekable();
+        while let Some(next) = tail.peek() {
+            if matches!(*next, '`' | '"' | '\'' | '«' | '»' | ')' | ']') {
+                tail.next();
+                continue;
+            }
+            break;
+        }
+        match tail.peek() {
+            None => return Some(index),
+            Some(next) if next.is_whitespace() => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn normalize_next_step_value(value: &str) -> Option<String> {
+    let mut normalized = value.trim().to_string();
+    for _ in 0..3 {
+        let mut stripped = false;
+        for label in [
+            "Ближайший обязательный следующий шаг:",
+            "Ближайший обязательный следующий шаг был такой:",
+            "Следующий обязательный следующий шаг:",
+            "Следующий обязательный шаг:",
+            "Nearest mandatory next step:",
+        ] {
+            if let Some(rest) = normalized.strip_prefix(label) {
+                normalized = rest
+                    .trim_start_matches(|ch: char| ch == ':' || ch == '-' || ch.is_whitespace())
+                    .trim()
+                    .to_string();
+                stripped = true;
+                break;
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+    let normalized = normalized
+        .trim_end_matches(['`', '"', '\'', '«', '»', '|'])
+        .trim()
+        .to_string();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn compact_next_step_from_text(text: &str) -> Option<String> {
+    for label in [
+        "Ближайший обязательный следующий шаг:",
+        "Ближайший обязательный следующий шаг был такой:",
+        "Следующий обязательный следующий шаг:",
+        "Следующий обязательный шаг:",
+        "Nearest mandatory next step:",
+    ] {
+        if let Some((_, value)) = text.split_once(label)
+            && let Some(next_step) = normalize_next_step_value(value.lines().next().unwrap_or(""))
+        {
+            return Some(next_step);
+        }
+    }
+    None
 }
 
 fn snapshot_messages(node: &Value, count: usize) -> Option<Vec<TranscriptMessage>> {
@@ -743,6 +963,8 @@ fn rollout_summary_from_path(path: &Path, count: usize) -> Result<RolloutSummary
             messages_count: 0,
             last_user_message: String::new(),
             last_assistant_message: String::new(),
+            summary_headline: None,
+            summary_next_step: None,
             tail_messages: Vec::new(),
         });
     }
@@ -769,12 +991,16 @@ fn rollout_summary_from_path(path: &Path, count: usize) -> Result<RolloutSummary
         .find(|message| message.role == "assistant")
         .map(|message| message.text.clone())
         .unwrap_or_default();
+    let summary_headline = compact_headline_from_text(&last_assistant_message, 220);
+    let summary_next_step = compact_next_step_from_text(&last_assistant_message);
     Ok(RolloutSummary {
         started_at,
         ended_at,
         messages_count: messages.len(),
         last_user_message,
         last_assistant_message,
+        summary_headline,
+        summary_next_step,
         tail_messages: select_tail_messages(&messages, count),
     })
 }
@@ -791,6 +1017,8 @@ fn rollout_summary_from_path_at_time(
             messages_count: 0,
             last_user_message: String::new(),
             last_assistant_message: String::new(),
+            summary_headline: None,
+            summary_next_step: None,
             tail_messages: Vec::new(),
         });
     }
@@ -817,13 +1045,28 @@ fn rollout_summary_from_path_at_time(
         .find(|message| message.role == "assistant")
         .map(|message| message.text.clone())
         .unwrap_or_default();
+    let selected_tail_messages = select_messages_for_time(&messages, target_epoch_s, count);
+    let summary_headline = selected_tail_messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .and_then(|message| compact_headline_from_text(&message.text, 220))
+        .or_else(|| compact_headline_from_text(&last_assistant_message, 220));
+    let summary_next_step = selected_tail_messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .and_then(|message| compact_next_step_from_text(&message.text))
+        .or_else(|| compact_next_step_from_text(&last_assistant_message));
     Ok(RolloutSummary {
         started_at,
         ended_at,
         messages_count: messages.len(),
         last_user_message,
         last_assistant_message,
-        tail_messages: select_messages_for_time(&messages, target_epoch_s, count),
+        summary_headline,
+        summary_next_step,
+        tail_messages: selected_tail_messages,
     })
 }
 
@@ -853,7 +1096,7 @@ fn extract_chat_messages_from_rollout_text(text: &str) -> Result<Vec<RolloutMess
             timestamp: row["timestamp"].as_str().unwrap_or_default().to_string(),
             role: role.to_string(),
             phase: payload["phase"].as_str().map(ToOwned::to_owned),
-            text: collapse_text(&text, 280),
+            text,
         });
     }
     Ok(messages)
@@ -1397,7 +1640,8 @@ fn collapse_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_tail_at_time_from_snapshots, collapse_text, extract_chat_messages_from_rollout_text,
+        chat_tail_at_time_from_snapshots, collapse_text, compact_headline_from_text,
+        compact_next_step_from_text, extract_chat_messages_from_rollout_text,
         extract_last_messages, parse_rfc3339_epoch_s, parse_role_heading,
         rendered_transcript_summary, rollout_summary_from_path, select_messages_for_time,
         select_tail_messages,
@@ -1501,6 +1745,30 @@ mod tests {
         assert_eq!(summary.last_user_message, "вопрос");
         assert_eq!(summary.last_assistant_message, "ответ");
         assert_eq!(summary.tail_messages.len(), 2);
+    }
+
+    #[test]
+    fn compact_next_step_strips_nested_labels_and_markdown_noise() {
+        let text = "Ближайший обязательный следующий шаг: Следующий обязательный шаг: проверить новый чат ещё раз.`|";
+        let next_step = compact_next_step_from_text(text).expect("next step");
+        assert_eq!(next_step, "проверить новый чат ещё раз.");
+    }
+
+    #[test]
+    fn compact_headline_prefers_backticked_active_line_value() {
+        let text = "В предыдущем чате мы закончили на continuity-контуре: по `Amai` активная линия тогда была `Amai startup restore pack enriched and committed`.";
+        let headline = compact_headline_from_text(text, 220).expect("headline");
+        assert_eq!(headline, "Amai startup restore pack enriched and committed");
+    }
+
+    #[test]
+    fn compact_headline_does_not_cut_on_filename_dot() {
+        let text = "В этом `providers`-каталоге ещё есть более слабые фасады, чем образец: `auth.rs` и `process.rs`. Дотягиваю их до того же уровня формулировки.";
+        let headline = compact_headline_from_text(text, 220).expect("headline");
+        assert_eq!(
+            headline,
+            "В этом `providers`-каталоге ещё есть более слабые фасады, чем образец: `auth.rs` и `process.rs`."
+        );
     }
 
     #[test]

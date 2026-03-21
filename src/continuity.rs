@@ -142,6 +142,8 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
                     "messages_count": summary["messages_count"].clone(),
                     "last_user_message": summary["last_user_message"].clone(),
                     "last_assistant_message": summary["last_assistant_message"].clone(),
+                    "summary_headline": summary["summary_headline"].clone(),
+                    "summary_next_step": summary["summary_next_step"].clone(),
                     "rendered_transcript": summary["rendered_transcript"].clone(),
                     "source_rollout": summary["source_rollout"].clone(),
                     "created_at_epoch_s": summary["created_at_epoch_s"].clone(),
@@ -333,6 +335,8 @@ async fn import_thread_index_snapshots(
                 "messages_count": summary.as_ref().map(|value| value["messages_count"].clone()).unwrap_or_else(|| json!(0)),
                 "last_user_message": summary.as_ref().map(|value| value["last_user_message"].clone()).unwrap_or_else(|| json!("")),
                 "last_assistant_message": summary.as_ref().map(|value| value["last_assistant_message"].clone()).unwrap_or_else(|| json!("")),
+                "summary_headline": summary.as_ref().map(|value| value["summary_headline"].clone()).unwrap_or_else(|| json!("")),
+                "summary_next_step": summary.as_ref().map(|value| value["summary_next_step"].clone()).unwrap_or_else(|| json!("")),
                 "rendered_transcript": if entry.rendered_transcript.is_empty() { json!("") } else { json!(entry.rendered_transcript) },
                 "source_rollout": if entry.source_rollout.is_empty() { json!("") } else { json!(entry.source_rollout) },
                 "raw_rollout": if entry.raw_mirror.is_empty() { json!("") } else { json!(entry.raw_mirror) },
@@ -405,6 +409,10 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
             .unwrap_or(0)
     );
     println!();
+    let startup_next_step = handoff_summary["next_step"]
+        .as_str()
+        .and_then(normalize_next_step_value)
+        .unwrap_or_else(|| "ещё нет данных".to_string());
     println!("Текущая активная линия:");
     println!(
         "- {}",
@@ -412,12 +420,7 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
             .as_str()
             .unwrap_or("ещё нет данных")
     );
-    println!(
-        "- Ближайший обязательный следующий шаг: {}",
-        handoff_summary["next_step"]
-            .as_str()
-            .unwrap_or("ещё нет данных")
-    );
+    println!("- Ближайший обязательный следующий шаг: {startup_next_step}");
     if let Some(restore) = working_state::build_restore_bundle(&db, &project, &namespace).await? {
         println!();
         working_state::print_restore_bundle_human(&restore);
@@ -719,7 +722,8 @@ fn render_direct_answer(
         .unwrap_or("ещё нет данных");
     let project_next_step = handoff_summary["next_step"]
         .as_str()
-        .unwrap_or("ещё нет данных");
+        .and_then(normalize_next_step_value)
+        .unwrap_or_else(|| "ещё нет данных".to_string());
     let thread_headline = if matches!(intent, "previous_chat" | "chat_at_time") {
         chat_tail.and_then(summarize_chat_tail_headline)
     } else {
@@ -731,7 +735,7 @@ fn render_direct_answer(
         None
     };
     let answer_headline = thread_headline.as_deref().unwrap_or(headline);
-    let answer_next_step = thread_next_step.as_deref().unwrap_or(project_next_step);
+    let answer_next_step = thread_next_step.as_deref().unwrap_or(&project_next_step);
 
     let mut lines = vec![format!("{heading} {answer_headline}")];
     if intent != "previous_chat"
@@ -783,7 +787,10 @@ fn render_direct_answer(
                 } else {
                     "Моё"
                 };
-                lines.push(format!("- {role}: {}", message.text));
+                lines.push(format!(
+                    "- {role}: {}",
+                    collapse_answer_text(&message.text, 320)
+                ));
             }
         }
     }
@@ -800,6 +807,13 @@ fn render_direct_answer(
 }
 
 fn summarize_chat_tail_headline(chat_tail: &codex_threads::ChatTail) -> Option<String> {
+    if let Some(value) = chat_tail
+        .summary_headline
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        return Some(value.to_string());
+    }
     let assistant = chat_tail
         .messages
         .iter()
@@ -809,6 +823,13 @@ fn summarize_chat_tail_headline(chat_tail: &codex_threads::ChatTail) -> Option<S
 }
 
 fn extract_chat_tail_next_step(chat_tail: &codex_threads::ChatTail) -> Option<String> {
+    if let Some(value) = chat_tail
+        .summary_next_step
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        return Some(value.to_string());
+    }
     let assistant = chat_tail
         .messages
         .iter()
@@ -844,6 +865,37 @@ fn collapse_answer_text(text: &str, max_chars: usize) -> String {
     collapsed.chars().take(max_chars).collect::<String>() + "..."
 }
 
+fn normalize_next_step_value(value: &str) -> Option<String> {
+    let mut normalized = value.trim().to_string();
+    for _ in 0..3 {
+        let mut stripped = false;
+        for label in [
+            "Ближайший обязательный следующий шаг:",
+            "Ближайший обязательный следующий шаг был такой:",
+            "Следующий обязательный следующий шаг:",
+            "Следующий обязательный шаг:",
+            "Nearest mandatory next step:",
+        ] {
+            if let Some(rest) = normalized.strip_prefix(label) {
+                normalized = rest
+                    .trim_start_matches(|ch: char| ch == ':' || ch == '-' || ch.is_whitespace())
+                    .trim()
+                    .to_string();
+                stripped = true;
+                break;
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+    let normalized = normalized
+        .trim_end_matches(['`', '"', '\'', '«', '»', '|'])
+        .trim()
+        .to_string();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
 fn extract_next_step_from_text(text: &str) -> Option<String> {
     for label in [
         "Ближайший обязательный следующий шаг:",
@@ -852,11 +904,10 @@ fn extract_next_step_from_text(text: &str) -> Option<String> {
         "Следующий обязательный шаг:",
         "Nearest mandatory next step:",
     ] {
-        if let Some((_, value)) = text.split_once(label) {
-            let next_step = value.lines().next().unwrap_or("").trim();
-            if !next_step.is_empty() {
-                return Some(next_step.to_string());
-            }
+        if let Some((_, value)) = text.split_once(label)
+            && let Some(next_step) = normalize_next_step_value(value.lines().next().unwrap_or(""))
+        {
+            return Some(next_step);
         }
     }
     None
@@ -1334,7 +1385,7 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_meta_continuity_handoff, render_direct_answer};
+    use super::{extract_next_step_from_text, is_meta_continuity_handoff, render_direct_answer};
     use crate::codex_threads::{ChatTail, TranscriptMessage};
     use serde_json::json;
 
@@ -1397,6 +1448,8 @@ mod tests {
         let chat_tail = ChatTail {
             thread_id: "thread-1".to_string(),
             title: "чат про continuity".to_string(),
+            summary_headline: Some("про temporal lookup".to_string()),
+            summary_next_step: None,
             messages: vec![
                 TranscriptMessage {
                     role: "user".to_string(),
@@ -1437,6 +1490,8 @@ mod tests {
         let chat_tail = ChatTail {
             thread_id: "thread-2".to_string(),
             title: "чат про continuity".to_string(),
+            summary_headline: Some("Закончили на temporal contour.".to_string()),
+            summary_next_step: Some("Проверить новый чат ещё раз.".to_string()),
             messages: vec![
                 TranscriptMessage {
                     role: "user".to_string(),
@@ -1456,5 +1511,12 @@ mod tests {
             answer.contains("Ближайший обязательный следующий шаг: Проверить новый чат ещё раз.")
         );
         assert!(answer.contains("Текущая активная линия проекта сейчас: Current project line"));
+    }
+
+    #[test]
+    fn extract_next_step_normalizes_nested_labels() {
+        let text = "Сводка.\nБлижайший обязательный следующий шаг: Следующий обязательный шаг: materialize compact thread summaries.`|";
+        let next_step = extract_next_step_from_text(text).expect("next step");
+        assert_eq!(next_step, "materialize compact thread summaries.");
     }
 }

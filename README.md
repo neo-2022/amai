@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 13:24 MSK
-Ручная сверка guide/docs: 2026-03-21 13:24 MSK
+modified_at: 2026-03-21 14:04 MSK
+Ручная сверка guide/docs: 2026-03-21 14:04 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -331,6 +331,17 @@ AMAI_AGENT_SCOPE=agent_beta  ./scripts/continuity_startup.sh --project art --nam
 вообще импортировано в continuity namespace. При refresh `Amai` отдельно втягивает machine-readable
 `thread_index.json`, чтобы иметь полный список chat threads и их временные метки, а уже full
 rendered transcripts можно ограничивать маленьким `transcript-limit` ради скорости и размера импорта.
+
+Дополнительно `Amai` теперь materialize-ит в temporal index не только `thread_id`, время и хвост
+сообщений, но и короткие поля:
+- `summary_headline`
+- `summary_next_step`
+
+Это важно по двум причинам:
+- ответ на `прошлый чат` или `что было в точное время` теперь может сразу брать готовую line-summary
+  из `Amai`, а не вытаскивать смысл заново из длинного assistant-абзаца;
+- временной lookup меньше зависит от post-hoc parsing старых текстов и быстрее отдаёт готовый
+  человекочитаемый ответ.
 
 Для обычного человека это значит ещё проще:
 - можно не помнить флаги `--chat-reference` и `--at-time-rfc3339`;

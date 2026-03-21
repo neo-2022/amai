@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 13:24 MSK
-Ручная сверка guide/docs: 2026-03-21 13:24 MSK
+modified_at: 2026-03-21 14:04 MSK
+Ручная сверка guide/docs: 2026-03-21 14:04 MSK
 
 # Operations
 
@@ -167,7 +167,16 @@ cd /home/art/agent-memory-index
 Именно поэтому корректный proof сейчас выглядит так:
 - `Rendered transcripts` в startup остаётся маленьким числом;
 - `continuity_thread_index` в PostgreSQL всё равно покрывает все чаты этого project-space;
+- в `continuity_thread_index` теперь живут compact поля `summary_headline` и `summary_next_step`;
 - temporal lookup продолжает точно отвечать на `previous chat` и `at exact time`.
+
+Практический смысл этих compact полей:
+- `summary_headline` даёт короткую линию выбранного chat thread без повторного разбора длинного
+  assistant-ответа;
+- `summary_next_step` даёт готовый следующий шаг того же thread без дублирования label вроде
+  `Следующий шаг: Следующий шаг: ...`;
+- за счёт этого `previous chat` и `exact time` живут на более готовом temporal snapshot, а не на
+  позднем post-hoc parsing.
 
 ## Working-state recovery и multi-agent изоляция
 

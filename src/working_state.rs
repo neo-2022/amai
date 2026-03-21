@@ -28,6 +28,7 @@ pub async fn record_handoff_event(
 ) -> Result<()> {
     let recorded_at_epoch_ms = now_epoch_ms()?;
     let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let next_step = normalize_next_step_hint(next_step);
     let thread_id = current_thread_id();
     let session_id = resolve_session_id(
         db,
@@ -50,7 +51,7 @@ pub async fn record_handoff_event(
             "source_kind": "continuity_handoff",
             "headline": headline,
             "next_step_hint": next_step,
-            "summary": summarize_details(details, headline, next_step),
+            "summary": summarize_details(details, headline, &next_step),
             "active_files": active_files,
             "recent_paths": extract_paths_from_text(details),
             "visible_projects": vec![project.code.clone()],
@@ -233,6 +234,10 @@ pub async fn build_restore_bundle(
 
 pub fn print_restore_bundle_human(restore: &Value) {
     let node = &restore["working_state_restore"];
+    let next_step = node["next_step"]
+        .as_str()
+        .map(normalize_next_step_hint)
+        .unwrap_or_else(|| "ещё нет данных".to_string());
     println!("Рабочее состояние Amai:");
     println!(
         "- Agent scope: {}",
@@ -246,10 +251,7 @@ pub fn print_restore_bundle_human(restore: &Value) {
         "- Текущая цель: {}",
         node["current_goal"].as_str().unwrap_or("ещё нет данных")
     );
-    println!(
-        "- Ближайший следующий шаг: {}",
-        node["next_step"].as_str().unwrap_or("ещё нет данных")
-    );
+    println!("- Ближайший следующий шаг: {}", next_step);
     if let Some(value) = node["restore_confidence"]
         .as_str()
         .filter(|value| *value == "preliminary")
@@ -670,6 +672,36 @@ fn derive_retrieval_next_step(active_files: &[String], target_kind: &str) -> Str
             target_kind
         )
     }
+}
+
+fn normalize_next_step_hint(value: &str) -> String {
+    let mut normalized = value.trim().to_string();
+    for _ in 0..3 {
+        let mut stripped = false;
+        for label in [
+            "Ближайший обязательный следующий шаг:",
+            "Ближайший обязательный следующий шаг был такой:",
+            "Следующий обязательный следующий шаг:",
+            "Следующий обязательный шаг:",
+            "Nearest mandatory next step:",
+        ] {
+            if let Some(rest) = normalized.strip_prefix(label) {
+                normalized = rest
+                    .trim_start_matches(|ch: char| ch == ':' || ch == '-' || ch.is_whitespace())
+                    .trim()
+                    .to_string();
+                stripped = true;
+                break;
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+    normalized
+        .trim_end_matches(['`', '"', '\'', '«', '»', '|'])
+        .trim()
+        .to_string()
 }
 
 fn summarize_details(details: &str, headline: &str, next_step: &str) -> String {
