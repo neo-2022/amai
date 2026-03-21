@@ -2146,11 +2146,11 @@ fn live_latency_table_targets(snapshot: &Value, state: &str) -> LiveLatencyTable
 
 fn target_values(targets: &LiveLatencyTableTargets) -> Vec<String> {
     vec![
-        format_target_ms("<=", targets.p50_ms),
-        format_target_ms("<=", targets.p95_ms),
-        format_target_ms("<=", targets.p99_ms),
-        format_target_ms("<=", targets.max_ms),
-        format_target_u64(">=", targets.sample_count),
+        format_target_ms("<", targets.p50_ms),
+        format_target_ms("<", targets.p95_ms),
+        format_target_ms("<", targets.p99_ms),
+        format_target_ms("<", targets.max_ms),
+        format_target_u64(">", targets.sample_count),
     ]
 }
 
@@ -2437,11 +2437,11 @@ fn format_percent(value: Option<f64>) -> String {
 }
 
 fn format_threshold_at_most(value: Option<f64>, unit: &str, decimals: usize) -> String {
-    format_threshold_value(value, "<=", unit, decimals)
+    format_threshold_value(value, "<", unit, decimals)
 }
 
 fn format_threshold_at_least(value: Option<f64>, unit: &str, decimals: usize) -> String {
-    format_threshold_value(value, ">=", unit, decimals)
+    format_threshold_value(value, ">", unit, decimals)
 }
 
 fn format_threshold_value(
