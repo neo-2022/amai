@@ -1,5 +1,5 @@
-modified_at = "2026-03-21 20:07 MSK"
-"Ручная сверка guide/docs" = "2026-03-21 20:07 MSK"
+modified_at = "2026-03-21 20:52 MSK"
+"Ручная сверка guide/docs" = "2026-03-21 20:52 MSK"
 
 [snapshot]
 postgres_query_probe_iterations = 20
@@ -42,18 +42,18 @@ alert_jetstream_disk_usage_ratio = 0.90
 critical_jetstream_disk_usage_ratio = 0.95
 
 [retrieval]
-target_cold_p50_ms = 100.0
-target_p95_ms = 500.0
-target_cold_p99_ms = 1000.0
-target_cold_max_ms = 2000.0
-target_cold_sample_count = 5
+target_cold_p50_ms = 20.0
+target_p95_ms = 50.0
+target_cold_p99_ms = 100.0
+target_cold_max_ms = 150.0
+target_cold_sample_count = 30
 target_hot_p50_ms = 10.0
 target_hot_p95_ms = 10.0
 target_hot_p99_ms = 10.0
 target_hot_max_ms = 15.0
-target_hot_sample_count = 10
-alert_p95_ms = 1000.0
-critical_p95_ms = 2000.0
+target_hot_sample_count = 50
+alert_p95_ms = 100.0
+critical_p95_ms = 150.0
 stretch_hot_p95_ms = 10.0
 
 [parser]
