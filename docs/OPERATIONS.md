@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 03:37 MSK
-Ручная сверка guide/docs: 2026-03-21 03:37 MSK
+modified_at: 2026-03-21 03:40 MSK
+Ручная сверка guide/docs: 2026-03-21 03:40 MSK
 
 # Operations
 
@@ -670,6 +670,9 @@ cargo run --release -- verify token-benchmark-suite \
 ```bash
 ./scripts/token_report.sh --budget-profile codex_5h
 ```
+
+Канонический spec этого слоя:
+- [TOKEN_LEDGER.md](/home/art/agent-memory-index/docs/TOKEN_LEDGER.md)
 
 Отдельный proof:
 

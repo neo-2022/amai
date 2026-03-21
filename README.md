@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 03:37 MSK
-Ручная сверка guide/docs: 2026-03-21 03:37 MSK
+modified_at: 2026-03-21 03:40 MSK
+Ручная сверка guide/docs: 2026-03-21 03:40 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -537,6 +537,9 @@ cargo run -- deployment explain --target kubernetes_server
 ```bash
 ./scripts/token_report.sh --budget-profile codex_5h
 ```
+
+Каноническая спецификация этого контура:
+- [docs/TOKEN_LEDGER.md](docs/TOKEN_LEDGER.md)
 
 Этот отчёт показывает:
 - главный честный KPI:
