@@ -12,6 +12,7 @@ mod edge_cache;
 mod indexer;
 mod language;
 mod mcp;
+mod mcp_task_matrix;
 mod nats;
 mod observe;
 mod onboarding;
@@ -263,6 +264,11 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 let mut db = postgres::connect_admin(&cfg).await?;
                 verify::run_text_compare(&cfg, &mut db, &args).await?;
+            }
+            VerifyCommand::McpMatrix(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                mcp_task_matrix::run_matrix(&cfg, &args).await?;
             }
             VerifyCommand::Accuracy(args) => {
                 let cfg = config::AppConfig::from_env()?;

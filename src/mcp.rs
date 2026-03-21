@@ -14,8 +14,8 @@ use tokio::time::{Duration, timeout};
 
 use crate::config::AppConfig;
 
-const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
-const SERVER_NAME: &str = "Art-memory-agent-index";
+pub(crate) const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+pub(crate) const SERVER_NAME: &str = "Art-memory-agent-index";
 
 pub async fn serve(cfg: &AppConfig) -> Result<()> {
     let stdin = tokio::io::stdin();
@@ -201,56 +201,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         }
     }
 
-    let exe = std::env::current_exe().context("failed to resolve current amai executable")?;
-    let mut child = ProcessCommand::new(&exe)
-        .arg("mcp")
-        .arg("serve")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .with_context(|| format!("failed to spawn MCP server from {}", exe.display()))?;
-
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("failed to capture MCP server stdin"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("failed to capture MCP server stdout"))?;
-
-    let mut session = McpProofSession {
-        child,
-        stdin,
-        stdout: BufReader::new(stdout).lines(),
-        next_id: 1,
-    };
-
-    let init = session
-        .request(
-            "initialize",
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "amai-proof",
-                    "version": env!("CARGO_PKG_VERSION"),
-                }
-            }),
-        )
-        .await?;
-    let server_info = &init["serverInfo"];
-    if server_info["name"].as_str() != Some(SERVER_NAME) {
-        return Err(anyhow!(
-            "unexpected MCP server name: {:?}",
-            server_info["name"]
-        ));
-    }
-    session
-        .notify("notifications/initialized", json!({}))
-        .await
-        .context("failed to send MCP initialized notification")?;
+    let mut session = spawn_proof_session(cfg).await?;
 
     let tools = session.request("tools/list", json!({})).await?;
     let tool_names = tools["tools"]
@@ -485,7 +436,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     Ok(())
 }
 
-struct McpProofSession {
+pub(crate) struct McpProofSession {
     child: Child,
     stdin: ChildStdin,
     stdout: tokio::io::Lines<BufReader<ChildStdout>>,
@@ -493,7 +444,7 @@ struct McpProofSession {
 }
 
 impl McpProofSession {
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+    pub(crate) async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
         let request = json!({
@@ -525,7 +476,7 @@ impl McpProofSession {
         Ok(response["result"].clone())
     }
 
-    async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+    pub(crate) async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
         let notification = json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -534,16 +485,19 @@ impl McpProofSession {
         write_message(&mut self.stdin, &notification).await
     }
 
-    async fn tool_call(&mut self, name: &str, arguments: Value) -> Result<Value> {
-        let result = self
-            .request(
-                "tools/call",
-                json!({
-                    "name": name,
-                    "arguments": arguments,
-                }),
-            )
-            .await?;
+    pub(crate) async fn tool_call_raw(&mut self, name: &str, arguments: Value) -> Result<Value> {
+        self.request(
+            "tools/call",
+            json!({
+                "name": name,
+                "arguments": arguments,
+            }),
+        )
+        .await
+    }
+
+    pub(crate) async fn tool_call(&mut self, name: &str, arguments: Value) -> Result<Value> {
+        let result = self.tool_call_raw(name, arguments).await?;
         if result["isError"].as_bool().unwrap_or(false) {
             return Err(anyhow!(
                 "MCP tool {} returned isError=true: {}",
@@ -554,13 +508,69 @@ impl McpProofSession {
         Ok(result["structuredContent"].clone())
     }
 
-    async fn shutdown(mut self) -> Result<()> {
+    pub(crate) async fn shutdown(mut self) -> Result<()> {
         self.child
             .kill()
             .await
             .context("failed to terminate MCP proof server")?;
         Ok(())
     }
+}
+
+pub(crate) async fn spawn_proof_session(cfg: &AppConfig) -> Result<McpProofSession> {
+    compatibility::assert_supported(cfg).await?;
+
+    let exe = std::env::current_exe().context("failed to resolve current amai executable")?;
+    let mut child = ProcessCommand::new(&exe)
+        .arg("mcp")
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("failed to spawn MCP server from {}", exe.display()))?;
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture MCP server stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture MCP server stdout"))?;
+
+    let mut session = McpProofSession {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout).lines(),
+        next_id: 1,
+    };
+
+    let init = session
+        .request(
+            "initialize",
+            json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "amai-proof",
+                    "version": env!("CARGO_PKG_VERSION"),
+                }
+            }),
+        )
+        .await?;
+    let server_info = &init["serverInfo"];
+    if server_info["name"].as_str() != Some(SERVER_NAME) {
+        return Err(anyhow!(
+            "unexpected MCP server name: {:?}",
+            server_info["name"]
+        ));
+    }
+    session
+        .notify("notifications/initialized", json!({}))
+        .await
+        .context("failed to send MCP initialized notification")?;
+    Ok(session)
 }
 
 async fn handle_request(cfg: &AppConfig, incoming: Value) -> Result<Value> {

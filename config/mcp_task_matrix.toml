@@ -1,0 +1,160 @@
+[source]
+display_name = "LiveMCPBench / MCP-Universe inspired local eval contour"
+summary = "Локальная Rust-first task matrix для Amai, собранная как честный bridge между внешними benchmark-классами LiveMCPBench и MCP-Universe и нашим реальным product contour."
+reference_urls = [
+  "https://github.com/philschmid/ai-agent-benchmark-compendium",
+  "https://github.com/philschmid/ai-agent-benchmark-compendium#function-calling--tool-use"
+]
+
+[matrices.live_mcpbench_local]
+display_name = "LiveMCPBench-style local MCP matrix"
+summary = "Measured local matrix для MCP tool discovery, context routing, observability и fail-closed hostile paths внутри Amai MCP."
+min_success_rate = 1.0
+max_failures = 0
+max_p95_ms = 15000.0
+task_codes = [
+  "tool_catalog",
+  "project_listing",
+  "namespace_listing",
+  "context_local_strict_isolation",
+  "context_related_scope_routing",
+  "observe_snapshot_green",
+  "token_report_live",
+  "warm_cache",
+  "unknown_tool_fail_closed",
+  "unknown_project_fail_closed",
+  "unknown_namespace_fail_closed"
+]
+
+[matrices.mcp_universe_local]
+display_name = "MCP-Universe-style local task matrix"
+summary = "Measured local matrix для multi-domain MCP usage и isolation контуров: happy path, hostile tool routing и explicit multi-agent continuity isolation."
+min_success_rate = 1.0
+max_failures = 0
+max_p95_ms = 20000.0
+task_codes = [
+  "tool_catalog",
+  "project_listing",
+  "namespace_listing",
+  "context_related_scope_routing",
+  "observe_snapshot_green",
+  "token_report_live",
+  "unknown_tool_fail_closed",
+  "continuity_restore_default_scope_success",
+  "continuity_restore_isolated_scope_fail_closed"
+]
+
+[tasks.tool_catalog]
+order = 1
+class = "happy_path"
+display_name = "Tool catalog is stable and complete"
+kind = "tool_catalog"
+
+[tasks.project_listing]
+order = 2
+class = "happy_path"
+display_name = "Registered projects are visible through MCP"
+kind = "project_listing"
+project = "project_alpha"
+related_project = "project_beta"
+
+[tasks.namespace_listing]
+order = 3
+class = "happy_path"
+display_name = "Registered namespace is visible through MCP"
+kind = "namespace_listing"
+project = "project_alpha"
+namespace = "review"
+
+[tasks.context_local_strict_isolation]
+order = 4
+class = "happy_path"
+display_name = "local_strict context pack stays inside primary project"
+kind = "context_local_strict_isolation"
+project = "project_alpha"
+related_project = "project_beta"
+namespace = "review"
+query = "shared_runtime_marker"
+retrieval_mode = "local_strict"
+
+[tasks.context_related_scope_routing]
+order = 5
+class = "happy_path"
+display_name = "local_plus_related routes across allowed related scope"
+kind = "context_related_scope_routing"
+project = "project_alpha"
+related_project = "project_beta"
+namespace = "review"
+query = "shared_runtime_marker"
+retrieval_mode = "local_plus_related"
+
+[tasks.observe_snapshot_green]
+order = 6
+class = "happy_path"
+display_name = "Observe snapshot stays green"
+kind = "observe_snapshot_green"
+
+[tasks.token_report_live]
+order = 7
+class = "happy_path"
+display_name = "Live token report uses verified headline"
+kind = "token_report_live"
+budget_profile = "codex_5h"
+
+[tasks.warm_cache]
+order = 8
+class = "happy_path"
+display_name = "Warm cache completes through MCP"
+kind = "warm_cache"
+project = "project_alpha"
+namespace = "review"
+query = "shared_runtime_marker"
+retrieval_mode = "local_plus_related"
+
+[tasks.unknown_tool_fail_closed]
+order = 9
+class = "hostile"
+display_name = "Unknown MCP tool fails closed"
+kind = "unknown_tool_fail_closed"
+expected_error_contains = "unknown MCP tool"
+
+[tasks.unknown_project_fail_closed]
+order = 10
+class = "hostile"
+display_name = "Unknown project fails closed"
+kind = "unknown_project_fail_closed"
+project = "unknown_project"
+namespace = "review"
+query = "shared_runtime_marker"
+retrieval_mode = "local_strict"
+expected_error_contains = "project not found"
+
+[tasks.unknown_namespace_fail_closed]
+order = 11
+class = "hostile"
+display_name = "Unknown namespace fails closed"
+kind = "unknown_namespace_fail_closed"
+project = "project_alpha"
+namespace = "unknown_namespace"
+query = "shared_runtime_marker"
+retrieval_mode = "local_strict"
+expected_error_contains = "namespace"
+
+[tasks.continuity_restore_default_scope_success]
+order = 12
+class = "isolation"
+display_name = "Default Art continuity scope restores successfully"
+kind = "continuity_restore_success"
+project = "art"
+namespace = "continuity"
+agent_scope = "art::continuity::default"
+
+[tasks.continuity_restore_isolated_scope_fail_closed]
+order = 13
+class = "isolation"
+display_name = "Isolated agent scope does not see чужой working-state"
+kind = "continuity_restore_fail_closed"
+project = "art"
+namespace = "continuity"
+agent_scope = "art::continuity::matrix_isolated"
+expected_error_contains = "no working-state restore bundle found"

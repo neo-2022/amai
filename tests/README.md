@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 16:25 MSK
-Ручная сверка guide/docs: 2026-03-21 16:25 MSK
+modified_at: 2026-03-21 16:50 MSK
+Ручная сверка guide/docs: 2026-03-21 16:50 MSK
 
 # Tests
 
@@ -20,6 +20,7 @@ modified_at: 2026-03-21 16:25 MSK
 ./scripts/proof_profiles.sh
 ./scripts/proof_install_auto.sh
 ./scripts/proof_benchmark_matrix.sh
+./scripts/proof_mcp_task_matrix.sh
 ./scripts/proof_token_benchmark.sh
 ./scripts/proof_token_benchmark_suite.sh
 ./scripts/proof_observability.sh
@@ -40,5 +41,7 @@ modified_at: 2026-03-21 16:25 MSK
 - `cargo run -- benchmark list`
 - `cargo run -- benchmark coverage`
 - `cargo run -- benchmark explain --benchmark live_mcpbench`
+- `cargo run -- verify mcp-matrix --matrix live_mcpbench_local ...`
+- `cargo run -- verify mcp-matrix --matrix mcp_universe_local ...`
 
 Когда появятся отдельные integration tests с поднимаемым stack fixture, они materialize-ятся именно здесь.

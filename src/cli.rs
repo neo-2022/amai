@@ -141,6 +141,7 @@ pub enum VerifyCommand {
     TokenBenchmark(Box<VerifyTokenBenchmarkArgs>),
     TokenBenchmarkSuite(Box<VerifyTokenBenchmarkSuiteArgs>),
     TextCompare(Box<VerifyTextCompareArgs>),
+    McpMatrix(Box<VerifyMcpMatrixArgs>),
     Accuracy(VerifyAccuracyArgs),
     Load(Box<VerifyLoadArgs>),
     Hostile(VerifyHostileArgs),
@@ -499,6 +500,24 @@ pub struct VerifyMcpArgs {
     pub min_savings_factor: f64,
     #[arg(long, default_value_t = 15.0)]
     pub min_savings_percent: f64,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct VerifyMcpMatrixArgs {
+    #[arg(long, default_value = "live_mcpbench_local")]
+    pub matrix: String,
+    #[arg(long, default_value = "project_alpha")]
+    pub project: String,
+    #[arg(long, default_value = "project_beta")]
+    pub related_project: String,
+    #[arg(long, default_value = "review")]
+    pub namespace: String,
+    #[arg(long, default_value = "codex_5h")]
+    pub budget_profile: String,
+    #[arg(long)]
+    pub min_success_rate: Option<f64>,
+    #[arg(long)]
+    pub max_p95_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, Args)]

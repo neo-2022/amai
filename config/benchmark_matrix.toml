@@ -150,7 +150,7 @@ order = 5
 display_name = "LiveMCPBench"
 aliases = ["live_mcpbench", "live-mcpbench", "live mcpbench"]
 family = "function_calling_tool_use"
-coverage_level = "next_priority"
+coverage_level = "partial"
 summary = "Прямой эталон для MCP tool navigation в real-world условиях. Для Amai это один из самых близких внешних benchmark-ориентиров."
 reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
 why_relevant = [
@@ -166,23 +166,25 @@ amai_focus = [
 current_coverage = [
   "MCP integration уже materialized.",
   "Есть proof_mcp.sh и hostile continuity contour.",
-  "Есть human dashboard и observability слой для runtime signals."
+  "Есть human dashboard и observability слой для runtime signals.",
+  "Есть Rust-first MCP task matrix с measured success_rate, hostile fail-closed задачами и measured latency."
 ]
 current_gaps = [
-  "Нет benchmark-compatible MCP task matrix и pass-rate.",
-  "Нет отдельного hostile contour для large MCP tool universe."
+  "Пока это local matrix, а не большой multi-server benchmark universe.",
+  "Нет richer task-level scoring beyond pass/fail and latency."
 ]
 proof_commands = [
-  "./scripts/proof_mcp.sh"
+  "./scripts/proof_mcp.sh",
+  "./scripts/proof_mcp_task_matrix.sh"
 ]
-next_step = "Сделать Rust-first MCP benchmark matrix с measured success/failure по multi-server tool tasks."
+next_step = "Расширить local MCP task matrix до более широкого multi-server и multi-tool universe contour с richer scoring."
 
 [benchmarks.mcp_universe]
 order = 6
 display_name = "MCP-Universe"
 aliases = ["mcp universe", "mcp-universe", "mcp_universe"]
 family = "function_calling_tool_use"
-coverage_level = "next_priority"
+coverage_level = "partial"
 summary = "Эталон для работы агентов с реальными MCP servers вместо искусственных симуляций. Для Amai это следующий обязательный слой после базового MCP smoke."
 reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
 why_relevant = [
@@ -196,16 +198,18 @@ amai_focus = [
 ]
 current_coverage = [
   "Есть Amai MCP server и local proof contour.",
-  "Есть strict project, namespace и agent_scope isolation."
+  "Есть strict project, namespace и agent_scope isolation.",
+  "Есть MCP-Universe-style local matrix с multi-domain happy-path, hostile tool routing и explicit continuity isolation tasks."
 ]
 current_gaps = [
-  "Нет ещё отдельного universe-scale MCP regression harness.",
-  "Нет measured report по multi-domain MCP task completion."
+  "Это ещё не настоящий universe-scale contour с внешними real servers.",
+  "Нет multi-server federation и richer domain breadth."
 ]
 proof_commands = [
-  "./scripts/proof_mcp.sh"
+  "./scripts/proof_mcp.sh",
+  "./scripts/proof_mcp_task_matrix.sh"
 ]
-next_step = "Добавить в Rust eval registry отдельный multi-domain MCP contour с real-server tasks."
+next_step = "Пойти от local universe-style matrix к более широкому federation contour с внешними MCP domains и richer domain scoring."
 
 [benchmarks.gaia]
 order = 1

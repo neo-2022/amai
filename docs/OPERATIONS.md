@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 16:25 MSK
-Ручная сверка guide/docs: 2026-03-21 16:25 MSK
+modified_at: 2026-03-21 16:50 MSK
+Ручная сверка guide/docs: 2026-03-21 16:50 MSK
 
 # Operations
 
@@ -847,6 +847,54 @@ cargo run --release -- verify token-benchmark \
 - проверяет coverage summary;
 - проверяет explain path по alias и по human-readable benchmark name;
 - fail-ит, если benchmark registry или CLI drift-нули.
+
+## MCP task matrix
+
+Это следующий слой после обычного `proof_mcp.sh`.
+
+Если `proof_mcp.sh` отвечает на вопрос:
+- жив ли MCP contour вообще?
+
+то `proof_mcp_task_matrix.sh` отвечает уже на другой вопрос:
+- выдерживает ли `Amai` measured набор задач класса `LiveMCPBench / MCP-Universe`, включая hostile и isolation-path?
+
+Запуск:
+
+```bash
+./scripts/proof_mcp_task_matrix.sh
+```
+
+Или напрямую:
+
+```bash
+cargo run -- verify mcp-matrix --matrix live_mcpbench_local --project project_alpha --related-project project_beta --namespace review
+cargo run -- verify mcp-matrix --matrix mcp_universe_local --project project_alpha --related-project project_beta --namespace review
+```
+
+Что делает этот contour:
+- поднимает measured task matrix вместо одного smoke;
+- считает `tasks_total`, `tasks_passed`, `tasks_failed`, `success_rate`;
+- считает `mean/p50/p95/max latency`;
+- раскладывает задачи по классам:
+  - `happy_path`
+  - `hostile`
+  - `isolation`
+
+Что именно проверяется сейчас:
+- стабильность MCP tool catalog;
+- project и namespace discovery;
+- `local_strict` isolation;
+- `local_plus_related` routing;
+- live observe snapshot;
+- live token report headline;
+- warm cache через MCP;
+- fail-closed на `unknown tool`;
+- fail-closed на `unknown project`;
+- fail-closed на `unknown namespace`;
+- default continuity restore для канонического agent scope;
+- fail-closed restore для изолированного agent scope.
+
+Это уже не “кажется, MCP работает”, а measured local benchmark contour с честным pass/fail и class breakdown.
 
 ## Token benchmark suite proof
 

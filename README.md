@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 16:25 MSK
-Ручная сверка guide/docs: 2026-03-21 16:25 MSK
+modified_at: 2026-03-21 16:50 MSK
+Ручная сверка guide/docs: 2026-03-21 16:50 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -962,6 +962,21 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 ./scripts/benchmark_matrix.sh explain --benchmark "SWE-bench Verified"
 ```
 
+Поверх этой карты уже materialized первый живой eval слой для `MCP`:
+
+```bash
+./scripts/proof_mcp_task_matrix.sh
+```
+
+Он делает то, чего раньше не было:
+- гоняет не один `smoke`, а measured task matrix;
+- считает успешность по задачам;
+- отдельно держит:
+  - happy-path;
+  - hostile fail-closed;
+  - multi-agent isolation;
+- даёт честный локальный bridge между `Amai` и классами `LiveMCPBench` / `MCP-Universe`.
+
 Что это даёт простыми словами:
 - `list`
   - показывает всю карту benchmark-семейств;
@@ -982,6 +997,7 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 ./scripts/proof_load.sh
 ./scripts/proof_hostile.sh
 ./scripts/proof_benchmark_matrix.sh
+./scripts/proof_mcp_task_matrix.sh
 ./scripts/proof_token_benchmark.sh
 ./scripts/proof_observability.sh
 ./scripts/proof_mcp.sh

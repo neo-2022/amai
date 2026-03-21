@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 16:25 MSK
-Ручная сверка guide/docs: 2026-03-21 16:25 MSK
+modified_at: 2026-03-21 16:50 MSK
+Ручная сверка guide/docs: 2026-03-21 16:50 MSK
 
 # Architecture
 
@@ -63,6 +63,8 @@ Event/work plane:
 `Amai` держит benchmark-ориентиры не как набор заметок в чате, а как machine-readable registry:
 - `config/benchmark_matrix.toml`
 - `src/benchmark_matrix.rs`
+- `config/mcp_task_matrix.toml`
+- `src/mcp_task_matrix.rs`
 
 Зачем это нужно:
 - не терять связь между нашими proof-контрами и внешним benchmark landscape;
@@ -76,6 +78,18 @@ Event/work plane:
 Важный архитектурный закон:
 - внешний compendium для `Amai` — это не runtime dependency;
 - это benchmark taxonomy, которую мы переводим в свой Rust-first registry и потом уже привязываем к нашим собственным proof и hostile harness-ам.
+
+Отдельный важный слой здесь:
+- `benchmark_matrix.toml`
+  - карта benchmark-классов и их продуктового статуса для `Amai`;
+- `mcp_task_matrix.toml`
+  - уже живой measured eval contour для MCP-класса задач.
+
+То есть первая матрица отвечает на вопрос:
+- что именно нужно benchmark-ить вообще?
+
+А вторая отвечает:
+- какие конкретные MCP-задачи `Amai` уже реально проходит и с какими measured цифрами?
 
 Не source of truth для state/policy.
 
