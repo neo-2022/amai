@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 14:26 MSK
-Ручная сверка guide/docs: 2026-03-21 14:26 MSK
+modified_at: 2026-03-21 14:40 MSK
+Ручная сверка guide/docs: 2026-03-21 14:40 MSK
 
 # Operations
 
@@ -208,6 +208,10 @@ cd /home/art/agent-memory-index
     - последние retrieval-запросы;
     - активные файлы;
     - текущую непрерывную рабочую сессию.
+- `chat_start_restore`
+  - компактный startup pack для первого содержательного ответа нового чата;
+  - строится поверх `handoff + working_state + continuity import`;
+  - нужен затем, чтобы не тратить первый ответ на повторное восстановление context.
 
 Каноническая изоляция для этого слоя:
 - `project_code`
@@ -255,6 +259,26 @@ cd /home/art/agent-memory-index
 
 Это важный инвариант: `current / previous / exact time` идут одним temporal path, а не
 разными эвристическими обходами.
+
+Для обычного startup это теперь выглядит так:
+
+```bash
+./scripts/continuity_startup.sh --project project_alpha --namespace continuity
+./scripts/continuity_restore.sh --project project_alpha --namespace continuity
+```
+
+Первый helper печатает:
+- human-readable startup summary;
+- `Chat-start restore pack`;
+- затем уже расширенное `working_state`.
+
+Второй helper печатает raw JSON и теперь возвращает сразу два узла:
+- `chat_start_restore`
+- `working_state_restore`
+
+Практический смысл:
+- `chat_start_restore` нужен как короткий первичный injection pack;
+- `working_state_restore` нужен как более широкий raw слой для аудита и машинного восстановления.
 
 Если передан `--question`, helper сам должен:
 - распознать `прошлый / текущий чат`;

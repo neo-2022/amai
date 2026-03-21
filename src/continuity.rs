@@ -72,6 +72,14 @@ struct ContinuityThreadIndexEntry {
 
 const MAX_SEARCHABLE_CONTINUITY_BYTES: usize = 12_000;
 
+struct ContinuityStartupContext {
+    project: ProjectRecord,
+    namespace: NamespaceRecord,
+    continuity: Value,
+    handoff_summary: Value,
+    restore: Option<Value>,
+}
+
 pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<()> {
     let mut db = postgres::connect_admin(cfg).await?;
     let s3_client = s3::connect(cfg).await?;
@@ -450,107 +458,97 @@ async fn import_thread_index_snapshots(
 
 pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<()> {
     let db = postgres::connect_admin(cfg).await?;
-    let project = resolve_project(&db, args).await?;
-    let namespace = postgres::find_namespace_by_code(&db, project.project_id, &args.namespace)
-        .await?
-        .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.namespace))?;
-    let snapshots =
-        postgres::list_observability_snapshots_by_kinds(&db, &["continuity_import"], Some(50))
-            .await?;
-    let latest = snapshots
-        .into_iter()
-        .find(|snapshot| {
-            snapshot.payload["continuity_import"]["project"]["code"].as_str()
-                == Some(project.code.as_str())
-                && snapshot.payload["continuity_import"]["namespace"]["code"].as_str()
-                    == Some(namespace.code.as_str())
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "no continuity import found for {}::{}",
-                project.code,
-                namespace.code
-            )
-        })?;
-
-    let continuity = &latest.payload["continuity_import"];
-    let handoff_summary = latest_handoff_summary(&db, &project, &namespace)
-        .await?
-        .unwrap_or_else(|| continuity["active_workline_summary"]["details"].clone());
+    let context = load_startup_context(&db, args).await?;
+    let chat_start_restore = build_chat_start_restore(
+        &context.project,
+        &context.namespace,
+        &context.continuity,
+        &context.handoff_summary,
+        context.restore.as_ref(),
+    );
     println!("Amai continuity startup");
     println!();
-    println!("Проект: {} ({})", project.display_name, project.code);
-    println!("Корень проекта: {}", project.repo_root);
-    println!("Namespace continuity: {}", namespace.code);
+    println!(
+        "Проект: {} ({})",
+        context.project.display_name, context.project.code
+    );
+    println!("Корень проекта: {}", context.project.repo_root);
+    println!("Namespace continuity: {}", context.namespace.code);
     println!(
         "Последний импорт continuity: {}",
-        human_epoch_ms(continuity["imported_at_epoch_ms"].as_u64())
+        human_epoch_ms(context.continuity["imported_at_epoch_ms"].as_u64())
     );
     println!(
         "Импортировано документов: {}",
-        continuity["documents_imported"].as_u64().unwrap_or(0)
+        context.continuity["documents_imported"]
+            .as_u64()
+            .unwrap_or(0)
     );
     println!(
         "Continuity snapshot: {}",
-        continuity["bootstrap_summary"]["bootstrap_file"]
+        context.continuity["bootstrap_summary"]["bootstrap_file"]
             .as_str()
             .unwrap_or("ещё нет данных")
     );
-    let bridge_files = continuity["session_memory_files"].as_u64().unwrap_or(0);
+    let bridge_files = context.continuity["session_memory_files"]
+        .as_u64()
+        .unwrap_or(0);
     if bridge_files > 0 {
         println!("Дополнительные bridge-notes: {}", bridge_files);
     }
     println!(
         "Rendered transcripts: {}",
-        continuity["rendered_transcript_files"]
+        context.continuity["rendered_transcript_files"]
             .as_u64()
             .unwrap_or(0)
     );
     println!();
-    let startup_next_step = handoff_summary["next_step"]
+    let startup_next_step = context.handoff_summary["next_step"]
         .as_str()
         .and_then(normalize_next_step_value)
         .unwrap_or_else(|| "ещё нет данных".to_string());
     println!("Текущая активная линия:");
     println!(
         "- {}",
-        handoff_summary["headline"]
+        context.handoff_summary["headline"]
             .as_str()
             .unwrap_or("ещё нет данных")
     );
     println!("- Ближайший обязательный следующий шаг: {startup_next_step}");
-    if let Some(restore) = working_state::build_restore_bundle(&db, &project, &namespace).await? {
+    println!();
+    print_chat_start_restore_human(&chat_start_restore);
+    if let Some(restore) = context.restore.as_ref() {
         println!();
-        working_state::print_restore_bundle_human(&restore);
+        working_state::print_restore_bundle_human(restore);
     }
     println!();
     println!("Bootstrap continuity:");
     println!(
         "- Thread count: {}",
-        continuity["bootstrap_summary"]["details"]["thread_count"]
+        context.continuity["bootstrap_summary"]["details"]["thread_count"]
             .as_u64()
             .unwrap_or(0)
     );
     println!(
         "- Последний rendered transcript: {}",
-        continuity["bootstrap_summary"]["details"]["latest_rendered_transcript"]
+        context.continuity["bootstrap_summary"]["details"]["latest_rendered_transcript"]
             .as_str()
             .unwrap_or("ещё нет данных")
     );
     println!();
     let mut import_command = format!(
         "cargo run -- continuity import --project {} --display-name '{}' --repo-root {} --namespace {} --bootstrap-file {}",
-        project.code,
-        project.display_name.replace('\'', "\\'"),
-        shell_quote(&project.repo_root),
-        namespace.code,
+        context.project.code,
+        context.project.display_name.replace('\'', "\\'"),
+        shell_quote(&context.project.repo_root),
+        context.namespace.code,
         shell_quote(
-            continuity["bootstrap_summary"]["bootstrap_file"]
+            context.continuity["bootstrap_summary"]["bootstrap_file"]
                 .as_str()
                 .unwrap_or_default()
         ),
     );
-    let active_workline_arg = continuity["active_workline_summary"]["active_workline_file"]
+    let active_workline_arg = context.continuity["active_workline_summary"]["active_workline_file"]
         .as_str()
         .unwrap_or_default();
     if !active_workline_arg.is_empty() {
@@ -560,7 +558,7 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
     println!("Как использовать дальше:");
     println!(
         "- Для project-scoped retrieval: cargo run -- context pack --project {} --namespace {} --query 'ваш вопрос'",
-        project.code, namespace.code
+        context.project.code, context.namespace.code
     );
     println!("- Для обновления continuity после новых изменений: {import_command}");
     Ok(())
@@ -568,20 +566,30 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
 
 pub async fn print_restore(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<()> {
     let db = postgres::connect_admin(cfg).await?;
-    let project = resolve_project(&db, args).await?;
-    let namespace = postgres::find_namespace_by_code(&db, project.project_id, &args.namespace)
-        .await?
-        .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.namespace))?;
-    let restore = working_state::build_restore_bundle(&db, &project, &namespace)
-        .await?
-        .ok_or_else(|| {
-            anyhow!(
-                "no working-state restore bundle found for {}::{}",
-                project.code,
-                namespace.code
-            )
-        })?;
-    println!("{}", serde_json::to_string_pretty(&restore)?);
+    let context = load_startup_context(&db, args).await?;
+    let restore = context.restore.ok_or_else(|| {
+        anyhow!(
+            "no working-state restore bundle found for {}::{}",
+            context.project.code,
+            context.namespace.code
+        )
+    })?;
+    let chat_start_restore = build_chat_start_restore(
+        &context.project,
+        &context.namespace,
+        &context.continuity,
+        &context.handoff_summary,
+        Some(&restore),
+    );
+    let mut output = serde_json::Map::new();
+    output.insert(
+        "chat_start_restore".to_string(),
+        chat_start_restore["chat_start_restore"].clone(),
+    );
+    if let Some(node) = restore.get("working_state_restore") {
+        output.insert("working_state_restore".to_string(), node.clone());
+    }
+    println!("{}", serde_json::to_string_pretty(&Value::Object(output))?);
     Ok(())
 }
 
@@ -902,6 +910,252 @@ fn render_direct_answer(
         "Ближайший обязательный следующий шаг: {answer_next_step}"
     ));
     lines.join("\n")
+}
+
+async fn load_startup_context(
+    db: &Client,
+    args: &ContinuityStartupArgs,
+) -> Result<ContinuityStartupContext> {
+    let project = resolve_project(db, args).await?;
+    let namespace = postgres::find_namespace_by_code(db, project.project_id, &args.namespace)
+        .await?
+        .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.namespace))?;
+    let snapshots =
+        postgres::list_observability_snapshots_by_kinds(db, &["continuity_import"], Some(50))
+            .await?;
+    let latest = snapshots
+        .into_iter()
+        .find(|snapshot| {
+            snapshot.payload["continuity_import"]["project"]["code"].as_str()
+                == Some(project.code.as_str())
+                && snapshot.payload["continuity_import"]["namespace"]["code"].as_str()
+                    == Some(namespace.code.as_str())
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "no continuity import found for {}::{}",
+                project.code,
+                namespace.code
+            )
+        })?;
+    let continuity = latest.payload["continuity_import"].clone();
+    let handoff_summary = latest_handoff_summary(db, &project, &namespace)
+        .await?
+        .unwrap_or_else(|| continuity["active_workline_summary"]["details"].clone());
+    let restore = working_state::build_restore_bundle(db, &project, &namespace).await?;
+    Ok(ContinuityStartupContext {
+        project,
+        namespace,
+        continuity,
+        handoff_summary,
+        restore,
+    })
+}
+
+fn build_chat_start_restore(
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    continuity: &Value,
+    handoff_summary: &Value,
+    restore: Option<&Value>,
+) -> Value {
+    let restore_node = restore.map(|value| &value["working_state_restore"]);
+    let headline = handoff_summary["headline"]
+        .as_str()
+        .unwrap_or("ещё нет данных")
+        .to_string();
+    let next_step = handoff_summary["next_step"]
+        .as_str()
+        .and_then(normalize_next_step_value)
+        .unwrap_or_else(|| "ещё нет данных".to_string());
+    let current_goal = restore_node
+        .and_then(|value| value["current_goal"].as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(headline.as_str())
+        .to_string();
+    let restore_confidence = restore_node
+        .and_then(|value| value["restore_confidence"].as_str())
+        .unwrap_or("preliminary")
+        .to_string();
+    let materialized_summary =
+        restore_node.and_then(|value| summarize_materialized_notes(&value["materialized_notes"]));
+    let recent_actions_summary =
+        restore_node.and_then(|value| summarize_recent_actions(&value["recent_actions"]));
+    let active_files_summary =
+        restore_node.and_then(|value| summarize_string_list(&value["active_files"], 4));
+    let open_questions_summary =
+        restore_node.and_then(|value| summarize_string_list(&value["open_questions"], 3));
+    let active_files = restore_node
+        .and_then(|value| value["active_files"].as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .take(4)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let open_questions = restore_node
+        .and_then(|value| value["open_questions"].as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .take(3)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let thread_count = continuity["bootstrap_summary"]["details"]["thread_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let latest_transcript =
+        continuity["bootstrap_summary"]["details"]["latest_rendered_transcript"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+    json!({
+        "chat_start_restore": {
+            "project": {
+                "code": project.code,
+                "display_name": project.display_name,
+                "repo_root": project.repo_root,
+            },
+            "namespace": {
+                "code": namespace.code,
+                "display_name": namespace.display_name,
+            },
+            "headline": headline,
+            "next_step": next_step,
+            "current_goal": current_goal,
+            "restore_confidence": restore_confidence,
+            "thread_count": thread_count,
+            "latest_rendered_transcript": latest_transcript,
+            "materialized_summary": materialized_summary,
+            "recent_actions_summary": recent_actions_summary,
+            "active_files_summary": active_files_summary,
+            "open_questions_summary": open_questions_summary,
+            "active_files": active_files,
+            "open_questions": open_questions,
+            "prompt_text": render_chat_start_prompt(
+                project,
+                namespace,
+                handoff_summary,
+                restore_node,
+                thread_count,
+            ),
+        }
+    })
+}
+
+fn render_chat_start_prompt(
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    handoff_summary: &Value,
+    restore_node: Option<&Value>,
+    thread_count: u64,
+) -> String {
+    let headline = handoff_summary["headline"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    let next_step = handoff_summary["next_step"]
+        .as_str()
+        .and_then(normalize_next_step_value)
+        .unwrap_or_else(|| "ещё нет данных".to_string());
+    let current_goal = restore_node
+        .and_then(|value| value["current_goal"].as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(headline);
+    let materialized_summary =
+        restore_node.and_then(|value| summarize_materialized_notes(&value["materialized_notes"]));
+    let recent_actions_summary =
+        restore_node.and_then(|value| summarize_recent_actions(&value["recent_actions"]));
+    let active_files_summary =
+        restore_node.and_then(|value| summarize_string_list(&value["active_files"], 4));
+    let open_questions_summary =
+        restore_node.and_then(|value| summarize_string_list(&value["open_questions"], 3));
+    let restore_confidence = restore_node
+        .and_then(|value| value["restore_confidence"].as_str())
+        .unwrap_or("preliminary");
+    let mut lines = vec![
+        "CHAT_START_RESTORE".to_string(),
+        format!("Project: {} ({})", project.display_name, project.code),
+        format!("Namespace: {}", namespace.code),
+        format!("Продолжаем с линии: {headline}"),
+        format!("Обязательный следующий шаг: {next_step}"),
+    ];
+    if current_goal != headline {
+        lines.push(format!("Текущая цель: {current_goal}"));
+    }
+    if let Some(value) = materialized_summary {
+        lines.push(format!("Что уже materialized: {value}"));
+    }
+    if let Some(value) = recent_actions_summary {
+        lines.push(format!("Недавние действия: {value}"));
+    }
+    if let Some(value) = active_files_summary {
+        lines.push(format!("Активные файлы: {value}"));
+    }
+    if let Some(value) = open_questions_summary {
+        lines.push(format!("Открытые вопросы: {value}"));
+    }
+    lines.push(format!("Thread count in continuity index: {thread_count}"));
+    if restore_confidence == "preliminary" {
+        lines.push(
+            "Статус recovery: preliminary; first substantive reply should still continue from this pack, not restart continuity from zero.".to_string(),
+        );
+    }
+    lines.push(
+        "Используй этот блок как восстановленный рабочий контекст для первого содержательного ответа нового чата и не трать первый ответ на повторное восстановление continuity, если пользователь не попросил этого явно.".to_string(),
+    );
+    lines.join("\n")
+}
+
+fn print_chat_start_restore_human(value: &Value) {
+    let node = &value["chat_start_restore"];
+    println!("Chat-start restore pack:");
+    println!(
+        "- Этот блок уже нужно считать восстановленным рабочим контекстом для первого содержательного ответа."
+    );
+    println!(
+        "- Продолжаем с линии: {}",
+        node["headline"].as_str().unwrap_or("ещё нет данных")
+    );
+    println!(
+        "- Обязательный следующий шаг: {}",
+        node["next_step"].as_str().unwrap_or("ещё нет данных")
+    );
+    if let Some(value) = node["materialized_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Что уже materialized: {value}");
+    }
+    if let Some(value) = node["recent_actions_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Недавние действия: {value}");
+    }
+    if let Some(value) = node["active_files_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Активные файлы: {value}");
+    }
+    if let Some(value) = node["open_questions_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Открытые вопросы: {value}");
+    }
+    println!(
+        "- Thread count в temporal index: {}",
+        node["thread_count"].as_u64().unwrap_or(0)
+    );
 }
 
 fn summarize_chat_tail_headline(chat_tail: &codex_threads::ChatTail) -> Option<String> {
@@ -1496,11 +1750,12 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        enrich_thread_index_file, extract_next_step_from_text, is_meta_continuity_handoff,
-        render_direct_answer,
+        build_chat_start_restore, enrich_thread_index_file, extract_next_step_from_text,
+        is_meta_continuity_handoff, render_direct_answer,
     };
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, TranscriptMessage};
+    use crate::postgres::{NamespaceRecord, ProjectRecord};
     use serde_json::json;
     use std::fs;
 
@@ -1633,6 +1888,69 @@ mod tests {
         let text = "Сводка.\nБлижайший обязательный следующий шаг: Следующий обязательный шаг: materialize compact thread summaries.`|";
         let next_step = extract_next_step_from_text(text).expect("next step");
         assert_eq!(next_step, "materialize compact thread summaries.");
+    }
+
+    #[test]
+    fn build_chat_start_restore_emits_prompt_and_compact_summaries() {
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "art".to_string(),
+            display_name: "Art".to_string(),
+            repo_root: "/home/art/Art".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let continuity = json!({
+            "bootstrap_summary": {
+                "details": {
+                    "thread_count": 16,
+                    "latest_rendered_transcript": "/tmp/rendered.md"
+                }
+            }
+        });
+        let handoff = json!({
+            "headline": "Amai upstream thread-index enrich materialized",
+            "next_step": "Сделать auto-injection restore pack прямо в chat-start prompt."
+        });
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Amai upstream thread-index enrich materialized",
+                "restore_confidence": "high",
+                "materialized_notes": [
+                    "Enriched temporal summaries теперь пишутся upstream."
+                ],
+                "recent_actions": [
+                    {"headline": "Проверили previous chat lookup"},
+                    {"headline": "Проверили exact-time lookup"}
+                ],
+                "active_files": [
+                    "/home/art/agent-memory-index/src/continuity.rs",
+                    "/home/art/Art/scripts/tools/amai_art_continuity_startup.sh"
+                ],
+                "open_questions": [
+                    "Как сделать auto-injection без дополнительного helper-обхода?"
+                ]
+            }
+        });
+
+        let pack =
+            build_chat_start_restore(&project, &namespace, &continuity, &handoff, Some(&restore));
+        let node = &pack["chat_start_restore"];
+        let prompt = node["prompt_text"].as_str().expect("prompt text");
+        assert!(prompt.contains("CHAT_START_RESTORE"));
+        assert!(
+            prompt.contains("Продолжаем с линии: Amai upstream thread-index enrich materialized")
+        );
+        assert!(prompt.contains("Обязательный следующий шаг: Сделать auto-injection restore pack прямо в chat-start prompt."));
+        assert!(prompt.contains(
+            "Недавние действия: Проверили previous chat lookup; Проверили exact-time lookup"
+        ));
+        assert_eq!(node["thread_count"], json!(16));
     }
 
     #[test]

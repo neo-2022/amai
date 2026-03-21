@@ -365,9 +365,9 @@ fn compose_restore_bundle(
         if let Some(query) = event["query"].as_str().filter(|value| !value.is_empty()) {
             push_unique(&mut recent_queries, query.to_string());
         }
-        collect_unique_strings(&mut open_questions, &event["open_questions"]);
+        collect_open_questions(&mut open_questions, &event["open_questions"]);
         collect_unique_strings(&mut rejected_hypotheses, &event["rejected_hypotheses"]);
-        collect_unique_strings(&mut materialized_notes, &event["materialized_notes"]);
+        collect_materialized_notes(&mut materialized_notes, &event["materialized_notes"]);
         if current_hypothesis.is_none() {
             current_hypothesis = event["current_hypothesis"]
                 .as_str()
@@ -722,8 +722,10 @@ fn extract_paths_from_text(text: &str) -> Vec<String> {
     let mut paths = Vec::new();
     for token in text.split_whitespace() {
         let cleaned = token
-            .trim_matches(|ch: char| matches!(ch, '(' | ')' | '[' | ']' | '"' | '\'' | ',' | ';'))
-            .trim_end_matches(['.', ':']);
+            .trim_matches(|ch: char| {
+                matches!(ch, '(' | ')' | '[' | ']' | '"' | '\'' | ',' | ';' | '`' | '|')
+            })
+            .trim_end_matches(['.', ':', '`', '|']);
         if cleaned.starts_with("/home/") {
             push_unique(&mut paths, cleaned.to_string());
         } else if let Some(start) = cleaned.find("/home/") {
@@ -762,10 +764,30 @@ fn derive_open_questions(text: &str) -> Vec<String> {
 
 fn extract_materialized_notes(text: &str) -> Vec<String> {
     let mut notes = Vec::new();
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let mut saw_bullets = false;
+    for line in &lines {
         if let Some(rest) = line.strip_prefix("- ") {
             push_unique(&mut notes, rest.trim().to_string());
-        } else if !looks_like_question(line) && line.chars().count() > 24 {
+            saw_bullets = true;
+        }
+        if notes.len() >= MAX_MATERIALIZED_NOTES {
+            break;
+        }
+    }
+    if saw_bullets {
+        return notes;
+    }
+    for line in lines {
+        if is_section_heading(line) || looks_like_question(line) {
+            continue;
+        }
+        let chars = line.chars().count();
+        if (16..=220).contains(&chars) {
             push_unique(&mut notes, line.to_string());
         }
         if notes.len() >= MAX_MATERIALIZED_NOTES {
@@ -776,13 +798,40 @@ fn extract_materialized_notes(text: &str) -> Vec<String> {
 }
 
 fn looks_like_question(value: &str) -> bool {
-    if value.is_empty() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         return false;
     }
-    value.ends_with('?')
-        || ["почему", "зачем", "как ", "где ", "what ", "why ", "how "]
-            .iter()
-            .any(|needle| value.to_lowercase().contains(needle))
+    if trimmed.ends_with('?') {
+        return true;
+    }
+    if is_section_heading(trimmed) || trimmed.chars().count() > 180 {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    [
+        "почему ",
+        "зачем ",
+        "как ",
+        "где ",
+        "когда ",
+        "что ",
+        "можно ли ",
+        "нужно ли ",
+        "what ",
+        "why ",
+        "how ",
+        "where ",
+        "when ",
+        "can ",
+    ]
+    .iter()
+    .any(|needle| lower.starts_with(needle))
+}
+
+fn is_section_heading(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed.ends_with(':') && !trimmed.ends_with("?:")
 }
 
 fn collect_unique_strings(target: &mut Vec<String>, value: &Value) {
@@ -791,6 +840,37 @@ fn collect_unique_strings(target: &mut Vec<String>, value: &Value) {
     };
     for item in items {
         if let Some(text) = item.as_str().filter(|text| !text.is_empty()) {
+            push_unique(target, text.to_string());
+        }
+    }
+}
+
+fn collect_open_questions(target: &mut Vec<String>, value: &Value) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    for item in items {
+        if let Some(text) = item.as_str().map(str::trim).filter(|text| !text.is_empty())
+            && looks_like_question(text)
+            && !text.contains('\n')
+            && text.chars().count() <= 180
+        {
+            push_unique(target, text.to_string());
+        }
+    }
+}
+
+fn collect_materialized_notes(target: &mut Vec<String>, value: &Value) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    for item in items {
+        if let Some(text) = item.as_str().map(str::trim).filter(|text| !text.is_empty())
+            && !is_section_heading(text)
+            && !looks_like_question(text)
+            && !text.contains('\n')
+            && (16..=220).contains(&text.chars().count())
+        {
             push_unique(target, text.to_string());
         }
     }
@@ -832,16 +912,25 @@ fn print_recent_actions(label: &str, value: &Value, limit: usize) {
             let summary = item["summary"].as_str().unwrap_or_default();
             if headline.is_empty() && summary.is_empty() {
                 None
-            } else if summary.is_empty() {
+            } else if !headline.is_empty() {
                 Some(headline.to_string())
             } else {
-                Some(format!("{headline}: {summary}"))
+                Some(collapse_human_text(summary, 120))
             }
         })
         .collect::<Vec<_>>()
         .join(" || ");
     if !rendered.is_empty() {
         println!("{label}: {rendered}");
+    }
+}
+
+fn collapse_human_text(text: &str, max_chars: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max_chars {
+        collapsed
+    } else {
+        collapsed.chars().take(max_chars).collect::<String>() + "..."
     }
 }
 
@@ -891,6 +980,12 @@ mod tests {
     }
 
     #[test]
+    fn derive_open_questions_ignores_section_headers() {
+        let questions = derive_open_questions("Почему это важно:");
+        assert!(questions.is_empty());
+    }
+
+    #[test]
     fn extract_paths_from_text_collects_local_files() {
         let paths = extract_paths_from_text(
             "Смотрели /home/art/Art/README.md и [token]( /home/art/agent-memory-index/src/token_budget.rs ).",
@@ -914,6 +1009,73 @@ mod tests {
         );
         assert_eq!(notes.len(), 2);
         assert_eq!(notes[0], "Первый важный результат.");
+    }
+
+    #[test]
+    fn extract_materialized_notes_ignores_headings_without_bullets() {
+        let notes = extract_materialized_notes(
+            "Что сделано:\nTemporal import теперь получает compact summary upstream.\nПочему это важно:\nОтветы стали короче.\n",
+        );
+        assert_eq!(notes.len(), 2);
+        assert_eq!(
+            notes[0],
+            "Temporal import теперь получает compact summary upstream."
+        );
+    }
+
+    #[test]
+    fn compose_restore_bundle_filters_noisy_multiline_open_questions() {
+        let noisy = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Amai upstream thread-index enrich materialized",
+            next_step_hint: "Сделать auto-injection restore pack прямо в chat-start prompt.",
+            summary: "Materialized upstream temporal continuity enrich-path.",
+            offset: 3,
+        });
+        let clean = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "event_kind": "retrieval_context_pack",
+                    "headline": "Рабочий запрос: startup restore pack",
+                    "next_step_hint": "Проверить новый чат.",
+                    "summary": "Проверили startup restore pack.",
+                    "recorded_at_epoch_ms": 4,
+                    "open_questions": [
+                        "Как сделать auto-injection без дополнительного helper-обхода?",
+                        "Materialized upstream temporal continuity enrich-path.\n\nЧто сделано:\n- шумный блок"
+                    ],
+                    "materialized_notes": [
+                        "Materialized upstream temporal continuity enrich-path.",
+                        "Что сделано:"
+                    ]
+                }
+            }),
+            created_at_epoch_ms: 4,
+        };
+
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[clean, noisy],
+        );
+        let open_questions = bundle["working_state_restore"]["open_questions"]
+            .as_array()
+            .expect("open questions array");
+        assert_eq!(open_questions.len(), 1);
+        assert_eq!(
+            open_questions[0],
+            json!("Как сделать auto-injection без дополнительного helper-обхода?")
+        );
     }
 
     #[test]
