@@ -626,10 +626,11 @@ pub fn render_html(refresh_ms: u64) -> String {
     </section>
 
     <section class="panel section">
-      <h2>Последние Проверочные Прогоны</h2>
+      <h2>Последние Честные Проверки</h2>
       <p class="muted">
-        Эти цифры не потоковые. Это последние сохранённые проверочные прогоны, которые нужны,
-        чтобы сравнивать систему с её целями на честных измерениях.
+        Эти цифры не потоковые. Здесь лежат последние сохранённые отдельные проверки:
+        нагрузка быстрого пути, полный холодный прогон и проверка точности с изоляцией.
+        Они нужны, чтобы сравнивать систему с её целями на повторяемых измерениях.
       </p>
       <div class="cards" id="benchmark-cards"></div>
     </section>
@@ -1001,7 +1002,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
 
     vec![
         card_with_rows(
-            "Последний hot stress-прогон",
+            "Быстрый путь под нагрузкой",
             format_optional(hot_load["qps"].as_f64(), |v| format!("{v:.2} qps")),
             "Это не живой поток чата, а последний сохранённый нагрузочный прогон по горячему пути.".to_string(),
             status_for_metric_prefix(snapshot, "load."),
@@ -1059,7 +1060,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
             ],
         ),
         card_with_rows(
-            "Последний cold contour",
+            "Полный холодный прогон",
             format_ms(cold_contour["machine_readable_summary"]["p95"].as_f64()),
             "Это последний честный end-to-end cold benchmark по реальным репозиториям и query slices.".to_string(),
             cold_contour_status(snapshot),
@@ -1155,7 +1156,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
             ],
         ),
         card_with_rows(
-            "Последняя проверка точности и изоляции",
+            "Точность и изоляция",
             format_f64_count(accuracy["cross_project_leakage"].as_f64()),
             "Этот блок не потоковый: он показывает последний сохранённый accuracy/isolation verification contour.".to_string(),
             worst_status(
@@ -1821,6 +1822,8 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
     } else {
         "unknown"
     };
+    let hot_targets = live_latency_table_targets(snapshot, "hot");
+    let cold_targets = live_latency_table_targets(snapshot, "cold");
 
     json!({
         "kind": "live_compare",
@@ -1880,14 +1883,8 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
             "rows": [
                 {
                     "label": "Повторный запрос — эталон",
-                    "tooltip": "Для live hot-path формальный эталон сейчас задан только по P95. Остальные колонки честно остаются без отдельного target.",
-                    "values": [
-                        "—".to_string(),
-                        format_ms(Some(hot_thresholds.0)),
-                        "—".to_string(),
-                        "—".to_string(),
-                        "—".to_string()
-                    ]
+                    "tooltip": "Это фиксированные цели для прогретого повторного запроса. Они не зависят от текущей сессии и всегда должны быть заполнены.",
+                    "values": target_values(&hot_targets)
                 },
                 {
                     "label": "Повторный запрос — сейчас",
@@ -1896,14 +1893,8 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
                 },
                 {
                     "label": "Первый запрос — эталон",
-                    "tooltip": "Для live cold-path формальный эталон сейчас задан только по P95. Остальные колонки честно остаются без отдельного target.",
-                    "values": [
-                        "—".to_string(),
-                        format_ms(Some(cold_thresholds.0)),
-                        "—".to_string(),
-                        "—".to_string(),
-                        "—".to_string()
-                    ]
+                    "tooltip": "Это фиксированные цели для первого запроса без прогрева. Они не зависят от текущей сессии и всегда должны быть заполнены.",
+                    "values": target_values(&cold_targets)
                 },
                 {
                     "label": "Первый запрос — сейчас",
@@ -1960,6 +1951,40 @@ fn compare_values(slice: Option<&Value>, sample_count: u64) -> Vec<String> {
         format_ms(slice.and_then(|value| value["p99_latency_ms"].as_f64())),
         format_ms(slice.and_then(|value| value["max_latency_ms"].as_f64())),
         format_u64(Some(sample_count)),
+    ]
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LiveLatencyTableTargets {
+    p50_ms: f64,
+    p95_ms: f64,
+    p99_ms: f64,
+    max_ms: f64,
+    sample_count: u64,
+}
+
+fn live_latency_table_targets(snapshot: &Value, state: &str) -> LiveLatencyTableTargets {
+    let thresholds = if state == "hot" {
+        &snapshot["thresholds"]["retrieval"]["hot_live_table"]
+    } else {
+        &snapshot["thresholds"]["retrieval"]["cold_live_table"]
+    };
+    LiveLatencyTableTargets {
+        p50_ms: thresholds["target_p50_ms"].as_f64().unwrap_or(0.0),
+        p95_ms: thresholds["target_p95_ms"].as_f64().unwrap_or(0.0),
+        p99_ms: thresholds["target_p99_ms"].as_f64().unwrap_or(0.0),
+        max_ms: thresholds["target_max_ms"].as_f64().unwrap_or(0.0),
+        sample_count: thresholds["target_sample_count"].as_u64().unwrap_or(0),
+    }
+}
+
+fn target_values(targets: &LiveLatencyTableTargets) -> Vec<String> {
+    vec![
+        format_target_ms("<=", targets.p50_ms),
+        format_target_ms("<=", targets.p95_ms),
+        format_target_ms("<=", targets.p99_ms),
+        format_target_ms("<=", targets.max_ms),
+        format_target_u64(">=", targets.sample_count),
     ]
 }
 
@@ -2241,6 +2266,14 @@ fn format_u64(value: Option<u64>) -> String {
     value
         .map(|number| number.to_string())
         .unwrap_or_else(|| "ещё нет данных".to_string())
+}
+
+fn format_target_ms(operator: &str, value: f64) -> String {
+    format!("{operator} {value:.3} ms")
+}
+
+fn format_target_u64(operator: &str, value: u64) -> String {
+    format!("{operator} {value}")
 }
 
 fn format_signed_count(value: Option<i64>) -> String {

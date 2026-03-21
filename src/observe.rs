@@ -88,7 +88,16 @@ struct NatsThresholds {
 
 #[derive(Debug, Clone, Deserialize)]
 struct RetrievalThresholds {
+    target_cold_p50_ms: f64,
     target_p95_ms: f64,
+    target_cold_p99_ms: f64,
+    target_cold_max_ms: f64,
+    target_cold_sample_count: u64,
+    target_hot_p50_ms: f64,
+    target_hot_p95_ms: f64,
+    target_hot_p99_ms: f64,
+    target_hot_max_ms: f64,
+    target_hot_sample_count: u64,
     alert_p95_ms: f64,
     critical_p95_ms: f64,
     stretch_hot_p95_ms: f64,
@@ -331,6 +340,20 @@ fn profile_thresholds_json(profile: &ObservabilityProfile) -> Value {
                 "target": profile.retrieval.stretch_hot_p95_ms,
                 "alert": profile.retrieval.target_p95_ms,
                 "critical": profile.retrieval.alert_p95_ms,
+            },
+            "cold_live_table": {
+                "target_p50_ms": profile.retrieval.target_cold_p50_ms,
+                "target_p95_ms": profile.retrieval.target_p95_ms,
+                "target_p99_ms": profile.retrieval.target_cold_p99_ms,
+                "target_max_ms": profile.retrieval.target_cold_max_ms,
+                "target_sample_count": profile.retrieval.target_cold_sample_count,
+            },
+            "hot_live_table": {
+                "target_p50_ms": profile.retrieval.target_hot_p50_ms,
+                "target_p95_ms": profile.retrieval.target_hot_p95_ms,
+                "target_p99_ms": profile.retrieval.target_hot_p99_ms,
+                "target_max_ms": profile.retrieval.target_hot_max_ms,
+                "target_sample_count": profile.retrieval.target_hot_sample_count,
             },
         },
         "accuracy": {
