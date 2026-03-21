@@ -1339,6 +1339,7 @@ fn summarize_events(
             "events_total": 0,
             "events_count": 0,
             "counted_events": 0,
+            "task_success_like_counted_events": 0,
             "legacy_unverified_events": 0,
             "preliminary": true,
             "baseline_tokens": 0,
@@ -1348,12 +1349,14 @@ fn summarize_events(
             "total_saved_tokens": 0,
             "total_effective_saved_tokens": 0,
             "verified_effective_saved_tokens": 0,
+            "verified_task_like_saved_tokens": 0,
             "total_naive_tokens": 0,
             "total_context_tokens": 0,
             "total_recovery_tokens": 0,
             "gross_savings_pct": 0.0,
             "effective_savings_pct": 0.0,
             "verified_effective_savings_pct": 0.0,
+            "verified_task_like_savings_pct": 0.0,
             "savings_percent": 0.0,
             "savings_factor": 0.0,
             "avg_saved_tokens_per_event": 0.0,
@@ -1391,6 +1394,24 @@ fn summarize_events(
         .iter()
         .map(|event| event.naive_tokens)
         .sum::<u64>();
+    let task_like_events = verified_events
+        .iter()
+        .copied()
+        .filter(|event| {
+            matches!(
+                event.quality_tier.as_str(),
+                "task_proxy" | "task_success_recovered"
+            )
+        })
+        .collect::<Vec<_>>();
+    let verified_task_like_saved_tokens = task_like_events
+        .iter()
+        .map(|event| event.effective_saved_tokens)
+        .sum::<i64>();
+    let verified_task_like_baseline_tokens = task_like_events
+        .iter()
+        .map(|event| event.naive_tokens)
+        .sum::<u64>();
     let gross_savings_pct = if total_naive_tokens == 0 {
         0.0
     } else {
@@ -1400,6 +1421,10 @@ fn summarize_events(
         percent_from_signed(total_effective_saved_tokens, total_naive_tokens);
     let verified_effective_savings_pct =
         percent_from_signed(verified_effective_saved_tokens, verified_baseline_tokens);
+    let verified_task_like_savings_pct = percent_from_signed(
+        verified_task_like_saved_tokens,
+        verified_task_like_baseline_tokens,
+    );
     let savings_factor = if total_context_tokens == 0 {
         total_naive_tokens as f64
     } else {
@@ -1458,6 +1483,7 @@ fn summarize_events(
         "events_total": events.len(),
         "events_count": events.len(),
         "counted_events": verified_events.len(),
+        "task_success_like_counted_events": task_like_events.len(),
         "legacy_unverified_events": legacy_unverified_events,
         "preliminary": preliminary,
         "baseline_tokens": total_naive_tokens,
@@ -1467,12 +1493,14 @@ fn summarize_events(
         "total_saved_tokens": total_saved_tokens,
         "total_effective_saved_tokens": total_effective_saved_tokens,
         "verified_effective_saved_tokens": verified_effective_saved_tokens,
+        "verified_task_like_saved_tokens": verified_task_like_saved_tokens,
         "total_naive_tokens": total_naive_tokens,
         "total_context_tokens": total_context_tokens,
         "total_recovery_tokens": total_recovery_tokens,
         "gross_savings_pct": gross_savings_pct,
         "effective_savings_pct": effective_savings_pct,
         "verified_effective_savings_pct": verified_effective_savings_pct,
+        "verified_task_like_savings_pct": verified_task_like_savings_pct,
         "savings_percent": gross_savings_pct,
         "savings_factor": savings_factor,
         "avg_saved_tokens_per_event": avg_saved_tokens_per_event,
@@ -1612,7 +1640,9 @@ fn query_slice_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementC
                     "query_type": query_type,
                     "events_count": summary["events_count"],
                     "counted_events": summary["counted_events"],
+                    "task_success_like_counted_events": summary["task_success_like_counted_events"],
                     "verified_effective_savings_pct": summary["verified_effective_savings_pct"],
+                    "verified_task_like_savings_pct": summary["verified_task_like_savings_pct"],
                     "quality_ok_rate": summary["quality_ok_rate"],
                     "task_success_like_rate": summary["task_success_like_rate"],
                     "fallback_rate": summary["fallback_rate"],

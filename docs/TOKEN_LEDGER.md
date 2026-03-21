@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 04:26 MSK
-Ручная сверка guide/docs: 2026-03-21 04:26 MSK
+modified_at: 2026-03-21 04:35 MSK
+Ручная сверка guide/docs: 2026-03-21 04:35 MSK
 
 # Token Ledger
 
@@ -200,6 +200,13 @@ Ledger не имеет права смешивать:
   - полезный результат достигнут через recovery chain;
 - `partial`
   - есть зацепки, но до quality gate ещё не дотянуто.
+
+Практически полезная secondary-метрика поверх этого градиента:
+- `verified_task_like_savings_pct`
+
+Смысл:
+- headline всё ещё остаётся `Verified Effective Savings %`;
+- но `verified_task_like_savings_pct` показывает более строгую долю savings по событиям, которые уже дошли до `task_proxy` или `task_success_recovered`.
 
 ## Recovery penalties
 

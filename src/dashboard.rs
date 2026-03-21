@@ -762,6 +762,21 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let rolling_recovery = rolling_window["median_recovery_tokens"].as_f64();
     let session_recovery = current_session["median_recovery_tokens"].as_f64();
     let lifetime_recovery = lifetime["median_recovery_tokens"].as_f64();
+    let session_task_rate = current_session["task_success_like_rate"].as_f64();
+    let session_task_count = current_session["task_success_like_counted_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let session_task_percent = current_session["verified_task_like_savings_pct"].as_f64();
+    let rolling_task_rate = rolling_window["task_success_like_rate"].as_f64();
+    let rolling_task_count = rolling_window["task_success_like_counted_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let rolling_task_percent = rolling_window["verified_task_like_savings_pct"].as_f64();
+    let lifetime_task_rate = lifetime["task_success_like_rate"].as_f64();
+    let lifetime_task_count = lifetime["task_success_like_counted_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let lifetime_task_percent = lifetime["verified_task_like_savings_pct"].as_f64();
 
     vec![
         card(
@@ -774,6 +789,11 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                     format_u64(Some(session_events)),
                     format_percent(session_percent),
                     recovery_sentence(session_recovery)
+                ) + &format!(
+                    " До более сильного task-level proxy уже дотянулись: {} событий, {} от всей выборки, экономия по ним: {}.",
+                    format_u64(Some(session_task_count)),
+                    format_percent(session_task_rate),
+                    format_percent(session_task_percent)
                 )
             } else if session_events_total > 0 {
                 format!(
@@ -796,6 +816,11 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                     format_u64(Some(rolling_events)),
                     format_percent(rolling_percent),
                     recovery_sentence(rolling_recovery)
+                ) + &format!(
+                    " До task-level proxy уже дошли: {} событий, {} от окна, экономия по ним: {}.",
+                    format_u64(Some(rolling_task_count)),
+                    format_percent(rolling_task_rate),
+                    format_percent(rolling_task_percent)
                 )
             } else if rolling_events_total > 0 {
                 format!(
@@ -817,6 +842,11 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                     format_u64(Some(lifetime_events)),
                     format_percent(lifetime_percent),
                     recovery_sentence(lifetime_recovery)
+                ) + &format!(
+                    " До task-level proxy за всё время дошли: {} событий, {} от всей выборки, экономия по ним: {}.",
+                    format_u64(Some(lifetime_task_count)),
+                    format_percent(lifetime_task_rate),
+                    format_percent(lifetime_task_percent)
                 )
             } else if lifetime_events_total > 0 {
                 format!(

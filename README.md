@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 04:26 MSK
-Ручная сверка guide/docs: 2026-03-21 04:26 MSK
+modified_at: 2026-03-21 04:35 MSK
+Ручная сверка guide/docs: 2026-03-21 04:35 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -629,6 +629,8 @@ cargo run --release -- observe reverify-token-ledger --apply
     - показывает, попал ли уже верхний слой retrieval в ожидаемую цель, а не только “нашлось что-то где-то”.
   - `task_success_like_rate`
     - доля событий, где контур уже дошёл до более сильного task-level proxy, а не остановился на одном retrieval parity.
+  - `verified_task_like_savings_pct`
+    - более строгая secondary-метрика: какая часть экономии уже относится именно к task-like событиям, а не только к широкому quality gate.
 
 Это важно не для красоты, а для честности:
 - если `Amai` сначала сэкономил токены, но потом заставил делать follow-up, retry или correction, эти токены теперь идут в штраф;

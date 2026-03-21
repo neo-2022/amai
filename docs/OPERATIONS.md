@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 04:26 MSK
-Ручная сверка guide/docs: 2026-03-21 04:26 MSK
+modified_at: 2026-03-21 04:35 MSK
+Ручная сверка guide/docs: 2026-03-21 04:35 MSK
 
 # Operations
 
@@ -729,6 +729,7 @@ cargo run --release -- verify token-benchmark-suite \
     - runtime пишет `quality_tier`;
     - пишет `head_hit_target`;
     - summary считает `task_success_like_rate`;
+    - summary считает `verified_task_like_savings_pct`;
     - `hybrid_task_proxy` означает, что цель попала в верхние retrieval hits без follow-up;
   - успешный recovery-follow-up может получить `quality_method = hybrid_task_success`;
   - и его `recovery_tokens` уже включают стоимость предыдущего промаха.
