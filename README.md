@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 12:32 MSK
-Ручная сверка guide/docs: 2026-03-21 12:32 MSK
+modified_at: 2026-03-21 12:54 MSK
+Ручная сверка guide/docs: 2026-03-21 12:54 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -307,6 +307,23 @@ AMAI_AGENT_SCOPE=agent_beta  ./scripts/continuity_startup.sh --project art --nam
 - это не “что-то старое по смыслу”;
 - это ближайший соседний chat thread по времени внутри того же `project + namespace + agent_scope`;
 - archived thread тоже считается нормальным кандидатом, потому что прошлый чат обычно уже архивный.
+
+Для temporal lookup теперь есть отдельный универсальный helper:
+
+```bash
+./scripts/chat_lookup.sh --project art --namespace continuity --chat-reference current --messages-count 2
+./scripts/chat_lookup.sh --project art --namespace continuity --chat-reference previous --messages-count 2
+./scripts/chat_lookup.sh --project art --namespace continuity --at-time-rfc3339 2026-03-21T11:41:00+03:00 --messages-count 2
+```
+
+Это один и тот же прямой путь для трёх случаев:
+- `current chat`
+- `previous chat`
+- `chat at exact time`
+
+То есть вопрос вида `что было в прошлую среду в 12:00` теперь не должен разваливаться на
+несколько обходов через transcript search. `Amai` сначала берёт thread index, потом выбирает
+подходящий chat по времени и только затем поднимает нужные сообщения.
 
 ## Как смотреть пользу онлайн без терминала
 

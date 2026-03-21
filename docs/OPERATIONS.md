@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 12:32 MSK
-Ручная сверка guide/docs: 2026-03-21 12:32 MSK
+modified_at: 2026-03-21 12:54 MSK
+Ручная сверка guide/docs: 2026-03-21 12:54 MSK
 
 # Operations
 
@@ -193,11 +193,10 @@ cd /home/art/agent-memory-index
 Если нужен именно предыдущий чат и его хвост:
 
 ```bash
-./scripts/continuity_answer.sh \
+./scripts/chat_lookup.sh \
   --project project_alpha \
   --namespace continuity \
-  --intent last_chat \
-  --include-previous-chat-messages \
+  --chat-reference previous \
   --messages-count 2
 ```
 
@@ -205,6 +204,16 @@ cd /home/art/agent-memory-index
 чтобы не спутать текущий thread с предыдущим внутри одного project-space.
 `previous chat` при этом означает ближайший thread по времени в том же
 `project + namespace + agent_scope`, включая уже архивные чаты.
+
+Если нужен текущий chat или chat на точный момент времени, используется тот же helper:
+
+```bash
+./scripts/chat_lookup.sh --project project_alpha --namespace continuity --chat-reference current --messages-count 2
+./scripts/chat_lookup.sh --project project_alpha --namespace continuity --at-time-rfc3339 2026-03-21T11:41:00+03:00 --messages-count 2
+```
+
+Это важный инвариант: `current / previous / exact time` идут одним temporal path, а не
+разными эвристическими обходами.
 
 Пример:
 

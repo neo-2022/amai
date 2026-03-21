@@ -413,32 +413,77 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
         .await?
         .unwrap_or_else(|| continuity["active_workline_summary"]["details"].clone());
     let restore = working_state::build_restore_bundle(&db, &project, &namespace).await?;
-    let previous_chat_tail = if args.include_previous_chat_messages {
-        let thread_index_snapshots = postgres::list_observability_snapshots_by_kinds(
-            &db,
-            &["continuity_thread_index"],
-            Some(200),
-        )
-        .await?;
-        codex_threads::previous_chat_tail(&project.repo_root, args.messages_count)?.or(
-            codex_threads::previous_chat_tail_from_snapshots(
-                &thread_index_snapshots,
-                &project.code,
-                &namespace.code,
-                codex_threads::current_thread_id().as_deref(),
-                args.messages_count,
-            ),
-        )
-    } else {
-        None
-    };
+    let current_thread_id = codex_threads::current_thread_id();
+    let wants_chat_lookup = args.include_chat_messages
+        || args.at_time_rfc3339.is_some()
+        || args.chat_reference.is_some()
+        || args.intent == "previous_chat"
+        || args.intent == "chat_at_time";
+    let chat_tail =
+        if wants_chat_lookup {
+            let thread_index_snapshots = postgres::list_observability_snapshots_by_kinds(
+                &db,
+                &["continuity_thread_index"],
+                Some(200),
+            )
+            .await?;
+            if let Some(at_time_rfc3339) = &args.at_time_rfc3339 {
+                codex_threads::chat_tail_at_time(
+                    &project.repo_root,
+                    at_time_rfc3339,
+                    args.messages_count,
+                )?
+                .or(codex_threads::chat_tail_at_time_from_snapshots(
+                    &thread_index_snapshots,
+                    &project.code,
+                    &namespace.code,
+                    at_time_rfc3339,
+                    args.messages_count,
+                )?)
+            } else {
+                let chat_reference =
+                    args.chat_reference
+                        .as_deref()
+                        .unwrap_or(if args.intent == "previous_chat" {
+                            "previous"
+                        } else {
+                            "current"
+                        });
+                match chat_reference {
+                    "previous" => {
+                        codex_threads::previous_chat_tail(&project.repo_root, args.messages_count)?
+                            .or(codex_threads::previous_chat_tail_from_snapshots(
+                                &thread_index_snapshots,
+                                &project.code,
+                                &namespace.code,
+                                current_thread_id.as_deref(),
+                                args.messages_count,
+                            ))
+                    }
+                    "current" => {
+                        codex_threads::current_chat_tail(&project.repo_root, args.messages_count)?
+                            .or(codex_threads::current_chat_tail_from_snapshots(
+                                &thread_index_snapshots,
+                                &project.code,
+                                &namespace.code,
+                                current_thread_id.as_deref(),
+                                args.messages_count,
+                            ))
+                    }
+                    _ => None,
+                }
+            }
+        } else {
+            None
+        };
     println!(
         "{}",
         render_direct_answer(
             &handoff_summary,
             restore.as_ref(),
-            previous_chat_tail.as_ref(),
+            chat_tail.as_ref(),
             &args.intent,
+            args.at_time_rfc3339.as_deref(),
         )
     );
     Ok(())
@@ -526,13 +571,15 @@ pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> R
 fn render_direct_answer(
     handoff_summary: &Value,
     restore: Option<&Value>,
-    previous_chat_tail: Option<&codex_threads::PreviousChatTail>,
+    chat_tail: Option<&codex_threads::ChatTail>,
     intent: &str,
+    at_time_rfc3339: Option<&str>,
 ) -> String {
     let heading = match intent {
         "continue" => "Продолжаем с этой линии:",
         "handoff" => "Текущий handoff в Amai:",
-        "previous_chat" => "Текущая активная линия:",
+        "previous_chat" => "На чём закончился прошлый чат:",
+        "chat_at_time" => "Что было в чате на этот момент:",
         _ => "На чём остановились:",
     };
     let headline = handoff_summary["headline"]
@@ -544,6 +591,7 @@ fn render_direct_answer(
 
     let mut lines = vec![format!("{heading} {headline}")];
     if intent != "previous_chat"
+        && intent != "chat_at_time"
         && let Some(restore_node) = restore.map(|value| &value["working_state_restore"])
     {
         if let Some(summary) = summarize_materialized_notes(&restore_node["materialized_notes"]) {
@@ -562,16 +610,30 @@ fn render_direct_answer(
             );
         }
     }
-    if let Some(previous_chat_tail) = previous_chat_tail {
-        let title = if previous_chat_tail.title.trim().is_empty() {
-            previous_chat_tail.thread_id.as_str()
+    if let Some(chat_tail) = chat_tail {
+        let title = if chat_tail.title.trim().is_empty() {
+            chat_tail.thread_id.as_str()
         } else {
-            previous_chat_tail.title.as_str()
+            chat_tail.title.as_str()
         };
-        lines.push(format!("Предыдущий чат по времени: {title}"));
-        if !previous_chat_tail.messages.is_empty() {
-            lines.push("Последние сообщения предыдущего чата:".to_string());
-            for message in &previous_chat_tail.messages {
+        if let Some(at_time_rfc3339) = at_time_rfc3339 {
+            lines.push(format!("Целевой момент времени: {at_time_rfc3339}"));
+            lines.push(format!("Подходящий chat thread: {title}"));
+        } else if intent == "previous_chat" {
+            lines.push(format!("Предыдущий чат по времени: {title}"));
+        } else {
+            lines.push(format!("Найденный chat thread: {title}"));
+        }
+        if !chat_tail.messages.is_empty() {
+            let label = if at_time_rfc3339.is_some() {
+                "Ближайшие сообщения к этому моменту:"
+            } else if intent == "previous_chat" {
+                "Последние сообщения предыдущего чата:"
+            } else {
+                "Последние сообщения этого чата:"
+            };
+            lines.push(label.to_string());
+            for message in &chat_tail.messages {
                 let role = if message.role == "user" {
                     "Ваше"
                 } else {
@@ -1058,6 +1120,7 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{is_meta_continuity_handoff, render_direct_answer};
+    use crate::codex_threads::{ChatTail, TranscriptMessage};
     use serde_json::json;
 
     #[test]
@@ -1084,7 +1147,7 @@ mod tests {
             }
         });
 
-        let answer = render_direct_answer(&handoff, Some(&restore), None, "last_chat");
+        let answer = render_direct_answer(&handoff, Some(&restore), None, "last_chat", None);
 
         assert!(
             answer
@@ -1108,5 +1171,42 @@ mod tests {
             "Сделать auto-injection restore pack прямо в chat-start prompt.",
             "Materialized рабочий контур в continuity."
         ));
+    }
+
+    #[test]
+    fn render_direct_answer_formats_time_addressable_chat_lookup() {
+        let handoff = json!({
+            "headline": "Temporal lookup materialized",
+            "next_step": "Проверить lookup по точному времени на реальном новом чате."
+        });
+        let chat_tail = ChatTail {
+            thread_id: "thread-1".to_string(),
+            title: "чат про continuity".to_string(),
+            messages: vec![
+                TranscriptMessage {
+                    role: "user".to_string(),
+                    text: "о чём говорили?".to_string(),
+                },
+                TranscriptMessage {
+                    role: "assistant".to_string(),
+                    text: "про temporal lookup".to_string(),
+                },
+            ],
+        };
+
+        let answer = render_direct_answer(
+            &handoff,
+            None,
+            Some(&chat_tail),
+            "chat_at_time",
+            Some("2026-03-19T12:00:00+03:00"),
+        );
+
+        assert!(answer.contains("Что было в чате на этот момент: Temporal lookup materialized"));
+        assert!(answer.contains("Целевой момент времени: 2026-03-19T12:00:00+03:00"));
+        assert!(answer.contains("Подходящий chat thread: чат про continuity"));
+        assert!(answer.contains("Ближайшие сообщения к этому моменту:"));
+        assert!(answer.contains("- Ваше: о чём говорили?"));
+        assert!(answer.contains("- Моё: про temporal lookup"));
     }
 }
