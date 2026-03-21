@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -69,6 +69,7 @@ struct ExternalDatasetEntry {
 enum AdapterStatus {
     Prepared,
     BlockedUnsupportedDataset,
+    BlockedUpstreamDisabled,
     BlockedConversionRequired,
     BlockedDatasetMissing,
 }
@@ -424,7 +425,6 @@ pub async fn run_external_adapter(
     }
 
     let adapter_kind = adapter_kind_for(benchmark_code);
-    let status = determine_adapter_status(benchmark_code, dataset, dataset_path.exists());
     let output_dir = output_dir_override
         .map(|path| path.to_path_buf())
         .unwrap_or_else(|| {
@@ -443,6 +443,12 @@ pub async fn run_external_adapter(
         .join("external-benchmarks")
         .join("upstream")
         .join(benchmark_code);
+    let status = determine_adapter_status(
+        benchmark_code,
+        dataset,
+        dataset_path.exists(),
+        &upstream_dir,
+    );
     let launch_commands =
         build_launch_commands(benchmark_code, &upstream_dir, &dataset_path, dataset);
     let comparison_commands = vec![
@@ -517,6 +523,11 @@ pub async fn run_external_adapter(
             benchmark.display_name, dataset.display_name
         );
     }
+    if status == AdapterStatus::BlockedUpstreamDisabled {
+        println!(
+            "Причина: upstream ann-benchmarks сейчас держит canonical qdrant config как disabled=true. Amai честно не называет такой contour prepared, пока upstream default path не станет исполнимым или не появится отдельный override-policy."
+        );
+    }
     if status == AdapterStatus::BlockedConversionRequired {
         println!(
             "Причина: VectorDBBench custom dataset path требует Parquet bundle `train/test/neighbors`, а текущий dataset в HDF5. Runner уже materialized fail-closed и не притворяется прямой совместимостью."
@@ -528,6 +539,112 @@ pub async fn run_external_adapter(
     println!();
     println!("Сравнивать рядом с внутренним Amai contour:");
     for command in comparison_commands {
+        println!("- {}", command);
+    }
+    Ok(())
+}
+
+pub fn print_external_harvest(
+    repo_root: &Path,
+    benchmark_query: &str,
+    dataset_query: &str,
+    output_dir_override: Option<&Path>,
+) -> Result<()> {
+    let registry = load_registry(repo_root)?;
+    let catalog = load_dataset_catalog(repo_root)?;
+    let (benchmark_code, benchmark) = resolve_benchmark(&registry, benchmark_query)
+        .ok_or_else(|| anyhow!("unknown external benchmark: {benchmark_query}"))?;
+    let (dataset_code, dataset) = resolve_dataset(&catalog, dataset_query)
+        .ok_or_else(|| anyhow!("unknown external dataset: {dataset_query}"))?;
+    let output_dir = output_dir_override
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(|| {
+            repo_root
+                .join("state")
+                .join("external-benchmarks")
+                .join("runs")
+                .join(benchmark_code)
+                .join(dataset_code)
+                .join("latest")
+        });
+    let summary_path = output_dir.join("summary.json");
+    let report_path = output_dir.join("report.md");
+    let script_path = output_dir.join("run_external.sh");
+    let status_path = output_dir.join("run_status.json");
+    let log_path = output_dir.join("run_external.log");
+    let summary_text = fs::read_to_string(&summary_path)
+        .with_context(|| format!("failed to read {}", summary_path.display()))?;
+    let summary_json: Value = serde_json::from_str(&summary_text)
+        .with_context(|| format!("failed to parse {}", summary_path.display()))?;
+    let run_status = if status_path.exists() {
+        let raw = fs::read_to_string(&status_path)
+            .with_context(|| format!("failed to read {}", status_path.display()))?;
+        Some(
+            serde_json::from_str::<Value>(&raw)
+                .with_context(|| format!("failed to parse {}", status_path.display()))?,
+        )
+    } else {
+        None
+    };
+    let log_size = if log_path.exists() {
+        Some(
+            fs::metadata(&log_path)
+                .with_context(|| format!("failed to stat {}", log_path.display()))?
+                .len(),
+        )
+    } else {
+        None
+    };
+
+    println!("Amai external benchmark harvest");
+    println!();
+    println!("Benchmark: {} ({})", benchmark.display_name, benchmark_code);
+    println!("Dataset: {} ({})", dataset.display_name, dataset_code);
+    println!(
+        "Adapter status: {}",
+        summary_json["status"].as_str().unwrap_or("unknown")
+    );
+    println!(
+        "Adapter kind: {}",
+        summary_json["adapter_kind"].as_str().unwrap_or("unknown")
+    );
+    println!("Workspace: {}", output_dir.display());
+    println!("Summary: {}", summary_path.display());
+    println!(
+        "Artifacts: report={} script={} status={} log={}",
+        if report_path.exists() { "yes" } else { "no" },
+        if script_path.exists() { "yes" } else { "no" },
+        if status_path.exists() { "yes" } else { "no" },
+        if log_path.exists() { "yes" } else { "no" }
+    );
+    if let Some(run_status) = &run_status {
+        println!(
+            "Run state: {}",
+            run_status["state"].as_str().unwrap_or("unknown")
+        );
+        if let Some(exit_code) = run_status["exit_code"].as_i64() {
+            println!("Exit code: {}", exit_code);
+        }
+        if let Some(message) = run_status["message"].as_str() {
+            println!("Message: {}", message);
+        }
+        if let Some(finished_at) = run_status["finished_at_epoch_s"].as_u64() {
+            println!("Finished at epoch_s: {}", finished_at);
+        }
+    } else {
+        println!("Run state: not_started");
+    }
+    if let Some(bytes) = log_size {
+        println!("Log size: {}", format_bytes(bytes));
+    }
+    println!();
+    println!("Сравнивать рядом с внутренним Amai contour:");
+    for command in summary_json["comparison_commands"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str())
+    {
         println!("- {}", command);
     }
     Ok(())
@@ -634,9 +751,12 @@ fn determine_adapter_status(
     benchmark_code: &str,
     dataset: &ExternalDatasetEntry,
     dataset_exists: bool,
+    upstream_dir: &Path,
 ) -> AdapterStatus {
     if !benchmark_supports_dataset(benchmark_code, dataset) {
         AdapterStatus::BlockedUnsupportedDataset
+    } else if upstream_disables_default_launch(benchmark_code, upstream_dir) {
+        AdapterStatus::BlockedUpstreamDisabled
     } else if adapter_kind_for(benchmark_code) == "conversion_required" {
         AdapterStatus::BlockedConversionRequired
     } else if !dataset_exists {
@@ -644,6 +764,21 @@ fn determine_adapter_status(
     } else {
         AdapterStatus::Prepared
     }
+}
+
+fn upstream_disables_default_launch(benchmark_code: &str, upstream_dir: &Path) -> bool {
+    if benchmark_code != "ann_benchmarks" {
+        return false;
+    }
+    let qdrant_config = upstream_dir
+        .join("ann_benchmarks")
+        .join("algorithms")
+        .join("qdrant")
+        .join("config.yml");
+    let Ok(content) = fs::read_to_string(&qdrant_config) else {
+        return false;
+    };
+    content.lines().any(|line| line.trim() == "disabled: true")
 }
 
 fn build_launch_commands(
@@ -702,6 +837,7 @@ fn adapter_status_code(status: AdapterStatus) -> &'static str {
     match status {
         AdapterStatus::Prepared => "prepared",
         AdapterStatus::BlockedUnsupportedDataset => "blocked_unsupported_dataset",
+        AdapterStatus::BlockedUpstreamDisabled => "blocked_upstream_disabled",
         AdapterStatus::BlockedConversionRequired => "blocked_conversion_required",
         AdapterStatus::BlockedDatasetMissing => "blocked_dataset_missing",
     }
@@ -711,6 +847,9 @@ fn adapter_status_label(status: AdapterStatus) -> &'static str {
     match status {
         AdapterStatus::Prepared => "готов к следующему запуску",
         AdapterStatus::BlockedUnsupportedDataset => "dataset пока не поддержан этим benchmark-ом",
+        AdapterStatus::BlockedUpstreamDisabled => {
+            "upstream benchmark сейчас отключил этот launch path"
+        }
         AdapterStatus::BlockedConversionRequired => "нужна конвертация dataset",
         AdapterStatus::BlockedDatasetMissing => "dataset ещё не скачан",
     }
@@ -771,9 +910,26 @@ captured_at_epoch_s: {captured_at}\n\n\
 fn render_adapter_script(ctx: &AdapterRenderContext<'_>) -> String {
     let body = if ctx.status == AdapterStatus::Prepared {
         format!(
-            "echo \"Amai external benchmark launch: {benchmark} / {dataset}\"\n\
-echo \"Источник: подготовленный adapter workspace; запускается реальный upstream path, а не echo-заглушка.\"\n\
-{}\n",
+            "SCRIPT_DIR=\"$(cd -- \"$(dirname -- \"${{BASH_SOURCE[0]}}\")\" && pwd)\"\n\
+LOG_PATH=\"$SCRIPT_DIR/run_external.log\"\n\
+STATUS_PATH=\"$SCRIPT_DIR/run_status.json\"\n\
+STARTED_AT=\"$(date +%s)\"\n\
+printf '{{\"state\":\"running\",\"exit_code\":null,\"message\":\"upstream launch started\",\"started_at_epoch_s\":%s}}\\n' \"$STARTED_AT\" > \"$STATUS_PATH\"\n\
+echo \"Amai external benchmark launch: {benchmark} / {dataset}\" | tee \"$LOG_PATH\"\n\
+echo \"Источник: подготовленный adapter workspace; запускается реальный upstream path, а не echo-заглушка.\" | tee -a \"$LOG_PATH\"\n\
+set +e\n\
+(\n\
+{}\n\
+) 2>&1 | tee -a \"$LOG_PATH\"\n\
+CMD_EXIT=${{PIPESTATUS[0]}}\n\
+set -e\n\
+FINISHED_AT=\"$(date +%s)\"\n\
+if [ \"$CMD_EXIT\" -eq 0 ]; then\n\
+  printf '{{\"state\":\"finished_ok\",\"exit_code\":%s,\"message\":\"upstream launch finished successfully\",\"started_at_epoch_s\":%s,\"finished_at_epoch_s\":%s}}\\n' \"$CMD_EXIT\" \"$STARTED_AT\" \"$FINISHED_AT\" > \"$STATUS_PATH\"\n\
+else\n\
+  printf '{{\"state\":\"finished_error\",\"exit_code\":%s,\"message\":\"upstream launch finished with error\",\"started_at_epoch_s\":%s,\"finished_at_epoch_s\":%s}}\\n' \"$CMD_EXIT\" \"$STARTED_AT\" \"$FINISHED_AT\" > \"$STATUS_PATH\"\n\
+fi\n\
+exit \"$CMD_EXIT\"\n",
             ctx.launch_commands.join("\n"),
             benchmark = shell_escape_echo(ctx.benchmark.display_name.as_str()),
             dataset = shell_escape_echo(ctx.dataset.display_name.as_str()),
@@ -793,6 +949,15 @@ exit 4\n",
             ctx.benchmark.display_name,
             ctx.dataset_path.display(),
             ctx.upstream_dir.display()
+        )
+    } else if ctx.status == AdapterStatus::BlockedUpstreamDisabled {
+        format!(
+            "echo \"Upstream {} сейчас держит canonical qdrant config в disabled=true; default launch path не должен считаться готовым.\"\n\
+echo \"Upstream repo: {}\"\n\
+echo \"Чтобы идти дальше честно, нужен либо upstream enable, либо отдельный explicit override-policy.\"\n\
+exit 5\n",
+            ctx.benchmark.display_name,
+            ctx.upstream_dir.display(),
         )
     } else {
         format!(
@@ -994,6 +1159,7 @@ mod tests {
         ordered_benchmarks, recommended_datasets, resolve_benchmark, resolve_dataset,
     };
     use std::collections::BTreeMap;
+    use std::fs;
     use std::path::Path;
 
     #[test]
@@ -1057,8 +1223,26 @@ mod tests {
     fn unsupported_dataset_blocks_ann_adapter_honestly() {
         let catalog = sample_catalog();
         let dataset = &catalog.datasets["sphere_10m_meta_dpr"];
-        let status = determine_adapter_status("ann_benchmarks", dataset, true);
+        let status =
+            determine_adapter_status("ann_benchmarks", dataset, true, Path::new("/tmp/missing"));
         assert_eq!(status, AdapterStatus::BlockedUnsupportedDataset);
+    }
+
+    #[test]
+    fn ann_adapter_blocks_when_upstream_qdrant_is_disabled() {
+        let catalog = sample_catalog();
+        let dataset = &catalog.datasets["dbpedia_openai_1000k_angular"];
+        let temp_root =
+            std::env::temp_dir().join(format!("amai-ann-upstream-disabled-{}", std::process::id()));
+        let config_dir = temp_root
+            .join("ann_benchmarks")
+            .join("algorithms")
+            .join("qdrant");
+        fs::create_dir_all(&config_dir).expect("create qdrant config dir");
+        fs::write(config_dir.join("config.yml"), "disabled: true\n").expect("write qdrant config");
+        let status = determine_adapter_status("ann_benchmarks", dataset, true, &temp_root);
+        assert_eq!(status, AdapterStatus::BlockedUpstreamDisabled);
+        let _ = fs::remove_dir_all(&temp_root);
     }
 
     #[test]

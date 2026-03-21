@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 22:37 MSK
-Ручная сверка guide/docs: 2026-03-21 22:37 MSK
+modified_at: 2026-03-21 22:51 MSK
+Ручная сверка guide/docs: 2026-03-21 22:51 MSK
 
 # Operations
 
@@ -922,6 +922,7 @@ cargo run -- benchmark external-datasets
 cargo run -- benchmark external-download --dataset dbpedia_openai_1000k_angular
 cargo run -- benchmark external-plan --benchmark vectordbbench
 cargo run -- benchmark external-adapter --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular
+cargo run -- benchmark external-harvest --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular
 ./scripts/proof_external_benchmark_env.sh
 ./scripts/proof_external_benchmark_adapter.sh
 ```
@@ -967,20 +968,26 @@ config/external_benchmark_datasets.toml
   - `summary.json`
   - `report.md`
   - `run_external.sh`
+  - `run_status.json`
+  - `run_external.log`
   - для `ann-benchmarks` `run_external.sh` теперь идёт безопасным upstream path:
     - локальный `.venv`
     - `pip install -r requirements.txt`
     - symlink dataset в `data/<dataset>.hdf5`
     - `python install.py --algorithm qdrant`
     - `python run.py --dataset ... --algorithm qdrant`
+  - `external-harvest`
+    - читает workspace короткой сводкой без разбора полного Docker-лога;
   - `docker compose up` здесь больше не является каноническим launch-path, потому что при отсутствии compose-файла upstream он может по ошибке подцепить parent compose другого проекта;
-  - если dataset подходит напрямую, workspace помечается как `prepared`;
+  - если dataset подходит напрямую и upstream default path реально доступен, workspace помечается как `prepared`;
   - если dataset не скачан, это честно помечается как `blocked_dataset_missing`;
+  - если upstream canonical launch path сам помечен как `disabled: true`, это честно помечается как `blocked_upstream_disabled`;
   - если benchmark требует другой формат данных, это честно помечается как `blocked_conversion_required`.
 
 Текущий важный инвариант:
 - `ann-benchmarks` принимает HDF5 datasets напрямую;
 - но только если upstream уже знает этот dataset по имени в своём `DATASETS` registry;
+- если upstream qdrant path помечен `disabled: true` в canonical config, `Amai` не имеет права продолжать показывать такой contour как `prepared`;
 - если файл существует, но dataset не поддержан upstream напрямую, `Amai` обязан пометить contour как `blocked_unsupported_dataset`;
 - `VectorDBBench` custom dataset contour не должен притворяться, что принимает те же HDF5 без подготовки;
 - поэтому для `VectorDBBench` runner сейчас fail-closed пишет, что нужен Parquet bundle `train/test/neighbors`.

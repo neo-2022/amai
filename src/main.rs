@@ -93,6 +93,14 @@ async fn main() -> Result<()> {
                     )
                     .await?
                 }
+                BenchmarkCommand::ExternalHarvest(args) => {
+                    external_benchmark::print_external_harvest(
+                        &repo_root,
+                        &args.benchmark,
+                        &args.dataset,
+                        args.output_dir.as_deref(),
+                    )?
+                }
             }
         }
         Command::Continuity { command } => match command {

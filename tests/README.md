@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 22:37 MSK
-Ручная сверка guide/docs: 2026-03-21 22:37 MSK
+modified_at: 2026-03-21 22:51 MSK
+Ручная сверка guide/docs: 2026-03-21 22:51 MSK
 
 # Tests
 
@@ -53,12 +53,15 @@ modified_at: 2026-03-21 22:37 MSK
 - `cargo run -- benchmark external-download --dataset dbpedia_openai_1000k_angular`
 - `cargo run -- benchmark external-plan --benchmark vectordbbench`
 - `cargo run -- benchmark external-adapter --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular`
+- `cargo run -- benchmark external-harvest --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular`
 - `cargo run -- verify mcp-matrix --matrix live_mcpbench_local ...`
 - `cargo run -- verify mcp-matrix --matrix mcp_universe_local ...`
 
 Для `external-adapter` важный инвариант теперь такой:
 - `run_external.sh` должен быть реальным безопасным launch-path, а не `echo`-заглушкой;
 - для `ann-benchmarks` это означает `.venv + requirements + install.py + run.py`;
+- если upstream держит canonical launch path в `disabled: true`, `Amai` обязан выдавать `blocked_upstream_disabled`, а не ложный `prepared`;
+- `external-harvest` должен уметь одной короткой командой показать `summary/report/script/status/log`;
 - ложный `docker compose up` без явного compose-файла больше не считается допустимым proof-path.
 
 Когда появятся отдельные integration tests с поднимаемым stack fixture, они materialize-ятся именно здесь.

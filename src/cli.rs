@@ -80,6 +80,7 @@ pub enum BenchmarkCommand {
     ExternalDownload(BenchmarkDatasetArgs),
     ExternalPlan(BenchmarkArgs),
     ExternalAdapter(BenchmarkExternalAdapterArgs),
+    ExternalHarvest(BenchmarkExternalHarvestArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -194,6 +195,16 @@ pub struct BenchmarkExternalAdapterArgs {
     pub dataset: String,
     #[arg(long, default_value_t = false)]
     pub download_missing: bool,
+    #[arg(long)]
+    pub output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchmarkExternalHarvestArgs {
+    #[arg(long)]
+    pub benchmark: String,
+    #[arg(long)]
+    pub dataset: String,
     #[arg(long)]
     pub output_dir: Option<PathBuf>,
 }
