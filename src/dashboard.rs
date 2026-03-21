@@ -712,16 +712,28 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
 
 fn build_top_cards(snapshot: &Value) -> Vec<Value> {
     vec![
-        card(
-            "Hot retrieval p95",
-            format_ms(snapshot["latest_retrieval_hot"]["benchmark"]["p95_ms"].as_f64()),
-            "Это повторный запрос по уже прогретому быстрому кэшу.".to_string(),
+        live_latency_card(
+            snapshot,
+            "mixed",
+            "Retrieval mix сейчас",
+            "Это живая смешанная картина по последним Amai-запросам в текущей сессии. Крупное число на карточке — показатель прямо сейчас.",
+            worst_status(
+                status_for_metric_prefix(snapshot, "retrieval.hot"),
+                status_for_metric_prefix(snapshot, "retrieval.cold"),
+            ),
+        ),
+        live_latency_card(
+            snapshot,
+            "hot",
+            "Retrieval hot сейчас",
+            "Это живые повторные запросы по уже прогретому кэшу. Крупное число на карточке — показатель прямо сейчас.",
             status_for_metric_prefix(snapshot, "retrieval.hot"),
         ),
-        card(
-            "Cold retrieval p95",
-            format_ms(snapshot["latest_retrieval_cold"]["benchmark"]["p95_ms"].as_f64()),
-            "Это первый запрос после старта или без готового прогрева.".to_string(),
+        live_latency_card(
+            snapshot,
+            "cold",
+            "Retrieval cold сейчас",
+            "Это живые запросы без готового fast-cache и без подмены component metrics. Крупное число на карточке — показатель прямо сейчас.",
             status_for_metric_prefix(snapshot, "retrieval.cold"),
         ),
         card(
@@ -1255,6 +1267,48 @@ fn card(title: &str, value: String, note: String, status: &str) -> Value {
     })
 }
 
+fn live_latency_card(
+    snapshot: &Value,
+    state: &str,
+    title: &str,
+    intro: &str,
+    fallback_status: &str,
+) -> Value {
+    let Some(slice) = latency_slice(snapshot, state) else {
+        return card(
+            title,
+            "ещё нет данных".to_string(),
+            format!("{intro} В текущей сессии Amai ещё не накопил живую выборку этого типа."),
+            "unknown",
+        );
+    };
+
+    let sample_count = slice["sample_count"].as_u64().unwrap_or(0);
+    if sample_count == 0 {
+        return card(
+            title,
+            "ещё нет данных".to_string(),
+            format!("{intro} В текущей сессии Amai ещё не накопил живую выборку этого типа."),
+            "unknown",
+        );
+    }
+
+    card(
+        title,
+        format_ms(slice["current_latency_ms"].as_f64()),
+        format!(
+            "{} Максимум в этой сессии: {}. Выборка: {}. P50: {}. P95: {}. P99: {}.",
+            intro,
+            format_ms(slice["max_latency_ms"].as_f64()),
+            format_u64(Some(sample_count)),
+            format_ms(slice["p50_latency_ms"].as_f64()),
+            format_ms(slice["p95_latency_ms"].as_f64()),
+            format_ms(slice["p99_latency_ms"].as_f64()),
+        ),
+        fallback_status,
+    )
+}
+
 fn service_card(
     title: &str,
     value: String,
@@ -1279,6 +1333,14 @@ fn status_label(status: &str) -> &'static str {
         "critical" => "критично",
         _ => "нет данных",
     }
+}
+
+fn latency_slice<'a>(snapshot: &'a Value, state: &str) -> Option<&'a Value> {
+    snapshot["token_budget_report"]["token_budget_report"]["current_session"]["latency_slices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|slice| slice["state"].as_str() == Some(state))
 }
 
 fn savings_status(

@@ -1558,7 +1558,17 @@ fn summarize_events(
         .collect::<Vec<_>>();
     latency_values
         .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let latency_sample_count = latency_values.len();
+    let current_latency_ms = events
+        .iter()
+        .rev()
+        .map(|event| event.latency_ms)
+        .find(|value| value.is_finite())
+        .unwrap_or_default();
+    let p50_latency_ms = percentile_from_sorted(&latency_values, 0.50);
     let p95_latency_ms = percentile_from_sorted(&latency_values, 0.95);
+    let p99_latency_ms = percentile_from_sorted(&latency_values, 0.99);
+    let max_latency_ms = latency_values.last().copied().unwrap_or_default();
     let quality_ok_rate = quality_ok_events * 100.0 / events.len() as f64;
     let task_success_like_rate = task_success_like_events * 100.0 / events.len() as f64;
     let answer_like_rate = answer_like_events_rate * 100.0 / events.len() as f64;
@@ -1608,7 +1618,13 @@ fn summarize_events(
         "answer_like_rate": answer_like_rate,
         "fallback_rate": fallback_rate,
         "median_recovery_tokens": median_recovery_tokens,
+        "sample_count": latency_sample_count,
+        "current_latency_ms": current_latency_ms,
+        "p50_latency_ms": p50_latency_ms,
         "p95_latency_ms": p95_latency_ms,
+        "p99_latency_ms": p99_latency_ms,
+        "max_latency_ms": max_latency_ms,
+        "latency_slices": latency_slice_breakdown(events),
         "started_at_epoch_ms": started_at_epoch_ms,
         "ended_at_epoch_ms": ended_at_epoch_ms,
         "age_ms_since_latest": now_epoch_ms.saturating_sub(ended_at_epoch_ms),
@@ -1749,7 +1765,12 @@ fn query_slice_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementC
                     "task_success_like_rate": summary["task_success_like_rate"],
                     "answer_like_rate": summary["answer_like_rate"],
                     "fallback_rate": summary["fallback_rate"],
+                    "sample_count": summary["sample_count"],
+                    "current_latency_ms": summary["current_latency_ms"],
+                    "p50_latency_ms": summary["p50_latency_ms"],
                     "p95_latency_ms": summary["p95_latency_ms"],
+                    "p99_latency_ms": summary["p99_latency_ms"],
+                    "max_latency_ms": summary["max_latency_ms"],
                 })
             })
             .collect(),
@@ -1785,11 +1806,98 @@ fn temperature_slice_breakdown(
                     "counted_events": summary["counted_events"],
                     "verified_effective_savings_pct": summary["verified_effective_savings_pct"],
                     "median_recovery_tokens": summary["median_recovery_tokens"],
+                    "sample_count": summary["sample_count"],
+                    "current_latency_ms": summary["current_latency_ms"],
+                    "p50_latency_ms": summary["p50_latency_ms"],
                     "p95_latency_ms": summary["p95_latency_ms"],
+                    "p99_latency_ms": summary["p99_latency_ms"],
+                    "max_latency_ms": summary["max_latency_ms"],
                 })
             })
             .collect(),
     )
+}
+
+fn latency_slice_breakdown(events: &[TokenBudgetEvent]) -> Value {
+    let mut grouped = BTreeMap::<String, Vec<f64>>::new();
+    let mut current_latency = BTreeMap::<String, f64>::new();
+
+    for event in events {
+        if !event.latency_ms.is_finite() {
+            continue;
+        }
+        grouped
+            .entry("mixed".to_string())
+            .or_default()
+            .push(event.latency_ms);
+        current_latency.insert("mixed".to_string(), event.latency_ms);
+
+        let state = normalize_latency_state(&event.cold_warm_state);
+        grouped
+            .entry(state.to_string())
+            .or_default()
+            .push(event.latency_ms);
+        current_latency.insert(state.to_string(), event.latency_ms);
+    }
+
+    let order = ["mixed", "hot", "cold", "benchmark"];
+    let mut slices = Vec::new();
+    for state in order {
+        if let Some(values) = grouped.get(state) {
+            slices.push(latency_slice_json(
+                state,
+                current_latency.get(state).copied().unwrap_or_default(),
+                values,
+            ));
+        }
+    }
+
+    for (state, values) in grouped {
+        if order.contains(&state.as_str()) {
+            continue;
+        }
+        slices.push(latency_slice_json(
+            &state,
+            current_latency.get(&state).copied().unwrap_or_default(),
+            &values,
+        ));
+    }
+
+    Value::Array(slices)
+}
+
+fn latency_slice_json(state: &str, current_latency_ms: f64, values: &[f64]) -> Value {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    json!({
+        "state": state,
+        "display_name": latency_state_display_name(state),
+        "sample_count": sorted.len(),
+        "current_latency_ms": current_latency_ms,
+        "p50_latency_ms": percentile_from_sorted(&sorted, 0.50),
+        "p95_latency_ms": percentile_from_sorted(&sorted, 0.95),
+        "p99_latency_ms": percentile_from_sorted(&sorted, 0.99),
+        "max_latency_ms": sorted.last().copied().unwrap_or_default(),
+    })
+}
+
+fn normalize_latency_state(state: &str) -> &'static str {
+    match state {
+        "warm" => "hot",
+        "cold" => "cold",
+        "benchmark" => "benchmark",
+        _ => "mixed",
+    }
+}
+
+fn latency_state_display_name(state: &str) -> &'static str {
+    match state {
+        "mixed" => "mix",
+        "hot" => "hot",
+        "cold" => "cold",
+        "benchmark" => "benchmark",
+        _ => "other",
+    }
 }
 
 fn percentile_from_sorted(values: &[f64], percentile: f64) -> f64 {
@@ -3088,8 +3196,9 @@ mod tests {
         MeasurementConfig, NaiveScope, TokenBudgetEvent, apply_reverification_metadata,
         build_product_headline, derive_baseline_strategy, derive_quality_verdict,
         derive_query_type, derive_traffic_class, event_to_json, followup_queries_related,
-        include_traffic_class_in_report, needs_live_reverification, parse_snapshot_event,
-        reconcile_followup_recovery, repair_legacy_token_event_payload, summarize_events,
+        include_traffic_class_in_report, latency_slice_breakdown, needs_live_reverification,
+        parse_snapshot_event, reconcile_followup_recovery, repair_legacy_token_event_payload,
+        summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -3592,6 +3701,251 @@ mod tests {
         assert_eq!(summary["answer_like_counted_events"], 1);
         assert_eq!(summary["verified_effective_savings_pct"], 93.75);
         assert_eq!(summary["verified_answer_like_savings_pct"], 93.75);
+    }
+
+    #[test]
+    fn summarize_events_exposes_extended_latency_distribution() {
+        let measurement = MeasurementConfig {
+            tokenizer: "o200k_base".to_string(),
+            naive_limit_files: 5,
+            naive_max_bytes_per_file: 16384,
+            include_verify_events_by_default: false,
+            preliminary_min_events: 50,
+            preliminary_min_baseline_tokens: 100_000,
+        };
+        let events = vec![
+            TokenBudgetEvent {
+                created_at_epoch_ms: 10,
+                event_id: "event-1".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 10,
+                snapshot_kind: "token_budget_event".to_string(),
+                source_kind: "live_context_pack".to_string(),
+                traffic_class: "live".to_string(),
+                project: "art".to_string(),
+                namespace: "continuity".to_string(),
+                query: "first".to_string(),
+                query_hash: "hash-1".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 11.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+            TokenBudgetEvent {
+                created_at_epoch_ms: 20,
+                event_id: "event-2".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 20,
+                snapshot_kind: "token_budget_event".to_string(),
+                source_kind: "live_context_pack".to_string(),
+                traffic_class: "live".to_string(),
+                project: "art".to_string(),
+                namespace: "continuity".to_string(),
+                query: "second".to_string(),
+                query_hash: "hash-2".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "warm".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 5.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+        ];
+
+        let summary = summarize_events(&events, 20, &measurement);
+        assert_eq!(summary["sample_count"], 2);
+        assert_eq!(summary["current_latency_ms"], 5.0);
+        assert_eq!(summary["p50_latency_ms"], 11.0);
+        assert_eq!(summary["p95_latency_ms"], 11.0);
+        assert_eq!(summary["p99_latency_ms"], 11.0);
+        assert_eq!(summary["max_latency_ms"], 11.0);
+    }
+
+    #[test]
+    fn latency_slice_breakdown_normalizes_hot_cold_and_mixed() {
+        let events = vec![
+            TokenBudgetEvent {
+                created_at_epoch_ms: 10,
+                event_id: "event-1".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 10,
+                snapshot_kind: "token_budget_event".to_string(),
+                source_kind: "live_context_pack".to_string(),
+                traffic_class: "live".to_string(),
+                project: "art".to_string(),
+                namespace: "continuity".to_string(),
+                query: "cold".to_string(),
+                query_hash: "hash-1".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 12.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+            TokenBudgetEvent {
+                created_at_epoch_ms: 20,
+                event_id: "event-2".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 20,
+                snapshot_kind: "token_budget_event".to_string(),
+                source_kind: "live_context_pack".to_string(),
+                traffic_class: "live".to_string(),
+                project: "art".to_string(),
+                namespace: "continuity".to_string(),
+                query: "hot".to_string(),
+                query_hash: "hash-2".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "warm".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 4.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+        ];
+        let breakdown = latency_slice_breakdown(&events);
+        let slices = breakdown.as_array().expect("array");
+        let mixed = slices
+            .iter()
+            .find(|slice| slice["state"].as_str() == Some("mixed"))
+            .expect("mixed");
+        let hot = slices
+            .iter()
+            .find(|slice| slice["state"].as_str() == Some("hot"))
+            .expect("hot");
+        let cold = slices
+            .iter()
+            .find(|slice| slice["state"].as_str() == Some("cold"))
+            .expect("cold");
+
+        assert_eq!(mixed["sample_count"], 2);
+        assert_eq!(mixed["current_latency_ms"], 4.0);
+        assert_eq!(hot["sample_count"], 1);
+        assert_eq!(hot["display_name"], "hot");
+        assert_eq!(cold["sample_count"], 1);
+        assert_eq!(cold["display_name"], "cold");
     }
 
     #[test]

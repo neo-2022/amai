@@ -29,6 +29,9 @@ pub struct ContextPackTimings {
     pub query_embed_ms: u128,
     pub semantic_search_ms: u128,
     pub semantic_hydrate_ms: u128,
+    pub ranking_ms: u128,
+    pub provenance_ms: u128,
+    pub pack_assembly_ms: u128,
     pub serialize_ms: u128,
     pub persist_ms: u128,
 }
@@ -355,9 +358,11 @@ async fn prepare_context_pack(
     }
     let lexical_lookup_ms = lexical_started.elapsed().as_millis();
 
+    let ranking_started = Instant::now();
     sort_and_truncate_documents(&mut documents, args.limit_documents);
     sort_and_truncate_symbols(&mut symbols, args.limit_symbols);
     sort_and_truncate_chunks(&mut chunks, args.limit_chunks);
+    let ranking_ms = ranking_started.elapsed().as_millis();
 
     let lexical_signal_count = documents.len() + symbols.len() + chunks.len();
     let (semantic_chunks, semantic_timings, semantic_guard) = semantic_chunks(
@@ -370,6 +375,7 @@ async fn prepare_context_pack(
         &chunks,
     )
     .await?;
+    let provenance_started = Instant::now();
     let visible_projects_json = json!(
         visible_scopes
             .iter()
@@ -387,12 +393,24 @@ async fn prepare_context_pack(
             })
             .collect::<Vec<_>>()
     );
+    let provenance_minimum = json!([
+        "source_project",
+        "repo_root",
+        "commit_sha",
+        "path",
+        "symbol",
+        "chunk_id",
+        "source_kind",
+        "trust_level"
+    ]);
+    let provenance_ms = provenance_started.elapsed().as_millis();
 
     let context_pack_id = Uuid::new_v4();
     let generated_epoch_s = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
         .as_secs();
+    let pack_assembly_started = Instant::now();
     let serialize_started = Instant::now();
     let stats = ContextPackStats {
         context_pack_id,
@@ -411,6 +429,9 @@ async fn prepare_context_pack(
             query_embed_ms: semantic_timings.query_embed_ms,
             semantic_search_ms: semantic_timings.search_ms,
             semantic_hydrate_ms: semantic_timings.hydrate_ms,
+            ranking_ms,
+            provenance_ms,
+            pack_assembly_ms: 0,
             serialize_ms: 0,
             persist_ms: 0,
         },
@@ -442,20 +463,13 @@ async fn prepare_context_pack(
         "quality": {
             "semantic_guard": semantic_guard_to_json(&semantic_guard)
         },
-        "provenance_minimum": [
-            "source_project",
-            "repo_root",
-            "commit_sha",
-            "path",
-            "symbol",
-            "chunk_id",
-            "source_kind",
-            "trust_level"
-        ],
+        "provenance_minimum": provenance_minimum,
         "retrieval_runtime": runtime_json(&stats)
     });
+    let pack_assembly_ms = pack_assembly_started.elapsed().as_millis();
     let payload_json: Arc<str> = Arc::from(serde_json::to_string(&payload)?);
     let mut stats = stats;
+    stats.timings.pack_assembly_ms = pack_assembly_ms;
     stats.timings.serialize_ms = serialize_started.elapsed().as_millis();
 
     Ok(PreparedContextPack {
@@ -1042,6 +1056,9 @@ fn prepared_from_cached_payload(
             query_embed_ms: 0,
             semantic_search_ms: 0,
             semantic_hydrate_ms: 0,
+            ranking_ms: 0,
+            provenance_ms: 0,
+            pack_assembly_ms: 0,
             serialize_ms: 0,
             persist_ms: 0,
         },
@@ -1153,6 +1170,9 @@ fn context_pack_result_from_local_entry(cached: LocalContextPackEntry) -> Contex
             query_embed_ms: 0,
             semantic_search_ms: 0,
             semantic_hydrate_ms: 0,
+            ranking_ms: 0,
+            provenance_ms: 0,
+            pack_assembly_ms: 0,
             serialize_ms: 0,
             persist_ms: 0,
         },
@@ -1164,6 +1184,13 @@ fn context_pack_result_from_local_entry(cached: LocalContextPackEntry) -> Contex
 
 fn runtime_json(stats: &ContextPackStats) -> Value {
     let timings = &stats.timings;
+    let policy_ms = timings.resolve_scope_ms + timings.cache_lookup_ms;
+    let retrieval_ms = timings.exact_lookup_ms
+        + timings.symbol_lookup_ms
+        + timings.lexical_lookup_ms
+        + timings.query_embed_ms
+        + timings.semantic_search_ms
+        + timings.semantic_hydrate_ms;
     let total_ms = timings.resolve_scope_ms
         + timings.cache_lookup_ms
         + timings.exact_lookup_ms
@@ -1172,6 +1199,9 @@ fn runtime_json(stats: &ContextPackStats) -> Value {
         + timings.query_embed_ms
         + timings.semantic_search_ms
         + timings.semantic_hydrate_ms
+        + timings.ranking_ms
+        + timings.provenance_ms
+        + timings.pack_assembly_ms
         + timings.serialize_ms
         + timings.persist_ms;
     json!({
@@ -1184,8 +1214,19 @@ fn runtime_json(stats: &ContextPackStats) -> Value {
         "query_embed_ms": timings.query_embed_ms as f64,
         "semantic_search_ms": timings.semantic_search_ms as f64,
         "semantic_hydrate_ms": timings.semantic_hydrate_ms as f64,
+        "ranking_ms": timings.ranking_ms as f64,
+        "provenance_ms": timings.provenance_ms as f64,
+        "pack_assembly_ms": timings.pack_assembly_ms as f64,
         "serialize_ms": timings.serialize_ms as f64,
         "persist_ms": timings.persist_ms as f64,
+        "stage_group_ms": {
+            "policy_ms": policy_ms as f64,
+            "retrieval_ms": retrieval_ms as f64,
+            "ranking_ms": timings.ranking_ms as f64,
+            "provenance_ms": timings.provenance_ms as f64,
+            "pack_assembly_ms": (timings.pack_assembly_ms + timings.serialize_ms) as f64,
+            "orchestration_total_ms": total_ms as f64
+        },
         "total_ms": total_ms as f64
     })
 }

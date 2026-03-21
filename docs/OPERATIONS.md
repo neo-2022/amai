@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 17:17 MSK
-Ручная сверка guide/docs: 2026-03-21 17:17 MSK
+modified_at: 2026-03-21 17:54 MSK
+Ручная сверка guide/docs: 2026-03-21 17:54 MSK
 
 # Operations
 
@@ -1350,6 +1350,18 @@ Grafana login берётся из `.env`:
   - текущее рабочее окно профиля;
   - всё время;
   - отдельный benchmark больше не подменяет собой третью карту.
+- верхние latency-карты human dashboard теперь тоже live-first, а не benchmark-first:
+  - `Retrieval mix сейчас`
+  - `Retrieval hot сейчас`
+  - `Retrieval cold сейчас`
+- крупное значение на такой карте означает текущий live latency-показатель;
+- подпись карты сразу показывает:
+  - `Max` в текущей сессии;
+  - `P50`
+  - `P95`
+  - `P99`
+  - `sample_count`
+  по этому же live-срезу.
 - runtime scrape targets и monitoring ports не должны быть вшиты в конфиг как абсолютные литералы;
 - поэтому monitoring profile рендерится из `.env` перед `docker compose --profile monitoring up`.
 - token-economy metrics тоже приходят в exporter:
@@ -1358,6 +1370,14 @@ Grafana login берётся из `.env`:
   - `amai_tokens_context_pack_total`
   - `amai_tokens_saved_total`
   - `amai_tokens_savings_factor`
+- live retrieval exporter теперь отдельно отдаёт по каждому состоянию `mixed/hot/cold`:
+  - `current_ms`
+  - `p50_ms`
+  - `p95_ms`
+  - `p99_ms`
+  - `max_ms`
+  - `sample_count`
+  чтобы live dashboard и monitoring не подменяли текущую картину старым benchmark-only `p95`.
   - `amai_tokens_savings_percent`
   - и как накопительный ledger по умолчанию уже в verified/live-only semantics:
   - `amai_tokens_saved_session_total`

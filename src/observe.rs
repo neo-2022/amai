@@ -1074,6 +1074,44 @@ fn render_prometheus_metrics(snapshot: &Value) -> String {
         "Cold retrieval benchmark p95 in milliseconds.",
         snapshot["latest_retrieval_cold"]["benchmark"]["p95_ms"].as_f64(),
     );
+    for (state, display) in [("mixed", "mix"), ("hot", "hot"), ("cold", "cold")] {
+        push_metric(
+            &mut output,
+            &format!("amai_retrieval_live_{display}_current_ms"),
+            &format!("Current live {display} retrieval latency in milliseconds."),
+            live_latency_value(snapshot, state, "current_latency_ms"),
+        );
+        push_metric(
+            &mut output,
+            &format!("amai_retrieval_live_{display}_p50_ms"),
+            &format!("Live {display} retrieval latency p50 in milliseconds."),
+            live_latency_value(snapshot, state, "p50_latency_ms"),
+        );
+        push_metric(
+            &mut output,
+            &format!("amai_retrieval_live_{display}_p95_ms"),
+            &format!("Live {display} retrieval latency p95 in milliseconds."),
+            live_latency_value(snapshot, state, "p95_latency_ms"),
+        );
+        push_metric(
+            &mut output,
+            &format!("amai_retrieval_live_{display}_p99_ms"),
+            &format!("Live {display} retrieval latency p99 in milliseconds."),
+            live_latency_value(snapshot, state, "p99_latency_ms"),
+        );
+        push_metric(
+            &mut output,
+            &format!("amai_retrieval_live_{display}_max_ms"),
+            &format!("Live {display} retrieval latency max in milliseconds."),
+            live_latency_value(snapshot, state, "max_latency_ms"),
+        );
+        push_metric(
+            &mut output,
+            &format!("amai_retrieval_live_{display}_sample_count"),
+            &format!("Sample count for live {display} retrieval latency."),
+            live_latency_value(snapshot, state, "sample_count"),
+        );
+    }
     push_metric(
         &mut output,
         "amai_index_files_per_min",
@@ -1330,6 +1368,25 @@ fn render_prometheus_metrics(snapshot: &Value) -> String {
     );
 
     output
+}
+
+fn live_latency_value(snapshot: &Value, state: &str, field: &str) -> Option<f64> {
+    snapshot["token_budget_report"]["token_budget_report"]["current_session"]["latency_slices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|slice| slice["state"].as_str() == Some(state))
+        .and_then(|slice| slice[field].as_f64())
+        .or_else(|| {
+            snapshot["token_budget_report"]["token_budget_report"]["current_session"]
+                ["latency_slices"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|slice| slice["state"].as_str() == Some(state))
+                .and_then(|slice| slice[field].as_u64())
+                .map(|value| value as f64)
+        })
 }
 
 fn push_metric(output: &mut String, name: &str, help: &str, value: Option<f64>) {

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod benchmark_matrix;
 mod bootstrap;
 mod chat_question;
