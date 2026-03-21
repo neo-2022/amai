@@ -221,6 +221,8 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         postgres::latest_observability_snapshot(&db, "retrieval_load_cold").await?;
     let latest_token_benchmark =
         postgres::latest_observability_snapshot(&db, "token_benchmark").await?;
+    let latest_working_state_restore =
+        postgres::latest_observability_snapshot(&db, "working_state_restore").await?;
     let token_budget_report = token_budget::collect_default_report(&db).await?;
 
     let payload = json!({
@@ -237,6 +239,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_retrieval_load_hot": latest_load_hot,
         "latest_retrieval_load_cold": latest_load_cold,
         "latest_token_benchmark": latest_token_benchmark,
+        "latest_working_state_restore": latest_working_state_restore,
         "token_budget_report": token_budget_report,
     });
     let sla = evaluate_sla(&payload, &profile);
@@ -254,6 +257,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_retrieval_load_hot": payload["latest_retrieval_load_hot"].clone(),
         "latest_retrieval_load_cold": payload["latest_retrieval_load_cold"].clone(),
         "latest_token_benchmark": payload["latest_token_benchmark"].clone(),
+        "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
         "token_budget_report": payload["token_budget_report"].clone(),
         "sla": sla,
     });

@@ -215,6 +215,12 @@ impl BridgePaths {
 async fn run_context(paths: &BridgePaths, args: &ContextArgs) -> Result<()> {
     let resolved = resolve_project(paths, args.project.clone(), args.repo_root.clone()).await?;
     let mut command = paths.amai_command();
+    apply_default_agent_scope(
+        &mut command,
+        &resolved.project_code,
+        &args.namespace,
+        "startup",
+    );
     command.arg("continuity").arg("startup");
     if let Some(repo_root) = resolved.repo_root {
         command.arg("--repo-root").arg(repo_root);
@@ -229,6 +235,12 @@ async fn run_search(paths: &BridgePaths, args: &SearchArgs) -> Result<()> {
     let resolved = resolve_project(paths, args.project.clone(), args.repo_root.clone()).await?;
     let query = args.query.join(" ");
     let mut command = paths.amai_command();
+    apply_default_agent_scope(
+        &mut command,
+        &resolved.project_code,
+        &args.namespace,
+        "search",
+    );
     command
         .arg("context")
         .arg("pack")
@@ -318,6 +330,12 @@ async fn run_save(paths: &BridgePaths, args: &SaveArgs) -> Result<()> {
         .with_context(|| format!("failed to write {}", details_path.display()))?;
 
     let mut command = paths.amai_command();
+    apply_default_agent_scope(
+        &mut command,
+        &resolved.project_code,
+        &args.namespace,
+        "handoff",
+    );
     command
         .arg("continuity")
         .arg("handoff")
@@ -345,6 +363,25 @@ fn run_mcp(paths: &BridgePaths, args: &McpArgs) -> Result<()> {
         }
     }
     run_inheriting(command).context("Amai MCP bridge failed")
+}
+
+fn apply_default_agent_scope(
+    command: &mut Command,
+    project_code: &str,
+    namespace: &str,
+    suffix: &str,
+) {
+    if env::var("AMAI_AGENT_SCOPE")
+        .ok()
+        .as_deref()
+        .unwrap_or("")
+        .is_empty()
+    {
+        command.env(
+            "AMAI_AGENT_SCOPE",
+            format!("{project_code}::{namespace}::memory-bridge::{suffix}"),
+        );
+    }
 }
 
 async fn resolve_project(

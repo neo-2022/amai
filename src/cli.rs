@@ -76,6 +76,7 @@ pub enum DeploymentCommand {
 pub enum ContinuityCommand {
     Import(ContinuityImportArgs),
     Startup(ContinuityStartupArgs),
+    Restore(ContinuityStartupArgs),
     Handoff(ContinuityHandoffArgs),
 }
 

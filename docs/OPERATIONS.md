@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 10:52 MSK
-Ручная сверка guide/docs: 2026-03-21 10:52 MSK
+modified_at: 2026-03-21 11:24 MSK
+Ручная сверка guide/docs: 2026-03-21 11:24 MSK
 
 # Operations
 
@@ -131,6 +131,7 @@ cd /home/art/agent-memory-index
 ```bash
 cd /home/art/agent-memory-index
 ./scripts/continuity_startup.sh --project project_alpha --namespace continuity
+./scripts/continuity_restore.sh --project project_alpha --namespace continuity
 ```
 
 Что это materialize-ит:
@@ -139,6 +140,9 @@ cd /home/art/agent-memory-index
 - searchable continuity-layer режется до безопасного размера для `PostgreSQL tsvector` и lexical chunks;
 - observability получает отдельный snapshot `continuity_import`;
 - startup-summary потом читается не из нескольких разрозненных источников, а из `Amai`.
+- поверх обычного handoff теперь materialized ещё и `working_state` слой:
+  он автозахватывается после `continuity handoff` и после `context pack`,
+  а новый chat-start поднимает не только headline/next-step, но и активные файлы, последние рабочие запросы и текущую рабочую сессию.
 - `--active-workline-file` больше не обязателен:
   если write-side handoff уже живёт в `Amai`, import может брать headline и next-step оттуда, а bootstrap/transcript слой остаётся только refresh-evidence.
 - старый каталог заметок теперь должен передаваться явно;
@@ -151,6 +155,37 @@ cd /home/art/agent-memory-index
   - при необходимости держать отдельный старый memory-export только как compatibility-layer;
   - после содержательной работы обновлять continuity import в `Amai`;
   - новый session-start уже поднимать через `Amai continuity startup`.
+
+## Working-state recovery и multi-agent изоляция
+
+Для continuity теперь есть два разных, но связанных слоя:
+
+- `continuity handoff`
+  - фиксирует главное решение и обязательный следующий шаг;
+- `working_state`
+  - фиксирует текущее рабочее состояние между чатами:
+    - активную цель;
+    - последние retrieval-запросы;
+    - активные файлы;
+    - текущую непрерывную рабочую сессию.
+
+Каноническая изоляция для этого слоя:
+- `project_code`
+- `namespace_code`
+- `agent_scope`
+- `session_id`
+
+Если агент один, это обычно уже работает без ручной настройки.
+Если агентов несколько, задавайте каждому свой `AMAI_AGENT_SCOPE`.
+
+Пример:
+
+```bash
+AMAI_AGENT_SCOPE=agent_alpha ./scripts/continuity_startup.sh --project project_alpha --namespace continuity
+AMAI_AGENT_SCOPE=agent_beta  ./scripts/continuity_startup.sh --project project_alpha --namespace continuity
+```
+
+Это нужно, чтобы параллельные агенты не поднимали и не продолжали чужую рабочую линию.
 
 ## Warmup after bootstrap
 

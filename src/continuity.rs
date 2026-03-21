@@ -2,6 +2,7 @@ use crate::cli::{ContinuityHandoffArgs, ContinuityImportArgs, ContinuityStartupA
 use crate::config::AppConfig;
 use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, ProjectRecord};
 use crate::s3;
+use crate::working_state;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -266,6 +267,10 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
             .as_str()
             .unwrap_or("ещё нет данных")
     );
+    if let Some(restore) = working_state::build_restore_bundle(&db, &project, &namespace).await? {
+        println!();
+        working_state::print_restore_bundle_human(&restore);
+    }
     println!();
     println!("Bootstrap continuity:");
     println!(
@@ -306,6 +311,25 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
         project.code, namespace.code
     );
     println!("- Для обновления continuity после новых изменений: {import_command}");
+    Ok(())
+}
+
+pub async fn print_restore(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<()> {
+    let db = postgres::connect_admin(cfg).await?;
+    let project = resolve_project(&db, args).await?;
+    let namespace = postgres::find_namespace_by_code(&db, project.project_id, &args.namespace)
+        .await?
+        .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.namespace))?;
+    let restore = working_state::build_restore_bundle(&db, &project, &namespace)
+        .await?
+        .ok_or_else(|| {
+            anyhow!(
+                "no working-state restore bundle found for {}::{}",
+                project.code,
+                namespace.code
+            )
+        })?;
+    println!("{}", serde_json::to_string_pretty(&restore)?);
     Ok(())
 }
 
@@ -374,6 +398,16 @@ pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> R
         }
     });
     let _ = postgres::insert_observability_snapshot(&db, "continuity_handoff", &payload).await?;
+    working_state::record_handoff_event(
+        &db,
+        &project,
+        &namespace,
+        &args.headline,
+        &args.next_step,
+        &details,
+        &local_handoff_path.display().to_string(),
+    )
+    .await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }

@@ -22,6 +22,7 @@ mod syntax;
 mod token_budget;
 mod verify;
 mod warmup;
+mod working_state;
 
 use anyhow::Result;
 use clap::Parser;
@@ -54,6 +55,11 @@ async fn main() -> Result<()> {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 continuity::print_startup(&cfg, &args).await?;
+            }
+            ContinuityCommand::Restore(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                continuity::print_restore(&cfg, &args).await?;
             }
             ContinuityCommand::Handoff(args) => {
                 let cfg = config::AppConfig::from_env()?;

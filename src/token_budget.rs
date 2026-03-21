@@ -2161,7 +2161,7 @@ fn include_traffic_class_in_report(traffic_class: &str, include_verify_events: b
     include_verify_events || traffic_class == "live"
 }
 
-fn derive_baseline_strategy(query_type: &str) -> &'static str {
+pub(crate) fn derive_baseline_strategy(query_type: &str) -> &'static str {
     match query_type {
         "onboarding_query" => "legacy_pre_amai",
         "config_lookup" | "symbol_lookup" | "code_lookup" => "ide_search_top_files",
@@ -2171,7 +2171,7 @@ fn derive_baseline_strategy(query_type: &str) -> &'static str {
     }
 }
 
-fn derive_query_type(query: &str) -> &'static str {
+pub(crate) fn derive_query_type(query: &str) -> &'static str {
     let lowered = query.to_lowercase();
 
     if [

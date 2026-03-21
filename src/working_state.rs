@@ -1,0 +1,822 @@
+use crate::postgres::{self, NamespaceRecord, ObservabilitySnapshotRecord, ProjectRecord};
+use crate::token_budget;
+use anyhow::{Context, Result};
+use serde::Serialize;
+use serde_json::{Value, json};
+use std::env;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio_postgres::Client;
+
+const WORKING_STATE_EVENT_KIND: &str = "working_state_event";
+const WORKING_STATE_RESTORE_KIND: &str = "working_state_restore";
+const SESSION_GAP_MS: u64 = 30 * 60 * 1000;
+const MAX_RESTORE_EVENTS: i64 = 120;
+const MAX_RECENT_ACTIONS: usize = 8;
+const MAX_RECENT_QUERIES: usize = 6;
+const MAX_ACTIVE_FILES: usize = 8;
+const MAX_OPEN_QUESTIONS: usize = 6;
+
+pub async fn record_handoff_event(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    headline: &str,
+    next_step: &str,
+    details: &str,
+    local_path: &str,
+) -> Result<()> {
+    let recorded_at_epoch_ms = now_epoch_ms()?;
+    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let session_id = resolve_session_id(
+        db,
+        &project.code,
+        &namespace.code,
+        &agent_scope,
+        recorded_at_epoch_ms,
+    )
+    .await?;
+    let active_files = extract_paths_from_text(details);
+    let payload = json!({
+        "working_state_event": {
+            "project": project_json(project),
+            "namespace": namespace_json(namespace),
+            "recorded_at_epoch_ms": recorded_at_epoch_ms,
+            "event_kind": "continuity_handoff",
+            "session_id": session_id,
+            "agent_scope": agent_scope,
+            "source_kind": "continuity_handoff",
+            "headline": headline,
+            "next_step_hint": next_step,
+            "summary": summarize_details(details, headline, next_step),
+            "active_files": active_files,
+            "recent_paths": extract_paths_from_text(details),
+            "visible_projects": vec![project.code.clone()],
+            "query": Value::Null,
+            "query_type": Value::Null,
+            "target_kind": "handoff",
+            "current_hypothesis": extract_first_question(details),
+            "rejected_hypotheses": Vec::<String>::new(),
+            "open_questions": derive_open_questions(details),
+            "last_command": "continuity handoff".to_string(),
+            "last_results_summary": format!("Зафиксирован handoff для {} :: {}", project.code, namespace.code),
+            "local_path": local_path,
+        }
+    });
+    postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
+    refresh_restore_snapshot(db, project, namespace).await?;
+    Ok(())
+}
+
+pub async fn record_context_pack_event(db: &Client, payload: &Value) -> Result<()> {
+    let node = payload
+        .as_object()
+        .context("context pack payload must be a JSON object")?;
+    let project_code = node["project"]["code"].as_str().unwrap_or_default();
+    let namespace_code = node["namespace"]["code"].as_str().unwrap_or_default();
+    if project_code.is_empty() || namespace_code.is_empty() {
+        return Ok(());
+    }
+    let project = ProjectSummary {
+        code: project_code.to_string(),
+        display_name: node["project"]["display_name"]
+            .as_str()
+            .unwrap_or(project_code)
+            .to_string(),
+        repo_root: node["project"]["repo_root"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    };
+    let namespace = NamespaceSummary {
+        code: namespace_code.to_string(),
+        display_name: node["namespace"]["display_name"]
+            .as_str()
+            .unwrap_or(namespace_code)
+            .to_string(),
+    };
+    let query = node["query"].as_str().unwrap_or_default().to_string();
+    let query_type = token_budget::derive_query_type(&query).to_string();
+    let active_files = extract_active_files_from_context_pack(payload);
+    let visible_projects = extract_visible_projects(node.get("visible_projects"));
+    let exact_documents = node["retrieval"]["exact_documents"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    let symbol_hits = node["retrieval"]["symbol_hits"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    let lexical_chunks = node["retrieval"]["lexical_chunks"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    let semantic_chunks = node["retrieval"]["semantic_chunks"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    let target_kind = if exact_documents > 0 {
+        "document"
+    } else if symbol_hits > 0 {
+        "symbol"
+    } else if lexical_chunks > 0 || semantic_chunks > 0 {
+        "file"
+    } else {
+        "unknown"
+    };
+    let recorded_at_epoch_ms = now_epoch_ms()?;
+    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let session_id = resolve_session_id(
+        db,
+        &project.code,
+        &namespace.code,
+        &agent_scope,
+        recorded_at_epoch_ms,
+    )
+    .await?;
+    let query_summary = format!(
+        "Найдено: документов {}, символов {}, lexical chunks {}, semantic chunks {}.",
+        exact_documents, symbol_hits, lexical_chunks, semantic_chunks
+    );
+    let payload = json!({
+        "working_state_event": {
+            "project": project,
+            "namespace": namespace,
+            "recorded_at_epoch_ms": recorded_at_epoch_ms,
+            "event_kind": "retrieval_context_pack",
+            "session_id": session_id,
+            "agent_scope": agent_scope,
+            "source_kind": "context_pack",
+            "headline": format!("Рабочий запрос: {}", query),
+            "next_step_hint": derive_retrieval_next_step(&active_files, target_kind),
+            "summary": format!("{} {}", query, query_summary),
+            "active_files": active_files,
+            "recent_paths": extract_active_files_from_context_pack(payload),
+            "visible_projects": visible_projects,
+            "query": query,
+            "query_type": query_type,
+            "target_kind": target_kind,
+            "current_hypothesis": derive_retrieval_hypothesis(payload),
+            "rejected_hypotheses": Vec::<String>::new(),
+            "open_questions": derive_open_questions(
+                node["query"].as_str().unwrap_or_default()
+            ),
+            "last_command": format!(
+                "context pack --project {} --namespace {} --query {}",
+                project.code,
+                namespace.code,
+                node["query"].as_str().unwrap_or_default()
+            ),
+            "last_results_summary": query_summary,
+            "context_pack_id": node["context_pack_id"].as_str().unwrap_or_default(),
+            "retrieval_mode": node["effective_retrieval_mode"].as_str().unwrap_or_default(),
+            "latency_ms": node["retrieval_runtime"]["total_ms"].clone(),
+        }
+    });
+    postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
+    let project_record = ProjectRecord {
+        project_id: postgres::get_project_by_code(db, &project.code)
+            .await?
+            .project_id,
+        code: project.code,
+        display_name: project.display_name,
+        repo_root: project.repo_root,
+        updated_at: String::new(),
+    };
+    let namespace_record = NamespaceRecord {
+        namespace_id: postgres::get_namespace_by_code(
+            db,
+            project_record.project_id,
+            &namespace.code,
+        )
+        .await?
+        .namespace_id,
+        code: namespace.code,
+        display_name: namespace.display_name,
+        retrieval_mode: String::new(),
+    };
+    refresh_restore_snapshot(db, &project_record, &namespace_record).await?;
+    Ok(())
+}
+
+pub async fn build_restore_bundle(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+) -> Result<Option<Value>> {
+    let snapshots = postgres::list_observability_snapshots_by_kinds(
+        db,
+        &[WORKING_STATE_EVENT_KIND],
+        Some(MAX_RESTORE_EVENTS),
+    )
+    .await?;
+    let events = select_relevant_events(
+        snapshots,
+        &project.code,
+        &namespace.code,
+        &current_agent_scope_for(&project.code, &namespace.code),
+    );
+    if events.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(compose_restore_bundle(
+        &project_json(project),
+        &namespace_json(namespace),
+        &events,
+    )))
+}
+
+pub fn print_restore_bundle_human(restore: &Value) {
+    let node = &restore["working_state_restore"];
+    println!("Рабочее состояние Amai:");
+    println!(
+        "- Agent scope: {}",
+        node["agent_scope"].as_str().unwrap_or("shared")
+    );
+    println!(
+        "- Активная сессия: {}",
+        human_duration_ms(node["session_age_ms"].as_u64().unwrap_or(0))
+    );
+    println!(
+        "- Текущая цель: {}",
+        node["current_goal"].as_str().unwrap_or("ещё нет данных")
+    );
+    println!(
+        "- Ближайший следующий шаг: {}",
+        node["next_step"].as_str().unwrap_or("ещё нет данных")
+    );
+    if let Some(value) = node["current_hypothesis"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Рабочая гипотеза: {value}");
+    }
+    print_string_list("- Активные файлы", &node["active_files"], MAX_ACTIVE_FILES);
+    print_string_list(
+        "- Последние рабочие запросы",
+        &node["recent_queries"],
+        MAX_RECENT_QUERIES,
+    );
+    print_string_list(
+        "- Открытые вопросы",
+        &node["open_questions"],
+        MAX_OPEN_QUESTIONS,
+    );
+}
+
+async fn refresh_restore_snapshot(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+) -> Result<()> {
+    let Some(bundle) = build_restore_bundle(db, project, namespace).await? else {
+        return Ok(());
+    };
+    let payload = json!({
+        "working_state_restore": bundle["working_state_restore"].clone()
+    });
+    postgres::insert_observability_snapshot(db, WORKING_STATE_RESTORE_KIND, &payload).await?;
+    Ok(())
+}
+
+fn compose_restore_bundle(
+    project: &Value,
+    namespace: &Value,
+    events: &[ObservabilitySnapshotRecord],
+) -> Value {
+    let latest = &events[0].payload["working_state_event"];
+    let session_id = latest["session_id"].as_str().unwrap_or_default();
+    let latest_recorded_at = latest["recorded_at_epoch_ms"]
+        .as_u64()
+        .unwrap_or(events[0].created_at_epoch_ms.max(0) as u64);
+    let mut current_goal = latest["headline"]
+        .as_str()
+        .unwrap_or("ещё нет данных")
+        .to_string();
+    let mut next_step = latest["next_step_hint"]
+        .as_str()
+        .unwrap_or("ещё нет данных")
+        .to_string();
+    if let Some(handoff) = events
+        .iter()
+        .map(|snapshot| &snapshot.payload["working_state_event"])
+        .find(|event| event["event_kind"].as_str() == Some("continuity_handoff"))
+    {
+        if let Some(value) = handoff["headline"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            current_goal = value.to_string();
+        }
+        if let Some(value) = handoff["next_step_hint"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            next_step = value.to_string();
+        }
+    }
+
+    let mut active_files = Vec::new();
+    let mut visible_projects = Vec::new();
+    let mut recent_queries = Vec::new();
+    let mut open_questions = Vec::new();
+    let mut rejected_hypotheses = Vec::new();
+    let mut current_hypothesis = None::<String>;
+    let mut last_command = None::<String>;
+    let mut last_results_summary = None::<String>;
+    let mut recent_actions = Vec::new();
+
+    for snapshot in events.iter().take(MAX_RECENT_ACTIONS) {
+        let event = &snapshot.payload["working_state_event"];
+        collect_unique_strings(&mut active_files, &event["active_files"]);
+        collect_unique_strings(&mut visible_projects, &event["visible_projects"]);
+        if let Some(query) = event["query"].as_str().filter(|value| !value.is_empty()) {
+            push_unique(&mut recent_queries, query.to_string());
+        }
+        collect_unique_strings(&mut open_questions, &event["open_questions"]);
+        collect_unique_strings(&mut rejected_hypotheses, &event["rejected_hypotheses"]);
+        if current_hypothesis.is_none() {
+            current_hypothesis = event["current_hypothesis"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+        }
+        if last_command.is_none() {
+            last_command = event["last_command"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+        }
+        if last_results_summary.is_none() {
+            last_results_summary = event["last_results_summary"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+        }
+        recent_actions.push(json!({
+            "event_kind": event["event_kind"],
+            "headline": event["headline"],
+            "summary": event["summary"],
+            "recorded_at_epoch_ms": event["recorded_at_epoch_ms"],
+        }));
+    }
+
+    let restore_confidence = if events.len() >= 4 && latest_recorded_at > 0 {
+        if now_epoch_ms().unwrap_or(latest_recorded_at) - latest_recorded_at <= 15 * 60 * 1000 {
+            "high"
+        } else {
+            "medium"
+        }
+    } else {
+        "preliminary"
+    };
+
+    json!({
+        "working_state_restore": {
+            "project": project,
+            "namespace": namespace,
+            "captured_at_epoch_ms": now_epoch_ms().unwrap_or(latest_recorded_at),
+            "agent_scope": latest["agent_scope"].as_str().unwrap_or("shared"),
+            "session_id": session_id,
+            "session_age_ms": now_epoch_ms().unwrap_or(latest_recorded_at).saturating_sub(latest_recorded_at),
+            "events_count": events.len(),
+            "current_goal": current_goal,
+            "next_step": next_step,
+            "current_hypothesis": current_hypothesis,
+            "open_questions": open_questions,
+            "rejected_hypotheses": rejected_hypotheses,
+            "active_files": active_files,
+            "visible_projects": visible_projects,
+            "recent_queries": recent_queries,
+            "recent_actions": recent_actions,
+            "last_command": last_command,
+            "last_results_summary": last_results_summary,
+            "restore_confidence": restore_confidence,
+            "is_preliminary": events.len() < 3,
+        }
+    })
+}
+
+fn select_relevant_events(
+    snapshots: Vec<ObservabilitySnapshotRecord>,
+    project_code: &str,
+    namespace_code: &str,
+    agent_scope: &str,
+) -> Vec<ObservabilitySnapshotRecord> {
+    let project_events = snapshots
+        .into_iter()
+        .filter(|snapshot| {
+            let node = &snapshot.payload["working_state_event"];
+            node["project"]["code"].as_str() == Some(project_code)
+                && node["namespace"]["code"].as_str() == Some(namespace_code)
+        })
+        .collect::<Vec<_>>();
+    if project_events.is_empty() {
+        return Vec::new();
+    }
+
+    let exact_scope = project_events.iter().any(|snapshot| {
+        snapshot.payload["working_state_event"]["agent_scope"].as_str() == Some(agent_scope)
+    });
+    let shared_scope = project_events.iter().any(|snapshot| {
+        matches!(
+            snapshot.payload["working_state_event"]["agent_scope"].as_str(),
+            Some("shared") | None | Some("")
+        )
+    });
+
+    let scoped = if exact_scope {
+        project_events
+            .into_iter()
+            .filter(|snapshot| {
+                snapshot.payload["working_state_event"]["agent_scope"].as_str() == Some(agent_scope)
+            })
+            .collect::<Vec<_>>()
+    } else if shared_scope {
+        project_events
+            .into_iter()
+            .filter(|snapshot| {
+                matches!(
+                    snapshot.payload["working_state_event"]["agent_scope"].as_str(),
+                    Some("shared") | None | Some("")
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if scoped.is_empty() {
+        return scoped;
+    }
+    let latest_session_id = scoped[0].payload["working_state_event"]["session_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    scoped
+        .into_iter()
+        .filter(|snapshot| {
+            snapshot.payload["working_state_event"]["session_id"].as_str()
+                == Some(latest_session_id.as_str())
+        })
+        .collect()
+}
+
+async fn resolve_session_id(
+    db: &Client,
+    project_code: &str,
+    namespace_code: &str,
+    agent_scope: &str,
+    recorded_at_epoch_ms: u64,
+) -> Result<String> {
+    let snapshots =
+        postgres::list_observability_snapshots_by_kinds(db, &[WORKING_STATE_EVENT_KIND], Some(60))
+            .await?;
+    let events = select_relevant_events(snapshots, project_code, namespace_code, agent_scope);
+    if let Some(latest) = events.first() {
+        let node = &latest.payload["working_state_event"];
+        let latest_recorded = node["recorded_at_epoch_ms"]
+            .as_u64()
+            .unwrap_or(latest.created_at_epoch_ms.max(0) as u64);
+        if recorded_at_epoch_ms.saturating_sub(latest_recorded) <= SESSION_GAP_MS
+            && let Some(session_id) = node["session_id"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+        {
+            return Ok(session_id.to_string());
+        }
+    }
+    Ok(format!(
+        "{}::{}::{}",
+        project_code, agent_scope, recorded_at_epoch_ms
+    ))
+}
+
+fn current_agent_scope_for(project_code: &str, namespace_code: &str) -> String {
+    for key in [
+        "AMAI_AGENT_SCOPE",
+        "CODEX_AGENT_SCOPE",
+        "AMAI_CLIENT_SCOPE",
+        "AMAI_CLIENT_KEY",
+    ] {
+        if let Ok(value) = env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    format!("{project_code}::{namespace_code}::default")
+}
+
+fn project_json(project: &ProjectRecord) -> Value {
+    json!({
+        "code": project.code,
+        "display_name": project.display_name,
+        "repo_root": project.repo_root,
+    })
+}
+
+fn namespace_json(namespace: &NamespaceRecord) -> Value {
+    json!({
+        "code": namespace.code,
+        "display_name": namespace.display_name,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectSummary {
+    code: String,
+    display_name: String,
+    repo_root: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NamespaceSummary {
+    code: String,
+    display_name: String,
+}
+
+fn extract_active_files_from_context_pack(payload: &Value) -> Vec<String> {
+    let retrieval = &payload["retrieval"];
+    let mut active_files = Vec::new();
+    for key in [
+        "exact_documents",
+        "symbol_hits",
+        "lexical_chunks",
+        "semantic_chunks",
+    ] {
+        if let Some(items) = retrieval[key].as_array() {
+            for item in items {
+                if let Some(path) = item["relative_path"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                {
+                    push_unique(&mut active_files, path.to_string());
+                } else if let Some(path) = item["provenance"]["path"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                {
+                    push_unique(&mut active_files, path.to_string());
+                }
+                if active_files.len() >= MAX_ACTIVE_FILES {
+                    return active_files;
+                }
+            }
+        }
+    }
+    active_files
+}
+
+fn extract_visible_projects(value: Option<&Value>) -> Vec<String> {
+    let mut visible = Vec::new();
+    let Some(items) = value.and_then(Value::as_array) else {
+        return visible;
+    };
+    for item in items {
+        if let Some(project_code) = item["project_code"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            push_unique(&mut visible, project_code.to_string());
+        }
+    }
+    visible
+}
+
+fn derive_retrieval_hypothesis(payload: &Value) -> Option<String> {
+    let active_files = extract_active_files_from_context_pack(payload);
+    if active_files.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Вероятный рабочий контекст сейчас лежит в: {}",
+            active_files
+                .into_iter()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+}
+
+fn derive_retrieval_next_step(active_files: &[String], target_kind: &str) -> String {
+    if let Some(path) = active_files.first() {
+        format!("Откройте {} и продолжайте работу от этого артефакта.", path)
+    } else {
+        format!(
+            "Уточните запрос или задайте follow-up, если текущий {} ещё не дал нужный контекст.",
+            target_kind
+        )
+    }
+}
+
+fn summarize_details(details: &str, headline: &str, next_step: &str) -> String {
+    let trimmed = details.trim();
+    if trimmed.is_empty() {
+        format!("{headline}. Дальше: {next_step}.")
+    } else {
+        let collapsed = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.chars().count() > 260 {
+            format!("{}...", collapsed.chars().take(260).collect::<String>())
+        } else {
+            collapsed
+        }
+    }
+}
+
+fn extract_paths_from_text(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for token in text.split_whitespace() {
+        let cleaned = token
+            .trim_matches(|ch: char| matches!(ch, '(' | ')' | '[' | ']' | '"' | '\'' | ',' | ';'))
+            .trim_end_matches(['.', ':']);
+        if cleaned.starts_with("/home/") {
+            push_unique(&mut paths, cleaned.to_string());
+        } else if let Some(start) = cleaned.find("/home/") {
+            push_unique(&mut paths, cleaned[start..].to_string());
+        }
+        if paths.len() >= MAX_ACTIVE_FILES {
+            break;
+        }
+    }
+    paths
+}
+
+fn extract_first_question(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| line.ends_with('?'))
+        .map(ToOwned::to_owned)
+}
+
+fn derive_open_questions(text: &str) -> Vec<String> {
+    let mut questions = Vec::new();
+    let trimmed = text.trim();
+    if looks_like_question(trimmed) {
+        push_unique(&mut questions, trimmed.to_string());
+    }
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if looks_like_question(line) {
+            push_unique(&mut questions, line.to_string());
+        }
+        if questions.len() >= MAX_OPEN_QUESTIONS {
+            break;
+        }
+    }
+    questions
+}
+
+fn looks_like_question(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    value.ends_with('?')
+        || ["почему", "зачем", "как ", "где ", "what ", "why ", "how "]
+            .iter()
+            .any(|needle| value.to_lowercase().contains(needle))
+}
+
+fn collect_unique_strings(target: &mut Vec<String>, value: &Value) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    for item in items {
+        if let Some(text) = item.as_str().filter(|text| !text.is_empty()) {
+            push_unique(target, text.to_string());
+        }
+    }
+}
+
+fn push_unique(target: &mut Vec<String>, value: String) {
+    if !target.iter().any(|existing| existing == &value) {
+        target.push(value);
+    }
+}
+
+fn print_string_list(label: &str, value: &Value, limit: usize) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    if items.is_empty() {
+        return;
+    }
+    let rendered = items
+        .iter()
+        .filter_map(Value::as_str)
+        .take(limit)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if !rendered.is_empty() {
+        println!("{label}: {rendered}");
+    }
+}
+
+fn human_duration_ms(duration_ms: u64) -> String {
+    let duration_secs = duration_ms / 1000;
+    let hours = duration_secs / 3600;
+    let minutes = (duration_secs % 3600) / 60;
+    if hours > 0 {
+        format!("{hours} ч. {minutes} мин.")
+    } else if minutes > 0 {
+        format!("{minutes} мин.")
+    } else {
+        format!("{} сек.", duration_secs)
+    }
+}
+
+fn now_epoch_ms() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn derive_open_questions_marks_human_questions() {
+        let questions = derive_open_questions("Почему dashboard не показывает нужный файл?");
+        assert_eq!(questions.len(), 1);
+        assert!(questions[0].contains("Почему"));
+    }
+
+    #[test]
+    fn extract_paths_from_text_collects_local_files() {
+        let paths = extract_paths_from_text(
+            "Смотрели /home/art/Art/README.md и [token]( /home/art/agent-memory-index/src/token_budget.rs ).",
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.contains("/home/art/Art/README.md"))
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.contains("/home/art/agent-memory-index/src/token_budget.rs"))
+        );
+    }
+
+    #[test]
+    fn select_relevant_events_prefers_exact_agent_scope() {
+        let exact = fake_snapshot("art", "continuity", "art::primary", "session-a", "exact", 2);
+        let shared = fake_snapshot("art", "continuity", "shared", "session-b", "shared", 1);
+        let selected = select_relevant_events(
+            vec![exact.clone(), shared],
+            "art",
+            "continuity",
+            "art::primary",
+        );
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0].payload["working_state_event"]["headline"],
+            json!("exact")
+        );
+    }
+
+    #[test]
+    fn select_relevant_events_does_not_mix_other_agent_scope_when_shared_missing() {
+        let foreign = fake_snapshot(
+            "art",
+            "continuity",
+            "art::secondary",
+            "session-b",
+            "foreign",
+            1,
+        );
+        let selected = select_relevant_events(vec![foreign], "art", "continuity", "art::primary");
+        assert!(selected.is_empty());
+    }
+
+    fn fake_snapshot(
+        project_code: &str,
+        namespace_code: &str,
+        agent_scope: &str,
+        session_id: &str,
+        headline: &str,
+        offset: i64,
+    ) -> ObservabilitySnapshotRecord {
+        ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "project": {
+                        "code": project_code,
+                    },
+                    "namespace": {
+                        "code": namespace_code,
+                    },
+                    "agent_scope": agent_scope,
+                    "session_id": session_id,
+                    "headline": headline,
+                    "recorded_at_epoch_ms": offset,
+                }
+            }),
+            created_at_epoch_ms: offset,
+        }
+    }
+}

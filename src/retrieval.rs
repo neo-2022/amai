@@ -7,6 +7,7 @@ use crate::postgres::{
 use crate::qdrant;
 use crate::s3;
 use crate::token_budget;
+use crate::working_state;
 use anyhow::{Context, Result, anyhow};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use qdrant_client::qdrant::point_id::PointIdOptions;
@@ -219,7 +220,8 @@ async fn record_context_pack_token_budget_event(db: &Client, payload: &Value) ->
     if !payload.is_object() {
         return Ok(());
     }
-    token_budget::record_live_context_pack_event(db, payload).await
+    token_budget::record_live_context_pack_event(db, payload).await?;
+    working_state::record_context_pack_event(db, payload).await
 }
 
 pub fn try_execute_context_pack_fast_cached(
