@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 21:48 MSK
-Ручная сверка guide/docs: 2026-03-21 21:48 MSK
+modified_at: 2026-03-21 21:59 MSK
+Ручная сверка guide/docs: 2026-03-21 21:59 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1062,6 +1062,32 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 - `explain`
   - раскладывает один benchmark по-человечески: зачем он нужен, что у нас уже есть и какой следующий шаг обязателен.
 
+Отдельно теперь materialized и внешний retrieval/vector comparative contour:
+
+```bash
+cargo run -- benchmark external-check
+cargo run -- benchmark external-explain --benchmark vectordbbench
+./scripts/proof_external_benchmark_env.sh
+```
+
+Что он делает:
+- не подменяет внутренний `Amai` cold/hot benchmark;
+- проверяет, готова ли эта машина к внешним comparative benchmark-ам;
+- разводит 3 разных слоя:
+  - `VectorDBBench`
+    - общий framework `engine + dataset + scenario`;
+  - `ann-benchmarks`
+    - ceiling именно ANN/retrieval-core;
+  - `Filtered ANN benchmark datasets`
+    - payload/filter pressure layer.
+
+Правильный смысл этого слоя:
+- весь продукт `Amai` как black-box потом идёт через `general framework + adapter`;
+- search/retrieval-core отдельно идёт через `ANN benchmark`;
+- payload/filter behaviour отдельно идёт через filtered ANN datasets.
+
+То есть внешний benchmark contour нужен не ради красивой ссылки на GitHub, а чтобы рядом с внутренними proof-ами был ещё и честный apples-to-apples сравнительный слой.
+
 ## Ключевые proof-команды
 
 Если нужен честный локальный proof:
@@ -1074,6 +1100,7 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 ./scripts/proof_load.sh
 ./scripts/proof_hostile.sh
 ./scripts/proof_benchmark_matrix.sh
+./scripts/proof_external_benchmark_env.sh
 ./scripts/proof_mcp_task_matrix.sh
 ./scripts/proof_memory_task_matrix.sh
 ./scripts/proof_token_benchmark.sh

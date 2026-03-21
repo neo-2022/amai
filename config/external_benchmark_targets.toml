@@ -1,0 +1,69 @@
+modified_at = "2026-03-21 21:59 MSK"
+"Ручная сверка guide/docs" = "2026-03-21 21:59 MSK"
+
+[source]
+display_name = "Amai external retrieval/vector benchmark layer"
+summary = "Это отдельный внешний comparative contour для retrieval/vector слоя. Он не заменяет внутренние hot/cold end-to-end проверки Amai, а дополняет их честным apples-to-apples сравнением."
+
+[benchmarks.vectordbbench]
+order = 1
+display_name = "VectorDBBench"
+aliases = ["vector db bench", "vector-db-benchmark", "vectordb bench"]
+benchmark_kind = "general framework + adapter"
+summary = "Общий framework для сравнения vector engines на одинаковом железе с одинаковыми dataset/scenario. Для Amai это лучший первый внешний benchmark, потому что он ближе всего к честному apples-to-apples сравнению vector/filter слоя."
+reference_url = "https://github.com/zilliztech/VectorDBBench"
+upstream_git_url = "https://github.com/zilliztech/VectorDBBench.git"
+requires_tools = ["python3", "docker", "git"]
+why_relevant = [
+  "Даёт общий engine/dataset/scenario контур вместо внутреннего красивого snapshot.",
+  "Позволяет сравнить retrieval/vector слой Amai на одинаковом железе и одинаковых нагрузках.",
+  "Подходит как основа для следующего слоя: Amai adapter для black-box benchmark."
+]
+local_role = [
+  "Использовать как первый внешний comparative benchmark для vector/filter layer.",
+  "Не выдавать его за весь продукт Amai целиком.",
+  "Держать рядом с внутренним Amai end-to-end cold/hot contour, а не вместо него."
+]
+next_step = "Materialize adapter-путь: dataset -> ingest -> warmup -> fixed workload -> latency/QPS/recall report рядом с внутренним Amai cold/hot benchmark."
+
+[benchmarks.ann_benchmarks]
+order = 2
+display_name = "ann-benchmarks"
+aliases = ["ann benchmarks", "ann-benchmark", "ann benchmark"]
+benchmark_kind = "ANN core ceiling"
+summary = "Классический benchmark для nearest-neighbor ядра с готовыми datasets, Docker-контейнерами и test suite для проверки корректности. Для Amai нужен как отдельный ceiling retrieval-core, чтобы не путать latency orchestration с latency search-ядра."
+reference_url = "https://github.com/erikbern/ann-benchmarks"
+upstream_git_url = "https://github.com/erikbern/ann-benchmarks.git"
+requires_tools = ["python3", "docker", "git"]
+why_relevant = [
+  "Даёт честный recall/latency tradeoff для search-ядра.",
+  "Помогает отделить bottleneck retrieval-core от bottleneck orchestration.",
+  "Имеет готовые datasets и test suite integrity."
+]
+local_role = [
+  "Использовать отдельно от whole-product benchmark.",
+  "Сравнивать retrieval-core ceiling, а не весь Amai runtime.",
+  "Сопоставлять результаты с VectorDBBench и внутренним cold contour."
+]
+next_step = "Построить отдельный Amai retrieval-core evaluation path, чтобы честно сравнивать ceiling search-ядра без примеси orchestration."
+
+[benchmarks.filtered_ann_datasets]
+order = 3
+display_name = "Filtered ANN benchmark datasets"
+aliases = ["filtered ann", "filtered ann datasets", "ann filtering benchmark datasets"]
+benchmark_kind = "payload/filter pressure layer"
+summary = "Набор dataset-ов для filtered retrieval с payload metadata и готовыми filtering requests. Для Amai этот слой важен, потому что payload/filter path ближе к реальным memory-orchestrator сценариям, чем чистый голый ANN."
+reference_url = "https://github.com/qdrant/ann-filtering-benchmark-datasets"
+upstream_git_url = "https://github.com/qdrant/ann-filtering-benchmark-datasets.git"
+requires_tools = ["python3", "git"]
+why_relevant = [
+  "Давит не только на vector search, но и на payload/filter integration.",
+  "Ближе к real-world retrieval, чем чистые nearest-neighbor тесты.",
+  "Нужен для честной проверки filtered search слоя рядом с general framework."
+]
+local_role = [
+  "Использовать как третий внешний слой после general framework и ANN core.",
+  "Проверять payload/filter поведение, а не подменять им весь продукт.",
+  "Сопоставлять с внутренними Amai cases по filtered retrieval и quality."
+]
+next_step = "Подготовить Amai comparative contour для filtered search: payload-aware datasets + recall/precision + latency рядом с внутренним cold benchmark."

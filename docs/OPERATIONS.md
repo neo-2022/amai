@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 21:48 MSK
-Ручная сверка guide/docs: 2026-03-21 21:48 MSK
+modified_at: 2026-03-21 21:59 MSK
+Ручная сверка guide/docs: 2026-03-21 21:59 MSK
 
 # Operations
 
@@ -912,6 +912,31 @@ cargo run --release -- verify token-benchmark \
 - проверяет coverage summary;
 - проверяет explain path по alias и по human-readable benchmark name;
 - fail-ит, если benchmark registry или CLI drift-нули.
+
+Отдельно materialized и внешний retrieval/vector readiness contour:
+
+```bash
+cargo run -- benchmark external-check
+cargo run -- benchmark external-explain --benchmark vectordbbench
+./scripts/proof_external_benchmark_env.sh
+```
+
+Это не замена `Amai` end-to-end benchmark-ам.
+Его задача уже другая:
+- проверить, что эта машина готова к внешним comparative benchmark-ам;
+- честно развести:
+  - `general framework + adapter`
+  - `ANN core ceiling`
+  - `payload/filter pressure`.
+
+Текущий канонический порядок для Amai:
+- `VectorDBBench`
+  - как первый apples-to-apples framework для vector/filter layer;
+- `ann-benchmarks`
+  - как ceiling retrieval-core;
+- `Filtered ANN benchmark datasets`
+  - как payload/filter layer;
+- и только после этого сопоставлять всё с внутренним `Amai` cold/hot contour.
 
 ## MCP task matrix
 

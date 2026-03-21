@@ -74,6 +74,8 @@ pub enum BenchmarkCommand {
     List,
     Coverage,
     Explain(BenchmarkArgs),
+    ExternalCheck,
+    ExternalExplain(BenchmarkArgs),
 }
 
 #[derive(Debug, Subcommand)]

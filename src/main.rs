@@ -12,6 +12,7 @@ mod continuity;
 mod dashboard;
 mod deployment;
 mod edge_cache;
+mod external_benchmark;
 mod indexer;
 mod language;
 mod mcp;
@@ -61,6 +62,12 @@ async fn main() -> Result<()> {
                 BenchmarkCommand::Coverage => benchmark_matrix::print_coverage(&repo_root)?,
                 BenchmarkCommand::Explain(args) => {
                     benchmark_matrix::print_benchmark_explainer(&repo_root, &args.benchmark)?
+                }
+                BenchmarkCommand::ExternalCheck => {
+                    external_benchmark::print_external_check(&repo_root)?
+                }
+                BenchmarkCommand::ExternalExplain(args) => {
+                    external_benchmark::print_external_explainer(&repo_root, &args.benchmark)?
                 }
             }
         }
