@@ -1,4 +1,4 @@
-use crate::cli::{ContinuityImportArgs, ContinuityStartupArgs};
+use crate::cli::{ContinuityHandoffArgs, ContinuityImportArgs, ContinuityStartupArgs};
 use crate::config::AppConfig;
 use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, ProjectRecord};
 use crate::s3;
@@ -28,7 +28,11 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
     let s3_client = s3::connect(cfg).await?;
     let repo_root = canonical_string(&args.repo_root)?;
     let bootstrap_path = canonical_path(&args.bootstrap_file)?;
-    let active_workline_path = canonical_path(&args.active_workline_file)?;
+    let active_workline_path: Option<PathBuf> = args
+        .active_workline_file
+        .as_ref()
+        .map(|path| canonical_path(path.as_path()))
+        .transpose()?;
     let project = postgres::upsert_project(
         &db,
         &args.project,
@@ -136,8 +140,6 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
 
     let bootstrap_text = fs::read_to_string(&bootstrap_path)
         .with_context(|| format!("failed to read {}", bootstrap_path.display()))?;
-    let active_workline_text = fs::read_to_string(&active_workline_path)
-        .with_context(|| format!("failed to read {}", active_workline_path.display()))?;
     let session_files = sources
         .iter()
         .filter(|source| source.source_kind == "continuity_session_memory")
@@ -146,7 +148,15 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
         .iter()
         .filter(|source| source.source_kind == "continuity_rendered_transcript")
         .count();
-    let active_summary = summarize_active_workline(&active_workline_text);
+    let active_summary = if let Some(active_workline_path) = &active_workline_path {
+        let active_workline_text = fs::read_to_string(active_workline_path)
+            .with_context(|| format!("failed to read {}", active_workline_path.display()))?;
+        summarize_active_workline(&active_workline_text)
+    } else {
+        latest_handoff_summary(&db, &project, &namespace)
+            .await?
+            .unwrap_or_else(|| json!({"headline":"ещё нет данных","next_step":"ещё нет данных"}))
+    };
     let bootstrap_summary = summarize_bootstrap(&bootstrap_text);
 
     let payload = json!({
@@ -170,7 +180,10 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
                 "details": bootstrap_summary,
             },
             "active_workline_summary": {
-                "active_workline_file": active_workline_path.display().to_string(),
+                "active_workline_file": active_workline_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
                 "details": active_summary,
             },
             "sources": imported,
@@ -207,6 +220,9 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
         })?;
 
     let continuity = &latest.payload["continuity_import"];
+    let handoff_summary = latest_handoff_summary(&db, &project, &namespace)
+        .await?
+        .unwrap_or_else(|| continuity["active_workline_summary"]["details"].clone());
     println!("Amai continuity startup");
     println!();
     println!("Проект: {} ({})", project.display_name, project.code);
@@ -240,13 +256,13 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
     println!("Текущая активная линия:");
     println!(
         "- {}",
-        continuity["active_workline_summary"]["details"]["headline"]
+        handoff_summary["headline"]
             .as_str()
             .unwrap_or("ещё нет данных")
     );
     println!(
         "- Ближайший обязательный следующий шаг: {}",
-        continuity["active_workline_summary"]["details"]["next_step"]
+        handoff_summary["next_step"]
             .as_str()
             .unwrap_or("ещё нет данных")
     );
@@ -265,13 +281,8 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
             .unwrap_or("ещё нет данных")
     );
     println!();
-    println!("Как использовать дальше:");
-    println!(
-        "- Для project-scoped retrieval: cargo run -- context pack --project {} --namespace {} --query 'ваш вопрос'",
-        project.code, namespace.code
-    );
-    println!(
-        "- Для обновления continuity после новых изменений: cargo run -- continuity import --project {} --display-name '{}' --repo-root {} --namespace {} --bootstrap-file {} --active-workline-file {}",
+    let mut import_command = format!(
+        "cargo run -- continuity import --project {} --display-name '{}' --repo-root {} --namespace {} --bootstrap-file {}",
         project.code,
         project.display_name.replace('\'', "\\'"),
         shell_quote(&project.repo_root),
@@ -281,20 +292,95 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
                 .as_str()
                 .unwrap_or_default()
         ),
-        shell_quote(
-            continuity["active_workline_summary"]["active_workline_file"]
-                .as_str()
-                .unwrap_or_default()
-        )
     );
+    let active_workline_arg = continuity["active_workline_summary"]["active_workline_file"]
+        .as_str()
+        .unwrap_or_default();
+    if !active_workline_arg.is_empty() {
+        import_command.push_str(" --active-workline-file ");
+        import_command.push_str(&shell_quote(active_workline_arg));
+    }
+    println!("Как использовать дальше:");
+    println!(
+        "- Для project-scoped retrieval: cargo run -- context pack --project {} --namespace {} --query 'ваш вопрос'",
+        project.code, namespace.code
+    );
+    println!("- Для обновления continuity после новых изменений: {import_command}");
+    Ok(())
+}
+
+pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> Result<()> {
+    let mut db = postgres::connect_admin(cfg).await?;
+    let project = postgres::get_project_by_code(&db, &args.project).await?;
+    let namespace = postgres::find_namespace_by_code(&db, project.project_id, &args.namespace)
+        .await?
+        .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.namespace))?;
+    let details = if let Some(details_file) = &args.details_file {
+        fs::read_to_string(details_file)
+            .with_context(|| format!("failed to read {}", details_file.display()))?
+    } else {
+        String::new()
+    };
+    let captured_at_epoch_ms = now_epoch_ms()?;
+    let body = render_handoff_markdown(&args.headline, &args.next_step, &details);
+    let amai_repo_root = crate::config::discover_repo_root(None)?;
+    let local_handoff_path = amai_repo_root
+        .join("state")
+        .join("continuity-imports")
+        .join(&project.code)
+        .join("live-handoff.md");
+    if let Some(parent) = local_handoff_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&local_handoff_path, &body)
+        .with_context(|| format!("failed to write {}", local_handoff_path.display()))?;
+    let document = build_document_record(
+        &project,
+        &namespace,
+        &ContinuitySource {
+            original_path: PathBuf::from("Amai continuity handoff"),
+            relative_path: ".amai-continuity/live-handoff/HANDOFF.md".to_string(),
+            source_kind: "continuity_handoff".to_string(),
+            artifact_bucket: cfg.s3_bucket_artifacts.clone(),
+            artifact_kind: "continuity_handoff".to_string(),
+        },
+        &body,
+        &body,
+        json!({
+            "continuity_kind": "continuity_handoff",
+            "captured_at_epoch_ms": captured_at_epoch_ms,
+        }),
+    )?;
+    let chunks = build_chunks(cfg, &body);
+    postgres::replace_document_index(&mut db, &document, &[], &chunks).await?;
+    let payload = json!({
+        "continuity_handoff": {
+            "project": {
+                "code": project.code,
+                "display_name": project.display_name,
+                "repo_root": project.repo_root,
+            },
+            "namespace": {
+                "code": namespace.code,
+                "display_name": namespace.display_name,
+            },
+            "captured_at_epoch_ms": captured_at_epoch_ms,
+            "headline": args.headline,
+            "next_step": args.next_step,
+            "details": details,
+            "relative_path": ".amai-continuity/live-handoff/HANDOFF.md",
+            "local_path": local_handoff_path.display().to_string(),
+        }
+    });
+    let _ = postgres::insert_observability_snapshot(&db, "continuity_handoff", &payload).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
 
 fn collect_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<Vec<ContinuitySource>> {
     let mut sources = Vec::new();
     let bootstrap_path = canonical_path(&args.bootstrap_file)?;
-    let active_workline_path = canonical_path(&args.active_workline_file)?;
-
     sources.push(ContinuitySource {
         original_path: bootstrap_path.clone(),
         relative_path: ".amai-continuity/bootstrap/continuity-snapshot.md".to_string(),
@@ -302,13 +388,16 @@ fn collect_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<Vec<C
         artifact_bucket: cfg.s3_bucket_artifacts.clone(),
         artifact_kind: "continuity_bootstrap".to_string(),
     });
-    sources.push(ContinuitySource {
-        original_path: active_workline_path.clone(),
-        relative_path: ".amai-continuity/active-workline/ACTIVE_WORKLINE.md".to_string(),
-        source_kind: "continuity_active_workline".to_string(),
-        artifact_bucket: cfg.s3_bucket_artifacts.clone(),
-        artifact_kind: "continuity_active_workline".to_string(),
-    });
+    if let Some(active_workline_file) = &args.active_workline_file {
+        let active_workline_path = canonical_path(active_workline_file)?;
+        sources.push(ContinuitySource {
+            original_path: active_workline_path,
+            relative_path: ".amai-continuity/active-workline/ACTIVE_WORKLINE.md".to_string(),
+            source_kind: "continuity_active_workline".to_string(),
+            artifact_bucket: cfg.s3_bucket_artifacts.clone(),
+            artifact_kind: "continuity_active_workline".to_string(),
+        });
+    }
 
     if let Some(memory_dir) = &args.memory_dir {
         let memory_dir = canonical_path(memory_dir)?;
@@ -405,6 +494,53 @@ fn build_document_record(
         diagnostics: json!([]),
         metadata,
     })
+}
+
+async fn latest_handoff_summary(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+) -> Result<Option<Value>> {
+    let snapshots =
+        postgres::list_observability_snapshots_by_kinds(db, &["continuity_handoff"], Some(50))
+            .await?;
+    Ok(snapshots
+        .into_iter()
+        .find(|snapshot| {
+            snapshot.payload["continuity_handoff"]["project"]["code"].as_str()
+                == Some(project.code.as_str())
+                && snapshot.payload["continuity_handoff"]["namespace"]["code"].as_str()
+                    == Some(namespace.code.as_str())
+        })
+        .map(|snapshot| {
+            json!({
+                "headline": snapshot.payload["continuity_handoff"]["headline"]
+                    .as_str()
+                    .unwrap_or("ещё нет данных"),
+                "next_step": snapshot.payload["continuity_handoff"]["next_step"]
+                    .as_str()
+                    .unwrap_or("ещё нет данных"),
+                "local_path": snapshot.payload["continuity_handoff"]["local_path"]
+                    .as_str()
+                    .unwrap_or_default(),
+            })
+        }))
+}
+
+fn render_handoff_markdown(headline: &str, next_step: &str, details: &str) -> String {
+    let mut lines = vec![
+        "# Amai Continuity Handoff".to_string(),
+        String::new(),
+        format!("- headline: {headline}"),
+        format!("- next_step: {next_step}"),
+    ];
+    if !details.trim().is_empty() {
+        lines.push(String::new());
+        lines.push("## Details".to_string());
+        lines.push(String::new());
+        lines.push(details.trim().to_string());
+    }
+    lines.join("\n") + "\n"
 }
 
 fn build_chunks(cfg: &AppConfig, content: &str) -> Vec<ChunkRecord> {

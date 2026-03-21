@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 04:48 MSK
-Ручная сверка guide/docs: 2026-03-21 04:48 MSK
+modified_at: 2026-03-21 05:28 MSK
+Ручная сверка guide/docs: 2026-03-21 05:28 MSK
 
 # Operations
 
@@ -115,15 +115,13 @@ cd /home/art/agent-memory-index
   --display-name "Project Alpha" \
   --repo-root /path/to/project-alpha \
   --namespace continuity \
-  --bootstrap-file /path/to/project-alpha/.codex/amai-project-bootstrap.md \
-  --active-workline-file /path/to/project-alpha/.codex/ACTIVE_WORKLINE.md
+  --bootstrap-file /path/to/amai/state/continuity-imports/project-alpha/continuity-snapshot.md
 ```
 
-Если у проекта есть старый внешний memory-export, который ещё нужен для аудита или совместимости
-с рантаймом клиента, его можно добавить отдельно:
+Если у проекта есть старый внешний каталог markdown-заметок или memory-export, который ещё нужен для аудита или совместимости с рантаймом клиента, его можно добавить отдельно:
 
 ```bash
-  --memory-dir /path/to/project-alpha/optional-memory-bridge
+  --memory-dir /path/to/project-alpha/optional-legacy-notes
 ```
 
 После этого новый startup-contour уже может идти через `Amai`:
@@ -139,12 +137,16 @@ cd /home/art/agent-memory-index
 - searchable continuity-layer режется до безопасного размера для `PostgreSQL tsvector` и lexical chunks;
 - observability получает отдельный snapshot `continuity_import`;
 - startup-summary потом читается не из нескольких разрозненных источников, а из `Amai`.
+- `--active-workline-file` больше не обязателен:
+  если write-side handoff уже живёт в `Amai`, import может брать headline и next-step оттуда, а bootstrap/transcript слой остаётся только refresh-evidence.
+- старый каталог заметок теперь должен передаваться явно;
+  автоматическое чтение project `.codex` как памяти запрещено, чтобы не возвращать legacy workflow.
 
 Важно:
 - старые источники при этом не обязаны сразу исчезать;
 - безопасный migration path такой:
   - продолжать писать handoff-файл / transcript mirror;
-  - при необходимости держать отдельный внешний memory bridge только как compatibility-layer;
+  - при необходимости держать отдельный старый memory-export только как compatibility-layer;
   - после содержательной работы обновлять continuity import в `Amai`;
   - новый session-start уже поднимать через `Amai continuity startup`.
 

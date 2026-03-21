@@ -76,6 +76,7 @@ pub enum DeploymentCommand {
 pub enum ContinuityCommand {
     Import(ContinuityImportArgs),
     Startup(ContinuityStartupArgs),
+    Handoff(ContinuityHandoffArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -167,7 +168,7 @@ pub struct ContinuityImportArgs {
     #[arg(long)]
     pub bootstrap_file: PathBuf,
     #[arg(long)]
-    pub active_workline_file: PathBuf,
+    pub active_workline_file: Option<PathBuf>,
     #[arg(long)]
     pub memory_dir: Option<PathBuf>,
     #[arg(long)]
@@ -182,6 +183,20 @@ pub struct ContinuityStartupArgs {
     pub repo_root: Option<PathBuf>,
     #[arg(long, default_value = "continuity")]
     pub namespace: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ContinuityHandoffArgs {
+    #[arg(long)]
+    pub project: String,
+    #[arg(long, default_value = "continuity")]
+    pub namespace: String,
+    #[arg(long)]
+    pub headline: String,
+    #[arg(long = "next-step")]
+    pub next_step: String,
+    #[arg(long)]
+    pub details_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

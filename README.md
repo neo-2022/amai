@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 04:35 MSK
-Ручная сверка guide/docs: 2026-03-21 04:35 MSK
+modified_at: 2026-03-21 05:28 MSK
+Ручная сверка guide/docs: 2026-03-21 05:28 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -326,10 +326,10 @@ http://127.0.0.1:9464/
 Если проект уже жил не в `Amai`, это не означает, что нужно всё начинать с нуля.
 
 `Amai` умеет забрать в себя старую continuity-линию из внешних источников, например:
-- заметки `EchoVault`;
 - bootstrap-файл continuity;
-- текущий `ACTIVE_WORKLINE`;
-- сохранённые rendered transcripts.
+- старый handoff-файл, если он ещё существует;
+- сохранённые rendered transcripts;
+- старый каталог markdown-заметок или memory-export, если он у вас вообще был.
 
 Простыми словами это значит так:
 - старые источники не выбрасываются;
@@ -344,9 +344,7 @@ http://127.0.0.1:9464/
   --display-name "Project Alpha" \
   --repo-root /path/to/project-alpha \
   --namespace continuity \
-  --bootstrap-file /path/to/project-alpha/.codex/project-bootstrap.md \
-  --active-workline-file /path/to/project-alpha/.codex/ACTIVE_WORKLINE.md \
-  --memory-dir /path/to/echovault/project-alpha
+  --bootstrap-file /path/to/amai/state/continuity-imports/project-alpha/continuity-snapshot.md
 ```
 
 Что делает эта команда:
@@ -354,6 +352,20 @@ http://127.0.0.1:9464/
 - складывает полный raw-content в artifact layer;
 - делает безопасный searchable слой для retrieval;
 - фиксирует import snapshot, чтобы потом новый старт не зависел от ручной сборки.
+- `--active-workline-file` больше не обязателен:
+  если write-side handoff уже живёт в `Amai`, import берёт headline и next-step оттуда, а bootstrap/transcript слой остаётся только refresh-evidence.
+
+Если у вас есть ещё и отдельный старый каталог заметок, его можно добавить явно:
+
+```bash
+./scripts/import_continuity.sh \
+  --project project_alpha \
+  --display-name "Project Alpha" \
+  --repo-root /path/to/project-alpha \
+  --namespace continuity \
+  --bootstrap-file /path/to/amai/state/continuity-imports/project-alpha/continuity-snapshot.md \
+  --memory-dir /path/to/project-alpha/optional-legacy-notes
+```
 
 ### Шаг 2. Запустить continuity-startup уже через `Amai`
 

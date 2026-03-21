@@ -21,6 +21,8 @@ state/nats/*
 state/sqlite/*
 !state/sqlite/.gitkeep
 state/install_state.json
+state/continuity-imports/
+state/*.pid
 
 tmp/*
 !tmp/.gitkeep
