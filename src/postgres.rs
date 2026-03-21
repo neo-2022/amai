@@ -727,6 +727,28 @@ pub async fn list_chunks_by_qdrant_point_ids(
         .collect())
 }
 
+pub async fn namespace_has_vector_points(
+    client: &Client,
+    project_id: Uuid,
+    namespace_id: Uuid,
+) -> Result<bool> {
+    let row = client
+        .query_one(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM ami.code_chunks
+                WHERE project_id = $1
+                  AND namespace_id = $2
+                  AND qdrant_point_id IS NOT NULL
+            )
+            "#,
+            &[&project_id, &namespace_id],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
 pub async fn insert_artifact_ref(client: &Client, record: &ArtifactRefInsert<'_>) -> Result<Uuid> {
     let row = client
         .query_one(

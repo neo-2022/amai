@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 18:19 MSK
-Ручная сверка guide/docs: 2026-03-21 18:19 MSK
+modified_at: 2026-03-21 18:45 MSK
+Ручная сверка guide/docs: 2026-03-21 18:45 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -469,6 +469,9 @@ http://127.0.0.1:9464/
   - `P50 / P95 / P99 / Max`
   - `precision / recall / hit rate`
   - сколько repo и query slices вошло в последний run;
+- compact proof-run теперь не должен искусственно раздувать cold хвост на scope без vector points:
+  - если для репозитория embeddings не строились, semantic path честно short-circuit-ится;
+  - это позволяет смотреть на реальный cold-path retrieval, а не на пустую оплату embed/search без единого hit;
 - что происходит внутри `PostgreSQL`, `Qdrant`, `NATS` и слоёв точности;
 - на каком железе сейчас всё работает и к какому клиенту уже привязана установка.
 

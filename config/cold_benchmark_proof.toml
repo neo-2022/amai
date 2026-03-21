@@ -9,6 +9,17 @@ min_target_hit_rate = 0.99
 min_recall = 0.99
 
 [[repos]]
+code = "art_local"
+display_name = "Art"
+repo_root = "../Art"
+namespace = "cold_benchmark"
+repo_type = "docs_heavy"
+size_class = "large_monorepo"
+limit_files = 240
+skip_embeddings = true
+default_retrieval_mode = "local_strict"
+
+[[repos]]
 code = "amai_local"
 display_name = "Amai"
 repo_root = "."
@@ -40,6 +51,14 @@ size_class = "small_repo"
 limit_files = 160
 skip_embeddings = true
 default_retrieval_mode = "local_strict"
+
+[[cases]]
+repo_code = "art_local"
+query_slice = "architecture_question"
+query = "Amai continuity startup"
+expected_projects = ["art_local"]
+expected_paths = ["scripts/tools/amai_art_continuity_startup.sh", "scripts/tools/README.md"]
+expected_terms = ["Amai continuity startup"]
 
 [[cases]]
 repo_code = "amai_local"
@@ -92,16 +111,16 @@ expected_terms = ["install_amai.sh"]
 
 [[cases]]
 repo_code = "langgraph_local"
-query_slice = "code_lookup"
-query = "art_bridge.md"
+query_slice = "docs_lookup"
+query = "REGART Art Bridge"
 expected_projects = ["langgraph_local"]
 expected_paths = ["docs/integration/art_bridge.md"]
-expected_terms = ["art_bridge"]
+expected_terms = ["REGART -> Art Bridge"]
 
 [[cases]]
 repo_code = "agent_regart_local"
-query_slice = "bugfix_context"
-query = "vector-store-module"
+query_slice = "architecture_question"
+query = "логический слой хранения для RAG"
 expected_projects = ["agent_regart_local"]
 expected_paths = ["docs/vector-store-module.md"]
-expected_terms = ["vector-store-module"]
+expected_terms = ["логический слой хранения"]

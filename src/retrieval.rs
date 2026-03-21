@@ -695,6 +695,38 @@ async fn semantic_chunks(
         ));
     }
 
+    let mut any_vectors = false;
+    for scope in visible_scopes {
+        if postgres::namespace_has_vector_points(
+            db,
+            scope.visible.project.project_id,
+            scope.namespace.namespace_id,
+        )
+        .await?
+        {
+            any_vectors = true;
+            break;
+        }
+    }
+    if !any_vectors {
+        return Ok((
+            lexical_fallback_chunks
+                .iter()
+                .take(limit)
+                .map(semantic_chunk_fallback_to_json)
+                .collect(),
+            SemanticTimings::default(),
+            SemanticGuardSummary {
+                query_terms: query_terms(query),
+                lexical_signal_count,
+                accepted_hits: lexical_fallback_chunks.len().min(limit),
+                rejected_hits: 0,
+                abstained: lexical_signal_count == 0,
+                reason: Some("no_vector_points_in_scope"),
+            },
+        ));
+    }
+
     let (vector, query_embed_ms) = embed_query(cfg, query)?;
     if vector.len() as u64 != cfg.qdrant_code_dim {
         return Err(anyhow!(

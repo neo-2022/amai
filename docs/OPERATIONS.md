@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 18:19 MSK
-Ручная сверка guide/docs: 2026-03-21 18:19 MSK
+modified_at: 2026-03-21 18:45 MSK
+Ручная сверка guide/docs: 2026-03-21 18:45 MSK
 
 # Operations
 
@@ -712,6 +712,15 @@ cargo run --release -- verify benchmark \
 ./scripts/proof_cold_benchmark.sh
 ```
 
+Этот proof-manifest теперь специально включает:
+- `Art` как `docs_heavy + large_monorepo`;
+- `Amai` как `code_heavy`;
+- дополнительные mixed-repo cases.
+
+Если для repo в proof включён `skip_embeddings = true`, runner не должен искусственно платить за semantic path на scope без vector points:
+- в таком случае retrieval честно short-circuit-ится;
+- cold contour меряет реальный end-to-end lexical/doc path, а не пустой embed хвост.
+
 Этот runner считает:
 - отдельно `cold` и `hot shadow`;
 - `P50 / P95 / P99 / max / sample_count`;
@@ -1422,6 +1431,11 @@ Grafana login берётся из `.env`:
   - `amai_tokens_savings_factor`
 - live retrieval exporter теперь отдельно отдаёт по каждому состоянию `mixed/hot/cold`:
   - `current_ms`
+  - `max_ms`
+  - `p50_ms`
+  - `p95_ms`
+  - `p99_ms`
+  - `sample_count`
   - `p50_ms`
   - `p95_ms`
   - `p99_ms`
