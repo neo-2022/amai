@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 17:17 MSK
-Ручная сверка guide/docs: 2026-03-21 17:17 MSK
+modified_at: 2026-03-21 18:19 MSK
+Ручная сверка guide/docs: 2026-03-21 18:19 MSK
 
 # Tests
 
@@ -24,6 +24,7 @@ modified_at: 2026-03-21 17:17 MSK
 ./scripts/proof_memory_task_matrix.sh
 ./scripts/proof_token_benchmark.sh
 ./scripts/proof_token_benchmark_suite.sh
+./scripts/proof_cold_benchmark.sh
 ./scripts/proof_observability.sh
 ./scripts/proof_mcp.sh
 ./scripts/proof_hostile.sh
@@ -32,6 +33,7 @@ modified_at: 2026-03-21 17:17 MSK
 
 Отдельно materialized Rust-native verification commands:
 - `cargo run -- verify benchmark ...`
+- `cargo run -- verify cold-path --manifest config/cold_benchmark_manifest.toml ...`
 - `cargo run -- verify accuracy ...`
 - `cargo run -- verify load ...`
 - `cargo run -- verify token-benchmark ...`

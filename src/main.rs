@@ -5,6 +5,7 @@ mod bootstrap;
 mod chat_question;
 mod cli;
 mod codex_threads;
+mod cold_benchmark;
 mod compatibility;
 mod config;
 mod continuity;
@@ -249,6 +250,12 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 let mut db = postgres::connect_admin(&cfg).await?;
                 verify::run_benchmark(&cfg, &mut db, &args).await?;
+            }
+            VerifyCommand::ColdPath(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                let mut db = postgres::connect_admin(&cfg).await?;
+                cold_benchmark::run(&cfg, &mut db, &args).await?;
             }
             VerifyCommand::TokenBenchmark(args) => {
                 let cfg = config::AppConfig::from_env()?;

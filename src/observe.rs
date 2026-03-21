@@ -221,6 +221,8 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         postgres::latest_observability_snapshot(&db, "retrieval_load_cold").await?;
     let latest_token_benchmark =
         postgres::latest_observability_snapshot(&db, "token_benchmark").await?;
+    let latest_cold_path_benchmark =
+        postgres::latest_observability_snapshot(&db, "cold_path_benchmark").await?;
     let latest_working_state_restore =
         postgres::latest_observability_snapshot(&db, "working_state_restore").await?;
     let token_budget_report = token_budget::collect_default_report(&db).await?;
@@ -239,6 +241,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_retrieval_load_hot": latest_load_hot,
         "latest_retrieval_load_cold": latest_load_cold,
         "latest_token_benchmark": latest_token_benchmark,
+        "latest_cold_path_benchmark": latest_cold_path_benchmark,
         "latest_working_state_restore": latest_working_state_restore,
         "token_budget_report": token_budget_report,
     });
@@ -257,6 +260,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_retrieval_load_hot": payload["latest_retrieval_load_hot"].clone(),
         "latest_retrieval_load_cold": payload["latest_retrieval_load_cold"].clone(),
         "latest_token_benchmark": payload["latest_token_benchmark"].clone(),
+        "latest_cold_path_benchmark": payload["latest_cold_path_benchmark"].clone(),
         "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
         "token_budget_report": payload["token_budget_report"].clone(),
         "sla": sla,
@@ -1073,6 +1077,74 @@ fn render_prometheus_metrics(snapshot: &Value) -> String {
         "amai_retrieval_cold_p95_ms",
         "Cold retrieval benchmark p95 in milliseconds.",
         snapshot["latest_retrieval_cold"]["benchmark"]["p95_ms"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_cold_contour_p50_ms",
+        "Latest end-to-end cold contour p50 in milliseconds.",
+        snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["p50"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_cold_contour_p95_ms",
+        "Latest end-to-end cold contour p95 in milliseconds.",
+        snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["p95"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_cold_contour_p99_ms",
+        "Latest end-to-end cold contour p99 in milliseconds.",
+        snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["p99"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_cold_contour_max_ms",
+        "Latest end-to-end cold contour max in milliseconds.",
+        snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["max"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_cold_contour_precision",
+        "Latest end-to-end cold contour precision.",
+        snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]
+            ["precision"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_cold_contour_recall",
+        "Latest end-to-end cold contour recall.",
+        snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["recall"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_cold_contour_hit_rate",
+        "Latest end-to-end cold contour target hit rate.",
+        snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]
+            ["hit_rate"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_cold_contour_fallback_rate",
+        "Latest end-to-end cold contour fallback rate.",
+        snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]
+            ["fallback_rate"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_cold_contour_target_met",
+        "Latest end-to-end cold contour target_met as 1 or 0.",
+        snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]
+            ["target_met"]
+            .as_bool()
+            .map(|value| if value { 1.0 } else { 0.0 }),
     );
     for (state, display) in [("mixed", "mix"), ("hot", "hot"), ("cold", "cold")] {
         push_metric(

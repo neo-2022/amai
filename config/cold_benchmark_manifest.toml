@@ -1,0 +1,144 @@
+[profile]
+display_name = "Local Real-Repos Cold Contour"
+summary = "Честный end-to-end cold benchmark для этой машины: реальные локальные репозитории, cold и hot shadow, quality, long-run и safety guards."
+target_p95_ms = 10.0
+target_p99_ms = 15.0
+target_max_ms = 20.0
+min_precision = 0.99
+min_target_hit_rate = 0.99
+min_recall = 0.99
+
+[[repos]]
+code = "art_local"
+display_name = "Art"
+repo_root = "../Art"
+namespace = "cold_benchmark"
+repo_type = "mixed"
+size_class = "large_monorepo"
+limit_files = 2500
+skip_embeddings = false
+default_retrieval_mode = "local_strict"
+
+[[repos]]
+code = "amai_local"
+display_name = "Amai"
+repo_root = "."
+namespace = "cold_benchmark"
+repo_type = "code_heavy"
+size_class = "medium_production"
+limit_files = 800
+skip_embeddings = false
+default_retrieval_mode = "local_strict"
+
+[[repos]]
+code = "langgraph_local"
+display_name = "my_langgraph_agent"
+repo_root = "../my_langgraph_agent"
+namespace = "cold_benchmark"
+repo_type = "mixed"
+size_class = "medium_repo"
+limit_files = 700
+skip_embeddings = false
+default_retrieval_mode = "local_strict"
+
+[[repos]]
+code = "agent_regart_local"
+display_name = "agent-RegArt"
+repo_root = "../agent-RegArt"
+namespace = "cold_benchmark"
+repo_type = "mixed"
+size_class = "small_repo"
+limit_files = 700
+skip_embeddings = false
+default_retrieval_mode = "local_strict"
+
+[[cases]]
+repo_code = "art_local"
+query_slice = "code_lookup"
+query = "CHECKLIST_00_MASTER_ART_REGART"
+description = "Art master checklist should be retrievable by exact filename."
+expected_projects = ["art_local"]
+expected_paths = ["docs/source/checklists/CHECKLIST_00_MASTER_ART_REGART.md"]
+expected_terms = ["CHECKLIST_00_MASTER_ART_REGART"]
+
+[[cases]]
+repo_code = "art_local"
+query_slice = "bugfix_context"
+query = "Amai continuity startup"
+description = "Art continuity startup path should stay visible in project law and helpers."
+expected_projects = ["art_local"]
+expected_paths = ["AGENTS.md", "scripts/tools/amai_art_continuity_startup.sh"]
+expected_terms = ["Amai continuity startup"]
+
+[[cases]]
+repo_code = "amai_local"
+query_slice = "symbol_lookup"
+query = "run_text_compare"
+description = "Core verify symbol should be retrievable from the codebase."
+expected_projects = ["amai_local"]
+expected_paths = ["src/verify.rs"]
+expected_symbols = ["run_text_compare"]
+expected_terms = ["run_text_compare"]
+
+[[cases]]
+repo_code = "amai_local"
+query_slice = "docs_lookup"
+query = "Что показывает эта панель"
+description = "Human dashboard docs should be retrievable from the README."
+expected_projects = ["amai_local"]
+expected_paths = ["README.md"]
+expected_terms = ["Что показывает эта панель"]
+
+[[cases]]
+repo_code = "amai_local"
+query_slice = "architecture_question"
+query = "chat-start restore pack"
+description = "Working-state restore architecture should remain visible."
+expected_projects = ["amai_local"]
+expected_paths = ["README.md", "docs/OPERATIONS.md"]
+expected_terms = ["chat-start restore pack"]
+
+[[cases]]
+repo_code = "amai_local"
+query_slice = "config_lookup"
+query = "AMI_LOCAL_FAST_CACHE_TTL_MS"
+description = "Latency cache config should be retrievable from docs and runtime config."
+expected_projects = ["amai_local"]
+expected_paths = ["src/config.rs", "docs/OPERATIONS.md"]
+expected_terms = ["AMI_LOCAL_FAST_CACHE_TTL_MS"]
+
+[[cases]]
+repo_code = "amai_local"
+query_slice = "cross_file_trace"
+query = "human_dashboard.sh"
+description = "Dashboard launch path should surface across script and docs."
+expected_projects = ["amai_local"]
+expected_paths = ["scripts/human_dashboard.sh", "README.md", "docs/OPERATIONS.md"]
+expected_terms = ["human_dashboard.sh"]
+
+[[cases]]
+repo_code = "amai_local"
+query_slice = "onboarding_query"
+query = "install_amai.sh"
+description = "Install path should be visible through script and docs."
+expected_projects = ["amai_local"]
+expected_paths = ["scripts/install_amai.sh", "README.md", "docs/OPERATIONS.md"]
+expected_terms = ["install_amai.sh"]
+
+[[cases]]
+repo_code = "langgraph_local"
+query_slice = "docs_lookup"
+query = "art_bridge.md"
+description = "Integration doc from my_langgraph_agent should be retrievable."
+expected_projects = ["langgraph_local"]
+expected_paths = ["docs/integration/art_bridge.md"]
+expected_terms = ["art_bridge"]
+
+[[cases]]
+repo_code = "agent_regart_local"
+query_slice = "architecture_question"
+query = "vector-store-module"
+description = "Vector-store architecture doc from agent-RegArt should be retrievable."
+expected_projects = ["agent_regart_local"]
+expected_paths = ["docs/vector-store-module.md"]
+expected_terms = ["vector-store-module"]

@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 17:54 MSK
-Ручная сверка guide/docs: 2026-03-21 17:54 MSK
+modified_at: 2026-03-21 18:19 MSK
+Ручная сверка guide/docs: 2026-03-21 18:19 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -461,6 +461,14 @@ http://127.0.0.1:9464/
   - `P99`
   - `sample_count`;
 - не течёт ли один проект в другой;
+- последний честный `Cold contour` verdict:
+  - `TARGET MET`
+  - `PARTIALLY MET`
+  - `NOT MET`;
+- если такой contour уже гоняли, панель сразу показывает:
+  - `P50 / P95 / P99 / Max`
+  - `precision / recall / hit rate`
+  - сколько repo и query slices вошло в последний run;
 - что происходит внутри `PostgreSQL`, `Qdrant`, `NATS` и слоёв точности;
 - на каком железе сейчас всё работает и к какому клиенту уже привязана установка.
 
@@ -1023,6 +1031,7 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 ./scripts/proof_mcp_task_matrix.sh
 ./scripts/proof_memory_task_matrix.sh
 ./scripts/proof_token_benchmark.sh
+./scripts/proof_cold_benchmark.sh
 ./scripts/proof_observability.sh
 ./scripts/proof_mcp.sh
 ./scripts/proof_onboarding.sh
@@ -1030,6 +1039,21 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 ./scripts/proof_stress_scale.sh
 ./scripts/proof_text_compare.sh
 ```
+
+Если нужен уже не короткий smoke, а честный end-to-end cold contour:
+
+```bash
+./scripts/cold_benchmark.sh --manifest config/cold_benchmark_manifest.toml
+```
+
+Этот runner:
+- сам индексирует указанные repo из manifest;
+- считает отдельно `cold` и `hot shadow`;
+- пишет:
+  - `summary.json`
+  - `report.md`
+  - `samples.csv`;
+- сохраняет последний результат в observability snapshot, чтобы его увидел human dashboard.
 
 ## Что означают ключевые слова
 

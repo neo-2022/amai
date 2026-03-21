@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 17:54 MSK
-Ручная сверка guide/docs: 2026-03-21 17:54 MSK
+modified_at: 2026-03-21 18:19 MSK
+Ручная сверка guide/docs: 2026-03-21 18:19 MSK
 
 # Operations
 
@@ -697,6 +697,56 @@ cargo run --release -- verify benchmark \
 Текущий репозиторный guard:
 - hot benchmark должен удерживать `p95 < 10ms`
 - hot benchmark должен удерживать `max < 15ms`
+
+## End-to-end cold contour
+
+Если нужен не component benchmark, а честный end-to-end cold retrieval contour:
+
+```bash
+./scripts/cold_benchmark.sh --manifest config/cold_benchmark_manifest.toml
+```
+
+Для компактного proof-run на реальных локальных репозиториях:
+
+```bash
+./scripts/proof_cold_benchmark.sh
+```
+
+Этот runner считает:
+- отдельно `cold` и `hot shadow`;
+- `P50 / P95 / P99 / max / sample_count`;
+- `precision / recall / target-hit rate / miss rate / fallback rate`;
+- stage breakdown по:
+  - `policy`
+  - `retrieval`
+  - `ranking`
+  - `provenance`
+  - `pack assembly`
+  - `orchestration`;
+- hardware / disk / thermal guard;
+- cleanup actions;
+- итоговый verdict:
+  - `TARGET MET`
+  - `PARTIALLY MET`
+  - `NOT MET`.
+
+Артефакты последнего run:
+- `state/cold-benchmark/latest/summary.json`
+- `state/cold-benchmark/latest/report.md`
+- `state/cold-benchmark/latest/samples.csv`
+
+Кроме файлов, runner теперь ещё и пишет snapshot `cold_path_benchmark`, поэтому:
+- human dashboard показывает сервисную карточку `Cold contour`;
+- `/metrics` публикует:
+  - `amai_cold_contour_p50_ms`
+  - `amai_cold_contour_p95_ms`
+  - `amai_cold_contour_p99_ms`
+  - `amai_cold_contour_max_ms`
+  - `amai_cold_contour_precision`
+  - `amai_cold_contour_recall`
+  - `amai_cold_contour_hit_rate`
+  - `amai_cold_contour_fallback_rate`
+  - `amai_cold_contour_target_met`.
 
 ## Accuracy proof
 

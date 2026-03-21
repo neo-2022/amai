@@ -138,6 +138,7 @@ pub enum IndexCommand {
 #[derive(Debug, Subcommand)]
 pub enum VerifyCommand {
     Benchmark(Box<VerifyBenchmarkArgs>),
+    ColdPath(Box<VerifyColdPathArgs>),
     TokenBenchmark(Box<VerifyTokenBenchmarkArgs>),
     TokenBenchmarkSuite(Box<VerifyTokenBenchmarkSuiteArgs>),
     TextCompare(Box<VerifyTextCompareArgs>),
@@ -365,6 +366,64 @@ pub struct VerifyBenchmarkArgs {
     pub max_p99_ms: Option<u128>,
     #[arg(long)]
     pub max_max_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct VerifyColdPathArgs {
+    #[arg(
+        long,
+        default_value = "config/cold_benchmark_manifest.toml",
+        help = "Path to the machine-readable cold benchmark dataset manifest"
+    )]
+    pub manifest: PathBuf,
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "How many full dataset cycles to run for the long-run contour"
+    )]
+    pub cycles: usize,
+    #[arg(
+        long,
+        default_value_t = 85.0,
+        help = "Thermal guard in Celsius. When exceeded, the runner pauses or stops."
+    )]
+    pub thermal_guard_celsius: f64,
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "How many seconds to cool down before retrying after a thermal spike"
+    )]
+    pub cooldown_seconds: u64,
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "How many cooldown retries are allowed before the run stops"
+    )]
+    pub max_cooldown_retries: usize,
+    #[arg(
+        long,
+        default_value_t = 25.0,
+        help = "Minimum free disk GiB required to continue the run"
+    )]
+    pub min_disk_free_gib: f64,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Reindex every repo on every cycle instead of only before the first cycle"
+    )]
+    pub reindex_each_cycle: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Skip indexing and assume the manifest repos are already indexed"
+    )]
+    pub skip_index: bool,
+    #[arg(
+        long,
+        default_value = "state/cold-benchmark/latest",
+        help = "Directory for report, JSON summary and per-sample CSV"
+    )]
+    pub output_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Args)]

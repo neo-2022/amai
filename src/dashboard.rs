@@ -1047,6 +1047,36 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                 ),
             ],
         ),
+        service_card(
+            "Cold contour",
+            snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["executive_summary"]["verdict"]
+                .as_str()
+                .unwrap_or("ещё нет данных")
+                .to_string(),
+            "Это последний честный end-to-end cold benchmark по реальным репозиториям и query slices, а не component-only latency.".to_string(),
+            cold_contour_status(snapshot),
+            vec![
+                format!(
+                    "P50 / P95 / P99 / Max: {} / {} / {} / {}.",
+                    format_ms(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["p50"].as_f64()),
+                    format_ms(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["p95"].as_f64()),
+                    format_ms(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["p99"].as_f64()),
+                    format_ms(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["max"].as_f64()),
+                ),
+                format!(
+                    "Precision / Recall / Hit rate: {} / {} / {}.",
+                    format_ratio_percent(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["precision"].as_f64()),
+                    format_ratio_percent(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["recall"].as_f64()),
+                    format_ratio_percent(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["hit_rate"].as_f64()),
+                ),
+                format!(
+                    "Repo count / query slices / samples: {} / {} / {}.",
+                    format_u64(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["repo_count"].as_u64()),
+                    format_u64(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["query_slice_count"].as_u64()),
+                    format_u64(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["sample_count"].as_u64()),
+                ),
+            ],
+        ),
     ]
 }
 
@@ -1332,6 +1362,17 @@ fn status_label(status: &str) -> &'static str {
         "alert" => "внимание",
         "critical" => "критично",
         _ => "нет данных",
+    }
+}
+
+fn cold_contour_status(snapshot: &Value) -> &'static str {
+    match snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["executive_summary"]["verdict"]
+        .as_str()
+    {
+        Some("TARGET MET") => "pass",
+        Some("PARTIALLY MET") => "alert",
+        Some("NOT MET") => "critical",
+        _ => "unknown",
     }
 }
 
