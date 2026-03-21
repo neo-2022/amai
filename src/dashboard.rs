@@ -368,24 +368,15 @@ pub fn render_html(refresh_ms: u64) -> String {
       text-align: right;
     }
 
-    .hint-anchor {
+    .has-tooltip {
       position: relative;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 18px;
-      height: 18px;
-      border-radius: 999px;
-      border: 1px solid var(--surface-border);
-      background: var(--surface);
-      color: var(--accent);
-      font-size: 12px;
-      font-weight: 800;
+      display: inline-block;
       cursor: help;
-      flex: 0 0 auto;
+      text-decoration: underline dotted rgba(13, 107, 111, 0.45);
+      text-underline-offset: 3px;
     }
 
-    .hint-anchor::after {
+    .has-tooltip::after {
       content: attr(data-tip);
       position: absolute;
       left: 50%;
@@ -409,10 +400,99 @@ pub fn render_html(refresh_ms: u64) -> String {
       z-index: 20;
     }
 
-    .hint-anchor:hover::after,
-    .hint-anchor:focus-visible::after {
+    .has-tooltip:hover::after,
+    .has-tooltip:focus-visible::after {
       opacity: 1;
       transform: translateX(-50%) translateY(0);
+    }
+
+    .compare-card {
+      padding: 20px;
+      border-radius: 20px;
+      border: 1px solid var(--surface-border);
+      background: var(--surface-raised);
+      display: grid;
+      gap: 16px;
+    }
+
+    .compare-card.pass { background: linear-gradient(180deg, rgba(29, 124, 91, 0.10), var(--surface-solid)); }
+    .compare-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.10), var(--surface-solid)); }
+    .compare-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.10), var(--surface-solid)); }
+    .compare-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.10), var(--surface-solid)); }
+
+    .compare-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      gap: 12px;
+    }
+
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .compare-metric {
+      border: 1px solid var(--surface-border);
+      border-radius: 18px;
+      background: var(--surface);
+      padding: 16px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .compare-metric-label {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .compare-metric-value {
+      margin: 0;
+      font-size: clamp(24px, 4vw, 34px);
+      line-height: 0.95;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+
+    .compare-metric-note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .compare-table-wrap {
+      overflow-x: auto;
+    }
+
+    .compare-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .compare-table th,
+    .compare-table td {
+      padding: 10px 12px;
+      border-top: 1px solid var(--surface-border);
+      text-align: right;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+
+    .compare-table th:first-child,
+    .compare-table td:first-child {
+      text-align: left;
+      white-space: normal;
+    }
+
+    .compare-table thead th {
+      color: var(--muted);
+      font-weight: 700;
     }
 
     .service-headline {
@@ -497,6 +577,10 @@ pub fn render_html(refresh_ms: u64) -> String {
       }
 
       .hero-cards {
+        grid-template-columns: 1fr;
+      }
+
+      .compare-grid {
         grid-template-columns: 1fr;
       }
     }
@@ -602,23 +686,75 @@ pub fn render_html(refresh_ms: u64) -> String {
       return element;
     }
 
-    function helpBadge(tooltip) {
-      const badge = document.createElement("span");
-      badge.className = "hint-anchor";
-      badge.tabIndex = 0;
-      badge.setAttribute("data-tip", tooltip);
-      badge.textContent = "?";
-      return badge;
+    function labelWithTooltip(text, tooltip, className = "metric-label") {
+      const wrap = document.createElement("span");
+      wrap.className = tooltip ? `${className} has-tooltip` : className;
+      if (tooltip) {
+        wrap.tabIndex = 0;
+        wrap.setAttribute("data-tip", tooltip);
+      }
+      wrap.textContent = text;
+      return wrap;
     }
 
-    function labelWithTooltip(text, tooltip) {
-      const wrap = document.createElement("span");
-      wrap.className = "metric-label";
-      wrap.appendChild(textNode("span", "", text));
-      if (tooltip) {
-        wrap.appendChild(helpBadge(tooltip));
+    function renderLiveCompareCard(container, card) {
+      const element = document.createElement("article");
+      element.className = `compare-card ${statusClass(card.status)}`;
+
+      const head = document.createElement("div");
+      head.className = "compare-head";
+      head.appendChild(labelWithTooltip(card.title, card.title_tooltip, "card-title"));
+      head.appendChild(textNode("div", `status-pill ${statusClass(card.status)}`, card.status_label));
+      element.appendChild(head);
+
+      if (card.source_label) {
+        element.appendChild(textNode("p", "card-source", card.source_label));
       }
-      return wrap;
+      element.appendChild(textNode("p", "card-note", card.note));
+
+      const compareGrid = document.createElement("div");
+      compareGrid.className = "compare-grid";
+      card.metrics.forEach((metric) => {
+        const metricCard = document.createElement("section");
+        metricCard.className = "compare-metric";
+        metricCard.appendChild(labelWithTooltip(metric.label, metric.tooltip, "compare-metric-label"));
+        metricCard.appendChild(textNode("p", "compare-metric-value", metric.value));
+        metricCard.appendChild(textNode("p", "compare-metric-note", metric.note));
+        compareGrid.appendChild(metricCard);
+      });
+      element.appendChild(compareGrid);
+
+      const tableWrap = document.createElement("div");
+      tableWrap.className = "compare-table-wrap";
+      const table = document.createElement("table");
+      table.className = "compare-table";
+
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      card.table.columns.forEach((column) => {
+        const th = document.createElement("th");
+        th.appendChild(labelWithTooltip(column.label, column.tooltip, ""));
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+      card.table.rows.forEach((row) => {
+        const tr = document.createElement("tr");
+        const labelCell = document.createElement("td");
+        labelCell.appendChild(labelWithTooltip(row.label, row.tooltip, ""));
+        tr.appendChild(labelCell);
+        row.values.forEach((value) => {
+          tr.appendChild(textNode("td", "", value));
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      tableWrap.appendChild(table);
+      element.appendChild(tableWrap);
+
+      container.appendChild(element);
     }
 
     function renderSummary(meta, headline) {
@@ -671,6 +807,10 @@ pub fn render_html(refresh_ms: u64) -> String {
       const container = document.getElementById(containerId);
       clearNode(container);
       cards.forEach((card) => {
+        if (card.kind === "live_compare") {
+          renderLiveCompareCard(container, card);
+          return;
+        }
         const element = document.createElement("article");
         element.className = `${kind} ${statusClass(card.status)}`;
 
@@ -850,35 +990,7 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
 }
 
 fn build_top_cards(snapshot: &Value) -> Vec<Value> {
-    vec![
-        live_latency_card(
-            snapshot,
-            "mixed",
-            "Живой retrieval mix",
-            Some(
-                "Смешанная задержка по последним живым запросам этой сессии. Здесь нет benchmark-цифр: это потоковая картина из реальных запросов, которые пришли уже после старта страницы.",
-            ),
-            "Это живая смешанная картина по последним Amai-запросам в текущей сессии.",
-        ),
-        live_latency_card(
-            snapshot,
-            "hot",
-            "Живой hot retrieval",
-            Some(
-                "Повторные запросы по уже прогретому кэшу. Это быстрый путь текущей сессии, а не отдельный stress/load benchmark.",
-            ),
-            "Это живые повторные запросы по уже прогретому кэшу.",
-        ),
-        live_latency_card(
-            snapshot,
-            "cold",
-            "Живой cold retrieval",
-            Some(
-                "Первый запрос без fast-cache внутри текущей сессии. Это живая оперативная метрика, а не последний сохранённый cold benchmark.",
-            ),
-            "Это живые запросы без готового fast-cache и без подмены component metrics.",
-        ),
-    ]
+    vec![live_latency_compare_card(snapshot)]
 }
 
 fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
@@ -1676,85 +1788,131 @@ fn card(title: &str, value: String, note: String, status: &str) -> Value {
     card_with_rows(title, value, note, status, None, None, Vec::new())
 }
 
-fn live_latency_card(
-    snapshot: &Value,
-    state: &str,
-    title: &str,
-    title_tooltip: Option<&str>,
-    intro: &str,
-) -> Value {
-    let Some(slice) = latency_slice(snapshot, state) else {
-        return card_with_rows(
-            title,
-            "ещё нет данных".to_string(),
-            format!("{intro} В текущей сессии Amai ещё не накопил живую выборку этого типа."),
-            "unknown",
-            Some("Источник: живая выборка текущей сессии".to_string()),
-            title_tooltip.map(str::to_string),
-            Vec::new(),
-        );
+fn live_latency_compare_card(snapshot: &Value) -> Value {
+    let hot = latency_slice(snapshot, "hot");
+    let cold = latency_slice(snapshot, "cold");
+    let hot_sample_count = hot
+        .and_then(|slice| slice["sample_count"].as_u64())
+        .unwrap_or_default();
+    let cold_sample_count = cold
+        .and_then(|slice| slice["sample_count"].as_u64())
+        .unwrap_or_default();
+    let hot_has_data = hot_sample_count > 0;
+    let cold_has_data = cold_sample_count > 0;
+    let hot_thresholds = live_latency_thresholds(snapshot, "hot");
+    let cold_thresholds = live_latency_thresholds(snapshot, "cold");
+    let hot_status = if hot_has_data {
+        status_from_threshold(
+            hot.and_then(|slice| slice["p95_latency_ms"].as_f64()),
+            hot_thresholds.0,
+            hot_thresholds.1,
+            hot_thresholds.2,
+        )
+    } else {
+        "unknown"
+    };
+    let cold_status = if cold_has_data {
+        status_from_threshold(
+            cold.and_then(|slice| slice["p95_latency_ms"].as_f64()),
+            cold_thresholds.0,
+            cold_thresholds.1,
+            cold_thresholds.2,
+        )
+    } else {
+        "unknown"
     };
 
-    let sample_count = slice["sample_count"].as_u64().unwrap_or(0);
-    if sample_count == 0 {
-        return card_with_rows(
-            title,
-            "ещё нет данных".to_string(),
-            format!("{intro} В текущей сессии Amai ещё не накопил живую выборку этого типа."),
-            "unknown",
-            Some("Источник: живая выборка текущей сессии".to_string()),
-            title_tooltip.map(str::to_string),
-            Vec::new(),
-        );
-    }
-
-    let (target, alert, critical) = live_latency_thresholds(snapshot, state);
-    let p95 = slice["p95_latency_ms"].as_f64();
-    card_with_rows(
-        title,
-        format_ms(slice["current_latency_ms"].as_f64()),
-        format!(
-            "{} Крупное число на карточке — последнее измерение прямо сейчас. Статус карточки считается по live P95 этой же выборки, а не по чужому benchmark-слою.",
-            intro
-        ),
-        status_from_threshold(p95, target, alert, critical),
-        Some("Источник: живая выборка текущей сессии, обновляется при новых запросах".to_string()),
-        title_tooltip.map(str::to_string),
-        vec![
-            metric_row(
-                "Эталон live P95",
-                format_ms(Some(target)),
-                Some(
-                    "Целевая граница для живой текущей выборки. Для hot она строже, для mix/cold — ближе к общему retrieval SLA.",
-                ),
-            ),
-            metric_row(
-                "Сейчас live P95",
-                format_ms(slice["p95_latency_ms"].as_f64()),
-                Some("Почти весь живой хвост текущей выборки этой сессии."),
-            ),
-            metric_row(
-                "Сейчас live P99",
-                format_ms(slice["p99_latency_ms"].as_f64()),
-                Some("Ещё более строгий хвост текущей живой выборки."),
-            ),
-            metric_row(
-                "Сейчас live Max",
-                format_ms(slice["max_latency_ms"].as_f64()),
-                Some("Самый тяжёлый одиночный запрос внутри текущей живой выборки."),
-            ),
-            metric_row(
-                "Сейчас последнее измерение",
-                format_ms(slice["current_latency_ms"].as_f64()),
-                Some("Последний фактически пришедший запрос этого типа."),
-            ),
-            metric_row(
-                "Сейчас выборка",
-                format_u64(Some(sample_count)),
-                Some("Сколько живых запросов этого типа уже вошло в расчёт текущей сессии."),
-            ),
+    json!({
+        "kind": "live_compare",
+        "title": "Как Amai отвечает сейчас",
+        "title_tooltip": "Это живое сравнение двух пользовательских режимов: повторный запрос по уже прогретому кэшу и первый запрос без прогрева. Здесь нет benchmark-снимков — только текущая сессия.",
+        "status": combine_statuses(&[hot_status, cold_status]),
+        "status_label": status_label(combine_statuses(&[hot_status, cold_status])),
+        "source_label": "Источник: живая выборка текущей сессии, обновляется при новых запросах",
+        "note": "Сверху показана медиана, то есть обычный уровень ответа в каждом режиме. Ниже — одна общая таблица, чтобы сравнить повторный и первый запрос без дублирования отдельных карточек.",
+        "metrics": [
+            {
+                "label": "Повторный запрос",
+                "tooltip": "Это уже прогретый путь: пользователь повторяет похожий запрос, а Amai не стартует с пустого места.",
+                "value": if hot_has_data {
+                    format_ms(hot.and_then(|slice| slice["p50_latency_ms"].as_f64()))
+                } else {
+                    "ещё нет данных".to_string()
+                },
+                "note": if hot_has_data {
+                    format!(
+                        "Статус: {}. Живая выборка: {}.",
+                        status_label(hot_status),
+                        format_u64(Some(hot_sample_count))
+                    )
+                } else {
+                    "В этой сессии ещё не накопилась живая hot-выборка.".to_string()
+                }
+            },
+            {
+                "label": "Первый запрос",
+                "tooltip": "Это первый запрос без fast-cache и без прогрева. Он всегда тяжелее и лучше показывает реальную цену холодного старта.",
+                "value": if cold_has_data {
+                    format_ms(cold.and_then(|slice| slice["p50_latency_ms"].as_f64()))
+                } else {
+                    "ещё нет данных".to_string()
+                },
+                "note": if cold_has_data {
+                    format!(
+                        "Статус: {}. Живая выборка: {}.",
+                        status_label(cold_status),
+                        format_u64(Some(cold_sample_count))
+                    )
+                } else {
+                    "В этой сессии ещё не накопилась живая cold-выборка.".to_string()
+                }
+            }
         ],
-    )
+        "table": {
+            "columns": [
+                { "label": "Режим", "tooltip": "Какой путь сейчас сравниваем: прогретый повторный запрос или первый холодный запрос." },
+                { "label": "P50", "tooltip": "Медиана. Это обычный уровень ответа, который пользователь видит чаще всего." },
+                { "label": "P95", "tooltip": "Тяжёлый хвост. Почти все запросы должны укладываться в эту границу." },
+                { "label": "P99", "tooltip": "Ещё более строгий хвост. Показывает редкие тяжёлые выбросы." },
+                { "label": "Max", "tooltip": "Самый тяжёлый одиночный запрос в текущей живой выборке." },
+                { "label": "Выборка", "tooltip": "Сколько живых запросов уже вошло в расчёт." }
+            ],
+            "rows": [
+                {
+                    "label": "Повторный запрос — эталон",
+                    "tooltip": "Для live hot-path формальный эталон сейчас задан только по P95. Остальные колонки честно остаются без отдельного target.",
+                    "values": [
+                        "—".to_string(),
+                        format_ms(Some(hot_thresholds.0)),
+                        "—".to_string(),
+                        "—".to_string(),
+                        "—".to_string()
+                    ]
+                },
+                {
+                    "label": "Повторный запрос — сейчас",
+                    "tooltip": "Текущая живая hot-выборка этой сессии.",
+                    "values": compare_values(hot, hot_sample_count)
+                },
+                {
+                    "label": "Первый запрос — эталон",
+                    "tooltip": "Для live cold-path формальный эталон сейчас задан только по P95. Остальные колонки честно остаются без отдельного target.",
+                    "values": [
+                        "—".to_string(),
+                        format_ms(Some(cold_thresholds.0)),
+                        "—".to_string(),
+                        "—".to_string(),
+                        "—".to_string()
+                    ]
+                },
+                {
+                    "label": "Первый запрос — сейчас",
+                    "tooltip": "Текущая живая cold-выборка этой сессии.",
+                    "values": compare_values(cold, cold_sample_count)
+                }
+            ]
+        }
+    })
 }
 
 fn card_with_rows(
@@ -1784,6 +1942,25 @@ fn metric_row(label: &str, value: String, tooltip: Option<&str>) -> Value {
         "value": value,
         "tooltip": tooltip,
     })
+}
+
+fn compare_values(slice: Option<&Value>, sample_count: u64) -> Vec<String> {
+    if sample_count == 0 {
+        return vec![
+            "ещё нет данных".to_string(),
+            "ещё нет данных".to_string(),
+            "ещё нет данных".to_string(),
+            "ещё нет данных".to_string(),
+            "0".to_string(),
+        ];
+    }
+    vec![
+        format_ms(slice.and_then(|value| value["p50_latency_ms"].as_f64())),
+        format_ms(slice.and_then(|value| value["p95_latency_ms"].as_f64())),
+        format_ms(slice.and_then(|value| value["p99_latency_ms"].as_f64())),
+        format_ms(slice.and_then(|value| value["max_latency_ms"].as_f64())),
+        format_u64(Some(sample_count)),
+    ]
 }
 
 fn status_label(status: &str) -> &'static str {
