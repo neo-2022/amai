@@ -413,7 +413,7 @@ pub fn chat_tail_at_time_from_snapshots(
     count: usize,
 ) -> Result<Option<ChatTail>> {
     let target_epoch_s = parse_rfc3339_epoch_s(at_time_rfc3339)?;
-    let snapshot = snapshots
+    let scoped_snapshots = snapshots
         .iter()
         .filter(|snapshot| {
             snapshot.payload["continuity_thread_index"]["project"]["code"].as_str()
@@ -421,6 +421,12 @@ pub fn chat_tail_at_time_from_snapshots(
                 && snapshot.payload["continuity_thread_index"]["namespace"]["code"].as_str()
                     == Some(namespace_code)
         })
+        .collect::<Vec<_>>();
+    if !target_is_within_snapshot_bounds(&scoped_snapshots, target_epoch_s) {
+        return Ok(None);
+    }
+    let snapshot = scoped_snapshots
+        .into_iter()
         .filter_map(|snapshot| {
             let node = &snapshot.payload["continuity_thread_index"];
             let (started_at_epoch_s, ended_at_epoch_s) = snapshot_window_epoch_s(node);
@@ -816,14 +822,26 @@ fn build_chat_tail_at_time(
 
 fn sanitize_chat_title(title: &str, messages: &[TranscriptMessage]) -> String {
     let collapsed_title = collapse_text(title, 160);
-    if !looks_like_noisy_title(&collapsed_title) {
-        return collapsed_title;
-    }
-    let fallback = messages
+    let first_user_message = messages
         .iter()
         .find(|message| message.role == "user" && !message.text.trim().is_empty())
         .map(|message| collapse_text(&message.text, 160))
         .unwrap_or_default();
+    let title_is_just_first_question =
+        !first_user_message.is_empty() && collapsed_title == first_user_message;
+    if !looks_like_noisy_title(&collapsed_title) && !title_is_just_first_question {
+        return collapsed_title;
+    }
+    if let Some(assistant_summary) = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant" && !message.text.trim().is_empty())
+        .and_then(|message| compact_headline_from_text(&message.text, 160))
+        .filter(|value| !looks_like_noisy_title(value))
+    {
+        return assistant_summary;
+    }
+    let fallback = first_user_message;
     if fallback.is_empty() {
         collapsed_title
     } else {
@@ -1387,6 +1405,9 @@ fn thread_record_at_time(repo_root: &str, target_epoch_s: i64) -> Result<Option<
     let conn = Connection::open(&db_path)
         .with_context(|| format!("failed to open {}", db_path.display()))?;
     let candidate_records = thread_records_around_time(&conn, repo_root, target_epoch_s, 12)?;
+    if !target_is_within_thread_bounds(&candidate_records, target_epoch_s) {
+        return Ok(None);
+    }
     let ranked = candidate_records
         .into_iter()
         .filter_map(|record| {
@@ -1430,6 +1451,47 @@ fn thread_record_at_time(repo_root: &str, target_epoch_s: i64) -> Result<Option<
         .min_by(|left, right| left.0.cmp(&right.0))
         .map(|(_, record)| record);
     Ok(ranked)
+}
+
+fn target_is_within_thread_bounds(records: &[ThreadRecord], target_epoch_s: i64) -> bool {
+    let mut earliest_started_at = i64::MAX;
+    let mut latest_ended_at = i64::MIN;
+    let mut found_window = false;
+
+    for record in records {
+        let Ok(Some((started_at_epoch_s, ended_at_epoch_s))) =
+            rollout_window_epoch_s(Path::new(&record.rollout_path))
+        else {
+            continue;
+        };
+        earliest_started_at = earliest_started_at.min(started_at_epoch_s);
+        latest_ended_at = latest_ended_at.max(ended_at_epoch_s);
+        found_window = true;
+    }
+
+    found_window && earliest_started_at <= target_epoch_s && target_epoch_s <= latest_ended_at
+}
+
+fn target_is_within_snapshot_bounds(
+    snapshots: &[&ObservabilitySnapshotRecord],
+    target_epoch_s: i64,
+) -> bool {
+    let mut earliest_started_at = i64::MAX;
+    let mut latest_ended_at = i64::MIN;
+    let mut found_window = false;
+
+    for snapshot in snapshots {
+        let node = &snapshot.payload["continuity_thread_index"];
+        let (started_at_epoch_s, ended_at_epoch_s) = snapshot_window_epoch_s(node);
+        if started_at_epoch_s <= 0 || ended_at_epoch_s <= 0 {
+            continue;
+        }
+        earliest_started_at = earliest_started_at.min(started_at_epoch_s);
+        latest_ended_at = latest_ended_at.max(ended_at_epoch_s);
+        found_window = true;
+    }
+
+    found_window && earliest_started_at <= target_epoch_s && target_epoch_s <= latest_ended_at
 }
 
 fn thread_records_around_time(
@@ -1747,8 +1809,8 @@ mod tests {
         chat_tail_at_time_from_snapshots, collapse_text, compact_headline_from_text,
         compact_next_step_from_text, extract_chat_messages_from_rollout_text,
         extract_last_messages, parse_rfc3339_epoch_s, parse_role_heading,
-        rendered_transcript_summary, rollout_summary_from_path, select_messages_for_time,
-        select_tail_messages,
+        previous_chat_tail_from_snapshots, rendered_transcript_summary, rollout_summary_from_path,
+        select_messages_for_time, select_tail_messages,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -1956,7 +2018,7 @@ mod tests {
             &snapshots,
             "art",
             "continuity",
-            "2025-03-04T12:01:00Z",
+            "2025-03-21T10:41:00Z",
             2,
         )
         .expect("tail result")
@@ -1972,7 +2034,71 @@ mod tests {
     }
 
     #[test]
-    fn noisy_title_is_replaced_with_real_user_message() {
+    fn chat_tail_at_time_from_snapshots_returns_none_for_future_time() {
+        let snapshots = vec![ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::nil(),
+            snapshot_kind: "continuity_thread_index".to_string(),
+            created_at_epoch_ms: 1_744_087_814_000,
+            payload: json!({
+                "continuity_thread_index": {
+                    "project": {"code": "art"},
+                    "namespace": {"code": "continuity"},
+                    "thread_id": "older-thread",
+                    "title": "старый чат",
+                    "created_at_epoch_s": 1_742_553_600,
+                    "updated_at_epoch_s": 1_742_553_660,
+                    "last_user_message": "старый вопрос",
+                    "last_assistant_message": "старый ответ"
+                }
+            }),
+        }];
+
+        let tail = chat_tail_at_time_from_snapshots(
+            &snapshots,
+            "art",
+            "continuity",
+            "2099-01-01T12:00:00Z",
+            2,
+        )
+        .expect("tail result");
+
+        assert!(tail.is_none());
+    }
+
+    #[test]
+    fn chat_tail_at_time_from_snapshots_returns_none_before_first_chat() {
+        let snapshots = vec![ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::nil(),
+            snapshot_kind: "continuity_thread_index".to_string(),
+            created_at_epoch_ms: 1_744_087_814_000,
+            payload: json!({
+                "continuity_thread_index": {
+                    "project": {"code": "art"},
+                    "namespace": {"code": "continuity"},
+                    "thread_id": "older-thread",
+                    "title": "старый чат",
+                    "created_at_epoch_s": 1_742_553_600,
+                    "updated_at_epoch_s": 1_742_553_660,
+                    "last_user_message": "старый вопрос",
+                    "last_assistant_message": "старый ответ"
+                }
+            }),
+        }];
+
+        let tail = chat_tail_at_time_from_snapshots(
+            &snapshots,
+            "art",
+            "continuity",
+            "2020-01-01T12:00:00Z",
+            2,
+        )
+        .expect("tail result");
+
+        assert!(tail.is_none());
+    }
+
+    #[test]
+    fn noisy_title_prefers_assistant_summary_over_raw_question_noise() {
         let snapshots = vec![ObservabilitySnapshotRecord {
             snapshot_id: Uuid::nil(),
             snapshot_kind: "continuity_thread_index".to_string(),
@@ -1995,12 +2121,47 @@ mod tests {
             &snapshots,
             "art",
             "continuity",
-            "2025-03-04T12:01:00Z",
+            "2025-03-21T10:41:00Z",
             2,
         )
         .expect("tail result")
         .expect("tail");
 
-        assert_eq!(tail.title, "о чем мы говорили?");
+        assert_eq!(tail.title, "про temporal lookup");
+    }
+
+    #[test]
+    fn question_like_title_prefers_assistant_summary_over_first_user_message() {
+        let snapshots = vec![ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::nil(),
+            snapshot_kind: "continuity_thread_index".to_string(),
+            created_at_epoch_ms: 1,
+            payload: json!({
+                "continuity_thread_index": {
+                    "project": {"code": "art"},
+                    "namespace": {"code": "continuity"},
+                    "thread_id": "thread-2",
+                    "title": "на чем закончили в прошлом чате, какие последние два сообщения?",
+                    "created_at_epoch_s": 1_742_553_600,
+                    "updated_at_epoch_s": 1_742_553_660,
+                    "last_user_message": "на чем закончили в прошлом чате, какие последние два сообщения?",
+                    "last_assistant_message": "Amai startup restore pack enriched and committed"
+                }
+            }),
+        }];
+
+        let tail = previous_chat_tail_from_snapshots(
+            &snapshots,
+            "art",
+            "continuity",
+            Some("current-thread"),
+            2,
+        )
+        .expect("tail");
+
+        assert_eq!(
+            tail.title,
+            "Amai startup restore pack enriched and committed"
+        );
     }
 }

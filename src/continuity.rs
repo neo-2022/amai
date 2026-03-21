@@ -840,6 +840,19 @@ fn render_direct_answer(
     } else {
         None
     };
+    if intent == "chat_at_time" && chat_tail.is_none() {
+        let mut lines = vec![format!(
+            "{heading} для этого момента нет точного совпадения в известных чатах."
+        )];
+        if let Some(at_time_rfc3339) = at_time_rfc3339 {
+            lines.push(format!("Целевой момент времени: {at_time_rfc3339}"));
+        }
+        lines.push(format!("Текущая активная линия проекта сейчас: {headline}"));
+        lines.push(format!(
+            "Ближайший обязательный следующий шаг: {project_next_step}"
+        ));
+        return lines.join("\n");
+    }
     let answer_headline = thread_headline.as_deref().unwrap_or(headline);
     let answer_next_step = thread_next_step.as_deref().unwrap_or(&project_next_step);
 
@@ -1881,6 +1894,31 @@ mod tests {
             answer.contains("Ближайший обязательный следующий шаг: Проверить новый чат ещё раз.")
         );
         assert!(answer.contains("Текущая активная линия проекта сейчас: Current project line"));
+    }
+
+    #[test]
+    fn render_direct_answer_reports_missing_exact_time_match_without_fake_chat() {
+        let handoff = json!({
+            "headline": "Current project line",
+            "next_step": "Current project next step."
+        });
+
+        let answer = render_direct_answer(
+            &handoff,
+            None,
+            None,
+            "chat_at_time",
+            Some("2099-01-01T12:00:00Z"),
+        );
+
+        assert!(answer.contains(
+            "Что было в чате на этот момент: для этого момента нет точного совпадения в известных чатах."
+        ));
+        assert!(answer.contains("Целевой момент времени: 2099-01-01T12:00:00Z"));
+        assert!(answer.contains("Текущая активная линия проекта сейчас: Current project line"));
+        assert!(
+            answer.contains("Ближайший обязательный следующий шаг: Current project next step.")
+        );
     }
 
     #[test]
