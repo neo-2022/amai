@@ -65,6 +65,8 @@ struct ContinuityThreadIndexEntry {
     #[serde(default)]
     summary_next_step: String,
     #[serde(default)]
+    time_slices: Vec<codex_threads::ThreadTimeSliceSummary>,
+    #[serde(default)]
     created_at_epoch_s: i64,
     #[serde(default)]
     updated_at_epoch_s: i64,
@@ -171,6 +173,7 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
                     "last_assistant_message": summary["last_assistant_message"].clone(),
                     "summary_headline": summary["summary_headline"].clone(),
                     "summary_next_step": summary["summary_next_step"].clone(),
+                    "time_slices": summary["time_slices"].clone(),
                     "rendered_transcript": summary["rendered_transcript"].clone(),
                     "source_rollout": summary["source_rollout"].clone(),
                     "created_at_epoch_s": summary["created_at_epoch_s"].clone(),
@@ -340,6 +343,7 @@ pub fn enrich_thread_index_file(args: &ContinuityThreadIndexEnrichArgs) -> Resul
         entry.last_assistant_message = summary.last_assistant_message;
         entry.summary_headline = summary.summary_headline;
         entry.summary_next_step = summary.summary_next_step;
+        entry.time_slices = summary.time_slices;
         entry.created_at_epoch_s = summary.created_at_epoch_s;
         entry.updated_at_epoch_s = summary.updated_at_epoch_s;
         enriched_threads += 1;
@@ -414,6 +418,7 @@ async fn import_thread_index_snapshots(
                     "last_assistant_message": summary.last_assistant_message,
                     "summary_headline": summary.summary_headline,
                     "summary_next_step": summary.summary_next_step,
+                    "time_slices": summary.time_slices,
                     "created_at_epoch_s": summary.created_at_epoch_s,
                     "updated_at_epoch_s": summary.updated_at_epoch_s,
                 })
@@ -443,6 +448,7 @@ async fn import_thread_index_snapshots(
                 "last_assistant_message": summary.as_ref().map(|value| value["last_assistant_message"].clone()).unwrap_or_else(|| json!(entry.last_assistant_message)),
                 "summary_headline": summary.as_ref().map(|value| value["summary_headline"].clone()).unwrap_or_else(|| json!(entry.summary_headline)),
                 "summary_next_step": summary.as_ref().map(|value| value["summary_next_step"].clone()).unwrap_or_else(|| json!(entry.summary_next_step)),
+                "time_slices": summary.as_ref().map(|value| value["time_slices"].clone()).unwrap_or_else(|| json!(entry.time_slices)),
                 "rendered_transcript": if entry.rendered_transcript.is_empty() { json!("") } else { json!(entry.rendered_transcript) },
                 "source_rollout": if entry.source_rollout.is_empty() { json!("") } else { json!(entry.source_rollout) },
                 "raw_rollout": if entry.raw_mirror.is_empty() { json!("") } else { json!(entry.raw_mirror) },
@@ -912,6 +918,25 @@ fn render_direct_answer(
         let title = select_chat_tail_label(chat_tail, answer_headline);
         if let Some(at_time_rfc3339) = at_time_rfc3339 {
             lines.push(format!("Целевой момент времени: {at_time_rfc3339}"));
+            if let Some(slice) = chat_tail.selected_time_slice.as_ref() {
+                let from = if slice.started_at.is_empty() {
+                    "неизвестно"
+                } else {
+                    slice.started_at.as_str()
+                };
+                let to = if slice.ended_at.is_empty() {
+                    "неизвестно"
+                } else {
+                    slice.ended_at.as_str()
+                };
+                lines.push(format!("Смысловой срез времени: {from} -> {to}"));
+                if !slice.user_anchor.is_empty() {
+                    lines.push(format!(
+                        "О чём шёл разговор в этот момент: {}",
+                        collapse_answer_text(&slice.user_anchor, 220)
+                    ));
+                }
+            }
             if let Some(title) = title.as_deref() {
                 lines.push(format!("Подходящий chat thread: {title}"));
             }
@@ -965,6 +990,10 @@ fn select_chat_tail_label(
     let _thread_id = chat_tail.thread_id.trim();
     let normalized_answer = collapse_answer_text(answer_headline, 220);
     let normalized_answer = normalized_answer.trim();
+    let selected_user_anchor = chat_tail
+        .selected_time_slice
+        .as_ref()
+        .map(|slice| collapse_answer_text(&slice.user_anchor, 220));
     for candidate in [
         chat_tail.title.trim(),
         chat_tail.summary_headline.as_deref().unwrap_or("").trim(),
@@ -975,6 +1004,10 @@ fn select_chat_tail_label(
         let normalized = collapse_answer_text(candidate, 220);
         if normalized.trim().is_empty()
             || normalized.trim() == normalized_answer
+            || selected_user_anchor
+                .as_deref()
+                .is_some_and(|anchor| anchor.trim() == normalized.trim())
+            || (chat_tail.selected_time_slice.is_some() && normalized.chars().count() > 140)
             || looks_like_noisy_chat_label(&normalized)
         {
             continue;
@@ -1265,6 +1298,14 @@ fn print_chat_start_restore_human(value: &Value) {
 
 fn summarize_chat_tail_headline(chat_tail: &codex_threads::ChatTail) -> Option<String> {
     if let Some(value) = chat_tail
+        .selected_time_slice
+        .as_ref()
+        .map(|slice| slice.summary_headline.as_str())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(value.to_string());
+    }
+    if let Some(value) = chat_tail
         .summary_headline
         .as_deref()
         .filter(|value| !value.is_empty())
@@ -1280,6 +1321,14 @@ fn summarize_chat_tail_headline(chat_tail: &codex_threads::ChatTail) -> Option<S
 }
 
 fn extract_chat_tail_next_step(chat_tail: &codex_threads::ChatTail) -> Option<String> {
+    if let Some(value) = chat_tail
+        .selected_time_slice
+        .as_ref()
+        .map(|slice| slice.summary_next_step.as_str())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(value.to_string());
+    }
     if let Some(value) = chat_tail
         .summary_next_step
         .as_deref()
@@ -1859,7 +1908,7 @@ mod tests {
         is_meta_continuity_handoff, parse_chat_reference_spec, render_direct_answer,
     };
     use crate::cli::ContinuityThreadIndexEnrichArgs;
-    use crate::codex_threads::{ChatTail, TranscriptMessage};
+    use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
     use crate::postgres::{NamespaceRecord, ProjectRecord};
     use serde_json::json;
     use std::fs;
@@ -1925,6 +1974,16 @@ mod tests {
             title: "чат про continuity".to_string(),
             summary_headline: Some("про temporal lookup".to_string()),
             summary_next_step: None,
+            selected_time_slice: Some(ThreadTimeSliceSummary {
+                started_at: "2026-03-19T11:59:20+03:00".to_string(),
+                ended_at: "2026-03-19T12:01:10+03:00".to_string(),
+                started_at_epoch_s: 1,
+                ended_at_epoch_s: 2,
+                user_anchor: "разбирали temporal lookup и его точный смысловой ответ".to_string(),
+                assistant_anchor: "про temporal lookup".to_string(),
+                summary_headline: "про temporal lookup".to_string(),
+                summary_next_step: String::new(),
+            }),
             messages: vec![
                 TranscriptMessage {
                     role: "user".to_string(),
@@ -1948,6 +2007,12 @@ mod tests {
 
         assert!(answer.contains("Что было в чате на этот момент: про temporal lookup"));
         assert!(answer.contains("Целевой момент времени: 2026-03-19T12:00:00+03:00"));
+        assert!(answer.contains(
+            "Смысловой срез времени: 2026-03-19T11:59:20+03:00 -> 2026-03-19T12:01:10+03:00"
+        ));
+        assert!(answer.contains(
+            "О чём шёл разговор в этот момент: разбирали temporal lookup и его точный смысловой ответ"
+        ));
         assert!(answer.contains("Подходящий chat thread: чат про continuity"));
         assert!(
             answer.contains("Текущая активная линия проекта сейчас: Temporal lookup materialized")
@@ -1968,6 +2033,7 @@ mod tests {
             title: "чат про continuity".to_string(),
             summary_headline: Some("Закончили на temporal contour.".to_string()),
             summary_next_step: Some("Проверить новый чат ещё раз.".to_string()),
+            selected_time_slice: None,
             messages: vec![
                 TranscriptMessage {
                     role: "user".to_string(),
@@ -2046,6 +2112,7 @@ mod tests {
             title: "чат про continuity".to_string(),
             summary_headline: Some("Закончили на temporal contour.".to_string()),
             summary_next_step: Some("Проверить новый чат ещё раз.".to_string()),
+            selected_time_slice: None,
             messages: vec![],
         };
 
@@ -2068,6 +2135,7 @@ mod tests {
                 "Amai ordinal chat recovery and prompt restore materialized".to_string(),
             ),
             summary_next_step: None,
+            selected_time_slice: None,
             messages: vec![TranscriptMessage {
                 role: "assistant".to_string(),
                 text: "Amai ordinal chat recovery and prompt restore materialized".to_string(),
@@ -2094,6 +2162,7 @@ mod tests {
                 .to_string(),
             summary_headline: Some("Human continuity summary".to_string()),
             summary_next_step: None,
+            selected_time_slice: None,
             messages: vec![TranscriptMessage {
                 role: "assistant".to_string(),
                 text: "Human continuity summary".to_string(),
@@ -2106,6 +2175,51 @@ mod tests {
             !answer.contains("Найденный chat thread: Продолжай строго"),
             "system-style chat label must be suppressed"
         );
+    }
+
+    #[test]
+    fn render_direct_answer_omits_overlong_exact_time_thread_label() {
+        let handoff = json!({
+            "headline": "Current project line",
+            "next_step": "Current project next step."
+        });
+        let chat_tail = ChatTail {
+            thread_id: "thread-5".to_string(),
+            title: "теперь у нас реализован механизм отслеживания корреляции реадми в доменах и поддоменах и в docs? чтобы мы видели если где изменился документ по дате, то нужно посмотреть соответствующий раздел".to_string(),
+            summary_headline: Some("Проверю текущее покрытие механизма и сразу закреплю правило в `AGENTS.md`.".to_string()),
+            summary_next_step: None,
+            selected_time_slice: Some(ThreadTimeSliceSummary {
+                started_at: "2026-03-11T06:19:47.067Z".to_string(),
+                ended_at: "2026-03-11T06:19:58.631Z".to_string(),
+                started_at_epoch_s: 1,
+                ended_at_epoch_s: 2,
+                user_anchor: "теперь у нас реализован механизм отслеживания корреляции реадми в доменах и поддоменах и в docs? чтобы мы видели если где изменился документ по дате".to_string(),
+                assistant_anchor: "Проверю текущее покрытие механизма и сразу закреплю правило в `AGENTS.md`.".to_string(),
+                summary_headline: "Проверю текущее покрытие механизма и сразу закреплю правило в `AGENTS.md`.".to_string(),
+                summary_next_step: String::new(),
+            }),
+            messages: vec![
+                TranscriptMessage {
+                    role: "user".to_string(),
+                    text: "теперь у нас реализован механизм отслеживания корреляции реадми...".to_string(),
+                },
+                TranscriptMessage {
+                    role: "assistant".to_string(),
+                    text: "Проверю текущее покрытие механизма и сразу закреплю правило в `AGENTS.md`.".to_string(),
+                },
+            ],
+        };
+
+        let answer = render_direct_answer(
+            &handoff,
+            None,
+            Some(&chat_tail),
+            "chat_at_time",
+            Some("2026-03-11T12:00:00+03:00"),
+            1,
+        );
+
+        assert!(!answer.contains("Подходящий chat thread:"));
     }
 
     #[test]

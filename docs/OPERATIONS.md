@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 15:39 MSK
-Ручная сверка guide/docs: 2026-03-21 15:39 MSK
+modified_at: 2026-03-21 16:09 MSK
+Ручная сверка guide/docs: 2026-03-21 16:09 MSK
 
 # Operations
 
@@ -172,6 +172,8 @@ cd /home/art/agent-memory-index
 - `Rendered transcripts` в startup остаётся маленьким числом;
 - `continuity_thread_index` в PostgreSQL всё равно покрывает все чаты этого project-space;
 - в `continuity_thread_index` теперь живут compact поля `summary_headline` и `summary_next_step`;
+- в этом же temporal snapshot теперь живут и `time_slices`: короткие смысловые окна внутри thread-а
+  с собственным диапазоном времени и compact anchors;
 - temporal lookup продолжает точно отвечать на `previous chat` и `at exact time`.
 
 Практический смысл этих compact полей:
@@ -179,8 +181,17 @@ cd /home/art/agent-memory-index
   assistant-ответа;
 - `summary_next_step` даёт готовый следующий шаг того же thread без дублирования label вроде
   `Следующий шаг: Следующий шаг: ...`;
+- `time_slices` дают уже не весь thread целиком, а локальный смысловой кусок вокруг нужного момента
+  времени, чтобы `exact time` не жил на приблизительном nearest-thread ответе;
 - за счёт этого `previous chat` и `exact time` живут на более готовом temporal snapshot, а не на
   позднем post-hoc parsing.
+
+Жёсткий инвариант exact-time контура:
+- если есть `time-local` evidence, ответ строится по нему;
+- если выбранный slice слишком далёк по времени или его вообще нет, temporal contour обязан
+  fail-closed;
+- fallback на просто последние сообщения thread-а для вопроса “что было в точное время” запрещён,
+  потому что это создаёт ложную память.
 
 Если нужно прогнать этот upstream enrich отдельно руками:
 

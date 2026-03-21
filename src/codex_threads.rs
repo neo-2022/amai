@@ -21,7 +21,28 @@ pub struct ChatTail {
     pub title: String,
     pub summary_headline: Option<String>,
     pub summary_next_step: Option<String>,
+    pub selected_time_slice: Option<ThreadTimeSliceSummary>,
     pub messages: Vec<TranscriptMessage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadTimeSliceSummary {
+    #[serde(default)]
+    pub started_at: String,
+    #[serde(default)]
+    pub ended_at: String,
+    #[serde(default)]
+    pub started_at_epoch_s: i64,
+    #[serde(default)]
+    pub ended_at_epoch_s: i64,
+    #[serde(default)]
+    pub user_anchor: String,
+    #[serde(default)]
+    pub assistant_anchor: String,
+    #[serde(default)]
+    pub summary_headline: String,
+    #[serde(default)]
+    pub summary_next_step: String,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +73,8 @@ struct RolloutSummary {
     last_assistant_message: String,
     summary_headline: Option<String>,
     summary_next_step: Option<String>,
+    time_slices: Vec<ThreadTimeSliceSummary>,
+    selected_time_slice: Option<ThreadTimeSliceSummary>,
     tail_messages: Vec<TranscriptMessage>,
 }
 
@@ -75,6 +98,8 @@ pub struct ThreadIndexSummary {
     pub created_at_epoch_s: i64,
     #[serde(default)]
     pub updated_at_epoch_s: i64,
+    #[serde(default)]
+    pub time_slices: Vec<ThreadTimeSliceSummary>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,10 +126,13 @@ struct ThreadIndexEntry {
     summary_headline: String,
     #[serde(default)]
     summary_next_step: String,
+    #[serde(default)]
+    time_slices: Vec<ThreadTimeSliceSummary>,
 }
 
 const SYNTHETIC_AGENTS_PREFIX: &str = "# AGENTS.md instructions for ";
 const SYNTHETIC_INSTRUCTIONS_MARKER: &str = "<INSTRUCTIONS>";
+const EXACT_TIME_MAX_SLICE_DRIFT_S: i64 = 3 * 60 * 60;
 
 pub fn current_thread_id() -> Option<String> {
     env::var("CODEX_THREAD_ID")
@@ -146,6 +174,7 @@ pub fn derive_thread_index_summary(
         summary_next_step: summary.summary_next_step.unwrap_or_default(),
         created_at_epoch_s: parse_rfc3339_epoch_s(&summary.started_at).unwrap_or_default(),
         updated_at_epoch_s: parse_rfc3339_epoch_s(&summary.ended_at).unwrap_or_default(),
+        time_slices: summary.time_slices,
     }))
 }
 
@@ -205,27 +234,41 @@ pub fn nth_previous_chat_tail(
     }
     let rendered_path = PathBuf::from(&entry.rendered_transcript);
     let messages = extract_last_messages(&rendered_path, count)?;
+    let selected_time_slice = entry.time_slices.last().cloned();
     Ok(Some(ChatTail {
         thread_id: entry.thread_id,
         title: sanitize_chat_title(&entry.title, &messages),
-        summary_headline: if entry.summary_headline.is_empty() {
-            messages
-                .iter()
-                .rev()
-                .find(|message| message.role == "assistant")
-                .and_then(|message| compact_headline_from_text(&message.text, 220))
-        } else {
-            Some(entry.summary_headline)
-        },
-        summary_next_step: if entry.summary_next_step.is_empty() {
-            messages
-                .iter()
-                .rev()
-                .find(|message| message.role == "assistant")
-                .and_then(|message| compact_next_step_from_text(&message.text))
-        } else {
-            Some(entry.summary_next_step)
-        },
+        summary_headline: selected_time_slice
+            .as_ref()
+            .map(|slice| slice.summary_headline.clone())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                if entry.summary_headline.is_empty() {
+                    messages
+                        .iter()
+                        .rev()
+                        .find(|message| message.role == "assistant")
+                        .and_then(|message| compact_headline_from_text(&message.text, 220))
+                } else {
+                    Some(entry.summary_headline)
+                }
+            }),
+        summary_next_step: selected_time_slice
+            .as_ref()
+            .map(|slice| slice.summary_next_step.clone())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                if entry.summary_next_step.is_empty() {
+                    messages
+                        .iter()
+                        .rev()
+                        .find(|message| message.role == "assistant")
+                        .and_then(|message| compact_next_step_from_text(&message.text))
+                } else {
+                    Some(entry.summary_next_step)
+                }
+            }),
+        selected_time_slice,
         messages,
     }))
 }
@@ -283,27 +326,41 @@ pub fn current_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTai
     }
     let rendered_path = PathBuf::from(&entry.rendered_transcript);
     let messages = extract_last_messages(&rendered_path, count)?;
+    let selected_time_slice = entry.time_slices.last().cloned();
     Ok(Some(ChatTail {
         thread_id: entry.thread_id,
         title: sanitize_chat_title(&entry.title, &messages),
-        summary_headline: if entry.summary_headline.is_empty() {
-            messages
-                .iter()
-                .rev()
-                .find(|message| message.role == "assistant")
-                .and_then(|message| compact_headline_from_text(&message.text, 220))
-        } else {
-            Some(entry.summary_headline)
-        },
-        summary_next_step: if entry.summary_next_step.is_empty() {
-            messages
-                .iter()
-                .rev()
-                .find(|message| message.role == "assistant")
-                .and_then(|message| compact_next_step_from_text(&message.text))
-        } else {
-            Some(entry.summary_next_step)
-        },
+        summary_headline: selected_time_slice
+            .as_ref()
+            .map(|slice| slice.summary_headline.clone())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                if entry.summary_headline.is_empty() {
+                    messages
+                        .iter()
+                        .rev()
+                        .find(|message| message.role == "assistant")
+                        .and_then(|message| compact_headline_from_text(&message.text, 220))
+                } else {
+                    Some(entry.summary_headline)
+                }
+            }),
+        summary_next_step: selected_time_slice
+            .as_ref()
+            .map(|slice| slice.summary_next_step.clone())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                if entry.summary_next_step.is_empty() {
+                    messages
+                        .iter()
+                        .rev()
+                        .find(|message| message.role == "assistant")
+                        .and_then(|message| compact_next_step_from_text(&message.text))
+                } else {
+                    Some(entry.summary_next_step)
+                }
+            }),
+        selected_time_slice,
         messages,
     }))
 }
@@ -352,14 +409,27 @@ pub fn nth_previous_chat_tail_from_snapshots(
     Some(ChatTail {
         thread_id: node["thread_id"].as_str().unwrap_or_default().to_string(),
         title: sanitize_chat_title(node["title"].as_str().unwrap_or_default(), &messages),
-        summary_headline: node["summary_headline"]
-            .as_str()
+        summary_headline: last_snapshot_time_slice(node)
+            .as_ref()
+            .map(|slice| slice.summary_headline.clone())
             .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        summary_next_step: node["summary_next_step"]
-            .as_str()
+            .or_else(|| {
+                node["summary_headline"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            }),
+        summary_next_step: last_snapshot_time_slice(node)
+            .as_ref()
+            .map(|slice| slice.summary_next_step.clone())
             .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
+            .or_else(|| {
+                node["summary_next_step"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            }),
+        selected_time_slice: last_snapshot_time_slice(node),
         messages,
     })
 }
@@ -405,16 +475,35 @@ pub fn current_chat_tail_from_snapshots(
     Some(ChatTail {
         thread_id: node["thread_id"].as_str().unwrap_or_default().to_string(),
         title: sanitize_chat_title(node["title"].as_str().unwrap_or_default(), &messages),
-        summary_headline: node["summary_headline"]
-            .as_str()
+        summary_headline: last_snapshot_time_slice(node)
+            .as_ref()
+            .map(|slice| slice.summary_headline.clone())
             .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        summary_next_step: node["summary_next_step"]
-            .as_str()
+            .or_else(|| {
+                node["summary_headline"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            }),
+        summary_next_step: last_snapshot_time_slice(node)
+            .as_ref()
+            .map(|slice| slice.summary_next_step.clone())
             .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
+            .or_else(|| {
+                node["summary_next_step"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            }),
+        selected_time_slice: last_snapshot_time_slice(node),
         messages,
     })
+}
+
+fn last_snapshot_time_slice(node: &Value) -> Option<ThreadTimeSliceSummary> {
+    let slices: Vec<ThreadTimeSliceSummary> =
+        serde_json::from_value(node["time_slices"].clone()).unwrap_or_default();
+    slices.last().cloned()
 }
 
 pub fn chat_tail_at_time(
@@ -426,7 +515,7 @@ pub fn chat_tail_at_time(
     let Some(record) = thread_record_at_time(repo_root, target_epoch_s)? else {
         return Ok(None);
     };
-    build_chat_tail_at_time(&record, target_epoch_s, count).map(Some)
+    build_chat_tail_at_time(&record, target_epoch_s, count)
 }
 
 pub fn chat_tail_at_time_from_snapshots(
@@ -453,7 +542,11 @@ pub fn chat_tail_at_time_from_snapshots(
         .into_iter()
         .filter_map(|snapshot| {
             let node = &snapshot.payload["continuity_thread_index"];
-            let (started_at_epoch_s, ended_at_epoch_s) = snapshot_window_epoch_s(node);
+            let selected_time_slice = snapshot_selected_time_slice(node, target_epoch_s);
+            let (started_at_epoch_s, ended_at_epoch_s) = selected_time_slice
+                .as_ref()
+                .map(|slice| (slice.started_at_epoch_s, slice.ended_at_epoch_s))
+                .unwrap_or_else(|| snapshot_window_epoch_s(node));
             let width = if started_at_epoch_s > 0
                 && ended_at_epoch_s > 0
                 && ended_at_epoch_s >= started_at_epoch_s
@@ -468,6 +561,19 @@ pub fn chat_tail_at_time_from_snapshots(
                 && target_epoch_s <= ended_at_epoch_s;
             let before = ended_at_epoch_s > 0 && ended_at_epoch_s <= target_epoch_s;
             let after = started_at_epoch_s > 0 && started_at_epoch_s >= target_epoch_s;
+            let distance = if contains {
+                0
+            } else if before {
+                target_epoch_s - ended_at_epoch_s
+            } else if after {
+                started_at_epoch_s - target_epoch_s
+            } else {
+                i64::MAX
+            };
+            if selected_time_slice.is_some() && !contains && distance > EXACT_TIME_MAX_SLICE_DRIFT_S
+            {
+                return None;
+            }
             let rank = if contains {
                 (
                     0_i32,
@@ -476,59 +582,75 @@ pub fn chat_tail_at_time_from_snapshots(
                     started_at_epoch_s,
                 )
             } else if before {
-                (
-                    1_i32,
-                    target_epoch_s - ended_at_epoch_s,
-                    width,
-                    started_at_epoch_s,
-                )
+                (1_i32, distance, width, started_at_epoch_s)
             } else if after {
-                (
-                    2_i32,
-                    started_at_epoch_s - target_epoch_s,
-                    width,
-                    started_at_epoch_s,
-                )
+                (2_i32, distance, width, started_at_epoch_s)
             } else {
                 return None;
             };
-            Some((rank, snapshot))
+            Some((rank, selected_time_slice, snapshot))
         })
         .min_by(|left, right| left.0.cmp(&right.0))
-        .map(|(_, snapshot)| snapshot);
-    let Some(snapshot) = snapshot else {
+        .map(|(_, selected_time_slice, snapshot)| (selected_time_slice, snapshot));
+    let Some((preselected_time_slice, snapshot)) = snapshot else {
         return Ok(None);
     };
     let node = &snapshot.payload["continuity_thread_index"];
     if let Some(messages) = snapshot_rollout_messages_at_time(node, target_epoch_s, count)? {
+        let selected_time_slice =
+            preselected_time_slice.or_else(|| snapshot_selected_time_slice(node, target_epoch_s));
         return Ok(Some(ChatTail {
             thread_id: node["thread_id"].as_str().unwrap_or_default().to_string(),
             title: sanitize_chat_title(node["title"].as_str().unwrap_or_default(), &messages),
-            summary_headline: node["summary_headline"]
-                .as_str()
+            summary_headline: selected_time_slice
+                .as_ref()
+                .map(|slice| slice.summary_headline.clone())
                 .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned),
-            summary_next_step: node["summary_next_step"]
-                .as_str()
+                .or_else(|| {
+                    node["summary_headline"]
+                        .as_str()
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                }),
+            summary_next_step: selected_time_slice
+                .as_ref()
+                .map(|slice| slice.summary_next_step.clone())
                 .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned),
+                .or_else(|| {
+                    node["summary_next_step"]
+                        .as_str()
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                }),
+            selected_time_slice,
             messages,
         }));
     }
-    let messages = snapshot_messages(node, count).unwrap_or_default();
+    let selected_time_slice =
+        preselected_time_slice.or_else(|| snapshot_selected_time_slice(node, target_epoch_s));
+    let Some(selected_time_slice) = selected_time_slice else {
+        return Ok(None);
+    };
+    let messages = time_slice_messages(&selected_time_slice, count);
     Ok(Some(ChatTail {
         thread_id: node["thread_id"].as_str().unwrap_or_default().to_string(),
         title: sanitize_chat_title(node["title"].as_str().unwrap_or_default(), &messages),
-        summary_headline: node["summary_headline"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        summary_next_step: node["summary_next_step"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
+        summary_headline: Some(selected_time_slice.summary_headline.clone())
+            .filter(|value| !value.is_empty()),
+        summary_next_step: Some(selected_time_slice.summary_next_step.clone())
+            .filter(|value| !value.is_empty()),
+        selected_time_slice: Some(selected_time_slice),
         messages,
     }))
+}
+
+fn snapshot_selected_time_slice(
+    node: &Value,
+    target_epoch_s: i64,
+) -> Option<ThreadTimeSliceSummary> {
+    let slices: Vec<ThreadTimeSliceSummary> =
+        serde_json::from_value(node["time_slices"].clone()).unwrap_or_default();
+    select_time_slice_for_epoch(&slices, target_epoch_s)
 }
 
 pub fn rendered_transcript_summary(
@@ -642,6 +764,10 @@ pub fn rendered_transcript_summary(
         "last_assistant_message": last_assistant_message,
         "summary_headline": summary_headline,
         "summary_next_step": summary_next_step,
+        "time_slices": rollout_summary
+            .as_ref()
+            .map(|summary| serde_json::to_value(&summary.time_slices).unwrap_or_else(|_| json!([])))
+            .unwrap_or_else(|| json!([])),
         "rendered_transcript": transcript_path,
         "source_rollout": source_rollout,
         "created_at_epoch_s": record.as_ref().map(|item| item.created_at_epoch_s).unwrap_or_default(),
@@ -672,6 +798,7 @@ fn thread_index_summary_from_value(value: &Value) -> ThreadIndexSummary {
             .to_string(),
         created_at_epoch_s: value["created_at_epoch_s"].as_i64().unwrap_or_default(),
         updated_at_epoch_s: value["updated_at_epoch_s"].as_i64().unwrap_or_default(),
+        time_slices: serde_json::from_value(value["time_slices"].clone()).unwrap_or_default(),
     }
 }
 
@@ -831,6 +958,7 @@ fn build_previous_chat_tail(
         title: sanitize_chat_title(title, &summary.tail_messages),
         summary_headline: summary.summary_headline,
         summary_next_step: summary.summary_next_step,
+        selected_time_slice: None,
         messages: summary.tail_messages,
     })
 }
@@ -839,16 +967,22 @@ fn build_chat_tail_at_time(
     record: &ThreadRecord,
     target_epoch_s: i64,
     count: usize,
-) -> Result<ChatTail> {
+) -> Result<Option<ChatTail>> {
     let summary =
         rollout_summary_from_path_at_time(Path::new(&record.rollout_path), target_epoch_s, count)?;
-    Ok(ChatTail {
+    if let Some(slice) = summary.selected_time_slice.as_ref()
+        && !time_slice_matches_exact_time(slice, target_epoch_s)
+    {
+        return Ok(None);
+    }
+    Ok(Some(ChatTail {
         thread_id: record.thread_id.clone(),
         title: sanitize_chat_title(&record.title, &summary.tail_messages),
         summary_headline: summary.summary_headline,
         summary_next_step: summary.summary_next_step,
+        selected_time_slice: summary.selected_time_slice,
         messages: summary.tail_messages,
-    })
+    }))
 }
 
 fn sanitize_chat_title(title: &str, messages: &[TranscriptMessage]) -> String {
@@ -856,7 +990,7 @@ fn sanitize_chat_title(title: &str, messages: &[TranscriptMessage]) -> String {
     let first_user_message = messages
         .iter()
         .find(|message| message.role == "user" && !message.text.trim().is_empty())
-        .map(|message| collapse_text(&message.text, 160))
+        .map(|message| primary_user_anchor(&message.text, 160))
         .unwrap_or_default();
     let title_is_just_first_question =
         !first_user_message.is_empty() && collapsed_title == first_user_message;
@@ -979,10 +1113,64 @@ fn compact_sentence(value: &str, max_chars: usize) -> Option<String> {
     if value.is_empty() {
         return None;
     }
-    let first_sentence = find_sentence_boundary(value)
-        .map(|index| value[..=index].trim())
-        .unwrap_or(value);
-    Some(truncate_compact_value(first_sentence, max_chars))
+    let mut remaining = value;
+    for _ in 0..3 {
+        let sentence = find_sentence_boundary(remaining)
+            .map(|index| remaining[..=index].trim())
+            .unwrap_or(remaining);
+        if !looks_like_operational_prefix_sentence(sentence) {
+            return Some(truncate_compact_value(sentence, max_chars));
+        }
+        let trimmed = remaining.strip_prefix(sentence).unwrap_or("").trim_start();
+        if trimmed.is_empty() {
+            return Some(truncate_compact_value(sentence, max_chars));
+        }
+        remaining = trimmed;
+    }
+    Some(truncate_compact_value(remaining, max_chars))
+}
+
+fn looks_like_operational_prefix_sentence(sentence: &str) -> bool {
+    let normalized = sentence.trim().to_lowercase();
+    normalized.starts_with("workspace совпадает:")
+        || normalized.starts_with("workspace matches:")
+        || normalized.starts_with("корень проекта совпадает:")
+        || normalized.starts_with("корень подтверждён:")
+        || normalized.starts_with("корень совпадает:")
+}
+
+fn primary_user_anchor(text: &str, max_chars: usize) -> String {
+    let mut cleaned = Vec::new();
+    let mut skipping_open_tabs = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("# Context from my IDE setup")
+            || trimmed.starts_with("## Active file:")
+            || trimmed.starts_with("## Active selection of the file:")
+            || trimmed.starts_with("## Open tabs:")
+            || trimmed.starts_with("## Open tabs")
+            || trimmed.starts_with("## My request for Codex:")
+        {
+            skipping_open_tabs = trimmed.starts_with("## Open tabs");
+            continue;
+        }
+        if skipping_open_tabs {
+            if trimmed.starts_with("- ") {
+                continue;
+            }
+            skipping_open_tabs = false;
+        }
+        cleaned.push(trimmed);
+    }
+    let candidate = cleaned.join(" ");
+    if candidate.trim().is_empty() {
+        collapse_text(text, max_chars)
+    } else {
+        collapse_text(&candidate, max_chars)
+    }
 }
 
 fn find_sentence_boundary(value: &str) -> Option<usize> {
@@ -1133,12 +1321,15 @@ fn rollout_summary_from_path(path: &Path, count: usize) -> Result<RolloutSummary
             last_assistant_message: String::new(),
             summary_headline: None,
             summary_next_step: None,
+            time_slices: Vec::new(),
+            selected_time_slice: None,
             tail_messages: Vec::new(),
         });
     }
     let text =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let messages = extract_chat_messages_from_rollout_text(&text)?;
+    let time_slices = build_time_slices(&messages, 32);
     let started_at = messages
         .first()
         .map(|message| message.timestamp.clone())
@@ -1169,6 +1360,8 @@ fn rollout_summary_from_path(path: &Path, count: usize) -> Result<RolloutSummary
         last_assistant_message,
         summary_headline,
         summary_next_step,
+        time_slices,
+        selected_time_slice: None,
         tail_messages: select_tail_messages(&messages, count),
     })
 }
@@ -1187,12 +1380,16 @@ fn rollout_summary_from_path_at_time(
             last_assistant_message: String::new(),
             summary_headline: None,
             summary_next_step: None,
+            time_slices: Vec::new(),
+            selected_time_slice: None,
             tail_messages: Vec::new(),
         });
     }
     let text =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let messages = extract_chat_messages_from_rollout_text(&text)?;
+    let time_slices = build_time_slices(&messages, 32);
+    let selected_time_slice = select_time_slice_for_epoch(&time_slices, target_epoch_s);
     let started_at = messages
         .first()
         .map(|message| message.timestamp.clone())
@@ -1214,17 +1411,29 @@ fn rollout_summary_from_path_at_time(
         .map(|message| message.text.clone())
         .unwrap_or_default();
     let selected_tail_messages = select_messages_for_time(&messages, target_epoch_s, count);
-    let summary_headline = selected_tail_messages
-        .iter()
-        .rev()
-        .find(|message| message.role == "assistant")
-        .and_then(|message| compact_headline_from_text(&message.text, 220))
+    let summary_headline = selected_time_slice
+        .as_ref()
+        .map(|slice| slice.summary_headline.clone())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            selected_tail_messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "assistant")
+                .and_then(|message| compact_headline_from_text(&message.text, 220))
+        })
         .or_else(|| compact_headline_from_text(&last_assistant_message, 220));
-    let summary_next_step = selected_tail_messages
-        .iter()
-        .rev()
-        .find(|message| message.role == "assistant")
-        .and_then(|message| compact_next_step_from_text(&message.text))
+    let summary_next_step = selected_time_slice
+        .as_ref()
+        .map(|slice| slice.summary_next_step.clone())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            selected_tail_messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "assistant")
+                .and_then(|message| compact_next_step_from_text(&message.text))
+        })
         .or_else(|| compact_next_step_from_text(&last_assistant_message));
     Ok(RolloutSummary {
         started_at,
@@ -1234,7 +1443,16 @@ fn rollout_summary_from_path_at_time(
         last_assistant_message,
         summary_headline,
         summary_next_step,
-        tail_messages: selected_tail_messages,
+        time_slices,
+        selected_time_slice: selected_time_slice.clone(),
+        tail_messages: if selected_tail_messages.is_empty() {
+            selected_time_slice
+                .as_ref()
+                .map(|slice| time_slice_messages(slice, count))
+                .unwrap_or_default()
+        } else {
+            selected_tail_messages
+        },
     })
 }
 
@@ -1439,6 +1657,191 @@ fn select_messages_for_time(
             text: message.text.clone(),
         })
         .collect()
+}
+
+fn build_time_slices(messages: &[RolloutMessage], limit: usize) -> Vec<ThreadTimeSliceSummary> {
+    if messages.is_empty() {
+        return Vec::new();
+    }
+    let mut slices = Vec::new();
+    let mut segment_start = 0usize;
+    for index in 1..messages.len() {
+        if messages[index].role == "user" {
+            if let Some(slice) = build_time_slice_from_segment(&messages[segment_start..index]) {
+                slices.push(slice);
+            }
+            segment_start = index;
+        }
+    }
+    if let Some(slice) = build_time_slice_from_segment(&messages[segment_start..]) {
+        slices.push(slice);
+    }
+    if slices.len() > limit {
+        slices = slices[slices.len().saturating_sub(limit)..].to_vec();
+    }
+    slices
+}
+
+fn build_time_slice_from_segment(segment: &[RolloutMessage]) -> Option<ThreadTimeSliceSummary> {
+    if segment.is_empty() {
+        return None;
+    }
+    let first = segment.first()?;
+    let user = segment
+        .iter()
+        .find(|message| message.role == "user" && !message.text.trim().is_empty());
+    let assistant = segment
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == "assistant"
+                && !message.text.trim().is_empty()
+                && matches!(
+                    message.phase.as_deref(),
+                    Some("final_answer") | Some("final") | Some("final_response") | None
+                )
+        })
+        .or_else(|| {
+            segment
+                .iter()
+                .rev()
+                .find(|message| message.role == "assistant" && !message.text.trim().is_empty())
+        });
+    let last = assistant.unwrap_or_else(|| segment.last().expect("non-empty segment"));
+    let started_at_epoch_s = parse_rfc3339_epoch_s(&first.timestamp)
+        .ok()
+        .unwrap_or_default();
+    let ended_at_epoch_s = parse_rfc3339_epoch_s(&last.timestamp)
+        .ok()
+        .unwrap_or(started_at_epoch_s);
+    let user_anchor = user
+        .map(|message| primary_user_anchor(&message.text, 220))
+        .unwrap_or_default();
+    let assistant_anchor = assistant
+        .map(|message| collapse_text(&message.text, 220))
+        .unwrap_or_default();
+    let summary_headline = assistant
+        .and_then(|message| compact_headline_from_text(&message.text, 220))
+        .or_else(|| {
+            (!user_anchor.is_empty()).then_some(if user_anchor.chars().count() > 220 {
+                user_anchor.chars().take(220).collect::<String>()
+            } else {
+                user_anchor.clone()
+            })
+        })
+        .unwrap_or_default();
+    if summary_headline.is_empty() && assistant_anchor.is_empty() && user_anchor.is_empty() {
+        return None;
+    }
+    Some(ThreadTimeSliceSummary {
+        started_at: first.timestamp.clone(),
+        ended_at: last.timestamp.clone(),
+        started_at_epoch_s,
+        ended_at_epoch_s,
+        user_anchor,
+        assistant_anchor,
+        summary_headline,
+        summary_next_step: assistant
+            .and_then(|message| compact_next_step_from_text(&message.text))
+            .unwrap_or_default(),
+    })
+}
+
+fn select_time_slice_for_epoch(
+    slices: &[ThreadTimeSliceSummary],
+    target_epoch_s: i64,
+) -> Option<ThreadTimeSliceSummary> {
+    slices
+        .iter()
+        .filter_map(|slice| {
+            let contains = slice.started_at_epoch_s > 0
+                && slice.ended_at_epoch_s > 0
+                && slice.started_at_epoch_s <= target_epoch_s
+                && target_epoch_s <= slice.ended_at_epoch_s;
+            let width = if slice.started_at_epoch_s > 0
+                && slice.ended_at_epoch_s > 0
+                && slice.ended_at_epoch_s >= slice.started_at_epoch_s
+            {
+                slice.ended_at_epoch_s - slice.started_at_epoch_s
+            } else {
+                i64::MAX
+            };
+            let before = slice.ended_at_epoch_s > 0 && slice.ended_at_epoch_s <= target_epoch_s;
+            let after = slice.started_at_epoch_s > 0 && slice.started_at_epoch_s >= target_epoch_s;
+            let rank = if contains {
+                (
+                    0_i32,
+                    width,
+                    target_epoch_s - slice.ended_at_epoch_s,
+                    slice.started_at_epoch_s,
+                )
+            } else if before {
+                (
+                    1_i32,
+                    target_epoch_s - slice.ended_at_epoch_s,
+                    width,
+                    slice.started_at_epoch_s,
+                )
+            } else if after {
+                (
+                    2_i32,
+                    slice.started_at_epoch_s - target_epoch_s,
+                    width,
+                    slice.started_at_epoch_s,
+                )
+            } else {
+                return None;
+            };
+            Some((rank, slice))
+        })
+        .min_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, slice)| slice.clone())
+}
+
+fn time_slice_matches_exact_time(slice: &ThreadTimeSliceSummary, target_epoch_s: i64) -> bool {
+    if slice.started_at_epoch_s > 0
+        && slice.ended_at_epoch_s > 0
+        && slice.started_at_epoch_s <= target_epoch_s
+        && target_epoch_s <= slice.ended_at_epoch_s
+    {
+        return true;
+    }
+    let distance = if slice.ended_at_epoch_s > 0 && slice.ended_at_epoch_s <= target_epoch_s {
+        target_epoch_s - slice.ended_at_epoch_s
+    } else if slice.started_at_epoch_s > 0 && slice.started_at_epoch_s >= target_epoch_s {
+        slice.started_at_epoch_s - target_epoch_s
+    } else {
+        i64::MAX
+    };
+    distance <= EXACT_TIME_MAX_SLICE_DRIFT_S
+}
+
+fn time_slice_messages(slice: &ThreadTimeSliceSummary, count: usize) -> Vec<TranscriptMessage> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let mut messages = Vec::new();
+    if count >= 2 && !slice.user_anchor.is_empty() {
+        messages.push(TranscriptMessage {
+            role: "user".to_string(),
+            text: slice.user_anchor.clone(),
+        });
+    }
+    if !slice.assistant_anchor.is_empty() {
+        messages.push(TranscriptMessage {
+            role: "assistant".to_string(),
+            text: slice.assistant_anchor.clone(),
+        });
+    } else if !slice.summary_headline.is_empty() {
+        messages.push(TranscriptMessage {
+            role: "assistant".to_string(),
+            text: slice.summary_headline.clone(),
+        });
+    }
+    if count == 1 && messages.len() > 1 {
+        messages = messages.split_off(messages.len() - 1);
+    }
+    messages
 }
 
 fn thread_record_at_time(repo_root: &str, target_epoch_s: i64) -> Result<Option<ThreadRecord>> {
@@ -1852,11 +2255,12 @@ fn collapse_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_tail_at_time_from_snapshots, collapse_text, compact_headline_from_text,
-        compact_next_step_from_text, extract_chat_messages_from_rollout_text,
-        extract_last_messages, nth_previous_chat_tail_from_snapshots, parse_rfc3339_epoch_s,
-        parse_role_heading, rendered_transcript_summary, rollout_summary_from_path,
-        select_messages_for_time, select_tail_messages,
+        ThreadTimeSliceSummary, chat_tail_at_time_from_snapshots, collapse_text,
+        compact_headline_from_text, compact_next_step_from_text,
+        extract_chat_messages_from_rollout_text, extract_last_messages,
+        nth_previous_chat_tail_from_snapshots, parse_rfc3339_epoch_s, parse_role_heading,
+        rendered_transcript_summary, rollout_summary_from_path, select_messages_for_time,
+        select_tail_messages,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -1984,6 +2388,16 @@ mod tests {
     }
 
     #[test]
+    fn compact_headline_skips_workspace_status_prefix() {
+        let text = "Workspace совпадает: `/home/art/Art`. По каноническому `Amai continuity startup` продолжаем с текущей materialized-линии: `Amai working-state continuity recovery materialized`.";
+        let headline = compact_headline_from_text(text, 220).expect("headline");
+        assert_eq!(
+            headline,
+            "По каноническому `Amai continuity startup` продолжаем с текущей materialized-линии: `Amai working-state continuity recovery materialized`."
+        );
+    }
+
+    #[test]
     fn select_messages_for_time_prefers_completed_exchange_before_target() {
         let rollout = r##"{"timestamp":"2026-03-21T11:59:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"старый вопрос"}]}}
 {"timestamp":"2026-03-21T11:59:10Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"старый ответ"}]}}
@@ -2022,7 +2436,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_tail_at_time_from_snapshots_works_with_thread_index_only() {
+    fn chat_tail_at_time_from_snapshots_works_with_time_slices_only() {
         let snapshots = vec![
             ObservabilitySnapshotRecord {
                 snapshot_id: Uuid::nil(),
@@ -2037,7 +2451,19 @@ mod tests {
                         "created_at_epoch_s": 1_742_553_600,
                         "updated_at_epoch_s": 1_742_553_660,
                         "last_user_message": "старый вопрос",
-                        "last_assistant_message": "старый ответ"
+                        "last_assistant_message": "старый ответ",
+                        "time_slices": [
+                            {
+                                "started_at": "2025-03-21T10:40:00Z",
+                                "ended_at": "2025-03-21T10:41:20Z",
+                                "started_at_epoch_s": 1742553600,
+                                "ended_at_epoch_s": 1742553680,
+                                "user_anchor": "старый вопрос",
+                                "assistant_anchor": "старый ответ",
+                                "summary_headline": "старый чат",
+                                "summary_next_step": ""
+                            }
+                        ]
                     }
                 }),
             },
@@ -2054,7 +2480,19 @@ mod tests {
                         "created_at_epoch_s": 1_742_554_000,
                         "updated_at_epoch_s": 1_742_554_060,
                         "last_user_message": "новый вопрос",
-                        "last_assistant_message": "новый ответ"
+                        "last_assistant_message": "новый ответ",
+                        "time_slices": [
+                            {
+                                "started_at": "2025-03-21T10:46:00Z",
+                                "ended_at": "2025-03-21T10:47:00Z",
+                                "started_at_epoch_s": 1742553960,
+                                "ended_at_epoch_s": 1742554020,
+                                "user_anchor": "новый вопрос",
+                                "assistant_anchor": "новый ответ",
+                                "summary_headline": "новый чат",
+                                "summary_next_step": ""
+                            }
+                        ]
                     }
                 }),
             },
@@ -2077,6 +2515,88 @@ mod tests {
         assert_eq!(tail.messages[0].text, "старый вопрос");
         assert_eq!(tail.messages[1].role, "assistant");
         assert_eq!(tail.messages[1].text, "старый ответ");
+    }
+
+    #[test]
+    fn chat_tail_at_time_from_snapshots_prefers_time_slice_summary_without_rollout() {
+        let snapshots = vec![ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: "continuity_thread_index".to_string(),
+            created_at_epoch_ms: 1_744_087_815_000,
+            payload: json!({
+                "continuity_thread_index": {
+                    "project": {"code": "art"},
+                    "namespace": {"code": "continuity"},
+                    "thread_id": "thread-slice",
+                    "title": "сырой заголовок",
+                    "started_at": "2025-03-21T10:39:00Z",
+                    "ended_at": "2025-03-21T10:45:00Z",
+                    "created_at_epoch_s": 1_742_553_540,
+                    "updated_at_epoch_s": 1_742_553_900,
+                    "summary_headline": "thread-level headline",
+                    "summary_next_step": "thread-level next step",
+                    "time_slices": [
+                        {
+                            "started_at": "2025-03-21T10:40:00Z",
+                            "ended_at": "2025-03-21T10:41:10Z",
+                            "started_at_epoch_s": 1742553600,
+                            "ended_at_epoch_s": 1742553670,
+                            "user_anchor": "разбирали как exact-time lookup должен брать готовый смысловой срез",
+                            "assistant_anchor": "нужно materialize time-slices upstream",
+                            "summary_headline": "exact-time lookup должен брать готовый смысловой срез",
+                            "summary_next_step": "materialize time-slices upstream"
+                        }
+                    ]
+                }
+            }),
+        }];
+
+        let tail = chat_tail_at_time_from_snapshots(
+            &snapshots,
+            "art",
+            "continuity",
+            "2025-03-21T10:40:30Z",
+            2,
+        )
+        .expect("tail result")
+        .expect("tail");
+
+        assert_eq!(tail.thread_id, "thread-slice");
+        assert_eq!(
+            tail.summary_headline.as_deref(),
+            Some("exact-time lookup должен брать готовый смысловой срез")
+        );
+        assert_eq!(
+            tail.summary_next_step.as_deref(),
+            Some("materialize time-slices upstream")
+        );
+        assert_eq!(tail.messages.len(), 2);
+        assert_eq!(tail.messages[0].role, "user");
+        assert!(
+            tail.messages[0]
+                .text
+                .contains("exact-time lookup должен брать готовый смысловой срез")
+        );
+        assert_eq!(tail.messages[1].role, "assistant");
+        assert_eq!(
+            tail.messages[1].text,
+            "нужно materialize time-slices upstream"
+        );
+        assert_eq!(
+            tail.selected_time_slice,
+            Some(ThreadTimeSliceSummary {
+                started_at: "2025-03-21T10:40:00Z".to_string(),
+                ended_at: "2025-03-21T10:41:10Z".to_string(),
+                started_at_epoch_s: 1742553600,
+                ended_at_epoch_s: 1742553670,
+                user_anchor: "разбирали как exact-time lookup должен брать готовый смысловой срез"
+                    .to_string(),
+                assistant_anchor: "нужно materialize time-slices upstream".to_string(),
+                summary_headline: "exact-time lookup должен брать готовый смысловой срез"
+                    .to_string(),
+                summary_next_step: "materialize time-slices upstream".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -2144,6 +2664,50 @@ mod tests {
     }
 
     #[test]
+    fn chat_tail_at_time_from_snapshots_fail_closes_when_nearest_slice_is_too_far() {
+        let snapshots = vec![ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::nil(),
+            snapshot_kind: "continuity_thread_index".to_string(),
+            created_at_epoch_ms: 1_744_087_814_000,
+            payload: json!({
+                "continuity_thread_index": {
+                    "project": {"code": "art"},
+                    "namespace": {"code": "continuity"},
+                    "thread_id": "thread-wide",
+                    "title": "длинный thread",
+                    "started_at": "2026-03-18T11:00:00+03:00",
+                    "ended_at": "2026-03-21T12:00:00+03:00",
+                    "created_at_epoch_s": 1742284800,
+                    "updated_at_epoch_s": 1742557200,
+                    "time_slices": [
+                        {
+                            "started_at": "2026-03-21T02:25:33.619Z",
+                            "ended_at": "2026-03-21T02:27:31.157Z",
+                            "started_at_epoch_s": 1742523933,
+                            "ended_at_epoch_s": 1742524051,
+                            "user_anchor": "шумный вопрос",
+                            "assistant_anchor": "шумный ответ",
+                            "summary_headline": "слишком далёкий смысловой срез",
+                            "summary_next_step": ""
+                        }
+                    ]
+                }
+            }),
+        }];
+
+        let tail = chat_tail_at_time_from_snapshots(
+            &snapshots,
+            "art",
+            "continuity",
+            "2026-03-18T12:00:00+03:00",
+            2,
+        )
+        .expect("tail result");
+
+        assert!(tail.is_none());
+    }
+
+    #[test]
     fn noisy_title_prefers_assistant_summary_over_raw_question_noise() {
         let snapshots = vec![ObservabilitySnapshotRecord {
             snapshot_id: Uuid::nil(),
@@ -2158,7 +2722,19 @@ mod tests {
                     "created_at_epoch_s": 1_742_553_600,
                     "updated_at_epoch_s": 1_742_553_660,
                     "last_user_message": "о чем мы говорили?",
-                    "last_assistant_message": "про temporal lookup"
+                    "last_assistant_message": "про temporal lookup",
+                    "time_slices": [
+                        {
+                            "started_at": "2025-03-21T10:40:00Z",
+                            "ended_at": "2025-03-21T10:41:20Z",
+                            "started_at_epoch_s": 1742553600,
+                            "ended_at_epoch_s": 1742553680,
+                            "user_anchor": "о чем мы говорили?",
+                            "assistant_anchor": "про temporal lookup",
+                            "summary_headline": "про temporal lookup",
+                            "summary_next_step": ""
+                        }
+                    ]
                 }
             }),
         }];
