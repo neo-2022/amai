@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 03:33 MSK
-Ручная сверка guide/docs: 2026-03-21 03:33 MSK
+modified_at: 2026-03-21 03:37 MSK
+Ручная сверка guide/docs: 2026-03-21 03:37 MSK
 
 # Operations
 
@@ -988,6 +988,11 @@ Grafana login берётся из `.env`:
 - поэтому `/metrics` собирает live snapshot read-only и не пишет `system_snapshot` в PostgreSQL на каждый Prometheus scrape;
 - persistence остаётся только у явных `observe snapshot` и `observe sla-check`.
 - human dashboard использует тот же read-only snapshot contour и тоже не пишет state на каждый refresh;
+- верхние hero-карты human dashboard теперь intentionally живут только на real live ledger:
+  - текущая сессия;
+  - текущее рабочее окно профиля;
+  - всё время;
+  - отдельный benchmark больше не подменяет собой третью карту.
 - runtime scrape targets и monitoring ports не должны быть вшиты в конфиг как абсолютные литералы;
 - поэтому monitoring profile рендерится из `.env` перед `docker compose --profile monitoring up`.
 - token-economy metrics тоже приходят в exporter:

@@ -754,14 +754,14 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let rolling_events = rolling_window["counted_events"].as_u64().unwrap_or(0);
     let rolling_saved = rolling_window["verified_effective_saved_tokens"].as_i64();
     let rolling_percent = rolling_window["verified_effective_savings_pct"].as_f64();
+    let rolling_started = rolling_window["started_at_epoch_ms"].as_u64();
+    let rolling_ended = rolling_window["ended_at_epoch_ms"].as_u64();
     let rolling_window_label = report["profile"]["display_name"]
         .as_str()
         .unwrap_or("рабочее окно");
-    let benchmark_savings_percent =
-        snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_percent"]
-            .as_f64();
-    let benchmark_savings_factor =
-        snapshot["latest_token_benchmark"]["token_benchmark"]["savings"]["savings_factor"].as_f64();
+    let rolling_recovery = rolling_window["median_recovery_tokens"].as_f64();
+    let session_recovery = current_session["median_recovery_tokens"].as_f64();
+    let lifetime_recovery = lifetime["median_recovery_tokens"].as_f64();
 
     vec![
         card(
@@ -769,10 +769,11 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             format_signed_count(session_saved),
             if session_events > 0 {
                 format!(
-                    "Сессия здесь = непрерывная работа без паузы дольше 30 минут. Длительность: {}. Учтено проверенных Amai-запросов: {}. Проверенная реальная экономия по ним: {}.",
+                    "Сессия здесь = непрерывная работа без паузы дольше 30 минут. Длительность: {}. Учтено реальных Amai-запросов без потери качества: {}. Проверенная реальная экономия по ним: {}. {}",
                     elapsed_since_epoch_label(session_started, session_ended),
                     format_u64(Some(session_events)),
-                    format_percent(session_percent)
+                    format_percent(session_percent),
+                    recovery_sentence(session_recovery)
                 )
             } else if session_events_total > 0 {
                 format!(
@@ -785,14 +786,37 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             savings_status(session_saved, session_events, session_events_total),
         ),
         card(
+            "Экономия токенов за рабочее окно",
+            format_signed_count(rolling_saved),
+            if rolling_events > 0 {
+                format!(
+                    "Это текущее скользящее окно профиля {}. Период: {}. Учтено реальных Amai-запросов без потери качества: {}. Проверенная реальная экономия: {}. {}",
+                    rolling_window_label,
+                    elapsed_since_epoch_label(rolling_started, rolling_ended),
+                    format_u64(Some(rolling_events)),
+                    format_percent(rolling_percent),
+                    recovery_sentence(rolling_recovery)
+                )
+            } else if rolling_events_total > 0 {
+                format!(
+                    "В текущем рабочем окне уже есть Amai-запросы: {}. Но проверенная выборка ещё не собрана, поэтому реальную экономию за окно пока рано считать устойчивой.",
+                    format_u64(Some(rolling_events_total))
+                )
+            } else {
+                "В текущем рабочем окне Amai ещё не накопил учтённых запросов, поэтому здесь пока нет живой verified статистики.".to_string()
+            },
+            savings_status(rolling_saved, rolling_events, rolling_events_total),
+        ),
+        card(
             "Экономия токенов за всё время записи",
             format_signed_count(lifetime_saved),
             if lifetime_events > 0 {
                 format!(
-                    "Это итог с первого проверенного Amai-запроса в этой установке. Период: {}. Учтено проверенных Amai-запросов: {}. Проверенная реальная экономия: {}.",
+                    "Это итог с первого проверенного Amai-запроса в этой установке. Период: {}. Учтено реальных Amai-запросов без потери качества: {}. Проверенная реальная экономия: {}. {}",
                     elapsed_since_epoch_label(lifetime_started, lifetime_ended),
                     format_u64(Some(lifetime_events)),
-                    format_percent(lifetime_percent)
+                    format_percent(lifetime_percent),
+                    recovery_sentence(lifetime_recovery)
                 )
             } else if lifetime_events_total > 0 {
                 format!(
@@ -803,34 +827,6 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                 "После установки Amai ещё не накопил учтённых запросов, поэтому здесь пока нет итоговой живой статистики.".to_string()
             },
             savings_status(lifetime_saved, lifetime_events, lifetime_events_total),
-        ),
-        card(
-            "Экономия на последнем честном замере",
-            if benchmark_savings_percent.is_some() {
-                format_percent(benchmark_savings_percent)
-            } else {
-                format_signed_count(rolling_saved)
-            },
-            if benchmark_savings_percent.is_some() {
-                format!(
-                    "Последний контрольный замер показал, что Amai передал модели {} относительно обычной широкой подачи контекста. Это ориентир на одном замере, а не сумма за всё время.",
-                    format_factor(benchmark_savings_factor)
-                )
-            } else {
-                format!(
-                    "Отдельный контрольный замер ещё не прогонялся, поэтому здесь временно показано {}: {} проверенных Amai-запросов и проверенная реальная экономия {}.",
-                    rolling_window_label,
-                    format_u64(Some(rolling_events)),
-                    format_percent(rolling_percent)
-                )
-            },
-            if benchmark_savings_percent.is_some() {
-                "pass"
-            } else if rolling_events_total > 0 {
-                savings_status(rolling_saved, rolling_events, rolling_events_total)
-            } else {
-                "unknown"
-            },
         ),
     ]
 }
@@ -1275,6 +1271,19 @@ fn savings_status(
     }
 }
 
+fn recovery_sentence(median_recovery_tokens: Option<f64>) -> String {
+    match median_recovery_tokens {
+        Some(value) if value > 0.0 => {
+            format!(
+                "Медианный штраф на доуточнение: {} токенов.",
+                value.round() as i64
+            )
+        }
+        Some(_) => "Доуточнения пока не отъедали токены назад.".to_string(),
+        None => "Штраф на доуточнение пока ещё не накоплен.".to_string(),
+    }
+}
+
 fn status_for_metric_prefix(snapshot: &Value, prefix: &str) -> &'static str {
     let mut current: Option<&str> = None;
     for check in snapshot["sla"]["checks"].as_array().into_iter().flatten() {
@@ -1408,12 +1417,6 @@ fn format_ratio_percent(value: Option<f64>) -> String {
 fn format_percent(value: Option<f64>) -> String {
     value
         .map(|number| format!("{number:.2}%"))
-        .unwrap_or_else(|| "ещё нет данных".to_string())
-}
-
-fn format_factor(value: Option<f64>) -> String {
-    value
-        .map(|number| format!("{number:.2}x меньше токенов"))
         .unwrap_or_else(|| "ещё нет данных".to_string())
 }
 

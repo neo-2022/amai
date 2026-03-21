@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 02:09 MSK
-Ручная сверка guide/docs: 2026-03-21 02:09 MSK
+modified_at: 2026-03-21 03:37 MSK
+Ручная сверка guide/docs: 2026-03-21 03:37 MSK
 
 # MCP Integration
 
@@ -91,6 +91,10 @@ scripts\install_amai.cmd
 - какие ещё клиенты были найдены;
 - живые метрики машины и stack;
 - token savings из последнего measured benchmark, если они уже есть.
+- адрес human dashboard, где уже видны три реальные live-метрики:
+  - текущая сессия;
+  - рабочее окно;
+  - всё время.
 - команду для human dashboard и адрес, где его открыть в браузере.
 
 Отдельно важно:
