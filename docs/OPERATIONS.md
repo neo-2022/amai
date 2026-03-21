@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 03:40 MSK
-Ручная сверка guide/docs: 2026-03-21 03:40 MSK
+modified_at: 2026-03-21 03:48 MSK
+Ручная сверка guide/docs: 2026-03-21 03:48 MSK
 
 # Operations
 
@@ -717,6 +717,11 @@ cargo run --release -- verify token-benchmark-suite \
 - headline считается не просто по raw savings;
 - recovery penalties теперь вычитаются из результата;
 - при live report один follow-up штрафует только ближайшее подходящее незакрытое событие, а не раздувает статистику несколько раз.
+- в текущем runtime это уже materialized не только на уровне отчёта:
+  - live events получают `session_id`;
+  - получают `rolling_window_profile`;
+  - успешный recovery-follow-up может получить `quality_method = hybrid_task_success`;
+  - и его `recovery_tokens` уже включают стоимость предыдущего промаха.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе:

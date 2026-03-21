@@ -62,6 +62,8 @@ struct ResolvedProfile {
 struct TokenBudgetEvent {
     created_at_epoch_ms: i64,
     event_id: String,
+    session_id: String,
+    rolling_window_profile: String,
     timestamp_utc: i64,
     snapshot_kind: String,
     source_kind: String,
@@ -92,6 +94,8 @@ struct TokenBudgetEvent {
     quality_method: String,
     needed_followup: bool,
     followup_count: u64,
+    followup_of_event_id: Option<String>,
+    resolved_by_event_id: Option<String>,
     fallback_triggered: bool,
     fallback_count: u64,
     document_hits: u64,
@@ -291,12 +295,14 @@ pub async fn collect_default_report_with_overrides(
 pub async fn record_live_context_pack_event(db: &Client, payload: &Value) -> Result<()> {
     let repo_root = config::discover_repo_root(None)?;
     let config = load_config(&repo_root)?;
-    let event = build_event_payload(
+    let profile = resolve_profile(&config, None, &repo_root)?;
+    let mut event = build_event_payload(
         payload,
         &config.measurement,
         "live_context_pack",
         "context_pack_token_budget",
     )?;
+    enrich_live_event_payload(db, &mut event, &profile).await?;
     let _ = postgres::insert_observability_snapshot(db, "token_budget_event", &event).await?;
     Ok(())
 }
@@ -429,6 +435,149 @@ async fn collect_report(
     }))
 }
 
+async fn enrich_live_event_payload(
+    db: &Client,
+    payload: &mut Value,
+    profile: &ResolvedProfile,
+) -> Result<()> {
+    let node = payload["token_budget_event"]
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("token budget payload missing token_budget_event object"))?;
+    let timestamp_utc = node
+        .get("timestamp_utc")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| current_epoch_ms().unwrap_or_default());
+    let current_event_id = node
+        .get("event_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let project = node
+        .get("project")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let namespace = node
+        .get("namespace")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let query = node
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let query_hash = node
+        .get("query_hash")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let query_type = node
+        .get("query_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let target_kind = node
+        .get("target_kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let session_gap_ms = profile.session_gap_minutes as i64 * 60_000;
+    let mut events = load_events(db, false, Some(64)).await?;
+    events.sort_by_key(|event| event.created_at_epoch_ms);
+    let session_id = resolve_session_id(&events, timestamp_utc, session_gap_ms);
+    node.insert("session_id".to_string(), Value::String(session_id));
+    node.insert(
+        "rolling_window_profile".to_string(),
+        Value::String(profile.code.clone()),
+    );
+    node.insert(
+        "budget_profile".to_string(),
+        Value::String(profile.code.clone()),
+    );
+
+    let current_key = FollowupEventKey {
+        query: &query,
+        query_hash: &query_hash,
+        query_type: &query_type,
+        target_kind: &target_kind,
+    };
+
+    let candidate_rows =
+        postgres::list_observability_snapshots_by_kinds(db, &["token_budget_event"], Some(64))
+            .await?;
+    let mut candidates = candidate_rows
+        .into_iter()
+        .filter_map(|row| {
+            parse_snapshot_event(&row)
+                .ok()
+                .flatten()
+                .filter(|event| event.traffic_class == "live")
+                .map(|event| (row, event))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(_, event)| event.created_at_epoch_ms);
+
+    if let Some((row, previous)) = candidates.into_iter().rev().find(|(_, previous)| {
+        previous.traffic_class == "live"
+            && previous.needed_followup
+            && previous.resolved_by_event_id.is_none()
+            && previous.project == project
+            && previous.namespace == namespace
+            && timestamp_utc.saturating_sub(previous.created_at_epoch_ms) <= session_gap_ms
+            && followup_queries_related(followup_event_key(previous), current_key)
+    }) {
+        let previous_cost = previous
+            .context_tokens
+            .saturating_add(previous.recovery_tokens);
+        set_recovery_penalty(
+            payload,
+            previous_cost,
+            previous.followup_count.saturating_add(1),
+        )?;
+        let node = payload["token_budget_event"]
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("token budget payload missing token_budget_event object"))?;
+        let followup = ensure_nested_object(node, "followup")?;
+        followup.insert(
+            "followup_of_event_id".to_string(),
+            Value::String(previous.event_id.clone()),
+        );
+        let quality = ensure_nested_object(node, "quality")?;
+        let quality_ok = quality
+            .get("quality_ok")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        quality.insert(
+            "quality_method".to_string(),
+            Value::String(if quality_ok {
+                "hybrid_task_success".to_string()
+            } else {
+                "hybrid_followup_pending".to_string()
+            }),
+        );
+
+        let mut previous_payload = row.payload.clone();
+        let previous_node = previous_payload["token_budget_event"]
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("previous token budget payload missing token_budget_event"))?;
+        let previous_followup = ensure_nested_object(previous_node, "followup")?;
+        previous_followup.insert(
+            "resolved_by_event_id".to_string(),
+            Value::String(current_event_id),
+        );
+        previous_followup.insert("recovery_resolved".to_string(), Value::Bool(true));
+        previous_followup.insert(
+            "recovery_resolved_at_utc".to_string(),
+            Value::from(timestamp_utc),
+        );
+        postgres::update_observability_snapshot_payload(db, &row.snapshot_id, &previous_payload)
+            .await?;
+    }
+
+    Ok(())
+}
+
 fn load_config(repo_root: &Path) -> Result<TokenBudgetConfigFile> {
     let path = repo_root.join(CONFIG_RELATIVE_PATH);
     let raw =
@@ -551,6 +700,14 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("{}-{}", row.snapshot_kind, row.created_at_epoch_ms));
+    let session_id = node["session_id"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    let rolling_window_profile = node["rolling_window_profile"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
     let timestamp_utc = node["timestamp_utc"]
         .as_i64()
         .unwrap_or(row.created_at_epoch_ms);
@@ -582,6 +739,12 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_bool()
         .unwrap_or(!quality_ok);
     let followup_count = node["followup"]["followup_count"].as_u64().unwrap_or(0);
+    let followup_of_event_id = node["followup"]["followup_of_event_id"]
+        .as_str()
+        .map(ToOwned::to_owned);
+    let resolved_by_event_id = node["followup"]["resolved_by_event_id"]
+        .as_str()
+        .map(ToOwned::to_owned);
     let fallback_triggered = node["recovery"]["fallback_triggered"]
         .as_bool()
         .unwrap_or(false);
@@ -601,6 +764,8 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
     Ok(Some(TokenBudgetEvent {
         created_at_epoch_ms: row.created_at_epoch_ms,
         event_id,
+        session_id,
+        rolling_window_profile,
         timestamp_utc,
         snapshot_kind: row.snapshot_kind.clone(),
         source_kind,
@@ -631,6 +796,8 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         quality_method,
         needed_followup,
         followup_count,
+        followup_of_event_id,
+        resolved_by_event_id,
         fallback_triggered,
         fallback_count,
         document_hits,
@@ -928,47 +1095,116 @@ fn current_session_events(
     session
 }
 
+fn resolve_session_id(events: &[TokenBudgetEvent], current_ts: i64, session_gap_ms: i64) -> String {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.traffic_class == "live"
+                && current_ts.saturating_sub(event.created_at_epoch_ms) <= session_gap_ms
+        })
+        .map(|event| {
+            if event.session_id.is_empty() {
+                event.event_id.clone()
+            } else {
+                event.session_id.clone()
+            }
+        })
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
+}
+
+fn set_recovery_penalty(
+    payload: &mut Value,
+    recovery_tokens: u64,
+    followup_count: u64,
+) -> Result<()> {
+    let node = payload["token_budget_event"]
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("token budget payload missing token_budget_event object"))?;
+    let recovery = ensure_nested_object(node, "recovery")?;
+    recovery.insert("recovery_tokens".to_string(), Value::from(recovery_tokens));
+    let followup = ensure_nested_object(node, "followup")?;
+    followup.insert("followup_count".to_string(), Value::from(followup_count));
+
+    let context_tokens = node["context_pack_render"]["tokens"].as_u64().unwrap_or(0);
+    let naive_tokens = node["naive_scope"]["tokens"].as_u64().unwrap_or(0);
+    let effective_saved_tokens =
+        naive_tokens as i64 - (context_tokens as i64 + recovery_tokens as i64);
+    let effective_savings_percent = percent_from_signed(effective_saved_tokens, naive_tokens);
+    let savings = ensure_nested_object(node, "savings")?;
+    savings.insert(
+        "effective_saved_tokens".to_string(),
+        Value::from(effective_saved_tokens),
+    );
+    savings.insert(
+        "effective_savings_percent".to_string(),
+        Value::from(effective_savings_percent),
+    );
+    Ok(())
+}
+
+fn ensure_nested_object<'a>(
+    parent: &'a mut serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a mut serde_json::Map<String, Value>> {
+    if !parent.get(key).is_some_and(Value::is_object) {
+        parent.insert(key.to_string(), json!({}));
+    }
+    parent
+        .get_mut(key)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("payload field {key} is not an object"))
+}
+
 fn reconcile_followup_recovery(
     events: &[TokenBudgetEvent],
     session_gap_ms: i64,
 ) -> Vec<TokenBudgetEvent> {
     let mut reconciled = events.to_vec();
-    for follower_index in 1..reconciled.len() {
-        if reconciled[follower_index].traffic_class != "live" {
+    for current_index in 1..reconciled.len() {
+        if reconciled[current_index].traffic_class != "live"
+            || reconciled[current_index].followup_of_event_id.is_some()
+        {
             continue;
         }
-        let follower_ts = reconciled[follower_index].created_at_epoch_ms;
-        let follower_project = reconciled[follower_index].project.clone();
-        let follower_namespace = reconciled[follower_index].namespace.clone();
-        let follower_key = followup_event_key(&reconciled[follower_index]);
-        let follower_context_tokens = reconciled[follower_index].context_tokens;
+        let current_ts = reconciled[current_index].created_at_epoch_ms;
+        let current_project = reconciled[current_index].project.clone();
+        let current_namespace = reconciled[current_index].namespace.clone();
+        let current_key = followup_event_key(&reconciled[current_index]);
 
-        for current_index in (0..follower_index).rev() {
-            if reconciled[current_index].traffic_class != "live"
-                || !reconciled[current_index].needed_followup
+        for previous_index in (0..current_index).rev() {
+            if reconciled[previous_index].traffic_class != "live"
+                || !reconciled[previous_index].needed_followup
+                || reconciled[previous_index].resolved_by_event_id.is_some()
             {
                 continue;
             }
-            if follower_ts.saturating_sub(reconciled[current_index].created_at_epoch_ms)
+            if current_ts.saturating_sub(reconciled[previous_index].created_at_epoch_ms)
                 > session_gap_ms
             {
                 break;
             }
-            if reconciled[current_index].project != follower_project
-                || reconciled[current_index].namespace != follower_namespace
+            if reconciled[previous_index].project != current_project
+                || reconciled[previous_index].namespace != current_namespace
             {
                 continue;
             }
-            let current_key = followup_event_key(&reconciled[current_index]);
-            if !followup_queries_related(current_key, follower_key) {
+            if !followup_queries_related(
+                followup_event_key(&reconciled[previous_index]),
+                current_key,
+            ) {
                 continue;
             }
-            let recovery_tokens = reconciled[current_index]
-                .recovery_tokens
-                .saturating_add(follower_context_tokens);
+            let recovery_tokens = reconciled[current_index].recovery_tokens.saturating_add(
+                reconciled[previous_index]
+                    .context_tokens
+                    .saturating_add(reconciled[previous_index].recovery_tokens),
+            );
             reconciled[current_index].recovery_tokens = recovery_tokens;
             reconciled[current_index].followup_count =
-                reconciled[current_index].followup_count.saturating_add(1);
+                reconciled[previous_index].followup_count.saturating_add(1);
+            reconciled[current_index].followup_of_event_id =
+                Some(reconciled[previous_index].event_id.clone());
             reconciled[current_index].effective_saved_tokens = reconciled[current_index]
                 .naive_tokens as i64
                 - (reconciled[current_index].context_tokens as i64 + recovery_tokens as i64);
@@ -976,6 +1212,8 @@ fn reconcile_followup_recovery(
                 reconciled[current_index].effective_saved_tokens,
                 reconciled[current_index].naive_tokens,
             );
+            reconciled[previous_index].resolved_by_event_id =
+                Some(reconciled[current_index].event_id.clone());
             break;
         }
     }
@@ -1346,49 +1584,176 @@ fn percentile_from_sorted(values: &[f64], percentile: f64) -> f64 {
 }
 
 fn event_to_json(event: &TokenBudgetEvent) -> Value {
-    json!({
-        "created_at_epoch_ms": event.created_at_epoch_ms,
-        "event_id": event.event_id,
-        "timestamp_utc": event.timestamp_utc,
-        "snapshot_kind": event.snapshot_kind,
-        "source_kind": event.source_kind,
-        "traffic_class": event.traffic_class,
-        "project": event.project,
-        "namespace": event.namespace,
-        "query": event.query,
-        "query_hash": event.query_hash,
-        "query_type": event.query_type,
-        "target_kind": event.target_kind,
-        "baseline_hit_target": event.baseline_hit_target,
-        "amai_hit_target": event.amai_hit_target,
-        "cold_warm_state": event.cold_warm_state,
-        "baseline_strategy": event.baseline_strategy,
-        "retrieval_mode": event.retrieval_mode,
-        "tokenizer": event.tokenizer,
-        "latency_ms": event.latency_ms,
-        "saved_tokens": event.saved_tokens,
-        "naive_tokens": event.naive_tokens,
-        "context_tokens": event.context_tokens,
-        "recovery_tokens": event.recovery_tokens,
-        "effective_saved_tokens": event.effective_saved_tokens,
-        "savings_factor": event.savings_factor,
-        "savings_percent": event.savings_percent,
-        "effective_savings_percent": event.effective_savings_percent,
-        "quality_ok": event.quality_ok,
-        "quality_score": event.quality_score,
-        "quality_method": event.quality_method,
-        "needed_followup": event.needed_followup,
-        "followup_count": event.followup_count,
-        "fallback_triggered": event.fallback_triggered,
-        "fallback_count": event.fallback_count,
-        "document_hits": event.document_hits,
-        "symbol_hits_count": event.symbol_hits_count,
-        "file_hits": event.file_hits,
-        "sources_count": event.sources_count,
-        "chunks_count": event.chunks_count,
-        "pack_token_count": event.pack_token_count,
-        "deduped_token_count": event.deduped_token_count,
-    })
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "created_at_epoch_ms".to_string(),
+        Value::from(event.created_at_epoch_ms),
+    );
+    object.insert(
+        "event_id".to_string(),
+        Value::String(event.event_id.clone()),
+    );
+    object.insert(
+        "session_id".to_string(),
+        Value::String(event.session_id.clone()),
+    );
+    object.insert(
+        "rolling_window_profile".to_string(),
+        Value::String(event.rolling_window_profile.clone()),
+    );
+    object.insert(
+        "timestamp_utc".to_string(),
+        Value::from(event.timestamp_utc),
+    );
+    object.insert(
+        "snapshot_kind".to_string(),
+        Value::String(event.snapshot_kind.clone()),
+    );
+    object.insert(
+        "source_kind".to_string(),
+        Value::String(event.source_kind.clone()),
+    );
+    object.insert(
+        "traffic_class".to_string(),
+        Value::String(event.traffic_class.clone()),
+    );
+    object.insert("project".to_string(), Value::String(event.project.clone()));
+    object.insert(
+        "namespace".to_string(),
+        Value::String(event.namespace.clone()),
+    );
+    object.insert("query".to_string(), Value::String(event.query.clone()));
+    object.insert(
+        "query_hash".to_string(),
+        Value::String(event.query_hash.clone()),
+    );
+    object.insert(
+        "query_type".to_string(),
+        Value::String(event.query_type.clone()),
+    );
+    object.insert(
+        "target_kind".to_string(),
+        Value::String(event.target_kind.clone()),
+    );
+    object.insert(
+        "baseline_hit_target".to_string(),
+        Value::Bool(event.baseline_hit_target),
+    );
+    object.insert(
+        "amai_hit_target".to_string(),
+        Value::Bool(event.amai_hit_target),
+    );
+    object.insert(
+        "cold_warm_state".to_string(),
+        Value::String(event.cold_warm_state.clone()),
+    );
+    object.insert(
+        "baseline_strategy".to_string(),
+        Value::String(event.baseline_strategy.clone()),
+    );
+    object.insert(
+        "retrieval_mode".to_string(),
+        event
+            .retrieval_mode
+            .as_ref()
+            .map(|value| Value::String(value.clone()))
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "tokenizer".to_string(),
+        Value::String(event.tokenizer.clone()),
+    );
+    object.insert("latency_ms".to_string(), Value::from(event.latency_ms));
+    object.insert("saved_tokens".to_string(), Value::from(event.saved_tokens));
+    object.insert("naive_tokens".to_string(), Value::from(event.naive_tokens));
+    object.insert(
+        "context_tokens".to_string(),
+        Value::from(event.context_tokens),
+    );
+    object.insert(
+        "recovery_tokens".to_string(),
+        Value::from(event.recovery_tokens),
+    );
+    object.insert(
+        "effective_saved_tokens".to_string(),
+        Value::from(event.effective_saved_tokens),
+    );
+    object.insert(
+        "savings_factor".to_string(),
+        Value::from(event.savings_factor),
+    );
+    object.insert(
+        "savings_percent".to_string(),
+        Value::from(event.savings_percent),
+    );
+    object.insert(
+        "effective_savings_percent".to_string(),
+        Value::from(event.effective_savings_percent),
+    );
+    object.insert("quality_ok".to_string(), Value::Bool(event.quality_ok));
+    object.insert(
+        "quality_score".to_string(),
+        Value::from(event.quality_score),
+    );
+    object.insert(
+        "quality_method".to_string(),
+        Value::String(event.quality_method.clone()),
+    );
+    object.insert(
+        "needed_followup".to_string(),
+        Value::Bool(event.needed_followup),
+    );
+    object.insert(
+        "followup_count".to_string(),
+        Value::from(event.followup_count),
+    );
+    object.insert(
+        "followup_of_event_id".to_string(),
+        event
+            .followup_of_event_id
+            .as_ref()
+            .map(|value| Value::String(value.clone()))
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "resolved_by_event_id".to_string(),
+        event
+            .resolved_by_event_id
+            .as_ref()
+            .map(|value| Value::String(value.clone()))
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "fallback_triggered".to_string(),
+        Value::Bool(event.fallback_triggered),
+    );
+    object.insert(
+        "fallback_count".to_string(),
+        Value::from(event.fallback_count),
+    );
+    object.insert(
+        "document_hits".to_string(),
+        Value::from(event.document_hits),
+    );
+    object.insert(
+        "symbol_hits_count".to_string(),
+        Value::from(event.symbol_hits_count),
+    );
+    object.insert("file_hits".to_string(), Value::from(event.file_hits));
+    object.insert(
+        "sources_count".to_string(),
+        Value::from(event.sources_count),
+    );
+    object.insert("chunks_count".to_string(), Value::from(event.chunks_count));
+    object.insert(
+        "pack_token_count".to_string(),
+        Value::from(event.pack_token_count),
+    );
+    object.insert(
+        "deduped_token_count".to_string(),
+        Value::from(event.deduped_token_count),
+    );
+    Value::Object(object)
 }
 
 fn build_event_payload(
@@ -1498,6 +1863,8 @@ fn build_event_payload(
             "followup": {
                 "needed_followup": quality.needed_followup,
                 "followup_count": quality.followup_count,
+                "followup_of_event_id": Value::Null,
+                "resolved_by_event_id": Value::Null,
             },
             "shape": {
                 "document_hits": document_hits,
@@ -2431,6 +2798,8 @@ mod tests {
             &[TokenBudgetEvent {
                 created_at_epoch_ms: 10,
                 event_id: "event-1".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
                 timestamp_utc: 10,
                 snapshot_kind: "token_budget_event".to_string(),
                 source_kind: "live_context_pack".to_string(),
@@ -2461,6 +2830,8 @@ mod tests {
                 quality_method: "retrieval_parity".to_string(),
                 needed_followup: false,
                 followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
                 fallback_triggered: false,
                 fallback_count: 0,
                 document_hits: 1,
@@ -2481,12 +2852,14 @@ mod tests {
     }
 
     #[test]
-    fn followup_recovery_is_attributed_to_previous_needed_followup_event() {
+    fn followup_recovery_is_attributed_to_successful_followup_event() {
         let reconciled = reconcile_followup_recovery(
             &[
                 TokenBudgetEvent {
                     created_at_epoch_ms: 1000,
                     event_id: "event-1".to_string(),
+                    session_id: "session-1".to_string(),
+                    rolling_window_profile: "codex_5h".to_string(),
                     timestamp_utc: 1000,
                     snapshot_kind: "token_budget_event".to_string(),
                     source_kind: "live_context_pack".to_string(),
@@ -2517,6 +2890,8 @@ mod tests {
                     quality_method: "hybrid_retrieval_parity".to_string(),
                     needed_followup: true,
                     followup_count: 0,
+                    followup_of_event_id: None,
+                    resolved_by_event_id: None,
                     fallback_triggered: false,
                     fallback_count: 0,
                     document_hits: 0,
@@ -2530,6 +2905,8 @@ mod tests {
                 TokenBudgetEvent {
                     created_at_epoch_ms: 2000,
                     event_id: "event-2".to_string(),
+                    session_id: "session-1".to_string(),
+                    rolling_window_profile: "codex_5h".to_string(),
                     timestamp_utc: 2000,
                     snapshot_kind: "token_budget_event".to_string(),
                     source_kind: "live_context_pack".to_string(),
@@ -2560,6 +2937,8 @@ mod tests {
                     quality_method: "hybrid_retrieval_parity".to_string(),
                     needed_followup: false,
                     followup_count: 0,
+                    followup_of_event_id: None,
+                    resolved_by_event_id: None,
                     fallback_triggered: false,
                     fallback_count: 0,
                     document_hits: 1,
@@ -2574,10 +2953,19 @@ mod tests {
             30 * 60_000,
         );
 
-        assert_eq!(reconciled[0].recovery_tokens, 120);
-        assert_eq!(reconciled[0].followup_count, 1);
-        assert_eq!(reconciled[0].effective_saved_tokens, 780);
-        assert_eq!(reconciled[0].effective_savings_percent, 78.0);
+        assert_eq!(reconciled[0].recovery_tokens, 0);
+        assert_eq!(
+            reconciled[0].resolved_by_event_id.as_deref(),
+            Some("event-2")
+        );
+        assert_eq!(reconciled[1].recovery_tokens, 100);
+        assert_eq!(reconciled[1].followup_count, 1);
+        assert_eq!(
+            reconciled[1].followup_of_event_id.as_deref(),
+            Some("event-1")
+        );
+        assert_eq!(reconciled[1].effective_saved_tokens, 780);
+        assert_eq!(reconciled[1].effective_savings_percent, 78.0);
     }
 
     #[test]
