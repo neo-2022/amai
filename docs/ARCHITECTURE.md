@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 02:09 MSK
-Ручная сверка guide/docs: 2026-03-21 02:09 MSK
+modified_at: 2026-03-21 16:25 MSK
+Ручная сверка guide/docs: 2026-03-21 16:25 MSK
 
 # Architecture
 
@@ -57,6 +57,25 @@ Event/work plane:
 - planner events;
 - retries;
 - fan-out notifications.
+
+## Benchmark control plane
+
+`Amai` держит benchmark-ориентиры не как набор заметок в чате, а как machine-readable registry:
+- `config/benchmark_matrix.toml`
+- `src/benchmark_matrix.rs`
+
+Зачем это нужно:
+- не терять связь между нашими proof-контрами и внешним benchmark landscape;
+- видеть, какие benchmark-семейства уже mapped или materialized;
+- не спорить каждый раз заново, что проверять следующим по `MCP`, `continuity`, `coding`, `multi-agent isolation` и будущим browser или GUI contour-ам.
+
+Источник внешней карты:
+- `philschmid/ai-agent-benchmark-compendium`
+- <https://github.com/philschmid/ai-agent-benchmark-compendium>
+
+Важный архитектурный закон:
+- внешний compendium для `Amai` — это не runtime dependency;
+- это benchmark taxonomy, которую мы переводим в свой Rust-first registry и потом уже привязываем к нашим собственным proof и hostile harness-ам.
 
 Не source of truth для state/policy.
 

@@ -14,6 +14,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Benchmark {
+        #[command(subcommand)]
+        command: BenchmarkCommand,
+    },
     Continuity {
         #[command(subcommand)]
         command: ContinuityCommand,
@@ -63,6 +67,13 @@ pub enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BenchmarkCommand {
+    List,
+    Coverage,
+    Explain(BenchmarkArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -150,6 +161,12 @@ pub enum ObserveCommand {
 pub enum McpCommand {
     Serve,
     Config(McpConfigArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchmarkArgs {
+    #[arg(long)]
+    pub benchmark: String,
 }
 
 #[derive(Debug, Clone, Args)]

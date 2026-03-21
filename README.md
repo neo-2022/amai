@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 16:09 MSK
-Ручная сверка guide/docs: 2026-03-21 16:09 MSK
+modified_at: 2026-03-21 16:25 MSK
+Ручная сверка guide/docs: 2026-03-21 16:25 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -940,6 +940,36 @@ cargo run -- index project --code project_alpha --path /path/to/project-alpha --
 cargo run -- context pack --project project_alpha --namespace review --query "how configuration is loaded"
 ```
 
+## Benchmark matrix
+
+Чтобы не жить на одном удобном локальном proof и не придумывать benchmark-цели из головы, в `Amai` теперь есть machine-readable benchmark matrix.
+
+Источник внешней карты:
+- `philschmid/ai-agent-benchmark-compendium`
+- <https://github.com/philschmid/ai-agent-benchmark-compendium>
+
+Эта матрица нужна для трёх вещей:
+- видеть, какие benchmark-семейства для `Amai` уже хотя бы mapped;
+- не потерять следующий обязательный приоритет;
+- привязывать наши proof-контуры к реальным внешним benchmark-классам: `MCP`, `continuity`, `coding`, `multi-agent isolation`, `browser/GUI`.
+
+Смотреть матрицу можно так:
+
+```bash
+./scripts/benchmark_matrix.sh
+./scripts/benchmark_matrix.sh coverage
+./scripts/benchmark_matrix.sh explain --benchmark live-mcpbench
+./scripts/benchmark_matrix.sh explain --benchmark "SWE-bench Verified"
+```
+
+Что это даёт простыми словами:
+- `list`
+  - показывает всю карту benchmark-семейств;
+- `coverage`
+  - показывает, где у `Amai` уже есть сильный задел, а где долг ещё впереди;
+- `explain`
+  - раскладывает один benchmark по-человечески: зачем он нужен, что у нас уже есть и какой следующий шаг обязателен.
+
 ## Ключевые proof-команды
 
 Если нужен честный локальный proof:
@@ -951,6 +981,7 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 ./scripts/proof_accuracy.sh
 ./scripts/proof_load.sh
 ./scripts/proof_hostile.sh
+./scripts/proof_benchmark_matrix.sh
 ./scripts/proof_token_benchmark.sh
 ./scripts/proof_observability.sh
 ./scripts/proof_mcp.sh

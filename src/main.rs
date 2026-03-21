@@ -1,3 +1,4 @@
+mod benchmark_matrix;
 mod bootstrap;
 mod chat_question;
 mod cli;
@@ -29,9 +30,9 @@ mod working_state;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    BootstrapCommand, Cli, Command, CompatCommand, ContextCommand, ContinuityCommand,
-    DeploymentCommand, IndexCommand, McpCommand, NamespaceCommand, ObserveCommand, ProjectCommand,
-    RelationCommand, VerifyCommand,
+    BenchmarkCommand, BootstrapCommand, Cli, Command, CompatCommand, ContextCommand,
+    ContinuityCommand, DeploymentCommand, IndexCommand, McpCommand, NamespaceCommand,
+    ObserveCommand, ProjectCommand, RelationCommand, VerifyCommand,
 };
 use std::path::Path;
 use tracing_subscriber::EnvFilter;
@@ -48,6 +49,16 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Benchmark { command } => {
+            let repo_root = config::discover_repo_root(None)?;
+            match command {
+                BenchmarkCommand::List => benchmark_matrix::print_matrix(&repo_root)?,
+                BenchmarkCommand::Coverage => benchmark_matrix::print_coverage(&repo_root)?,
+                BenchmarkCommand::Explain(args) => {
+                    benchmark_matrix::print_benchmark_explainer(&repo_root, &args.benchmark)?
+                }
+            }
+        }
         Command::Continuity { command } => match command {
             ContinuityCommand::Import(args) => {
                 let cfg = config::AppConfig::from_env()?;

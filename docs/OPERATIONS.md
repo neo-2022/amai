@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 16:09 MSK
-Ручная сверка guide/docs: 2026-03-21 16:09 MSK
+modified_at: 2026-03-21 16:25 MSK
+Ручная сверка guide/docs: 2026-03-21 16:25 MSK
 
 # Operations
 
@@ -806,6 +806,47 @@ cargo run --release -- verify token-benchmark \
 - строит компактный LLM-ready render текущего `context pack`;
 - сравнивает оба результата на одном tokenizer;
 - сохраняет snapshot `token_benchmark`.
+
+## Benchmark matrix
+
+Это отдельный Rust-first contour, который переводит внешний benchmark landscape в machine-readable карту для `Amai`.
+
+Источник внешней таксономии:
+- `philschmid/ai-agent-benchmark-compendium`
+- <https://github.com/philschmid/ai-agent-benchmark-compendium>
+
+Запуск:
+
+```bash
+./scripts/benchmark_matrix.sh
+./scripts/benchmark_matrix.sh coverage
+./scripts/benchmark_matrix.sh explain --benchmark live-mcpbench
+./scripts/benchmark_matrix.sh explain --benchmark "SWE-bench Verified"
+```
+
+Что означает этот contour:
+- `list`
+  - печатает каноническую карту benchmark-семейств и их текущий статус для `Amai`;
+- `coverage`
+  - показывает общую сводку: что уже materialized, что частично покрыто, что только mapped и что стоит следующим обязательным приоритетом;
+- `explain`
+  - объясняет один benchmark человеческим языком:
+  - зачем он нужен именно `Amai`;
+  - какие proof-контуры уже есть;
+  - где честные пробелы;
+  - какой следующий шаг обязателен.
+
+Отдельный proof:
+
+```bash
+./scripts/proof_benchmark_matrix.sh
+```
+
+Этот proof:
+- проверяет, что список benchmark-семейств печатается из machine-readable registry;
+- проверяет coverage summary;
+- проверяет explain path по alias и по human-readable benchmark name;
+- fail-ит, если benchmark registry или CLI drift-нули.
 
 ## Token benchmark suite proof
 

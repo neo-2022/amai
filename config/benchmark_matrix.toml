@@ -1,0 +1,587 @@
+[source]
+display_name = "philschmid/ai-agent-benchmark-compendium"
+url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+
+[families.function_calling_tool_use]
+order = 1
+display_name = "Function Calling & Tool Use"
+why_it_matters = "Это семейство нужно нам не ради общего слова \"tools\", а для проверки, насколько Amai выдерживает MCP, многошаговый tool selection, policy-gated tool use и работу с несколькими tool-источниками без путаницы."
+
+[families.general_assistant_reasoning]
+order = 2
+display_name = "General Assistant & Reasoning"
+why_it_matters = "Эти эталоны важны, потому что Amai должен не только хранить память, но и поднимать правильный рабочий контекст, не врать на continuity-вопросах и не ломаться на сложных естественных запросах."
+
+[families.coding_software_engineering]
+order = 3
+display_name = "Coding & Software Engineering"
+why_it_matters = "Это семейство показывает, выдерживает ли Amai реальную инженерную работу: continuity в кодовой базе, multi-file retrieval, bugfix context, code editing support и длинные рабочие линии без потери смысла."
+
+[families.computer_interaction]
+order = 4
+display_name = "Computer Interaction"
+why_it_matters = "Это следующий внешний слой для задач, где agent должен держать в памяти ход GUI и web-взаимодействия, а Amai — не терять шаги, состояние и policy-контур при длинной навигации."
+
+[benchmarks.bfcl]
+order = 1
+display_name = "BFCL"
+aliases = ["bfcl", "berkeley function calling leaderboard"]
+family = "function_calling_tool_use"
+coverage_level = "mapped"
+summary = "Эталон для tool use и function calling в serial, parallel и multi-turn сценариях. Для Amai это полезно как reference для строгого multi-step tool contour, а не как прямой runtime replacement."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Нужен как reference для multi-turn tool choice и stateful reasoning.",
+  "Полезен для проверки, не ломается ли Amai на многошаговом tool-routing вокруг continuity и context retrieval."
+]
+amai_focus = [
+  "MCP tool selection",
+  "stateful multi-step retrieval",
+  "multi-turn continuity without context drift"
+]
+current_coverage = [
+  "Есть живой MCP contour и proof_mcp.sh.",
+  "Есть hostile continuity/temporal lookup и fail-closed поведение.",
+  "Есть multi-agent scope isolation через Amai working-state."
+]
+current_gaps = [
+  "Нет отдельного BFCL-style harness с task-level scoring.",
+  "Нет unified pass-rate отчёта по serial, parallel и multi-turn tool tasks."
+]
+proof_commands = [
+  "./scripts/proof_mcp.sh",
+  "./scripts/proof_hostile.sh"
+]
+next_step = "Собрать Rust-first tool-use eval set с serial, parallel и multi-turn MCP tasks поверх Amai."
+
+[benchmarks.toolbench]
+order = 2
+display_name = "ToolBench"
+aliases = ["toolbench"]
+family = "function_calling_tool_use"
+coverage_level = "mapped"
+summary = "Масштабный ориентир на работу с большим числом реальных API. Для Amai он полезен как давление на retrieval и routing, когда tool surface становится действительно большим."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Проверяет, не разваливается ли tool routing на большом API landscape.",
+  "Подталкивает нас к measured benchmark-матрице, а не к одному удобному MCP smoke."
+]
+amai_focus = [
+  "large tool catalog navigation",
+  "tool selection under ambiguity",
+  "retrieval reduction before tool invocation"
+]
+current_coverage = [
+  "Есть MCP baseline и continuity-safe retrieval contour.",
+  "Есть project, namespace и agent_scope isolation."
+]
+current_gaps = [
+  "Нет yet большого tool registry stress contour.",
+  "Нет pass-rate по неоднозначным tool-choice сценариям."
+]
+proof_commands = [
+  "./scripts/proof_mcp.sh"
+]
+next_step = "Развернуть Amai tool catalog fixtures и дать measured отчёт по large-tool routing."
+
+[benchmarks.tau_bench]
+order = 3
+display_name = "Tau-Bench"
+aliases = ["tau-bench", "tau bench"]
+family = "function_calling_tool_use"
+coverage_level = "mapped"
+summary = "Ориентир на разговорный agent flow с policies, multi-turn state и domain constraints. Для Amai это особенно полезно как шаблон policy-gated continuity и follow-up recovery."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Проверяет, как agent держит состояние и policy across turns.",
+  "Близко к нашему контру recovery-aware continuity и token-ledger с follow-up penalties."
+]
+amai_focus = [
+  "policy-gated memory usage",
+  "multi-turn continuity",
+  "recovery-aware follow-up handling"
+]
+current_coverage = [
+  "Есть working-state continuity recovery.",
+  "Есть recovery-aware token ledger."
+]
+current_gaps = [
+  "Нет domain-style dialog task suite с measured completion.",
+  "Нет explicit policy violation scorecard."
+]
+proof_commands = [
+  "./scripts/proof_token_ledger.sh",
+  "./scripts/proof_hostile.sh"
+]
+next_step = "Добавить policy-heavy multi-turn task set, где recovery и violations считаются отдельно."
+
+[benchmarks.api_bank]
+order = 4
+display_name = "API-Bank"
+aliases = ["api-bank", "api bank"]
+family = "function_calling_tool_use"
+coverage_level = "mapped"
+summary = "Ориентир на step-by-step API planning. Для Amai это не про копирование benchmark-а, а про давление на reasoning + retrieval + tool planning внутри одного контра."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Полезен как модель последовательного API planning.",
+  "Помогает проверить, не теряется ли важный context между шагами плана."
+]
+amai_focus = [
+  "step-by-step tool planning",
+  "retrieval-backed API reasoning",
+  "continuity across action chains"
+]
+current_coverage = [
+  "Есть continuity startup, restore и handoff contour.",
+  "Есть multi-step working-state recovery."
+]
+current_gaps = [
+  "Нет API planning benchmark contour с measured success.",
+  "Нет проверяемой цепочки plan -> tool -> recovery -> final answer."
+]
+proof_commands = [
+  "./scripts/proof_hostile.sh"
+]
+next_step = "Сделать небольшой Rust-first planning benchmark для action chains с несколькими шагами."
+
+[benchmarks.live_mcpbench]
+order = 5
+display_name = "LiveMCPBench"
+aliases = ["live_mcpbench", "live-mcpbench", "live mcpbench"]
+family = "function_calling_tool_use"
+coverage_level = "next_priority"
+summary = "Прямой эталон для MCP tool navigation в real-world условиях. Для Amai это один из самых близких внешних benchmark-ориентиров."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Amai уже живёт как MCP server и значит должен выдерживать benchmark именно этого класса.",
+  "Нужно проверять не только один server/tool, а navigation по большому MCP toolset."
+]
+amai_focus = [
+  "MCP server ergonomics",
+  "tool discovery and tool routing",
+  "policy-safe MCP usage",
+  "multi-server MCP stability"
+]
+current_coverage = [
+  "MCP integration уже materialized.",
+  "Есть proof_mcp.sh и hostile continuity contour.",
+  "Есть human dashboard и observability слой для runtime signals."
+]
+current_gaps = [
+  "Нет benchmark-compatible MCP task matrix и pass-rate.",
+  "Нет отдельного hostile contour для large MCP tool universe."
+]
+proof_commands = [
+  "./scripts/proof_mcp.sh"
+]
+next_step = "Сделать Rust-first MCP benchmark matrix с measured success/failure по multi-server tool tasks."
+
+[benchmarks.mcp_universe]
+order = 6
+display_name = "MCP-Universe"
+aliases = ["mcp universe", "mcp-universe", "mcp_universe"]
+family = "function_calling_tool_use"
+coverage_level = "next_priority"
+summary = "Эталон для работы агентов с реальными MCP servers вместо искусственных симуляций. Для Amai это следующий обязательный слой после базового MCP smoke."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Нужен для real MCP ecosystems, а не только для одного локального proof.",
+  "Полезен для проверки cross-tool и cross-domain drift."
+]
+amai_focus = [
+  "real MCP server interaction",
+  "multi-domain tool use",
+  "cross-scope safety"
+]
+current_coverage = [
+  "Есть Amai MCP server и local proof contour.",
+  "Есть strict project, namespace и agent_scope isolation."
+]
+current_gaps = [
+  "Нет ещё отдельного universe-scale MCP regression harness.",
+  "Нет measured report по multi-domain MCP task completion."
+]
+proof_commands = [
+  "./scripts/proof_mcp.sh"
+]
+next_step = "Добавить в Rust eval registry отдельный multi-domain MCP contour с real-server tasks."
+
+[benchmarks.gaia]
+order = 1
+display_name = "GAIA"
+aliases = ["gaia", "general ai assistants"]
+family = "general_assistant_reasoning"
+coverage_level = "mapped"
+summary = "Общий эталон для ассистентов, где важны reasoning, web/tool usage и способность доводить реальную задачу до конца. Для Amai полезен как верхний ориентир на end-to-end task success."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Помогает не застрять в локальных микро-метриках и помнить про end-to-end usefulness.",
+  "Показывает, что одного retrieval-speed мало без корректного task completion."
+]
+amai_focus = [
+  "end-to-end continuity usefulness",
+  "working-state recovery",
+  "task success after restart or chat switch"
+]
+current_coverage = [
+  "Есть continuity startup, restore и handoff.",
+  "Есть chat-start restore pack и semantic temporal answers."
+]
+current_gaps = [
+  "Нет ещё GAIA-style task suite вокруг реальных assistant workflows.",
+  "Нет answer-level judge для полного task success KPI."
+]
+proof_commands = [
+  "./scripts/continuity_startup.sh --project art --namespace continuity",
+  "./scripts/chat_lookup.sh --project art --namespace continuity --question 'на чем закончили в прошлом чате?'"
+]
+next_step = "Собрать small Rust-first end-to-end assistant suite вокруг continuity recovery и task resume."
+
+[benchmarks.agentbench]
+order = 2
+display_name = "AgentBench"
+aliases = ["agentbench", "agent bench"]
+family = "general_assistant_reasoning"
+coverage_level = "mapped"
+summary = "Многомерный эталон для агентов в разных средах. Для Amai особенно полезен как напоминание, что continuity, policy, tool use и environment interaction нужно мерить вместе."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Даёт ориентир на environment diversity, а не на один узкий proof.",
+  "Подходит как модель для hostile multi-environment validation."
+]
+amai_focus = [
+  "continuity across environments",
+  "policy and safety under drift",
+  "multi-agent and multi-project isolation"
+]
+current_coverage = [
+  "Есть hostile contour и project, namespace и agent_scope isolation.",
+  "Есть exact-time и previous-chat recovery."
+]
+current_gaps = [
+  "Нет unified environment matrix для OS, browser и db-like tasks.",
+  "Нет measured task success table по разным environment classes."
+]
+proof_commands = [
+  "./scripts/proof_hostile.sh"
+]
+next_step = "Развернуть hostile matrix по environment classes и собрать единый Rust report."
+
+[benchmarks.assistantbench]
+order = 3
+display_name = "AssistantBench"
+aliases = ["assistantbench", "assistant bench"]
+family = "general_assistant_reasoning"
+coverage_level = "mapped"
+summary = "Ориентир на длинные и трудоёмкие задачи ассистента. Для Amai полезен как давление на long-horizon memory и способность не сбрасывать рабочую линию."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Близок к пользовательскому ожиданию: новый чат должен продолжать работу, а не начинать заново.",
+  "Проверяет длинный рабочий горизонт, а не только быстрый single-turn answer."
+]
+amai_focus = [
+  "long-horizon continuity",
+  "working-state durability",
+  "task resume after interruptions"
+]
+current_coverage = [
+  "Есть working-state recovery contour.",
+  "Есть chat-start restore pack."
+]
+current_gaps = [
+  "Нет длительного task suite с measured resume success.",
+  "Нет отдельного scorecard по interruption-resume quality."
+]
+proof_commands = [
+  "./scripts/continuity_restore.sh --project art --namespace continuity"
+]
+next_step = "Добавить resume benchmark с многими interruption points и measured recovery quality."
+
+[benchmarks.facts_grounding]
+order = 4
+display_name = "FACTS Grounding"
+aliases = ["facts grounding", "facts_grounding"]
+family = "general_assistant_reasoning"
+coverage_level = "mapped"
+summary = "Ориентир на grounded long-form ответы. Для Amai важен не как web benchmark, а как напоминание: retrieval и continuity должны поддерживать grounded answer quality, а не только экономить токены."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Поддерживает следующий обязательный шаг по answer-level quality gate.",
+  "Не даёт нам продавать raw savings без проверки grounded usefulness."
+]
+amai_focus = [
+  "answer grounding",
+  "retrieval provenance",
+  "quality-preserving token savings"
+]
+current_coverage = [
+  "Есть provenance-rich context pack.",
+  "Есть verified, live-only, recovery-aware token ledger."
+]
+current_gaps = [
+  "Нет полноценного answer-level judge.",
+  "Нет groundedness score в default product reporting."
+]
+proof_commands = [
+  "./scripts/token_report.sh",
+  "./scripts/proof_token_ledger.sh"
+]
+next_step = "Материализовать answer-level judge и grounding-oriented product KPI поверх token ledger."
+
+[benchmarks.livebench]
+order = 5
+display_name = "LiveBench"
+aliases = ["livebench", "live bench"]
+family = "general_assistant_reasoning"
+coverage_level = "future"
+summary = "Ориентир на contamination-free задачи из свежих данных. Для Amai это future layer, когда пойдём в более широкий live reasoning contour поверх product memory."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Полезен как future anti-overfitting signal.",
+  "Проверяет reasoning на новых данных, а не только на familiar project corpora."
+]
+amai_focus = [
+  "fresh-data reasoning",
+  "live task robustness",
+  "anti-overfitting benchmark hygiene"
+]
+current_coverage = [
+  "Есть live-only separation в token ledger.",
+  "Есть exact-time and semantic temporal recovery."
+]
+current_gaps = [
+  "Нет live external task harness.",
+  "Нет contamination-safe benchmark loop."
+]
+proof_commands = []
+next_step = "Вернуться после materialized MCP and answer-judge contours."
+
+[benchmarks.swe_bench_verified]
+order = 1
+display_name = "SWE-bench Verified"
+aliases = ["swe-bench verified", "swebench verified", "swe_bench_verified"]
+family = "coding_software_engineering"
+coverage_level = "mapped"
+summary = "Реальный ориентир для инженерных coding agents. Для Amai он важен как эталон доказанного bugfix-context и code-change usefulness, а не только как retrieval benchmark."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Нужен как reference для coding-agent tasks на реальных issue-like задачах.",
+  "Показывает, что retrieval и continuity должны доходить до реального исправления."
+]
+amai_focus = [
+  "bugfix context retrieval",
+  "cross-file trace support",
+  "long-running coding continuity"
+]
+current_coverage = [
+  "Есть real-project retrieval contour и text compare proof.",
+  "Есть working-state continuity для длинной инженерной линии."
+]
+current_gaps = [
+  "Нет ещё SWE-style issue-to-patch harness поверх Amai.",
+  "Нет measured bugfix success contour по verified tasks."
+]
+proof_commands = [
+  "./scripts/proof_text_compare.sh",
+  "./scripts/proof_accuracy.sh"
+]
+next_step = "Собрать Rust-first coding-agent eval contour: issue context, patch support, regression checks."
+
+[benchmarks.swe_polybench]
+order = 2
+display_name = "SWE-PolyBench"
+aliases = ["swe-polybench", "swe polybench", "swe_polybench"]
+family = "coding_software_engineering"
+coverage_level = "mapped"
+summary = "Ориентир на multi-language coding tasks. Для Amai это pressure test на multi-project и multi-language continuity без путаницы."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Полезен, потому что Amai не должен быть привязан только к одному языку.",
+  "Поддерживает нашу линию на polyglot retrieval и long coding continuity."
+]
+amai_focus = [
+  "multi-language indexing",
+  "polyglot coding continuity",
+  "cross-language retrieval correctness"
+]
+current_coverage = [
+  "Есть language-aware indexing foundation.",
+  "Есть hostile continuity contour и project isolation."
+]
+current_gaps = [
+  "Нет polyglot issue-like harness.",
+  "Нет measured report по language slices."
+]
+proof_commands = [
+  "./scripts/proof_text_compare.sh"
+]
+next_step = "Добавить в Rust fixtures набор polyglot coding tasks и measured slices по языкам."
+
+[benchmarks.aider_polyglot]
+order = 3
+display_name = "Aider Polyglot Benchmark"
+aliases = ["aider polyglot", "aider_polyglot", "aider-polyglot"]
+family = "coding_software_engineering"
+coverage_level = "mapped"
+summary = "Полезный ориентир для code editing, self-correction и polyglot engineering tasks. Для Amai особенно важен как pressure test на continuity across different languages."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "У Amai уже есть multi-language indexing foundation.",
+  "Нужно мерить не только retrieval, но и устойчивость coding-context across languages."
+]
+amai_focus = [
+  "multi-language continuity",
+  "polyglot retrieval",
+  "coding self-correction support"
+]
+current_coverage = [
+  "Есть language-aware indexing and retrieval foundation.",
+  "Есть coding continuity contour."
+]
+current_gaps = [
+  "Нет отдельного polyglot benchmark-harness.",
+  "Нет measured self-correction contour по нескольким языкам."
+]
+proof_commands = [
+  "./scripts/proof_text_compare.sh"
+]
+next_step = "Добавить polyglot eval fixtures и measured report по language slices."
+
+[benchmarks.livecodebench]
+order = 4
+display_name = "LiveCodeBench"
+aliases = ["livecodebench", "live codebench", "live-codebench"]
+family = "coding_software_engineering"
+coverage_level = "future"
+summary = "Ориентир на contamination-free code tasks. Для Amai это future layer после materialized coding-agent harness и answer-level quality gates."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Полезен как защита от самообмана на familiar fixtures.",
+  "Помогает потом отделять skill от memorization."
+]
+amai_focus = [
+  "fresh coding tasks",
+  "self-repair",
+  "anti-contamination eval"
+]
+current_coverage = [
+  "Есть baseline coding continuity contour."
+]
+current_gaps = [
+  "Нет contamination-free coding suite.",
+  "Нет live code-task harness."
+]
+proof_commands = []
+next_step = "Вернуться после materialized SWE-style harness and polyglot slices."
+
+[benchmarks.webarena]
+order = 1
+display_name = "WebArena"
+aliases = ["webarena", "web arena"]
+family = "computer_interaction"
+coverage_level = "future"
+summary = "Крупный ориентир для browser и web agents. Для Amai это следующий слой после того, как continuity, MCP и coding eval contours станут достаточно зрелыми."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Нужен, если Amai будет поддерживать длинные browser-agent workflows.",
+  "Полезен для будущего GUI и web layer, но не должен вытеснять более близкие текущие MCP и continuity задачи."
+]
+amai_focus = [
+  "browser-state continuity",
+  "multi-step web task memory",
+  "computer interaction recovery"
+]
+current_coverage = [
+  "Есть только foundation через continuity и temporal memory."
+]
+current_gaps = [
+  "Нет собственного browser-agent eval contour.",
+  "Нет WebArena-style state and action trace benchmark."
+]
+proof_commands = []
+next_step = "Отложить до следующего слоя, после MCP and continuity benchmark matrix."
+
+[benchmarks.browsecomp]
+order = 2
+display_name = "BrowseComp"
+aliases = ["browsecomp", "browse comp"]
+family = "computer_interaction"
+coverage_level = "future"
+summary = "Хороший ориентир для browsing agents с упором на труднодоступную информацию и длинную навигацию. Для Amai это будущий eval слой для browser memory."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Полезен как reference для persistent browsing tasks.",
+  "Проверяет длинную цепочку поиска и memory retention при сложной навигации."
+]
+amai_focus = [
+  "persistent browsing memory",
+  "long-horizon navigation context",
+  "exact-time recovery across navigation steps"
+]
+current_coverage = [
+  "Есть only continuity building blocks."
+]
+current_gaps = [
+  "Нет browser-horizon benchmark contour.",
+  "Нет measured browsing-task success report."
+]
+proof_commands = []
+next_step = "Вернуться к нему после materialized MCP and coding benchmark layers."
+
+[benchmarks.st_webagentbench]
+order = 3
+display_name = "ST-WebAgentBench"
+aliases = ["st-webagentbench", "st webagentbench", "st_webagentbench"]
+family = "computer_interaction"
+coverage_level = "mapped"
+summary = "Ориентир на безопасность и trustworthiness web agents. Для Amai полезен как будущий safety layer, особенно если browser tools пойдут в baseline."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Нам нужен safety contour не только для памяти, но и для действий.",
+  "Помогает заранее проектировать policy-safe browser integration."
+]
+amai_focus = [
+  "policy enforcement",
+  "safety and trustworthiness",
+  "action guardrails"
+]
+current_coverage = [
+  "Есть fail-closed hostile continuity path.",
+  "Есть strict project and namespace isolation."
+]
+current_gaps = [
+  "Нет browser-action safety benchmark.",
+  "Нет measured trustworthiness contour for action-taking agents."
+]
+proof_commands = [
+  "./scripts/proof_hostile.sh"
+]
+next_step = "Собрать action-safety benchmark contour до ввода browser agents в основной product path."
+
+[benchmarks.osworld]
+order = 4
+display_name = "OSWorld"
+aliases = ["osworld", "os world"]
+family = "computer_interaction"
+coverage_level = "future"
+summary = "Ориентир на open-ended computer-use tasks. Для Amai это дальний слой, когда memory and continuity должны удерживать состояние уже в пределах реальной ОС."
+reference_url = "https://github.com/philschmid/ai-agent-benchmark-compendium"
+why_relevant = [
+  "Полезен для будущего desktop-agent expansion.",
+  "Проверяет long-horizon state retention на уровне всей OS среды."
+]
+amai_focus = [
+  "desktop-state continuity",
+  "cross-tool action memory",
+  "computer-use recovery"
+]
+current_coverage = [
+  "Есть only continuity substrate and temporal recovery."
+]
+current_gaps = [
+  "Нет OS-level task harness.",
+  "Нет computer-use replay and recovery contour."
+]
+proof_commands = []
+next_step = "Вернуться, когда browser/action layer и safety contour уже materialized."
