@@ -1149,45 +1149,155 @@ fn render_prometheus_metrics(snapshot: &Value) -> String {
     push_metric(
         &mut output,
         "amai_tokens_saved_session_total",
-        "Saved tokens accumulated in the current token-usage session.",
+        "Verified effective saved tokens accumulated in the current live token-usage session.",
+        snapshot["token_budget_report"]["token_budget_report"]["current_session"]
+            ["verified_effective_saved_tokens"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_saved_window_total",
+        "Verified effective saved tokens accumulated in the current live budget window.",
+        snapshot["token_budget_report"]["token_budget_report"]["rolling_window"]
+            ["verified_effective_saved_tokens"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_saved_lifetime_total",
+        "Verified effective saved tokens accumulated across all live recorded token-usage events.",
+        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]
+            ["verified_effective_saved_tokens"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_savings_percent_session",
+        "Verified effective savings percent accumulated in the current live token-usage session.",
+        snapshot["token_budget_report"]["token_budget_report"]["current_session"]
+            ["verified_effective_savings_pct"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_savings_percent_window",
+        "Verified effective savings percent accumulated in the current live budget window.",
+        snapshot["token_budget_report"]["token_budget_report"]["rolling_window"]
+            ["verified_effective_savings_pct"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_savings_percent_lifetime",
+        "Verified effective savings percent accumulated across all live recorded token-usage events.",
+        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]
+            ["verified_effective_savings_pct"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_raw_saved_session_total",
+        "Raw saved tokens accumulated in the current session before quality gating.",
         snapshot["token_budget_report"]["token_budget_report"]["current_session"]
             ["total_saved_tokens"]
             .as_f64(),
     );
     push_metric(
         &mut output,
-        "amai_tokens_saved_window_total",
-        "Saved tokens accumulated in the current budget window.",
+        "amai_tokens_raw_saved_window_total",
+        "Raw saved tokens accumulated in the current budget window before quality gating.",
         snapshot["token_budget_report"]["token_budget_report"]["rolling_window"]["total_saved_tokens"]
             .as_f64(),
     );
     push_metric(
         &mut output,
-        "amai_tokens_saved_lifetime_total",
-        "Saved tokens accumulated across all recorded token-usage events.",
+        "amai_tokens_raw_saved_lifetime_total",
+        "Raw saved tokens accumulated across all recorded token-usage events before quality gating.",
         snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["total_saved_tokens"]
             .as_f64(),
     );
     push_metric(
         &mut output,
-        "amai_tokens_savings_percent_session",
-        "Savings percent accumulated in the current token-usage session.",
-        snapshot["token_budget_report"]["token_budget_report"]["current_session"]
-            ["savings_percent"]
+        "amai_tokens_raw_savings_percent_session",
+        "Raw savings percent accumulated in the current session before quality gating.",
+        snapshot["token_budget_report"]["token_budget_report"]["current_session"]["savings_percent"]
             .as_f64(),
     );
     push_metric(
         &mut output,
-        "amai_tokens_savings_percent_window",
-        "Savings percent accumulated in the current budget window.",
+        "amai_tokens_raw_savings_percent_window",
+        "Raw savings percent accumulated in the current budget window before quality gating.",
         snapshot["token_budget_report"]["token_budget_report"]["rolling_window"]["savings_percent"]
             .as_f64(),
     );
     push_metric(
         &mut output,
-        "amai_tokens_savings_percent_lifetime",
-        "Savings percent accumulated across all recorded token-usage events.",
+        "amai_tokens_raw_savings_percent_lifetime",
+        "Raw savings percent accumulated across all recorded token-usage events before quality gating.",
         snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["savings_percent"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_quality_ok_rate_session",
+        "Share of current-session live events that passed the quality gate.",
+        snapshot["token_budget_report"]["token_budget_report"]["current_session"]["quality_ok_rate"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_quality_ok_rate_window",
+        "Share of current-window live events that passed the quality gate.",
+        snapshot["token_budget_report"]["token_budget_report"]["rolling_window"]["quality_ok_rate"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_quality_ok_rate_lifetime",
+        "Share of lifetime live events that passed the quality gate.",
+        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["quality_ok_rate"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_fallback_rate_session",
+        "Share of current-session live events that needed fallback or follow-up.",
+        snapshot["token_budget_report"]["token_budget_report"]["current_session"]["fallback_rate"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_fallback_rate_window",
+        "Share of current-window live events that needed fallback or follow-up.",
+        snapshot["token_budget_report"]["token_budget_report"]["rolling_window"]["fallback_rate"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_fallback_rate_lifetime",
+        "Share of lifetime live events that needed fallback or follow-up.",
+        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["fallback_rate"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_answer_like_rate_session",
+        "Share of current-session live events that already reached the stricter answer-like contour.",
+        snapshot["token_budget_report"]["token_budget_report"]["current_session"]["answer_like_rate"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_answer_like_rate_window",
+        "Share of current-window live events that already reached the stricter answer-like contour.",
+        snapshot["token_budget_report"]["token_budget_report"]["rolling_window"]["answer_like_rate"]
+            .as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_tokens_answer_like_rate_lifetime",
+        "Share of lifetime live events that already reached the stricter answer-like contour.",
+        snapshot["token_budget_report"]["token_budget_report"]["lifetime"]["answer_like_rate"]
             .as_f64(),
     );
     push_metric(
@@ -1234,4 +1344,73 @@ fn push_metric(output: &mut String, name: &str, help: &str, value: Option<f64>) 
     output.push(' ');
     output.push_str(&value.to_string());
     output.push('\n');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_prometheus_metrics;
+    use serde_json::json;
+
+    #[test]
+    fn prometheus_token_rollups_export_verified_values_by_default() {
+        let snapshot = json!({
+            "latest_token_benchmark": {
+                "token_benchmark": {
+                    "naive_scope": { "token_count": 100.0 },
+                    "context_pack": { "token_count": 20.0 },
+                    "savings": {
+                        "saved_tokens": 80.0,
+                        "savings_factor": 5.0,
+                        "savings_percent": 80.0
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "verified_effective_saved_tokens": 60.0,
+                        "verified_effective_savings_pct": 75.0,
+                        "total_saved_tokens": 90.0,
+                        "savings_percent": 90.0,
+                        "quality_ok_rate": 70.0,
+                        "fallback_rate": 20.0,
+                        "answer_like_rate": 50.0
+                    },
+                    "rolling_window": {
+                        "verified_effective_saved_tokens": 120.0,
+                        "verified_effective_savings_pct": 66.0,
+                        "total_saved_tokens": 180.0,
+                        "savings_percent": 88.0,
+                        "quality_ok_rate": 80.0,
+                        "fallback_rate": 10.0,
+                        "answer_like_rate": 40.0
+                    },
+                    "lifetime": {
+                        "verified_effective_saved_tokens": 240.0,
+                        "verified_effective_savings_pct": 55.0,
+                        "total_saved_tokens": 300.0,
+                        "savings_percent": 77.0,
+                        "quality_ok_rate": 90.0,
+                        "fallback_rate": 5.0,
+                        "answer_like_rate": 35.0
+                    }
+                }
+            },
+            "sla": {
+                "summary": {
+                    "pass": 1.0,
+                    "alert": 0.0,
+                    "critical": 0.0,
+                    "unknown": 0.0
+                }
+            }
+        });
+
+        let output = render_prometheus_metrics(&snapshot);
+        assert!(output.contains("amai_tokens_saved_session_total 60"));
+        assert!(output.contains("amai_tokens_savings_percent_window 66"));
+        assert!(output.contains("amai_tokens_raw_saved_session_total 90"));
+        assert!(output.contains("amai_tokens_quality_ok_rate_lifetime 90"));
+        assert!(output.contains("amai_tokens_answer_like_rate_window 40"));
+    }
 }

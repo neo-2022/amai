@@ -541,6 +541,22 @@ async fn enrich_live_event_payload(
             previous_cost,
             previous.followup_count.saturating_add(1),
         )?;
+        let exact_hits = payload["retrieval"]["exact_documents"]
+            .as_array()
+            .map_or(0, Vec::len);
+        let symbol_hits = payload["retrieval"]["symbol_hits"]
+            .as_array()
+            .map_or(0, Vec::len);
+        let lexical_hits = payload["retrieval"]["lexical_chunks"]
+            .as_array()
+            .map_or(0, Vec::len);
+        let semantic_hits = payload["retrieval"]["semantic_chunks"]
+            .as_array()
+            .map_or(0, Vec::len);
+        let target_kind_owned = payload["token_budget_event"]["target_kind"]
+            .as_str()
+            .unwrap_or("file")
+            .to_string();
         let node = payload["token_budget_event"]
             .as_object_mut()
             .ok_or_else(|| anyhow!("token budget payload missing token_budget_event object"))?;
@@ -554,10 +570,26 @@ async fn enrich_live_event_payload(
             .get("quality_ok")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let head_hit_target = quality
+            .get("head_hit_target")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let answer_like_proxy = answer_like_from_counts(
+            &target_kind_owned,
+            head_hit_target,
+            exact_hits,
+            symbol_hits,
+            lexical_hits,
+            semantic_hits,
+        );
         quality.insert(
             "quality_method".to_string(),
             Value::String(if quality_ok {
-                "hybrid_task_success".to_string()
+                if answer_like_proxy {
+                    "hybrid_answer_success".to_string()
+                } else {
+                    "hybrid_task_success".to_string()
+                }
             } else {
                 "hybrid_followup_pending".to_string()
             }),
@@ -565,7 +597,11 @@ async fn enrich_live_event_payload(
         quality.insert(
             "quality_tier".to_string(),
             Value::String(if quality_ok {
-                "task_success_recovered".to_string()
+                if answer_like_proxy {
+                    "answer_success_recovered".to_string()
+                } else {
+                    "task_success_recovered".to_string()
+                }
             } else {
                 "partial".to_string()
             }),
@@ -940,6 +976,22 @@ fn apply_reverification_metadata(
     original_node: &Value,
     fallback_timestamp_utc: i64,
 ) -> Result<()> {
+    let target_kind_owned = rebuilt_payload["token_budget_event"]["target_kind"]
+        .as_str()
+        .unwrap_or("file")
+        .to_string();
+    let exact_hits = rebuilt_payload["retrieval"]["exact_documents"]
+        .as_array()
+        .map_or(0, Vec::len);
+    let symbol_hits = rebuilt_payload["retrieval"]["symbol_hits"]
+        .as_array()
+        .map_or(0, Vec::len);
+    let lexical_hits = rebuilt_payload["retrieval"]["lexical_chunks"]
+        .as_array()
+        .map_or(0, Vec::len);
+    let semantic_hits = rebuilt_payload["retrieval"]["semantic_chunks"]
+        .as_array()
+        .map_or(0, Vec::len);
     let rebuilt_node = rebuilt_payload["token_budget_event"]
         .as_object_mut()
         .ok_or_else(|| anyhow!("rebuilt token event payload missing token_budget_event object"))?;
@@ -984,10 +1036,20 @@ fn apply_reverification_metadata(
             .get("head_hit_target")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let answer_like_proxy = answer_like_from_counts(
+            &target_kind_owned,
+            head_hit_target,
+            exact_hits,
+            symbol_hits,
+            lexical_hits,
+            semantic_hits,
+        );
         quality.insert(
             "quality_method".to_string(),
             Value::String(if quality_ok {
-                if head_hit_target {
+                if answer_like_proxy {
+                    "reverified_answer_proxy".to_string()
+                } else if head_hit_target {
                     "reverified_task_proxy".to_string()
                 } else {
                     "reverified_retrieval_parity".to_string()
@@ -999,7 +1061,9 @@ fn apply_reverification_metadata(
         quality.insert(
             "quality_tier".to_string(),
             Value::String(if quality_ok {
-                if head_hit_target {
+                if answer_like_proxy {
+                    "answer_proxy".to_string()
+                } else if head_hit_target {
                     "task_proxy".to_string()
                 } else {
                     "retrieval".to_string()
@@ -1340,6 +1404,7 @@ fn summarize_events(
             "events_count": 0,
             "counted_events": 0,
             "task_success_like_counted_events": 0,
+            "answer_like_counted_events": 0,
             "legacy_unverified_events": 0,
             "preliminary": true,
             "baseline_tokens": 0,
@@ -1350,6 +1415,7 @@ fn summarize_events(
             "total_effective_saved_tokens": 0,
             "verified_effective_saved_tokens": 0,
             "verified_task_like_saved_tokens": 0,
+            "verified_answer_like_saved_tokens": 0,
             "total_naive_tokens": 0,
             "total_context_tokens": 0,
             "total_recovery_tokens": 0,
@@ -1357,11 +1423,13 @@ fn summarize_events(
             "effective_savings_pct": 0.0,
             "verified_effective_savings_pct": 0.0,
             "verified_task_like_savings_pct": 0.0,
+            "verified_answer_like_savings_pct": 0.0,
             "savings_percent": 0.0,
             "savings_factor": 0.0,
             "avg_saved_tokens_per_event": 0.0,
             "quality_ok_rate": 0.0,
             "task_success_like_rate": 0.0,
+            "answer_like_rate": 0.0,
             "fallback_rate": 0.0,
             "median_recovery_tokens": 0.0,
             "p95_latency_ms": 0.0,
@@ -1400,15 +1468,31 @@ fn summarize_events(
         .filter(|event| {
             matches!(
                 event.quality_tier.as_str(),
-                "task_proxy" | "task_success_recovered"
+                "task_proxy"
+                    | "task_success_recovered"
+                    | "answer_proxy"
+                    | "answer_success_recovered"
             )
         })
+        .collect::<Vec<_>>();
+    let answer_like_events = verified_events
+        .iter()
+        .copied()
+        .filter(|event| is_answer_like_event(event))
         .collect::<Vec<_>>();
     let verified_task_like_saved_tokens = task_like_events
         .iter()
         .map(|event| event.effective_saved_tokens)
         .sum::<i64>();
     let verified_task_like_baseline_tokens = task_like_events
+        .iter()
+        .map(|event| event.naive_tokens)
+        .sum::<u64>();
+    let verified_answer_like_saved_tokens = answer_like_events
+        .iter()
+        .map(|event| event.effective_saved_tokens)
+        .sum::<i64>();
+    let verified_answer_like_baseline_tokens = answer_like_events
         .iter()
         .map(|event| event.naive_tokens)
         .sum::<u64>();
@@ -1425,6 +1509,10 @@ fn summarize_events(
         verified_task_like_saved_tokens,
         verified_task_like_baseline_tokens,
     );
+    let verified_answer_like_savings_pct = percent_from_signed(
+        verified_answer_like_saved_tokens,
+        verified_answer_like_baseline_tokens,
+    );
     let savings_factor = if total_context_tokens == 0 {
         total_naive_tokens as f64
     } else {
@@ -1437,9 +1525,16 @@ fn summarize_events(
         .filter(|event| {
             matches!(
                 event.quality_tier.as_str(),
-                "task_proxy" | "task_success_recovered"
+                "task_proxy"
+                    | "task_success_recovered"
+                    | "answer_proxy"
+                    | "answer_success_recovered"
             )
         })
+        .count() as f64;
+    let answer_like_events_rate = events
+        .iter()
+        .filter(|event| is_answer_like_event(event))
         .count() as f64;
     let legacy_unverified_events = events
         .iter()
@@ -1466,6 +1561,7 @@ fn summarize_events(
     let p95_latency_ms = percentile_from_sorted(&latency_values, 0.95);
     let quality_ok_rate = quality_ok_events * 100.0 / events.len() as f64;
     let task_success_like_rate = task_success_like_events * 100.0 / events.len() as f64;
+    let answer_like_rate = answer_like_events_rate * 100.0 / events.len() as f64;
     let fallback_rate = fallback_events * 100.0 / events.len() as f64;
     let started_at_epoch_ms = events
         .first()
@@ -1484,6 +1580,7 @@ fn summarize_events(
         "events_count": events.len(),
         "counted_events": verified_events.len(),
         "task_success_like_counted_events": task_like_events.len(),
+        "answer_like_counted_events": answer_like_events.len(),
         "legacy_unverified_events": legacy_unverified_events,
         "preliminary": preliminary,
         "baseline_tokens": total_naive_tokens,
@@ -1494,6 +1591,7 @@ fn summarize_events(
         "total_effective_saved_tokens": total_effective_saved_tokens,
         "verified_effective_saved_tokens": verified_effective_saved_tokens,
         "verified_task_like_saved_tokens": verified_task_like_saved_tokens,
+        "verified_answer_like_saved_tokens": verified_answer_like_saved_tokens,
         "total_naive_tokens": total_naive_tokens,
         "total_context_tokens": total_context_tokens,
         "total_recovery_tokens": total_recovery_tokens,
@@ -1501,11 +1599,13 @@ fn summarize_events(
         "effective_savings_pct": effective_savings_pct,
         "verified_effective_savings_pct": verified_effective_savings_pct,
         "verified_task_like_savings_pct": verified_task_like_savings_pct,
+        "verified_answer_like_savings_pct": verified_answer_like_savings_pct,
         "savings_percent": gross_savings_pct,
         "savings_factor": savings_factor,
         "avg_saved_tokens_per_event": avg_saved_tokens_per_event,
         "quality_ok_rate": quality_ok_rate,
         "task_success_like_rate": task_success_like_rate,
+        "answer_like_rate": answer_like_rate,
         "fallback_rate": fallback_rate,
         "median_recovery_tokens": median_recovery_tokens,
         "p95_latency_ms": p95_latency_ms,
@@ -1641,10 +1741,13 @@ fn query_slice_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementC
                     "events_count": summary["events_count"],
                     "counted_events": summary["counted_events"],
                     "task_success_like_counted_events": summary["task_success_like_counted_events"],
+                    "answer_like_counted_events": summary["answer_like_counted_events"],
                     "verified_effective_savings_pct": summary["verified_effective_savings_pct"],
                     "verified_task_like_savings_pct": summary["verified_task_like_savings_pct"],
+                    "verified_answer_like_savings_pct": summary["verified_answer_like_savings_pct"],
                     "quality_ok_rate": summary["quality_ok_rate"],
                     "task_success_like_rate": summary["task_success_like_rate"],
+                    "answer_like_rate": summary["answer_like_rate"],
                     "fallback_rate": summary["fallback_rate"],
                     "p95_latency_ms": summary["p95_latency_ms"],
                 })
@@ -1829,6 +1932,10 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
     object.insert(
         "quality_score".to_string(),
         Value::from(event.quality_score),
+    );
+    object.insert(
+        "answer_like_proxy".to_string(),
+        Value::Bool(is_answer_like_event(event)),
     );
     object.insert(
         "quality_method".to_string(),
@@ -2200,10 +2307,20 @@ fn derive_quality_verdict(
             "evidence_bundle" => head_hit_target && total_hits >= 3,
             _ => head_hit_target,
         };
+    let answer_like_proxy = answer_like_from_counts(
+        target_kind,
+        head_hit_target,
+        exact_hits,
+        symbol_hits,
+        lexical_hits,
+        semantic_hits,
+    ) && task_success_proxy;
     let quality_score = match target_kind {
         "cross_file_trace" => {
-            if task_success_proxy {
+            if answer_like_proxy {
                 1.0
+            } else if task_success_proxy {
+                0.92
             } else if quality_ok {
                 0.85
             } else if total_hits > 0 && !semantic_guard_abstained {
@@ -2213,8 +2330,10 @@ fn derive_quality_verdict(
             }
         }
         "evidence_bundle" => {
-            if task_success_proxy {
+            if answer_like_proxy {
                 1.0
+            } else if task_success_proxy {
+                0.94
             } else if quality_ok {
                 0.9
             } else if total_hits > 0 && !semantic_guard_abstained {
@@ -2224,8 +2343,10 @@ fn derive_quality_verdict(
             }
         }
         _ => {
-            if task_success_proxy {
+            if answer_like_proxy {
                 1.0
+            } else if task_success_proxy {
+                0.9
             } else if quality_ok {
                 0.8
             } else if total_hits > 0 && !semantic_guard_abstained {
@@ -2235,7 +2356,9 @@ fn derive_quality_verdict(
             }
         }
     };
-    let (quality_method, quality_tier) = if task_success_proxy {
+    let (quality_method, quality_tier) = if answer_like_proxy {
+        ("hybrid_answer_proxy", "answer_proxy")
+    } else if task_success_proxy {
         ("hybrid_task_proxy", "task_proxy")
     } else if quality_ok {
         ("hybrid_retrieval_parity", "retrieval")
@@ -2255,6 +2378,56 @@ fn derive_quality_verdict(
         head_hit_target,
         needed_followup: !quality_ok,
         followup_count: 0,
+    }
+}
+
+fn answer_like_from_counts(
+    target_kind: &str,
+    head_hit_target: bool,
+    exact_hits: usize,
+    symbol_hits: usize,
+    lexical_hits: usize,
+    semantic_hits: usize,
+) -> bool {
+    if !head_hit_target {
+        return false;
+    }
+    let total_hits = exact_hits + symbol_hits + lexical_hits + semantic_hits;
+    let nonzero_sections = [exact_hits, symbol_hits, lexical_hits, semantic_hits]
+        .into_iter()
+        .filter(|count| *count > 0)
+        .count();
+    match target_kind {
+        "document" => exact_hits > 0,
+        "file" => exact_hits > 0 || lexical_hits > 0,
+        "symbol" => symbol_hits > 0,
+        "cross_file_trace" => symbol_hits > 0 && lexical_hits > 0 && total_hits >= 3,
+        "evidence_bundle" => total_hits >= 4 && nonzero_sections >= 2,
+        _ => total_hits > 0,
+    }
+}
+
+fn is_answer_like_event(event: &TokenBudgetEvent) -> bool {
+    if !event.quality_ok {
+        return false;
+    }
+    if matches!(
+        event.quality_tier.as_str(),
+        "answer_proxy" | "answer_success_recovered"
+    ) {
+        return true;
+    }
+    match event.target_kind.as_str() {
+        "document" => event.head_hit_target && event.document_hits > 0,
+        "file" => event.head_hit_target && event.file_hits > 0,
+        "symbol" => event.head_hit_target && event.symbol_hits_count > 0,
+        "cross_file_trace" => {
+            event.head_hit_target && event.symbol_hits_count > 0 && event.chunks_count >= 2
+        }
+        "evidence_bundle" => {
+            event.head_hit_target && event.sources_count >= 2 && event.chunks_count >= 3
+        }
+        _ => event.head_hit_target && event.sources_count > 0,
     }
 }
 
@@ -3027,8 +3200,8 @@ mod tests {
         assert!(verdict.baseline_hit_target);
         assert!(verdict.amai_hit_target);
         assert!(verdict.quality_ok);
-        assert_eq!(verdict.quality_method, "hybrid_task_proxy");
-        assert_eq!(verdict.quality_tier, "task_proxy");
+        assert_eq!(verdict.quality_method, "hybrid_answer_proxy");
+        assert_eq!(verdict.quality_tier, "answer_proxy");
         assert!(verdict.head_hit_target);
     }
 
@@ -3303,7 +3476,14 @@ mod tests {
     #[test]
     fn reverification_keeps_identity_and_marks_method() {
         let mut rebuilt = json!({
+            "retrieval": {
+                "exact_documents": [{}],
+                "symbol_hits": [],
+                "lexical_chunks": [],
+                "semantic_chunks": []
+            },
             "token_budget_event": {
+                "target_kind": "file",
                 "quality": {
                     "quality_ok": true,
                     "quality_score": 1.0,
@@ -3332,8 +3512,11 @@ mod tests {
         assert_eq!(event["event_id"], "existing-event");
         assert_eq!(event["timestamp_utc"], 12345);
         assert_eq!(event["traffic_class"], "live");
-        assert_eq!(event["quality"]["quality_method"], "reverified_task_proxy");
-        assert_eq!(event["quality"]["quality_tier"], "task_proxy");
+        assert_eq!(
+            event["quality"]["quality_method"],
+            "reverified_answer_proxy"
+        );
+        assert_eq!(event["quality"]["quality_tier"], "answer_proxy");
         assert_eq!(
             event["reverification"]["previous_quality_method"],
             "legacy_unverified"
@@ -3406,7 +3589,9 @@ mod tests {
 
         assert_eq!(summary["preliminary"], false);
         assert_eq!(summary["counted_events"], 1);
+        assert_eq!(summary["answer_like_counted_events"], 1);
         assert_eq!(summary["verified_effective_savings_pct"], 93.75);
+        assert_eq!(summary["verified_answer_like_savings_pct"], 93.75);
     }
 
     #[test]

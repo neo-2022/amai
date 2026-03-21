@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 05:28 MSK
-Ручная сверка guide/docs: 2026-03-21 05:28 MSK
+modified_at: 2026-03-21 05:47 MSK
+Ручная сверка guide/docs: 2026-03-21 05:47 MSK
 
 # Operations
 
@@ -712,6 +712,12 @@ cargo run --release -- verify token-benchmark-suite \
     - `symbol_lookup`
     - `architecture_question`
     - и другие, если они реально накоплены в live-потоке.
+- `quality_ok_rate`
+  - сколько событий прошло quality gate;
+- `fallback_rate`
+  - как часто retrieval приходилось чинить повторным ходом;
+- `answer_like_rate`
+  - какая доля live-событий уже дошла до более строгого answer-like proxy, а не остановилась только на retrieval parity.
 - `temperature_slices`
   - отдельные срезы по состоянию retrieval:
     - `cold`
@@ -738,10 +744,12 @@ cargo run --release -- verify token-benchmark-suite \
   - quality gate больше не состоит только из `quality_ok`:
     - runtime пишет `quality_tier`;
     - пишет `head_hit_target`;
+    - summary считает `answer_like_rate`;
+    - summary считает `verified_answer_like_savings_pct`;
     - summary считает `task_success_like_rate`;
     - summary считает `verified_task_like_savings_pct`;
-    - `hybrid_task_proxy` означает, что цель попала в верхние retrieval hits без follow-up;
-  - успешный recovery-follow-up может получить `quality_method = hybrid_task_success`;
+    - `hybrid_answer_proxy` означает, что контекст уже выглядит достаточным для полезного ответа без follow-up;
+  - успешный recovery-follow-up может получить `quality_method = hybrid_answer_success`;
   - и его `recovery_tokens` уже включают стоимость предыдущего промаха.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
@@ -1031,13 +1039,30 @@ Grafana login берётся из `.env`:
   - `amai_tokens_saved_total`
   - `amai_tokens_savings_factor`
   - `amai_tokens_savings_percent`
-  - и как накопительный ledger:
+  - и как накопительный ledger по умолчанию уже в verified/live-only semantics:
   - `amai_tokens_saved_session_total`
   - `amai_tokens_saved_window_total`
   - `amai_tokens_saved_lifetime_total`
   - `amai_tokens_savings_percent_session`
   - `amai_tokens_savings_percent_window`
   - `amai_tokens_savings_percent_lifetime`
+  - дополнительные quality rollups:
+  - `amai_tokens_quality_ok_rate_session`
+  - `amai_tokens_quality_ok_rate_window`
+  - `amai_tokens_quality_ok_rate_lifetime`
+  - `amai_tokens_fallback_rate_session`
+  - `amai_tokens_fallback_rate_window`
+  - `amai_tokens_fallback_rate_lifetime`
+  - `amai_tokens_answer_like_rate_session`
+  - `amai_tokens_answer_like_rate_window`
+  - `amai_tokens_answer_like_rate_lifetime`
+  - raw savings теперь остаются отдельно, чтобы не подменять headline:
+  - `amai_tokens_raw_saved_session_total`
+  - `amai_tokens_raw_saved_window_total`
+  - `amai_tokens_raw_saved_lifetime_total`
+  - `amai_tokens_raw_savings_percent_session`
+  - `amai_tokens_raw_savings_percent_window`
+  - `amai_tokens_raw_savings_percent_lifetime`
 
 ## Hardware baseline
 

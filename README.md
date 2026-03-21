@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 05:28 MSK
-Ручная сверка guide/docs: 2026-03-21 05:28 MSK
+modified_at: 2026-03-21 05:47 MSK
+Ручная сверка guide/docs: 2026-03-21 05:47 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -559,6 +559,12 @@ cargo run -- deployment explain --target kubernetes_server
 - сколько токенов `Amai` сэкономил за текущую рабочую сессию;
 - сколько токенов сэкономлено за текущее окно лимита;
 - сколько токенов сэкономлено за всё время;
+- насколько часто экономия осталась полезной без деградации:
+  - `quality_ok_rate`;
+- как часто retrieval пришлось чинить follow-up-ом или fallback:
+  - `fallback_rate`;
+- какая доля событий дошла до более строгого полезного ответа без лишнего доуточнения:
+  - `answer_like_rate`;
 - срезы по типам запросов:
   - где `Amai` экономит на `code_lookup`;
   - где на `docs_lookup`;
@@ -634,24 +640,32 @@ cargo run --release -- observe reverify-token-ledger --apply
 - quality layer стал глубже и тоже materialized в runtime:
   - `quality_tier`
     - `retrieval`
+    - `answer_proxy`
     - `task_proxy`
+    - `answer_success_recovered`
     - `task_success_recovered`
     - `partial`
   - `head_hit_target`
     - показывает, попал ли уже верхний слой retrieval в ожидаемую цель, а не только “нашлось что-то где-то”.
+  - `answer_like_rate`
+    - доля событий, где `Amai` не просто что-то нашёл, а уже дошёл до более строгого answer-like proxy.
+  - `verified_answer_like_savings_pct`
+    - более строгая secondary-метрика: какая доля экономии уже относится к событиям, где контекст выглядит достаточным для полезного ответа без лишнего follow-up.
   - `task_success_like_rate`
-    - доля событий, где контур уже дошёл до более сильного task-level proxy, а не остановился на одном retrieval parity.
+    - legacy-compatible secondary view: доля событий, где контур уже дошёл до более сильного task-level proxy, а не остановился на одном retrieval parity.
   - `verified_task_like_savings_pct`
-    - более строгая secondary-метрика: какая часть экономии уже относится именно к task-like событиям, а не только к широкому quality gate.
+    - legacy-compatible secondary-метрика: какая часть экономии уже относится именно к task-like событиям, а не только к широкому quality gate.
 
 Это важно не для красоты, а для честности:
 - если `Amai` сначала сэкономил токены, но потом заставил делать follow-up, retry или correction, эти токены теперь идут в штраф;
 - headline при этом считается уже не по сырой экономии, а по `Verified Effective Savings %`.
+- Prometheus exporter и human dashboard теперь по умолчанию тоже живут на verified/live-only цифрах;
+  - raw savings остаются доступными отдельно как secondary engineering layer и не подменяют собой продуктовую цифру.
 - если follow-up реально исправил предыдущий промах, у успешного события quality method может стать:
-  - `hybrid_task_success`;
-  - это значит, что `Amai` не просто что-то нашёл, а довёл цепочку до полезного результата.
+  - `hybrid_answer_success`;
+  - это значит, что `Amai` не просто что-то нашёл, а довёл цепочку до более строгого answer-like результата уже с учётом recovery penalty.
 - если follow-up не понадобился и нужная цель попала прямо в верхние retrieval hits, событие может получить:
-  - `hybrid_task_proxy`;
+  - `hybrid_answer_proxy`;
   - это честнее, чем просто `retrieval_parity`, но всё ещё не притворяется полноценным answer-LLM judge.
 
 ## Честно о скорости и пределах
