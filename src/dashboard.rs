@@ -738,19 +738,22 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let current_session = &report["current_session"];
     let lifetime = &report["lifetime"];
     let rolling_window = &report["rolling_window"];
-    let session_events = current_session["events_total"].as_u64().unwrap_or(0);
-    let session_saved = current_session["total_effective_saved_tokens"].as_i64();
-    let session_percent = current_session["effective_savings_pct"].as_f64();
+    let session_events_total = current_session["events_total"].as_u64().unwrap_or(0);
+    let session_events = current_session["counted_events"].as_u64().unwrap_or(0);
+    let session_saved = current_session["verified_effective_saved_tokens"].as_i64();
+    let session_percent = current_session["verified_effective_savings_pct"].as_f64();
     let session_started = current_session["started_at_epoch_ms"].as_u64();
     let session_ended = current_session["ended_at_epoch_ms"].as_u64();
-    let lifetime_events = lifetime["events_total"].as_u64().unwrap_or(0);
-    let lifetime_saved = lifetime["total_effective_saved_tokens"].as_i64();
-    let lifetime_percent = lifetime["effective_savings_pct"].as_f64();
+    let lifetime_events_total = lifetime["events_total"].as_u64().unwrap_or(0);
+    let lifetime_events = lifetime["counted_events"].as_u64().unwrap_or(0);
+    let lifetime_saved = lifetime["verified_effective_saved_tokens"].as_i64();
+    let lifetime_percent = lifetime["verified_effective_savings_pct"].as_f64();
     let lifetime_started = lifetime["started_at_epoch_ms"].as_u64();
     let lifetime_ended = lifetime["ended_at_epoch_ms"].as_u64();
-    let rolling_events = rolling_window["events_total"].as_u64().unwrap_or(0);
-    let rolling_saved = rolling_window["total_effective_saved_tokens"].as_i64();
-    let rolling_percent = rolling_window["effective_savings_pct"].as_f64();
+    let rolling_events_total = rolling_window["events_total"].as_u64().unwrap_or(0);
+    let rolling_events = rolling_window["counted_events"].as_u64().unwrap_or(0);
+    let rolling_saved = rolling_window["verified_effective_saved_tokens"].as_i64();
+    let rolling_percent = rolling_window["verified_effective_savings_pct"].as_f64();
     let rolling_window_label = report["profile"]["display_name"]
         .as_str()
         .unwrap_or("рабочее окно");
@@ -766,30 +769,40 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             format_signed_count(session_saved),
             if session_events > 0 {
                 format!(
-                    "Сессия здесь = непрерывная работа без паузы дольше 30 минут. Длительность: {}. Учтено Amai-запросов: {}. Реальная экономия по ним: {}.",
+                    "Сессия здесь = непрерывная работа без паузы дольше 30 минут. Длительность: {}. Учтено проверенных Amai-запросов: {}. Проверенная реальная экономия по ним: {}.",
                     elapsed_since_epoch_label(session_started, session_ended),
                     format_u64(Some(session_events)),
                     format_percent(session_percent)
                 )
+            } else if session_events_total > 0 {
+                format!(
+                    "В этой сессии уже есть Amai-запросы: {}. Но они ещё не дали проверенную выборку, поэтому главный KPI по сессии пока не накоплен.",
+                    format_u64(Some(session_events_total))
+                )
             } else {
                 "В текущей непрерывной сессии Amai ещё не накопил ни одного учтённого запроса, поэтому реальную экономию пока рано показывать.".to_string()
             },
-            savings_status(session_saved, session_events),
+            savings_status(session_saved, session_events, session_events_total),
         ),
         card(
             "Экономия токенов за всё время записи",
             format_signed_count(lifetime_saved),
             if lifetime_events > 0 {
                 format!(
-                    "Это итог с первого учтённого Amai-запроса в этой установке. Период: {}. Учтено Amai-запросов: {}. Реальная экономия: {}.",
+                    "Это итог с первого проверенного Amai-запроса в этой установке. Период: {}. Учтено проверенных Amai-запросов: {}. Проверенная реальная экономия: {}.",
                     elapsed_since_epoch_label(lifetime_started, lifetime_ended),
                     format_u64(Some(lifetime_events)),
                     format_percent(lifetime_percent)
                 )
+            } else if lifetime_events_total > 0 {
+                format!(
+                    "После установки уже накоплены Amai-запросы: {}. Но проверенная выборка ещё не собрана, поэтому главный KPI пока не считается надёжным.",
+                    format_u64(Some(lifetime_events_total))
+                )
             } else {
                 "После установки Amai ещё не накопил учтённых запросов, поэтому здесь пока нет итоговой живой статистики.".to_string()
             },
-            savings_status(lifetime_saved, lifetime_events),
+            savings_status(lifetime_saved, lifetime_events, lifetime_events_total),
         ),
         card(
             "Экономия на последнем честном замере",
@@ -805,7 +818,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                 )
             } else {
                 format!(
-                    "Отдельный контрольный замер ещё не прогонялся, поэтому здесь временно показано {}: {} учтённых Amai-запросов и реальная экономия {}.",
+                    "Отдельный контрольный замер ещё не прогонялся, поэтому здесь временно показано {}: {} проверенных Amai-запросов и проверенная реальная экономия {}.",
                     rolling_window_label,
                     format_u64(Some(rolling_events)),
                     format_percent(rolling_percent)
@@ -813,8 +826,8 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             },
             if benchmark_savings_percent.is_some() {
                 "pass"
-            } else if rolling_events > 0 {
-                savings_status(rolling_saved, rolling_events)
+            } else if rolling_events_total > 0 {
+                savings_status(rolling_saved, rolling_events, rolling_events_total)
             } else {
                 "unknown"
             },
@@ -1244,9 +1257,17 @@ fn status_label(status: &str) -> &'static str {
     }
 }
 
-fn savings_status(saved_tokens: Option<i64>, events_total: u64) -> &'static str {
-    if events_total == 0 {
-        "unknown"
+fn savings_status(
+    saved_tokens: Option<i64>,
+    counted_events: u64,
+    events_total: u64,
+) -> &'static str {
+    if counted_events == 0 {
+        if events_total == 0 {
+            "unknown"
+        } else {
+            "alert"
+        }
     } else if saved_tokens.unwrap_or_default() < 0 {
         "alert"
     } else {

@@ -137,6 +137,8 @@ pub enum ObserveCommand {
     Snapshot,
     SlaCheck,
     TokenReport(ObserveTokenReportArgs),
+    RepairTokenLedger(ObserveRepairTokenLedgerArgs),
+    ReverifyTokenLedger(ObserveReverifyTokenLedgerArgs),
     Serve(ObserveServeArgs),
 }
 
@@ -444,6 +446,22 @@ pub struct ObserveTokenReportArgs {
     pub budget_profile: Option<String>,
     #[arg(long)]
     pub include_verify_events: Option<bool>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveRepairTokenLedgerArgs {
+    #[arg(long, default_value_t = false)]
+    pub apply: bool,
+    #[arg(long)]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveReverifyTokenLedgerArgs {
+    #[arg(long, default_value_t = false)]
+    pub apply: bool,
+    #[arg(long)]
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -269,6 +269,19 @@ async fn main() -> Result<()> {
                 let db = postgres::connect_admin(&cfg).await?;
                 token_budget::print_report(&db, &args).await?;
             }
+            ObserveCommand::RepairTokenLedger(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                let db = postgres::connect_admin(&cfg).await?;
+                token_budget::repair_legacy_token_events(&db, args.apply, args.limit).await?;
+            }
+            ObserveCommand::ReverifyTokenLedger(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                let mut db = postgres::connect_admin(&cfg).await?;
+                token_budget::reverify_legacy_live_events(&cfg, &mut db, args.apply, args.limit)
+                    .await?;
+            }
             ObserveCommand::Serve(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

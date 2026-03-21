@@ -79,6 +79,7 @@ pub struct DocumentRecord {
 
 #[derive(Debug, Clone)]
 pub struct ObservabilitySnapshotRecord {
+    pub snapshot_id: Uuid,
     pub snapshot_kind: String,
     pub payload: Value,
     pub created_at_epoch_ms: i64,
@@ -999,6 +1000,7 @@ pub async fn list_observability_snapshots_by_kinds(
         .query(
             r#"
             SELECT
+                snapshot_id,
                 snapshot_kind,
                 payload,
                 (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms
@@ -1014,11 +1016,31 @@ pub async fn list_observability_snapshots_by_kinds(
     Ok(rows
         .into_iter()
         .map(|row| ObservabilitySnapshotRecord {
-            snapshot_kind: row.get(0),
-            payload: row.get(1),
-            created_at_epoch_ms: row.get(2),
+            snapshot_id: row.get(0),
+            snapshot_kind: row.get(1),
+            payload: row.get(2),
+            created_at_epoch_ms: row.get(3),
         })
         .collect())
+}
+
+pub async fn update_observability_snapshot_payload(
+    client: &Client,
+    snapshot_id: &Uuid,
+    payload: &Value,
+) -> Result<()> {
+    client
+        .execute(
+            r#"
+            UPDATE ami.observability_snapshots
+            SET payload = $2
+            WHERE snapshot_id = $1
+            "#,
+            &[snapshot_id, payload],
+        )
+        .await
+        .context("failed to update observability snapshot payload")?;
+    Ok(())
 }
 
 fn sql_ident(input: &str) -> Result<String> {

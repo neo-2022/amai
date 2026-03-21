@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 01:09 MSK
-Ручная сверка guide/docs: 2026-03-21 01:09 MSK
+modified_at: 2026-03-21 03:07 MSK
+Ручная сверка guide/docs: 2026-03-21 03:07 MSK
 
 # Operations
 
@@ -678,6 +678,10 @@ cargo run --release -- verify token-benchmark-suite \
 ```
 
 Что показывает этот contour:
+- `headline`
+  - канонический product KPI:
+    - `Verified Effective Savings %`
+    - по-русски: `Проверенная реальная экономия`;
 - `current_session`
   - токены, сэкономленные в текущей рабочей сессии;
 - `rolling_window`
@@ -695,6 +699,28 @@ cargo run --release -- verify token-benchmark-suite \
 ```bash
 cargo run --release -- observe token-report --include-verify-events true
 ```
+
+Если в базе уже есть старые live `token_budget_event`, записанные до quality-gated формата, канонический путь теперь такой:
+
+```bash
+cargo run --release -- observe repair-token-ledger --apply
+cargo run --release -- observe reverify-token-ledger --apply
+```
+
+Смысл по-человечески:
+- `repair-token-ledger`
+  - чинит старые записи без ручного SQL;
+  - достраивает недостающие поля нового ledger-формата;
+- `reverify-token-ledger`
+  - повторно прогоняет старые live-запросы через текущий retrieval contour;
+  - если retrieval реально находит достаточный контекст, событие становится `quality_ok = true`;
+  - после этого headline может перейти из `предварительно` в полноценную `Проверенную реальную экономию`.
+
+Важно:
+- headline снимает пометку `предварительно`, если набран хотя бы один из двух порогов:
+  - `events_count >= 50`
+  - или `baseline_tokens >= 100000`;
+- это соответствует принятой ledger-spec и не требует одновременно проходить оба порога.
 
 ## MCP proof
 

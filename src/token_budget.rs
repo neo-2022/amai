@@ -1,7 +1,8 @@
-use crate::cli::ObserveTokenReportArgs;
-use crate::config;
+use crate::cli::{ContextPackArgs, ObserveTokenReportArgs};
+use crate::config::{self, AppConfig};
 use crate::language;
 use crate::postgres::{self, ObservabilitySnapshotRecord};
+use crate::retrieval;
 use anyhow::{Context, Result, anyhow, bail};
 use ignore::WalkBuilder;
 use serde::Deserialize;
@@ -130,6 +131,99 @@ pub async fn print_report(db: &Client, args: &ObserveTokenReportArgs) -> Result<
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+pub async fn repair_legacy_token_events(
+    db: &Client,
+    apply: bool,
+    limit: Option<i64>,
+) -> Result<()> {
+    let rows =
+        postgres::list_observability_snapshots_by_kinds(db, &["token_budget_event"], limit).await?;
+    let mut scanned = 0_u64;
+    let mut changed = 0_u64;
+
+    for row in rows {
+        scanned += 1;
+        if let Some(payload) = repair_legacy_token_event_payload(&row.payload) {
+            changed += 1;
+            if apply {
+                postgres::update_observability_snapshot_payload(db, &row.snapshot_id, &payload)
+                    .await?;
+            }
+        }
+    }
+
+    println!(
+        "token ledger repair :: scanned={} changed={} mode={}",
+        scanned,
+        changed,
+        if apply { "apply" } else { "dry_run" }
+    );
+    Ok(())
+}
+
+pub async fn reverify_legacy_live_events(
+    cfg: &AppConfig,
+    db: &mut Client,
+    apply: bool,
+    limit: Option<i64>,
+) -> Result<()> {
+    let rows =
+        postgres::list_observability_snapshots_by_kinds(db, &["token_budget_event"], limit).await?;
+    let repo_root = config::discover_repo_root(None)?;
+    let measurement = load_config(&repo_root)?.measurement;
+    let mut scanned = 0_u64;
+    let mut eligible = 0_u64;
+    let mut reverified = 0_u64;
+    let mut quality_ok = 0_u64;
+    let mut skipped = 0_u64;
+    let mut failed = 0_u64;
+
+    for row in rows {
+        scanned += 1;
+        if !needs_live_reverification(&row.payload) {
+            skipped += 1;
+            continue;
+        }
+        eligible += 1;
+
+        match reverify_live_event_payload(cfg, db, &measurement, &row).await {
+            Ok(Some(payload)) => {
+                let node = &payload["token_budget_event"];
+                if node["quality"]["quality_ok"].as_bool().unwrap_or(false) {
+                    quality_ok += 1;
+                }
+                reverified += 1;
+                if apply {
+                    postgres::update_observability_snapshot_payload(db, &row.snapshot_id, &payload)
+                        .await?;
+                }
+            }
+            Ok(None) => {
+                skipped += 1;
+            }
+            Err(error) => {
+                failed += 1;
+                eprintln!(
+                    "token ledger reverify failed: snapshot={} :: {}",
+                    row.snapshot_id, error
+                );
+            }
+        }
+    }
+
+    println!(
+        "token ledger reverify :: scanned={} eligible={} reverified={} quality_ok={} skipped={} failed={} mode={}",
+        scanned,
+        eligible,
+        reverified,
+        quality_ok,
+        skipped,
+        failed,
+        if apply { "apply" } else { "dry_run" }
+    );
     Ok(())
 }
 
@@ -481,6 +575,260 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
     }))
 }
 
+fn needs_live_reverification(payload: &Value) -> bool {
+    let node = &payload["token_budget_event"];
+    if !node.is_object() {
+        return false;
+    }
+    let source_kind = node["source_kind"].as_str().unwrap_or_default();
+    let traffic_class = node["traffic_class"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| derive_traffic_class(source_kind));
+    if traffic_class != "live" {
+        return false;
+    }
+    let quality_method = node["quality"]["quality_method"]
+        .as_str()
+        .unwrap_or_default();
+    let quality_ok = node["quality"]["quality_ok"].as_bool().unwrap_or(false);
+    quality_method == "legacy_unverified" || (quality_method.is_empty() && !quality_ok)
+}
+
+async fn reverify_live_event_payload(
+    cfg: &AppConfig,
+    db: &mut Client,
+    measurement: &MeasurementConfig,
+    row: &ObservabilitySnapshotRecord,
+) -> Result<Option<Value>> {
+    let node = &row.payload["token_budget_event"];
+    if !node.is_object() {
+        return Ok(None);
+    }
+
+    let project = node["project"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("token event missing project"))?;
+    let namespace = node["namespace"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("token event missing namespace"))?;
+    let query = node["query"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("token event missing query"))?;
+
+    let args = ContextPackArgs {
+        project: project.to_string(),
+        namespace: namespace.to_string(),
+        query: query.to_string(),
+        retrieval_mode: node["retrieval_mode"].as_str().map(ToOwned::to_owned),
+        disable_cache: false,
+        limit_documents: 5,
+        limit_symbols: 8,
+        limit_chunks: 8,
+        limit_semantic_chunks: 8,
+    };
+
+    let result =
+        retrieval::execute_context_pack_capture_with_options(cfg, db, &args, false, false).await?;
+    let source_kind = node["source_kind"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("live_context_pack");
+    let mut rebuilt = build_event_payload(
+        &result.payload,
+        measurement,
+        source_kind,
+        "reverified_live_context_pack",
+    )?;
+    apply_reverification_metadata(&mut rebuilt, node, row.created_at_epoch_ms)?;
+    Ok(Some(rebuilt))
+}
+
+fn apply_reverification_metadata(
+    rebuilt_payload: &mut Value,
+    original_node: &Value,
+    fallback_timestamp_utc: i64,
+) -> Result<()> {
+    let rebuilt_node = rebuilt_payload["token_budget_event"]
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("rebuilt token event payload missing token_budget_event object"))?;
+
+    let event_id = original_node["event_id"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let timestamp_utc = original_node["timestamp_utc"]
+        .as_i64()
+        .unwrap_or(fallback_timestamp_utc);
+    let source_kind = original_node["source_kind"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("live_context_pack");
+    let quality_ok = rebuilt_node
+        .get("quality")
+        .and_then(|value| value.get("quality_ok"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let reverified_at_utc = current_epoch_ms()?;
+
+    rebuilt_node.insert("event_id".to_string(), Value::String(event_id));
+    rebuilt_node.insert("timestamp_utc".to_string(), Value::from(timestamp_utc));
+    rebuilt_node.insert(
+        "source_kind".to_string(),
+        Value::String(source_kind.to_string()),
+    );
+    rebuilt_node.insert(
+        "traffic_class".to_string(),
+        Value::String(derive_traffic_class(source_kind)),
+    );
+    rebuilt_node.insert(
+        "payload_origin".to_string(),
+        Value::String("reverified_live_context_pack".to_string()),
+    );
+    if let Some(quality) = rebuilt_node
+        .get_mut("quality")
+        .and_then(Value::as_object_mut)
+    {
+        quality.insert(
+            "quality_method".to_string(),
+            Value::String(if quality_ok {
+                "reverified_retrieval_parity".to_string()
+            } else {
+                "reverified_retrieval_miss".to_string()
+            }),
+        );
+        quality.insert(
+            "reverified_at_utc".to_string(),
+            Value::from(reverified_at_utc),
+        );
+    }
+    rebuilt_node.insert(
+        "reverification".to_string(),
+        json!({
+            "reverified_at_utc": reverified_at_utc,
+            "previous_quality_method": original_node["quality"]["quality_method"]
+                .as_str()
+                .unwrap_or("missing"),
+            "previous_quality_ok": original_node["quality"]["quality_ok"]
+                .as_bool()
+                .unwrap_or(false),
+        }),
+    );
+    Ok(())
+}
+
+fn repair_legacy_token_event_payload(payload: &Value) -> Option<Value> {
+    let mut updated = payload.clone();
+    let node = updated.get_mut("token_budget_event")?;
+    let object = node.as_object_mut()?;
+    let source_kind = object
+        .get("source_kind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let query = object
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let query_type = object
+        .get("query_type")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && *value != "unknown")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| derive_query_type(query).to_string());
+    let mut changed = false;
+
+    if !object.contains_key("traffic_class") {
+        object.insert(
+            "traffic_class".to_string(),
+            Value::String(derive_traffic_class(source_kind)),
+        );
+        changed = true;
+    }
+    if !object.contains_key("query_type") {
+        object.insert("query_type".to_string(), Value::String(query_type.clone()));
+        changed = true;
+    }
+    if !object.contains_key("baseline_strategy") {
+        object.insert(
+            "baseline_strategy".to_string(),
+            Value::String(derive_baseline_strategy(&query_type).to_string()),
+        );
+        changed = true;
+    }
+    if !object.contains_key("recovery") {
+        object.insert(
+            "recovery".to_string(),
+            json!({
+                "recovery_tokens": 0,
+                "fallback_triggered": false,
+                "fallback_count": 0
+            }),
+        );
+        changed = true;
+    }
+    if !object.contains_key("shape") {
+        object.insert(
+            "shape".to_string(),
+            json!({
+                "sources_count": 0,
+                "chunks_count": 0
+            }),
+        );
+        changed = true;
+    }
+    if !object.contains_key("quality") {
+        object.insert(
+            "quality".to_string(),
+            json!({
+                "quality_ok": false,
+                "quality_score": 0.0,
+                "quality_method": "legacy_unverified"
+            }),
+        );
+        changed = true;
+    }
+    let naive_tokens = object
+        .get("naive_scope")
+        .and_then(|value| value.get("tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let context_tokens = object
+        .get("context_pack_render")
+        .and_then(|value| value.get("tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let recovery_tokens = object
+        .get("recovery")
+        .and_then(|value| value.get("recovery_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if let Some(savings) = object.get_mut("savings").and_then(Value::as_object_mut) {
+        if !savings.contains_key("effective_saved_tokens") {
+            savings.insert(
+                "effective_saved_tokens".to_string(),
+                Value::from(naive_tokens as i64 - (context_tokens as i64 + recovery_tokens as i64)),
+            );
+            changed = true;
+        }
+        if !savings.contains_key("effective_savings_percent") {
+            let effective_saved_tokens = savings
+                .get("effective_saved_tokens")
+                .and_then(Value::as_i64)
+                .unwrap_or(naive_tokens as i64 - (context_tokens as i64 + recovery_tokens as i64));
+            savings.insert(
+                "effective_savings_percent".to_string(),
+                Value::from(percent_from_signed(effective_saved_tokens, naive_tokens)),
+            );
+            changed = true;
+        }
+    }
+
+    changed.then_some(updated)
+}
+
 fn current_session_events(
     events: &[TokenBudgetEvent],
     session_gap_ms: i64,
@@ -592,7 +940,7 @@ fn summarize_events(
         .unwrap_or_default();
 
     let preliminary = events.len() < measurement.preliminary_min_events as usize
-        || total_naive_tokens < measurement.preliminary_min_baseline_tokens;
+        && total_naive_tokens < measurement.preliminary_min_baseline_tokens;
 
     json!({
         "events_total": events.len(),
@@ -1380,8 +1728,10 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_product_headline, derive_baseline_strategy, derive_query_type, derive_traffic_class,
-        include_traffic_class_in_report,
+        MeasurementConfig, TokenBudgetEvent, apply_reverification_metadata, build_product_headline,
+        derive_baseline_strategy, derive_query_type, derive_traffic_class,
+        include_traffic_class_in_report, needs_live_reverification,
+        repair_legacy_token_event_payload, summarize_events,
     };
     use serde_json::json;
 
@@ -1494,5 +1844,156 @@ mod tests {
                 .unwrap_or_default()
                 .contains("старым форматом")
         );
+    }
+
+    #[test]
+    fn legacy_token_event_repair_adds_missing_fields() {
+        let repaired = repair_legacy_token_event_payload(&json!({
+            "token_budget_event": {
+                "query": "Как установить Amai и подключить к VS Code?",
+                "source_kind": "live_context_pack",
+                "naive_scope": { "tokens": 1000 },
+                "context_pack_render": { "tokens": 200 },
+                "savings": {
+                    "saved_tokens": 800,
+                    "savings_percent": 80.0,
+                    "savings_factor": 5.0
+                }
+            }
+        }))
+        .expect("repair should produce patched payload");
+
+        let event = &repaired["token_budget_event"];
+        assert_eq!(event["traffic_class"], "live");
+        assert_eq!(event["query_type"], "onboarding_query");
+        assert_eq!(event["quality"]["quality_method"], "legacy_unverified");
+        assert_eq!(event["savings"]["effective_saved_tokens"], 800);
+        assert_eq!(event["savings"]["effective_savings_percent"], 80.0);
+    }
+
+    #[test]
+    fn only_legacy_live_events_need_reverification() {
+        assert!(needs_live_reverification(&json!({
+            "token_budget_event": {
+                "source_kind": "live_context_pack",
+                "traffic_class": "live",
+                "quality": {
+                    "quality_ok": false,
+                    "quality_method": "legacy_unverified"
+                }
+            }
+        })));
+        assert!(!needs_live_reverification(&json!({
+            "token_budget_event": {
+                "source_kind": "verify_token_benchmark",
+                "traffic_class": "verify",
+                "quality": {
+                    "quality_ok": true,
+                    "quality_method": "benchmark_assumption"
+                }
+            }
+        })));
+        assert!(!needs_live_reverification(&json!({
+            "token_budget_event": {
+                "source_kind": "live_context_pack",
+                "traffic_class": "live",
+                "quality": {
+                    "quality_ok": true,
+                    "quality_method": "retrieval_parity"
+                }
+            }
+        })));
+    }
+
+    #[test]
+    fn reverification_keeps_identity_and_marks_method() {
+        let mut rebuilt = json!({
+            "token_budget_event": {
+                "quality": {
+                    "quality_ok": true,
+                    "quality_score": 1.0,
+                    "quality_method": "retrieval_parity"
+                }
+            }
+        });
+        apply_reverification_metadata(
+            &mut rebuilt,
+            &json!({
+                "event_id": "existing-event",
+                "timestamp_utc": 12345,
+                "source_kind": "live_context_pack",
+                "quality": {
+                    "quality_ok": false,
+                    "quality_method": "legacy_unverified"
+                }
+            }),
+            99999,
+        )
+        .expect("reverification metadata should apply");
+
+        let event = &rebuilt["token_budget_event"];
+        assert_eq!(event["event_id"], "existing-event");
+        assert_eq!(event["timestamp_utc"], 12345);
+        assert_eq!(event["traffic_class"], "live");
+        assert_eq!(
+            event["quality"]["quality_method"],
+            "reverified_retrieval_parity"
+        );
+        assert_eq!(
+            event["reverification"]["previous_quality_method"],
+            "legacy_unverified"
+        );
+    }
+
+    #[test]
+    fn preliminary_turns_off_when_token_volume_is_high_enough() {
+        let measurement = MeasurementConfig {
+            tokenizer: "o200k_base".to_string(),
+            naive_limit_files: 5,
+            naive_max_bytes_per_file: 16384,
+            include_verify_events_by_default: false,
+            preliminary_min_events: 50,
+            preliminary_min_baseline_tokens: 100_000,
+        };
+        let summary = summarize_events(
+            &[TokenBudgetEvent {
+                created_at_epoch_ms: 10,
+                event_id: "event-1".to_string(),
+                timestamp_utc: 10,
+                snapshot_kind: "token_budget_event".to_string(),
+                source_kind: "live_context_pack".to_string(),
+                traffic_class: "live".to_string(),
+                project: "art".to_string(),
+                namespace: "continuity".to_string(),
+                query: "explain token savings".to_string(),
+                query_hash: "hash".to_string(),
+                query_type: "architecture_question".to_string(),
+                cold_warm_state: "warm".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                saved_tokens: 150_000,
+                naive_tokens: 160_000,
+                context_tokens: 10_000,
+                recovery_tokens: 0,
+                effective_saved_tokens: 150_000,
+                savings_factor: 16.0,
+                savings_percent: 93.75,
+                effective_savings_percent: 93.75,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                fallback_triggered: false,
+                fallback_count: 0,
+                sources_count: 5,
+                chunks_count: 4,
+            }],
+            20,
+            &measurement,
+        );
+
+        assert_eq!(summary["preliminary"], false);
+        assert_eq!(summary["counted_events"], 1);
+        assert_eq!(summary["verified_effective_savings_pct"], 93.75);
     }
 }
