@@ -1370,12 +1370,15 @@ fn collapse_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        collapse_text, extract_chat_messages_from_rollout_text, extract_last_messages,
-        parse_rfc3339_epoch_s, parse_role_heading, rendered_transcript_summary,
-        rollout_summary_from_path, select_messages_for_time, select_tail_messages,
+        chat_tail_at_time_from_snapshots, collapse_text, extract_chat_messages_from_rollout_text,
+        extract_last_messages, parse_rfc3339_epoch_s, parse_role_heading,
+        rendered_transcript_summary, rollout_summary_from_path, select_messages_for_time,
+        select_tail_messages,
     };
+    use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
     use std::fs;
+    use uuid::Uuid;
 
     #[test]
     fn parse_role_heading_accepts_only_user_and_assistant() {
@@ -1509,5 +1512,63 @@ mod tests {
         assert_eq!(selected[0].text, "вопрос");
         assert_eq!(selected[1].role, "assistant");
         assert_eq!(selected[1].text, "ответ");
+    }
+
+    #[test]
+    fn chat_tail_at_time_from_snapshots_works_with_thread_index_only() {
+        let snapshots = vec![
+            ObservabilitySnapshotRecord {
+                snapshot_id: Uuid::nil(),
+                snapshot_kind: "continuity_thread_index".to_string(),
+                created_at_epoch_ms: 1_744_087_814_000,
+                payload: json!({
+                    "continuity_thread_index": {
+                        "project": {"code": "art"},
+                        "namespace": {"code": "continuity"},
+                        "thread_id": "older-thread",
+                        "title": "старый чат",
+                        "created_at_epoch_s": 1_742_553_600,
+                        "updated_at_epoch_s": 1_742_553_660,
+                        "last_user_message": "старый вопрос",
+                        "last_assistant_message": "старый ответ"
+                    }
+                }),
+            },
+            ObservabilitySnapshotRecord {
+                snapshot_id: Uuid::new_v4(),
+                snapshot_kind: "continuity_thread_index".to_string(),
+                created_at_epoch_ms: 1_744_087_815_000,
+                payload: json!({
+                    "continuity_thread_index": {
+                        "project": {"code": "art"},
+                        "namespace": {"code": "continuity"},
+                        "thread_id": "newer-thread",
+                        "title": "новый чат",
+                        "created_at_epoch_s": 1_742_554_000,
+                        "updated_at_epoch_s": 1_742_554_060,
+                        "last_user_message": "новый вопрос",
+                        "last_assistant_message": "новый ответ"
+                    }
+                }),
+            },
+        ];
+
+        let tail = chat_tail_at_time_from_snapshots(
+            &snapshots,
+            "art",
+            "continuity",
+            "2025-03-04T12:01:00Z",
+            2,
+        )
+        .expect("tail result")
+        .expect("tail");
+
+        assert_eq!(tail.thread_id, "older-thread");
+        assert_eq!(tail.title, "старый чат");
+        assert_eq!(tail.messages.len(), 2);
+        assert_eq!(tail.messages[0].role, "user");
+        assert_eq!(tail.messages[0].text, "старый вопрос");
+        assert_eq!(tail.messages[1].role, "assistant");
+        assert_eq!(tail.messages[1].text, "старый ответ");
     }
 }

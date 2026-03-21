@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 12:54 MSK
-Ручная сверка guide/docs: 2026-03-21 12:54 MSK
+modified_at: 2026-03-21 13:12 MSK
+Ручная сверка guide/docs: 2026-03-21 13:12 MSK
 
 # Operations
 
@@ -145,6 +145,9 @@ cd /home/art/agent-memory-index
   а новый chat-start поднимает не только headline/next-step, но и активные файлы, последние рабочие запросы и текущую рабочую сессию.
 - `--active-workline-file` больше не обязателен:
   если write-side handoff уже живёт в `Amai`, import может брать headline и next-step оттуда, а bootstrap/transcript слой остаётся только refresh-evidence.
+- `--thread-index-file` добавляет отдельный machine-readable temporal index всех chat threads.
+  Это важно, потому что temporal lookup по `previous chat` и `exact time` больше не должен зависеть
+  от ширины импорта full rendered transcripts.
 - старый каталог заметок теперь должен передаваться явно;
   автоматическое чтение project `.codex` как памяти запрещено, чтобы не возвращать legacy workflow.
 
@@ -155,6 +158,16 @@ cd /home/art/agent-memory-index
   - при необходимости держать отдельный старый memory-export только как compatibility-layer;
   - после содержательной работы обновлять continuity import в `Amai`;
   - новый session-start уже поднимать через `Amai continuity startup`.
+
+Для `Art` этот контур теперь настроен так по умолчанию:
+- bootstrap snapshot по-прежнему собирается из transcript mirror;
+- full rendered transcripts в import остаются ограниченными `ART_TRANSCRIPT_LIMIT=3`;
+- но полный temporal index импортируется отдельно из `~/.memory/transcripts/codex/thread_index.json`.
+
+Именно поэтому корректный proof сейчас выглядит так:
+- `Rendered transcripts` в startup остаётся маленьким числом;
+- `continuity_thread_index` в PostgreSQL всё равно покрывает все чаты этого project-space;
+- temporal lookup продолжает точно отвечать на `previous chat` и `at exact time`.
 
 ## Working-state recovery и multi-agent изоляция
 

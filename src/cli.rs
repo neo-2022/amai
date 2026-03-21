@@ -170,6 +170,8 @@ pub struct ContinuityImportArgs {
     #[arg(long)]
     pub bootstrap_file: PathBuf,
     #[arg(long)]
+    pub thread_index_file: Option<PathBuf>,
+    #[arg(long)]
     pub active_workline_file: Option<PathBuf>,
     #[arg(long)]
     pub memory_dir: Option<PathBuf>,

@@ -7,6 +7,7 @@ use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, Projec
 use crate::s3;
 use crate::working_state;
 use anyhow::{Context, Result, anyhow, bail};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -25,6 +26,30 @@ struct ContinuitySource {
     artifact_kind: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ContinuityThreadIndexFile {
+    #[serde(default)]
+    threads: Vec<ContinuityThreadIndexEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ContinuityThreadIndexEntry {
+    #[serde(default)]
+    thread_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    cwd: String,
+    #[serde(default)]
+    first_user_message: String,
+    #[serde(default)]
+    source_rollout: String,
+    #[serde(default)]
+    raw_mirror: String,
+    #[serde(default)]
+    rendered_transcript: String,
+}
+
 const MAX_SEARCHABLE_CONTINUITY_BYTES: usize = 12_000;
 
 pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<()> {
@@ -32,6 +57,11 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
     let s3_client = s3::connect(cfg).await?;
     let repo_root = canonical_string(&args.repo_root)?;
     let bootstrap_path = canonical_path(&args.bootstrap_file)?;
+    let thread_index_path: Option<PathBuf> = args
+        .thread_index_file
+        .as_ref()
+        .map(|path| canonical_path(path.as_path()))
+        .transpose()?;
     let active_workline_path: Option<PathBuf> = args
         .active_workline_file
         .as_ref()
@@ -69,6 +99,9 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
         &namespace.code,
     )
     .await?;
+    if let Some(thread_index_path) = &thread_index_path {
+        import_thread_index_snapshots(&db, &project, &namespace, thread_index_path).await?;
+    }
 
     let import_started_epoch_ms = now_epoch_ms()?;
     let import_batch_id = Uuid::new_v4();
@@ -80,7 +113,8 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
         let (searchable_content, truncated_bytes) =
             truncate_utf8_by_bytes(&content, MAX_SEARCHABLE_CONTINUITY_BYTES);
 
-        if source.source_kind == "continuity_rendered_transcript"
+        if thread_index_path.is_none()
+            && source.source_kind == "continuity_rendered_transcript"
             && let Some(summary) = codex_threads::rendered_transcript_summary(
                 &content,
                 &source.original_path.display().to_string(),
@@ -242,6 +276,72 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
     });
     let _ = postgres::insert_observability_snapshot(&db, "continuity_import", &payload).await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+async fn import_thread_index_snapshots(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    thread_index_path: &Path,
+) -> Result<()> {
+    let raw = fs::read_to_string(thread_index_path)
+        .with_context(|| format!("failed to read {}", thread_index_path.display()))?;
+    let index: ContinuityThreadIndexFile = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", thread_index_path.display()))?;
+    let mut seen = BTreeSet::new();
+
+    for entry in index.threads {
+        if entry.thread_id.is_empty() || !entry.cwd.starts_with(&project.repo_root) {
+            continue;
+        }
+        if !seen.insert(entry.thread_id.clone()) {
+            continue;
+        }
+
+        let summary = if entry.rendered_transcript.is_empty() {
+            None
+        } else {
+            fs::read_to_string(&entry.rendered_transcript)
+                .ok()
+                .and_then(|content| {
+                    codex_threads::rendered_transcript_summary(
+                        &content,
+                        &entry.rendered_transcript,
+                        Some(&entry.cwd),
+                    )
+                })
+        };
+        let payload = json!({
+            "continuity_thread_index": {
+                "project": {
+                    "code": project.code,
+                    "display_name": project.display_name,
+                    "repo_root": project.repo_root,
+                },
+                "namespace": {
+                    "code": namespace.code,
+                    "display_name": namespace.display_name,
+                },
+                "thread_id": entry.thread_id,
+                "title": summary.as_ref().map(|value| value["title"].clone()).unwrap_or_else(|| json!(entry.title)),
+                "cwd": summary.as_ref().map(|value| value["cwd"].clone()).unwrap_or_else(|| json!(entry.cwd)),
+                "first_user_message": summary.as_ref().map(|value| value["first_user_message"].clone()).unwrap_or_else(|| json!(entry.first_user_message)),
+                "started_at": summary.as_ref().map(|value| value["started_at"].clone()).unwrap_or_else(|| json!("")),
+                "ended_at": summary.as_ref().map(|value| value["ended_at"].clone()).unwrap_or_else(|| json!("")),
+                "messages_count": summary.as_ref().map(|value| value["messages_count"].clone()).unwrap_or_else(|| json!(0)),
+                "last_user_message": summary.as_ref().map(|value| value["last_user_message"].clone()).unwrap_or_else(|| json!("")),
+                "last_assistant_message": summary.as_ref().map(|value| value["last_assistant_message"].clone()).unwrap_or_else(|| json!("")),
+                "rendered_transcript": if entry.rendered_transcript.is_empty() { json!("") } else { json!(entry.rendered_transcript) },
+                "source_rollout": if entry.source_rollout.is_empty() { json!("") } else { json!(entry.source_rollout) },
+                "raw_rollout": if entry.raw_mirror.is_empty() { json!("") } else { json!(entry.raw_mirror) },
+                "created_at_epoch_s": summary.as_ref().map(|value| value["created_at_epoch_s"].clone()).unwrap_or_else(|| json!(0)),
+                "updated_at_epoch_s": summary.as_ref().map(|value| value["updated_at_epoch_s"].clone()).unwrap_or_else(|| json!(0)),
+            }
+        });
+        let _ = postgres::insert_observability_snapshot(db, "continuity_thread_index", &payload)
+            .await?;
+    }
     Ok(())
 }
 

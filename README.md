@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 12:54 MSK
-Ручная сверка guide/docs: 2026-03-21 12:54 MSK
+modified_at: 2026-03-21 13:12 MSK
+Ручная сверка guide/docs: 2026-03-21 13:12 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -324,6 +324,11 @@ AMAI_AGENT_SCOPE=agent_beta  ./scripts/continuity_startup.sh --project art --nam
 То есть вопрос вида `что было в прошлую среду в 12:00` теперь не должен разваливаться на
 несколько обходов через transcript search. `Amai` сначала берёт thread index, потом выбирает
 подходящий chat по времени и только затем поднимает нужные сообщения.
+
+Важно: полнота temporal lookup теперь не должна зависеть от того, сколько full transcript-боди
+вообще импортировано в continuity namespace. При refresh `Amai` отдельно втягивает machine-readable
+`thread_index.json`, чтобы иметь полный список chat threads и их временные метки, а уже full
+rendered transcripts можно ограничивать маленьким `transcript-limit` ради скорости и размера импорта.
 
 ## Как смотреть пользу онлайн без терминала
 
