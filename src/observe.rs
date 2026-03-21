@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, discover_repo_root};
 use crate::{dashboard, nats, postgres, s3, token_budget};
 use anyhow::{Context, Result, anyhow};
 use axum::{
@@ -716,6 +716,8 @@ async fn collect_optional_benchmark_qdrant_live(cfg: &AppConfig, http: &reqwest:
             if let Some(object) = value.as_object_mut() {
                 object.insert("available".to_string(), Value::Bool(true));
                 object.insert("configured".to_string(), Value::Bool(true));
+                object.insert("active".to_string(), Value::Bool(true));
+                object.insert("from_last_success".to_string(), Value::Bool(false));
                 object.insert(
                     "http_url".to_string(),
                     Value::String(qdrant_http_url.to_string()),
@@ -724,17 +726,82 @@ async fn collect_optional_benchmark_qdrant_live(cfg: &AppConfig, http: &reqwest:
                     "collection_code".to_string(),
                     Value::String(collection_code.to_string()),
                 );
+                object.insert(
+                    "captured_at_epoch_ms".to_string(),
+                    Value::from(now_epoch_ms()),
+                );
             }
+            persist_last_successful_benchmark_qdrant_snapshot(&value);
             value
         }
-        Err(error) => json!({
-            "available": false,
-            "configured": true,
-            "http_url": qdrant_http_url,
-            "collection_code": collection_code,
-            "reason": format!("{error:#}"),
-        }),
+        Err(_error) => load_last_successful_benchmark_qdrant_snapshot()
+            .map(|mut cached| {
+                if let Some(object) = cached.as_object_mut() {
+                    object.insert("available".to_string(), Value::Bool(false));
+                    object.insert("configured".to_string(), Value::Bool(true));
+                    object.insert("active".to_string(), Value::Bool(false));
+                    object.insert("from_last_success".to_string(), Value::Bool(true));
+                    object.insert(
+                        "http_url".to_string(),
+                        Value::String(qdrant_http_url.to_string()),
+                    );
+                    object.insert(
+                        "collection_code".to_string(),
+                        Value::String(collection_code.to_string()),
+                    );
+                }
+                cached
+            })
+            .unwrap_or_else(|| {
+                json!({
+                    "available": false,
+                    "configured": true,
+                    "active": false,
+                    "from_last_success": false,
+                    "http_url": qdrant_http_url,
+                    "collection_code": collection_code,
+                })
+            }),
     }
+}
+
+fn benchmark_qdrant_cache_path() -> Option<PathBuf> {
+    let repo_root = discover_repo_root(None).ok()?;
+    Some(
+        repo_root
+            .join("state")
+            .join("observe")
+            .join("benchmark_qdrant_last_success.json"),
+    )
+}
+
+fn persist_last_successful_benchmark_qdrant_snapshot(value: &Value) {
+    let Some(path) = benchmark_qdrant_cache_path() else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(text) = serde_json::to_string_pretty(value) else {
+        return;
+    };
+    let _ = fs::write(path, text);
+}
+
+fn load_last_successful_benchmark_qdrant_snapshot() -> Option<Value> {
+    let path = benchmark_qdrant_cache_path()?;
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 async fn collect_nats_live(

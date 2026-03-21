@@ -1610,9 +1610,7 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
     let benchmark = &snapshot["benchmark_qdrant"];
     let configured = benchmark["configured"].as_bool().unwrap_or(false);
     let available = benchmark["available"].as_bool().unwrap_or(false);
-    let human_reason = benchmark["reason"]
-        .as_str()
-        .map(humanize_benchmark_qdrant_reason);
+    let from_last_success = benchmark["from_last_success"].as_bool().unwrap_or(false);
     let status = if !configured {
         "unknown"
     } else if !available {
@@ -1629,20 +1627,19 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
             ),
         ])
     };
-    let value = if available {
+    let value = if available || from_last_success {
         format_optional(benchmark["memory_resident_bytes"].as_f64(), human_bytes)
     } else if configured {
-        "бенч сейчас не активен".to_string()
+        "ещё нет данных".to_string()
     } else {
         "не настроено".to_string()
     };
     let note = if available {
         "Живые системные показатели отдельного Qdrant, который сейчас занят внешним benchmark-прогоном. Эти числа не смешиваются с Amai live.".to_string()
-    } else if let Some(reason) = &human_reason {
-        reason.clone()
+    } else if from_last_success {
+        "Показаны последние сохранённые результаты внешнего benchmark-Qdrant. Новый тест сейчас не запущен, но последние успешные числа сохранены для сравнения.".to_string()
     } else if configured {
-        "Отдельный benchmark-Qdrant настроен, но сейчас не отвечает или внешний прогон не активен."
-            .to_string()
+        "Отдельный benchmark-Qdrant настроен, но тест сейчас не запущен. Значения появятся после первого успешного прогона.".to_string()
     } else {
         "Отдельный benchmark-Qdrant ещё не настроен. Когда внешний прогон будет идти через выделенный инстанс, здесь появятся его живые системные числа.".to_string()
     };
@@ -1651,13 +1648,18 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
             "Источник: live Qdrant /metrics внешнего бенча ({}), обновляется на каждом refresh dashboard",
             benchmark["http_url"].as_str().unwrap_or("unknown")
         ))
+    } else if from_last_success {
+        Some(format!(
+            "Источник: последние сохранённые live Qdrant /metrics внешнего бенча ({}). Тест сейчас не запущен.",
+            benchmark["http_url"].as_str().unwrap_or("unknown")
+        ))
     } else {
         Some(
             "Источник: отдельный benchmark-Qdrant. Эта карточка никогда не берёт данные из Amai live."
                 .to_string(),
         )
     };
-    let mut rows = vec![
+    let rows = vec![
         metric_row(
             "Эталон optimize queue",
             format_f64_count(snapshot["thresholds"]["qdrant"]["optimize_queue"]["target"].as_f64()),
@@ -1696,43 +1698,21 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
             Some("Сколько сегментов сейчас держит внешний benchmark-Qdrant."),
         ),
     ];
-    if let Some(reason) = human_reason {
-        rows.push(metric_row(
-            "Что это значит",
-            reason,
-            Some(
-                "Человеческое объяснение, почему отдельный benchmark-Qdrant сейчас не даёт live-метрики.",
-            ),
-        ));
-    }
-    if let Some(reason) = benchmark["reason"].as_str() {
-        rows.push(metric_row(
-            "Техническая причина",
-            reason.to_string(),
-            Some(
-                "Сырая техническая причина, которую вернул источник live-метрик benchmark-Qdrant.",
-            ),
-        ));
-    }
-    card_with_rows(
-        "Qdrant внешнего бенча",
-        value,
-        note,
-        status,
-        source_label,
-        Some("Это отдельный инстанс Qdrant для внешнего benchmark-прогона. Он не должен смешиваться с основным Qdrant Amai.".to_string()),
-        rows,
-    )
-}
-
-fn humanize_benchmark_qdrant_reason(reason: &str) -> String {
-    if reason.contains("Connection reset by peer") || reason.contains("error sending request") {
-        return "Внешний benchmark-Qdrant перестал отвечать по HTTP. Обычно это значит, что отдельный benchmark-инстанс завис или сломался после прогона, поэтому live-метрики с него сейчас снять нельзя.".to_string();
-    }
-    if reason.contains("failed to query qdrant metrics endpoint") {
-        return "Внешний benchmark-Qdrant сейчас не отдал live-метрики. Значит отдельный benchmark-инстанс не отвечает так, как должен, и цифры с него временно недоступны.".to_string();
-    }
-    reason.to_string()
+    let status_label_override = if configured && !available {
+        Some("тест не запущен".to_string())
+    } else {
+        None
+    };
+    json!({
+        "title": "Qdrant внешнего бенча",
+        "value": value,
+        "note": note,
+        "status": status,
+        "status_label": status_label_override.unwrap_or_else(|| status_label(status).to_string()),
+        "source_label": source_label,
+        "title_tooltip": Some("Это отдельный инстанс Qdrant для внешнего benchmark-прогона. Он не должен смешиваться с основным Qdrant Amai.".to_string()),
+        "rows": rows,
+    })
 }
 
 fn build_warnings(snapshot: &Value) -> Vec<String> {
@@ -2704,7 +2684,11 @@ fn bytes_to_gib(bytes: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{browser_base_url, human_elapsed_ms, monitoring_url, worst_status};
+    use super::{
+        benchmark_qdrant_live_card, browser_base_url, human_elapsed_ms, monitoring_url,
+        worst_status,
+    };
+    use serde_json::json;
 
     #[test]
     fn browser_url_rewrites_unspecified_v4() {
@@ -2731,5 +2715,84 @@ mod tests {
         assert_eq!(human_elapsed_ms(30_000), "меньше минуты");
         assert_eq!(human_elapsed_ms(61_000), "1 мин.");
         assert_eq!(human_elapsed_ms(3_720_000), "1 ч. 2 мин.");
+    }
+
+    #[test]
+    fn benchmark_qdrant_card_uses_last_success_snapshot_without_error_rows() {
+        let snapshot = json!({
+            "thresholds": {
+                "qdrant": {
+                    "optimize_queue": { "target": 10.0 },
+                    "update_queue_length": { "target": 0.0 }
+                }
+            },
+            "benchmark_qdrant": {
+                "configured": true,
+                "available": false,
+                "active": false,
+                "from_last_success": true,
+                "http_url": "http://127.0.0.1:7633",
+                "memory_resident_bytes": 422123456.0,
+                "points_count": 70200.0,
+                "segments_count": 8.0,
+                "index_optimize_queue": 0.0,
+                "update_queue_length": 0.0
+            }
+        });
+        let card = benchmark_qdrant_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("alert"));
+        assert_eq!(card["status_label"].as_str(), Some("тест не запущен"));
+        assert_eq!(card["value"].as_str(), Some("402.57 MiB"));
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("последние сохранённые результаты")
+        );
+        let empty_rows = Vec::new();
+        let labels = card["rows"]
+            .as_array()
+            .unwrap_or(&empty_rows)
+            .iter()
+            .filter_map(|row| row["label"].as_str())
+            .collect::<Vec<_>>();
+        assert!(!labels.contains(&"Что это значит"));
+        assert!(!labels.contains(&"Техническая причина"));
+    }
+
+    #[test]
+    fn benchmark_qdrant_card_without_cache_shows_test_not_running_without_error_rows() {
+        let snapshot = json!({
+            "thresholds": {
+                "qdrant": {
+                    "optimize_queue": { "target": 10.0 },
+                    "update_queue_length": { "target": 0.0 }
+                }
+            },
+            "benchmark_qdrant": {
+                "configured": true,
+                "available": false,
+                "active": false,
+                "from_last_success": false,
+                "http_url": "http://127.0.0.1:7633",
+                "index_optimize_queue": null,
+                "update_queue_length": null,
+                "memory_resident_bytes": null,
+                "points_count": null,
+                "segments_count": null
+            }
+        });
+        let card = benchmark_qdrant_live_card(&snapshot);
+        assert_eq!(card["status_label"].as_str(), Some("тест не запущен"));
+        assert_eq!(card["value"].as_str(), Some("ещё нет данных"));
+        let empty_rows = Vec::new();
+        let labels = card["rows"]
+            .as_array()
+            .unwrap_or(&empty_rows)
+            .iter()
+            .filter_map(|row| row["label"].as_str())
+            .collect::<Vec<_>>();
+        assert!(!labels.contains(&"Что это значит"));
+        assert!(!labels.contains(&"Техническая причина"));
     }
 }
