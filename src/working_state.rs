@@ -15,6 +15,7 @@ const MAX_RECENT_ACTIONS: usize = 8;
 const MAX_RECENT_QUERIES: usize = 6;
 const MAX_ACTIVE_FILES: usize = 8;
 const MAX_OPEN_QUESTIONS: usize = 6;
+const MAX_MATERIALIZED_NOTES: usize = 6;
 
 pub async fn record_handoff_event(
     db: &Client,
@@ -57,6 +58,7 @@ pub async fn record_handoff_event(
             "current_hypothesis": extract_first_question(details),
             "rejected_hypotheses": Vec::<String>::new(),
             "open_questions": derive_open_questions(details),
+            "materialized_notes": extract_materialized_notes(details),
             "last_command": "continuity handoff".to_string(),
             "last_results_summary": format!("Зафиксирован handoff для {} :: {}", project.code, namespace.code),
             "local_path": local_path,
@@ -244,6 +246,13 @@ pub fn print_restore_bundle_human(restore: &Value) {
         "- Ближайший следующий шаг: {}",
         node["next_step"].as_str().unwrap_or("ещё нет данных")
     );
+    if let Some(value) = node["restore_confidence"]
+        .as_str()
+        .filter(|value| *value == "preliminary")
+    {
+        let _ = value;
+        println!("- Статус recovery: предварительно, потому что живая выборка ещё маленькая.");
+    }
     if let Some(value) = node["current_hypothesis"]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -261,6 +270,12 @@ pub fn print_restore_bundle_human(restore: &Value) {
         &node["open_questions"],
         MAX_OPEN_QUESTIONS,
     );
+    print_string_list(
+        "- Materialized решения",
+        &node["materialized_notes"],
+        MAX_MATERIALIZED_NOTES,
+    );
+    print_recent_actions("- Недавние действия", &node["recent_actions"], 3);
 }
 
 async fn refresh_restore_snapshot(
@@ -320,6 +335,7 @@ fn compose_restore_bundle(
     let mut recent_queries = Vec::new();
     let mut open_questions = Vec::new();
     let mut rejected_hypotheses = Vec::new();
+    let mut materialized_notes = Vec::new();
     let mut current_hypothesis = None::<String>;
     let mut last_command = None::<String>;
     let mut last_results_summary = None::<String>;
@@ -334,6 +350,7 @@ fn compose_restore_bundle(
         }
         collect_unique_strings(&mut open_questions, &event["open_questions"]);
         collect_unique_strings(&mut rejected_hypotheses, &event["rejected_hypotheses"]);
+        collect_unique_strings(&mut materialized_notes, &event["materialized_notes"]);
         if current_hypothesis.is_none() {
             current_hypothesis = event["current_hypothesis"]
                 .as_str()
@@ -384,6 +401,7 @@ fn compose_restore_bundle(
             "current_hypothesis": current_hypothesis,
             "open_questions": open_questions,
             "rejected_hypotheses": rejected_hypotheses,
+            "materialized_notes": materialized_notes,
             "active_files": active_files,
             "visible_projects": visible_projects,
             "recent_queries": recent_queries,
@@ -665,6 +683,21 @@ fn derive_open_questions(text: &str) -> Vec<String> {
     questions
 }
 
+fn extract_materialized_notes(text: &str) -> Vec<String> {
+    let mut notes = Vec::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some(rest) = line.strip_prefix("- ") {
+            push_unique(&mut notes, rest.trim().to_string());
+        } else if !looks_like_question(line) && line.chars().count() > 24 {
+            push_unique(&mut notes, line.to_string());
+        }
+        if notes.len() >= MAX_MATERIALIZED_NOTES {
+            break;
+        }
+    }
+    notes
+}
+
 fn looks_like_question(value: &str) -> bool {
     if value.is_empty() {
         return false;
@@ -705,6 +738,31 @@ fn print_string_list(label: &str, value: &Value, limit: usize) {
         .take(limit)
         .collect::<Vec<_>>()
         .join(" | ");
+    if !rendered.is_empty() {
+        println!("{label}: {rendered}");
+    }
+}
+
+fn print_recent_actions(label: &str, value: &Value, limit: usize) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    let rendered = items
+        .iter()
+        .take(limit)
+        .filter_map(|item| {
+            let headline = item["headline"].as_str().unwrap_or_default();
+            let summary = item["summary"].as_str().unwrap_or_default();
+            if headline.is_empty() && summary.is_empty() {
+                None
+            } else if summary.is_empty() {
+                Some(headline.to_string())
+            } else {
+                Some(format!("{headline}: {summary}"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" || ");
     if !rendered.is_empty() {
         println!("{label}: {rendered}");
     }
@@ -758,6 +816,15 @@ mod tests {
                 .iter()
                 .any(|path| path.contains("/home/art/agent-memory-index/src/token_budget.rs"))
         );
+    }
+
+    #[test]
+    fn extract_materialized_notes_prefers_bullets() {
+        let notes = extract_materialized_notes(
+            "Сделан слой.\n- Первый важный результат.\n- Второй важный результат.\nПочему так?\n",
+        );
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0], "Первый важный результат.");
     }
 
     #[test]
