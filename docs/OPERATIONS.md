@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 20:52 MSK
-Ручная сверка guide/docs: 2026-03-21 20:52 MSK
+modified_at: 2026-03-21 21:13 MSK
+Ручная сверка guide/docs: 2026-03-21 21:13 MSK
 
 # Operations
 
@@ -792,8 +792,9 @@ cargo run --release -- verify load \
   --namespace review \
   --query "shared_runtime_marker" \
   --retrieval-mode local_plus_related \
-  --workers 2 \
-  --iterations-per-worker 25
+  --workers 8 \
+  --iterations-per-worker 250 \
+  --warmup-per-worker 2
 ```
 
 Этот proof:
@@ -803,8 +804,13 @@ cargo run --release -- verify load \
 
 Текущий репозиторный guard:
 - `qps >= 5000`
+- `p50 <= 10ms`
 - `p95 < 10ms`
+- `p99 <= 10ms`
+- `max <= 15ms`
 - `error_rate = 0`
+- `workers >= 8`
+- `sample_count >= 2000`
 
 Важно:
 - если после warmup `verify load` пишет `execution_mode = hot_cache_only`, это правильный и желаемый режим;
@@ -1414,6 +1420,7 @@ Grafana login берётся из `.env`:
   - live поток текущей сессии;
   - живые system probes;
   - последний сохранённый benchmark;
+- benchmark-карточки теперь обязаны прямо писать слово `benchmark` в source label, а live-карточки — прямо писать, что benchmark-данные туда не подмешиваются;
 - live latency слой на human dashboard теперь схлопнут в один общий блок `Как Amai отвечает сейчас`, а не размазан по трём похожим карточкам;
 - сверху в этом блоке стоят две крупные живые цифры:
   - `Повторный запрос`
@@ -1442,10 +1449,20 @@ Grafana login берётся из `.env`:
 - status этого общего live блока остаётся привязан к честному live `P95` той же выборки, а не к чужому benchmark snapshot;
 - блок непотоковых измерений теперь человекочитаемо называется `Последние честные проверки`;
 - benchmark-карты внутри него отдельно показывают:
-  - `Эталон / Сейчас`;
+  - явный источник `benchmark`, а не live;
+  - отдельную comparison table `Метрика / Эталон / Тестовые данные`;
   - покрытие выборки;
   - `repo_count`;
   - `query_slice_count`;
+- для карточки `Быстрый путь под нагрузкой` теперь обязательно показываются:
+  - `QPS`;
+  - `P50`;
+  - `P95`;
+  - `P99`;
+  - `Max`;
+  - `error rate`;
+  - `workers`;
+  - `sample_count`;
 - спецтермины и англицизмы на human dashboard теперь имеют русскую подсказку при наведении курсора на сам термин, без отдельного значка `?`.
 - runtime scrape targets и monitoring ports не должны быть вшиты в конфиг как абсолютные литералы;
 - поэтому monitoring profile рендерится из `.env` перед `docker compose --profile monitoring up`.

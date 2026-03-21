@@ -698,7 +698,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       return wrap;
     }
 
-    function renderLiveCompareCard(container, card) {
+    function renderCompareCard(container, card) {
       const element = document.createElement("article");
       element.className = `compare-card ${statusClass(card.status)}`;
 
@@ -713,17 +713,19 @@ pub fn render_html(refresh_ms: u64) -> String {
       }
       element.appendChild(textNode("p", "card-note", card.note));
 
-      const compareGrid = document.createElement("div");
-      compareGrid.className = "compare-grid";
-      card.metrics.forEach((metric) => {
-        const metricCard = document.createElement("section");
-        metricCard.className = "compare-metric";
-        metricCard.appendChild(labelWithTooltip(metric.label, metric.tooltip, "compare-metric-label"));
-        metricCard.appendChild(textNode("p", "compare-metric-value", metric.value));
-        metricCard.appendChild(textNode("p", "compare-metric-note", metric.note));
-        compareGrid.appendChild(metricCard);
-      });
-      element.appendChild(compareGrid);
+      if (card.metrics && card.metrics.length > 0) {
+        const compareGrid = document.createElement("div");
+        compareGrid.className = "compare-grid";
+        card.metrics.forEach((metric) => {
+          const metricCard = document.createElement("section");
+          metricCard.className = "compare-metric";
+          metricCard.appendChild(labelWithTooltip(metric.label, metric.tooltip, "compare-metric-label"));
+          metricCard.appendChild(textNode("p", "compare-metric-value", metric.value));
+          metricCard.appendChild(textNode("p", "compare-metric-note", metric.note));
+          compareGrid.appendChild(metricCard);
+        });
+        element.appendChild(compareGrid);
+      }
 
       const tableWrap = document.createElement("div");
       tableWrap.className = "compare-table-wrap";
@@ -808,8 +810,8 @@ pub fn render_html(refresh_ms: u64) -> String {
       const container = document.getElementById(containerId);
       clearNode(container);
       cards.forEach((card) => {
-        if (card.kind === "live_compare") {
-          renderLiveCompareCard(container, card);
+        if (card.kind === "live_compare" || card.kind === "compare_table") {
+          renderCompareCard(container, card);
           return;
         }
         const element = document.createElement("article");
@@ -999,63 +1001,124 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
     let cold_contour = &snapshot["latest_cold_path_benchmark"]["cold_benchmark"];
     let accuracy = &snapshot["latest_retrieval_accuracy"]["accuracy_verification"];
     let thresholds = &snapshot["thresholds"];
+    let hot_load_sample_count = hot_load["success_count"]
+        .as_u64()
+        .zip(hot_load["error_count"].as_u64())
+        .map(|(success, errors)| success + errors);
 
     vec![
-        card_with_rows(
+        compare_table_card(
             "Быстрый путь под нагрузкой",
-            format_optional(hot_load["qps"].as_f64(), |v| format!("{v:.2} qps")),
-            "Это не живой поток чата, а последний сохранённый нагрузочный прогон по горячему пути.".to_string(),
-            status_for_metric_prefix(snapshot, "load."),
+            "Это benchmark-карточка. Здесь нет живой телеметрии текущей сессии: показан только последний сохранённый hot-load прогон по прогретому быстрому пути."
+                .to_string(),
+            hot_load_benchmark_status(snapshot, hot_load, thresholds),
             Some(source_label(
-                "Источник: последний сохранённый load verification snapshot",
+                "Источник: benchmark. Последний сохранённый hot-load verification snapshot; live-данные страницы сюда не подмешиваются",
                 hot_load["captured_at_epoch_ms"].as_u64(),
             )),
-            Some("QPS показывает, сколько запросов в секунду выдержал прогретый быстрый путь в отдельном нагрузочном прогоне.".to_string()),
+            Some("Это отдельный проверочный прогон прогретого пути. Он показывает, какую нагрузку выдержал Amai в benchmark-режиме, а не то, что происходит прямо сейчас в чате.".to_string()),
             vec![
-                metric_row(
-                    "Эталон QPS",
-                    format_optional(thresholds["load"]["hot_qps"]["target"].as_f64(), |v| format!("{v:.0} qps")),
-                    Some("Целевой минимум для отдельного горячего нагрузочного прогона."),
-                ),
-                metric_row(
-                    "Сейчас QPS",
-                    format_optional(hot_load["qps"].as_f64(), |v| format!("{v:.2} qps")),
-                    Some("Фактический результат последнего сохранённого hot stress-прогона."),
-                ),
-                metric_row(
-                    "Эталон hot P95",
-                    format_ms(thresholds["retrieval"]["hot_live_p95_ms"]["target"].as_f64()),
-                    Some("Stretch-goal для горячего p95: почти все быстрые повторные запросы должны укладываться в эту границу."),
-                ),
-                metric_row(
-                    "Сейчас hot P95",
-                    format_ms(hot_load["p95_ms"].as_f64()),
-                    Some("Фактический p95 последнего hot stress-прогона."),
-                ),
-                metric_row(
-                    "Эталон error rate",
-                    format_percent(thresholds["load"]["hot_error_rate"]["target"].as_f64()),
-                    Some("Под нагрузкой ошибки должны быть близки к нулю."),
-                ),
-                metric_row(
-                    "Сейчас error rate",
-                    format_percent(hot_load["error_rate"].as_f64()),
-                    Some("Доля ошибок в последнем сохранённом hot stress-прогоне."),
-                ),
-                metric_row(
-                    "Сейчас workers",
-                    format_u64(hot_load["workers"].as_u64()),
-                    Some("Сколько параллельных worker-ов участвовало в последнем hot stress-прогоне."),
-                ),
-                metric_row(
-                    "Сейчас выборка",
-                    format_u64(
-                        hot_load["success_count"]
-                            .as_u64()
-                            .zip(hot_load["error_count"].as_u64())
-                            .map(|(success, errors)| success + errors),
+                compare_table_row(
+                    "QPS",
+                    "Сколько запросов в секунду выдержал быстрый прогретый путь в отдельном benchmark-прогоне.",
+                    compare_pair(
+                        format_threshold_at_least(
+                            thresholds["load"]["hot_qps"].get("target").and_then(Value::as_f64),
+                            "qps",
+                            0,
+                        ),
+                        format_optional(hot_load["qps"].as_f64(), |v| format!("{v:.2} qps")),
                     ),
-                    Some("Сколько отдельных запросов вошло в последний hot stress-прогон."),
+                ),
+                compare_table_row(
+                    "P50",
+                    "Медиана hot benchmark. Обычный уровень задержки в отдельном нагрузочном прогоне.",
+                    compare_pair(
+                        format_threshold_at_most(
+                            thresholds["load"]["hot_benchmark_table"]["target_p50_ms"]
+                                .as_f64(),
+                            "ms",
+                            3,
+                        ),
+                        format_ms(hot_load["p50_ms"].as_f64()),
+                    ),
+                ),
+                compare_table_row(
+                    "P95",
+                    "Тяжёлый хвост hot benchmark. Почти все прогретые ответы должны укладываться в эту границу.",
+                    compare_pair(
+                        format_threshold_at_most(
+                            thresholds["load"]["hot_benchmark_table"]["target_p95_ms"]
+                                .as_f64(),
+                            "ms",
+                            3,
+                        ),
+                        format_ms(hot_load["p95_ms"].as_f64()),
+                    ),
+                ),
+                compare_table_row(
+                    "P99",
+                    "Редкие тяжёлые выбросы в отдельном hot-load benchmark.",
+                    compare_pair(
+                        format_threshold_at_most(
+                            thresholds["load"]["hot_benchmark_table"]["target_p99_ms"]
+                                .as_f64(),
+                            "ms",
+                            3,
+                        ),
+                        format_ms(hot_load["p99_ms"].as_f64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Max",
+                    "Самый тяжёлый одиночный запрос в последнем hot-load benchmark.",
+                    compare_pair(
+                        format_threshold_at_most(
+                            thresholds["load"]["hot_benchmark_table"]["target_max_ms"]
+                                .as_f64(),
+                            "ms",
+                            3,
+                        ),
+                        format_ms(hot_load["max_ms"].as_f64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Error rate",
+                    "Доля ошибок в отдельном hot-load benchmark. Здесь целевой уровень должен быть нулевым.",
+                    compare_pair(
+                        format_threshold_at_most(
+                            thresholds["load"]["hot_error_rate"].get("target").and_then(Value::as_f64),
+                            "%",
+                            2,
+                        ),
+                        format_percent(hot_load["error_rate"].as_f64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Workers",
+                    "Сколько параллельных worker-ов участвовало в benchmark-прогоне.",
+                    compare_pair(
+                        format_threshold_at_least(
+                            thresholds["load"]["hot_benchmark_table"]["target_workers"]
+                                .as_f64(),
+                            "",
+                            0,
+                        ),
+                        format_u64(hot_load["workers"].as_u64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Выборка",
+                    "Сколько отдельных запросов вошло в benchmark. Это не живая сессия, а размер сохранённого проверочного прогона.",
+                    compare_pair(
+                        format_threshold_at_least(
+                            thresholds["load"]["hot_benchmark_table"]["target_sample_count"]
+                                .as_f64(),
+                            "",
+                            0,
+                        ),
+                        format_u64(hot_load_sample_count),
+                    ),
                 ),
             ],
         ),
@@ -1065,7 +1128,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
             "Это последний честный end-to-end cold benchmark по реальным репозиториям и query slices.".to_string(),
             cold_contour_status(snapshot),
             Some(source_label(
-                "Источник: последний сохранённый end-to-end cold benchmark",
+                "Источник: benchmark. Последний сохранённый end-to-end cold benchmark; live-данные страницы сюда не подмешиваются",
                 cold_contour["captured_at_epoch_ms"].as_u64(),
             )),
             Some("Cold contour меряет полный путь policy -> retrieval -> ranking -> pack assembly -> provenance -> orchestration.".to_string()),
@@ -1167,7 +1230,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 ),
             ),
             Some(source_label(
-                "Источник: последний сохранённый retrieval accuracy verification",
+                "Источник: benchmark. Последний сохранённый retrieval accuracy verification; live-данные страницы сюда не подмешиваются",
                 accuracy["captured_at_epoch_ms"].as_u64(),
             )),
             Some("Проверка точности и изоляции показывает, не течёт ли один проект в другой и насколько точно Amai попадает в нужные символы и семантику.".to_string()),
@@ -1831,7 +1894,7 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
         "title_tooltip": "Это живое сравнение двух пользовательских режимов: повторный запрос по уже прогретому кэшу и первый запрос без прогрева. Здесь нет benchmark-снимков — только текущая сессия.",
         "status": combine_statuses(&[hot_status, cold_status]),
         "status_label": status_label(combine_statuses(&[hot_status, cold_status])),
-        "source_label": "Источник: живая выборка текущей сессии, обновляется при новых запросах",
+        "source_label": "Источник: живая выборка текущей сессии, обновляется при новых запросах. Benchmark-данные сюда не подмешиваются.",
         "note": "Сверху показана медиана, то есть обычный уровень ответа в каждом режиме. Ниже — одна общая таблица, чтобы сравнить повторный и первый запрос без дублирования отдельных карточек.",
         "metrics": [
             {
@@ -1906,6 +1969,46 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
     })
 }
 
+fn compare_table_card(
+    title: &str,
+    note: String,
+    status: &str,
+    source_label: Option<String>,
+    title_tooltip: Option<String>,
+    rows: Vec<Value>,
+) -> Value {
+    json!({
+        "kind": "compare_table",
+        "title": title,
+        "note": note,
+        "status": status,
+        "status_label": status_label(status),
+        "source_label": source_label,
+        "title_tooltip": title_tooltip,
+        "metrics": [],
+        "table": {
+            "columns": [
+                { "label": "Метрика", "tooltip": "Что именно измерялось в этом проверочном прогоне." },
+                { "label": "Эталон", "tooltip": "Фиксированная целевая планка. Она не зависит от текущей сессии и не меняется от запроса к запросу." },
+                { "label": "Тестовые данные", "tooltip": "Фактический результат последнего сохранённого benchmark-прогона." }
+            ],
+            "rows": rows,
+        }
+    })
+}
+
+fn compare_table_row(label: &str, tooltip: &str, values: Vec<String>) -> Value {
+    json!({
+        "label": label,
+        "tooltip": tooltip,
+        "values": values,
+    })
+}
+
+fn compare_pair(target: String, current: String) -> Vec<String> {
+    vec![target, current]
+}
+
 fn card_with_rows(
     title: &str,
     value: String,
@@ -1933,6 +2036,69 @@ fn metric_row(label: &str, value: String, tooltip: Option<&str>) -> Value {
         "value": value,
         "tooltip": tooltip,
     })
+}
+
+fn hot_load_benchmark_status(
+    snapshot: &Value,
+    hot_load: &Value,
+    thresholds: &Value,
+) -> &'static str {
+    let qps_status = status_for_metric_name(snapshot, "load.hot_qps");
+    let error_status = status_for_metric_name(snapshot, "load.hot_error_rate");
+    let p50_status = status_at_most(
+        hot_load["p50_ms"].as_f64(),
+        thresholds["load"]["hot_benchmark_table"]["target_p50_ms"].as_f64(),
+    );
+    let p95_status = status_at_most(
+        hot_load["p95_ms"].as_f64(),
+        thresholds["load"]["hot_benchmark_table"]["target_p95_ms"].as_f64(),
+    );
+    let p99_status = status_at_most(
+        hot_load["p99_ms"].as_f64(),
+        thresholds["load"]["hot_benchmark_table"]["target_p99_ms"].as_f64(),
+    );
+    let max_status = status_at_most(
+        hot_load["max_ms"].as_f64(),
+        thresholds["load"]["hot_benchmark_table"]["target_max_ms"].as_f64(),
+    );
+    let workers_status = status_at_least(
+        hot_load["workers"].as_f64(),
+        thresholds["load"]["hot_benchmark_table"]["target_workers"].as_f64(),
+    );
+    let sample_count = hot_load["success_count"]
+        .as_u64()
+        .zip(hot_load["error_count"].as_u64())
+        .map(|(success, errors)| (success + errors) as f64);
+    let sample_status = status_at_least(
+        sample_count,
+        thresholds["load"]["hot_benchmark_table"]["target_sample_count"].as_f64(),
+    );
+    combine_statuses(&[
+        qps_status,
+        error_status,
+        p50_status,
+        p95_status,
+        p99_status,
+        max_status,
+        workers_status,
+        sample_status,
+    ])
+}
+
+fn status_at_most(current: Option<f64>, target: Option<f64>) -> &'static str {
+    match (current, target) {
+        (Some(current), Some(target)) if current <= target => "pass",
+        (Some(_), Some(_)) => "critical",
+        _ => "unknown",
+    }
+}
+
+fn status_at_least(current: Option<f64>, target: Option<f64>) -> &'static str {
+    match (current, target) {
+        (Some(current), Some(target)) if current >= target => "pass",
+        (Some(_), Some(_)) => "critical",
+        _ => "unknown",
+    }
 }
 
 fn compare_values(slice: Option<&Value>, sample_count: u64) -> Vec<String> {
@@ -2163,7 +2329,7 @@ fn humanize_check(check: &Value) -> String {
     let status = status_label(check["status"].as_str().unwrap_or("unknown"));
     let value = match check["value"].as_f64() {
         Some(number) if metric.ends_with("_ratio") => format!("{:.2}%", number * 100.0),
-        Some(number) if metric.contains("p95_ms") => format!("{number:.3} ms"),
+        Some(number) if metric.ends_with("_ms") => format!("{number:.3} ms"),
         Some(number) => format!("{number:.3}"),
         None => "ещё нет данных".to_string(),
     };
@@ -2195,7 +2361,15 @@ fn humanize_check(check: &Value) -> String {
             "Семантический поиск стал реже попадать в правильные ответы."
         }
         "load.hot_qps" => "Горячий быстрый путь держит меньше QPS, чем обещано.",
+        "load.hot_p50_ms" => "Обычная hot-задержка в benchmark-прогоне стала выше целевой планки.",
+        "load.hot_p95_ms" => "Тяжёлый хвост hot benchmark стал выше обещанной границы.",
+        "load.hot_p99_ms" => "Редкие тяжёлые выбросы в hot benchmark стали слишком большими.",
+        "load.hot_max_ms" => "Самый тяжёлый запрос в hot benchmark вышел за безопасную границу.",
         "load.hot_error_rate" => "Под нагрузкой появились ошибки на быстром пути.",
+        "load.hot_workers" => "Последний hot benchmark был прогнан слишком слабой параллельностью.",
+        "load.hot_sample_count" => {
+            "Последний hot benchmark собран на слишком маленькой выборке, чтобы ему доверять."
+        }
         _ => "Один из обязательных проверочных контуров вышел из своей нормы.",
     };
     format!("{explanation} Сейчас: {value}. Состояние: {status}.")
@@ -2260,6 +2434,36 @@ fn format_percent(value: Option<f64>) -> String {
     value
         .map(|number| format!("{number:.2}%"))
         .unwrap_or_else(|| "ещё нет данных".to_string())
+}
+
+fn format_threshold_at_most(value: Option<f64>, unit: &str, decimals: usize) -> String {
+    format_threshold_value(value, "<=", unit, decimals)
+}
+
+fn format_threshold_at_least(value: Option<f64>, unit: &str, decimals: usize) -> String {
+    format_threshold_value(value, ">=", unit, decimals)
+}
+
+fn format_threshold_value(
+    value: Option<f64>,
+    operator: &str,
+    unit: &str,
+    decimals: usize,
+) -> String {
+    match value {
+        Some(number) if unit.is_empty() => {
+            format!("{operator} {}", format_decimal(number, decimals))
+        }
+        Some(number) if unit == "%" => {
+            format!("{operator} {}%", format_decimal(number, decimals))
+        }
+        Some(number) => format!("{operator} {} {unit}", format_decimal(number, decimals)),
+        None => "ещё нет данных".to_string(),
+    }
+}
+
+fn format_decimal(value: f64, decimals: usize) -> String {
+    format!("{value:.prec$}", prec = decimals)
 }
 
 fn format_u64(value: Option<u64>) -> String {

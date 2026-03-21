@@ -123,6 +123,12 @@ struct AccuracyThresholds {
 #[derive(Debug, Clone, Deserialize)]
 struct LoadThresholds {
     target_hot_qps: f64,
+    target_hot_p50_ms: f64,
+    target_hot_p95_ms: f64,
+    target_hot_p99_ms: f64,
+    target_hot_max_ms: f64,
+    target_hot_workers: u64,
+    target_hot_sample_count: u64,
     alert_hot_qps: f64,
     critical_hot_qps: f64,
     target_hot_error_rate: f64,
@@ -378,6 +384,14 @@ fn profile_thresholds_json(profile: &ObservabilityProfile) -> Value {
                 "target": profile.load.target_hot_qps,
                 "alert": profile.load.alert_hot_qps,
                 "critical": profile.load.critical_hot_qps,
+            },
+            "hot_benchmark_table": {
+                "target_p50_ms": profile.load.target_hot_p50_ms,
+                "target_p95_ms": profile.load.target_hot_p95_ms,
+                "target_p99_ms": profile.load.target_hot_p99_ms,
+                "target_max_ms": profile.load.target_hot_max_ms,
+                "target_workers": profile.load.target_hot_workers,
+                "target_sample_count": profile.load.target_hot_sample_count,
             },
             "hot_error_rate": {
                 "target": profile.load.target_hot_error_rate,
@@ -1344,9 +1358,48 @@ fn render_prometheus_metrics(snapshot: &Value) -> String {
     );
     push_metric(
         &mut output,
+        "amai_load_hot_p50_ms",
+        "Hot benchmark p50 latency from the latest load verification.",
+        snapshot["latest_retrieval_load_hot"]["load_verification"]["p50_ms"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_load_hot_p95_ms",
+        "Hot benchmark p95 latency from the latest load verification.",
+        snapshot["latest_retrieval_load_hot"]["load_verification"]["p95_ms"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_load_hot_p99_ms",
+        "Hot benchmark p99 latency from the latest load verification.",
+        snapshot["latest_retrieval_load_hot"]["load_verification"]["p99_ms"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_load_hot_max_ms",
+        "Hot benchmark max latency from the latest load verification.",
+        snapshot["latest_retrieval_load_hot"]["load_verification"]["max_ms"].as_f64(),
+    );
+    push_metric(
+        &mut output,
         "amai_load_hot_error_rate",
         "Concurrent hot retrieval error rate from the latest load verification.",
         snapshot["latest_retrieval_load_hot"]["load_verification"]["error_rate"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_load_hot_workers",
+        "Parallel worker count from the latest hot load verification.",
+        snapshot["latest_retrieval_load_hot"]["load_verification"]["workers"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_load_hot_sample_count",
+        "Total sample count from the latest hot load verification.",
+        snapshot["latest_retrieval_load_hot"]["load_verification"]["success_count"]
+            .as_f64()
+            .zip(snapshot["latest_retrieval_load_hot"]["load_verification"]["error_count"].as_f64())
+            .map(|(success, errors)| success + errors),
     );
     push_metric(
         &mut output,
