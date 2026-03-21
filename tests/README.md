@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 21:59 MSK
-Ручная сверка guide/docs: 2026-03-21 21:59 MSK
+modified_at: 2026-03-21 22:06 MSK
+Ручная сверка guide/docs: 2026-03-21 22:06 MSK
 
 # Tests
 
@@ -21,6 +21,7 @@ modified_at: 2026-03-21 21:59 MSK
 ./scripts/proof_install_auto.sh
 ./scripts/proof_benchmark_matrix.sh
 ./scripts/proof_external_benchmark_env.sh
+./scripts/proof_external_benchmark_adapter.sh
 ./scripts/proof_mcp_task_matrix.sh
 ./scripts/proof_memory_task_matrix.sh
 ./scripts/proof_token_benchmark.sh
@@ -48,6 +49,8 @@ modified_at: 2026-03-21 21:59 MSK
 - `cargo run -- benchmark explain --benchmark live_mcpbench`
 - `cargo run -- benchmark external-check`
 - `cargo run -- benchmark external-explain --benchmark vectordbbench`
+- `cargo run -- benchmark external-datasets`
+- `cargo run -- benchmark external-plan --benchmark vectordbbench`
 - `cargo run -- verify mcp-matrix --matrix live_mcpbench_local ...`
 - `cargo run -- verify mcp-matrix --matrix mcp_universe_local ...`
 

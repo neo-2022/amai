@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 21:59 MSK
-Ручная сверка guide/docs: 2026-03-21 21:59 MSK
+modified_at: 2026-03-21 22:06 MSK
+Ручная сверка guide/docs: 2026-03-21 22:06 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1067,12 +1067,17 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 ```bash
 cargo run -- benchmark external-check
 cargo run -- benchmark external-explain --benchmark vectordbbench
+cargo run -- benchmark external-datasets
+cargo run -- benchmark external-plan --benchmark vectordbbench
 ./scripts/proof_external_benchmark_env.sh
+./scripts/proof_external_benchmark_adapter.sh
 ```
 
 Что он делает:
 - не подменяет внутренний `Amai` cold/hot benchmark;
 - проверяет, готова ли эта машина к внешним comparative benchmark-ам;
+- печатает канонический dataset catalog для внешнего comparative contour;
+- показывает adapter-plan `dataset -> ingest -> warmup -> workload -> metrics`;
 - разводит 3 разных слоя:
   - `VectorDBBench`
     - общий framework `engine + dataset + scenario`;
@@ -1088,6 +1093,15 @@ cargo run -- benchmark external-explain --benchmark vectordbbench
 
 То есть внешний benchmark contour нужен не ради красивой ссылки на GitHub, а чтобы рядом с внутренними proof-ами был ещё и честный apples-to-apples сравнительный слой.
 
+HDF5-датасеты, которые уже зафиксированы как стартовый каталог:
+- `dbpedia-openai-1000k-angular`
+- `snowflake-msmarco-arctic-embed-m-v1.5-angular`
+- `sift-128-euclidean`
+- `sphere-10M-meta-dpr`
+
+Они не запускаются автоматически при обычном proof-cycle.
+Но они уже materialized как канонический dataset-manifest для внешнего adapter-контура, чтобы следующий шаг не жил на устной инструкции из чата.
+
 ## Ключевые proof-команды
 
 Если нужен честный локальный proof:
@@ -1101,6 +1115,7 @@ cargo run -- benchmark external-explain --benchmark vectordbbench
 ./scripts/proof_hostile.sh
 ./scripts/proof_benchmark_matrix.sh
 ./scripts/proof_external_benchmark_env.sh
+./scripts/proof_external_benchmark_adapter.sh
 ./scripts/proof_mcp_task_matrix.sh
 ./scripts/proof_memory_task_matrix.sh
 ./scripts/proof_token_benchmark.sh

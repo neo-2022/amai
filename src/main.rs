@@ -69,6 +69,12 @@ async fn main() -> Result<()> {
                 BenchmarkCommand::ExternalExplain(args) => {
                     external_benchmark::print_external_explainer(&repo_root, &args.benchmark)?
                 }
+                BenchmarkCommand::ExternalDatasets => {
+                    external_benchmark::print_external_datasets(&repo_root)?
+                }
+                BenchmarkCommand::ExternalPlan(args) => {
+                    external_benchmark::print_external_plan(&repo_root, &args.benchmark)?
+                }
             }
         }
         Command::Continuity { command } => match command {

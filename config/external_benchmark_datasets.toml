@@ -1,0 +1,69 @@
+modified_at = "2026-03-21 22:06 MSK"
+"Ручная сверка guide/docs" = "2026-03-21 22:06 MSK"
+
+[source]
+display_name = "Amai external benchmark dataset catalog"
+summary = "Это канонический machine-readable набор внешних benchmark-датасетов для retrieval/vector comparative contour. Каталог нужен, чтобы adapter path жил не на устных командах из чата, а на фиксированном manifest."
+
+[storage]
+relative_root = "state/external-benchmarks/datasets"
+
+[datasets.dbpedia_openai_1000k_angular]
+order = 1
+display_name = "dbpedia-openai-1000k-angular"
+aliases = ["dbpedia", "dbpedia-openai"]
+family = "hdf5"
+distance = "cosine"
+dimensions = 1536
+local_filename = "dbpedia-openai-1000k-angular.hdf5"
+download_url = "https://storage.googleapis.com/ann-datasets/ann-benchmarks/dbpedia-openai-1000k-angular.hdf5"
+usage_scope = ["vectordbbench", "ann_benchmarks"]
+why_useful = [
+  "Хороший общий HDF5 baseline для apples-to-apples retrieval compare.",
+  "Подходит как стартовый dataset для adapter-пути и ANN-style external check."
+]
+
+[datasets.snowflake_msmarco_arctic_embed_m_v1_5_angular]
+order = 2
+display_name = "snowflake-msmarco-arctic-embed-m-v1.5-angular"
+aliases = ["snowflake-msmarco", "arctic-embed"]
+family = "hdf5"
+distance = "cosine"
+dimensions = 768
+local_filename = "snowflake-msmarco-arctic-embed-m-v1.5-angular.hdf5"
+download_url = "https://storage.googleapis.com/ann-datasets/custom/snowflake-msmarco-arctic-embed-m-v1.5-angular.hdf5"
+usage_scope = ["vectordbbench", "ann_benchmarks"]
+why_useful = [
+  "Даёт второй semantic/text retrieval профиль, а не один-единственный dataset.",
+  "Полезен для richer recall/latency comparison на text-heavy embeddings."
+]
+
+[datasets.sift_128_euclidean]
+order = 3
+display_name = "sift-128-euclidean"
+aliases = ["sift"]
+family = "hdf5"
+distance = "euclidean"
+dimensions = 128
+local_filename = "sift-128-euclidean.hdf5"
+download_url = "http://ann-benchmarks.com/sift-128-euclidean.hdf5"
+usage_scope = ["ann_benchmarks"]
+why_useful = [
+  "Классический ANN-core ceiling dataset.",
+  "Нужен, чтобы retrieval-core ceiling не зависел только от text embeddings."
+]
+
+[datasets.sphere_10m_meta_dpr]
+order = 4
+display_name = "sphere-10M-meta-dpr"
+aliases = ["sphere-10m", "meta-dpr"]
+family = "hdf5"
+distance = "cosine"
+dimensions = 768
+local_filename = "sphere-10M-meta-dpr.hdf5"
+download_url = "https://storage.googleapis.com/ann-datasets/custom/sphere-10M-meta-dpr.hdf5"
+usage_scope = ["vectordbbench", "ann_benchmarks", "filtered_ann_datasets"]
+why_useful = [
+  "Даёт более тяжёлый большой dataset для pressure-тестов.",
+  "Полезен как мост между core ANN compare и более тяжёлым filtered/payload слоем."
+]

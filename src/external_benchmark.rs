@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Deserialize)]
@@ -11,10 +11,22 @@ struct ExternalBenchmarkFile {
     benchmarks: BTreeMap<String, ExternalBenchmarkEntry>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ExternalDatasetFile {
+    source: ExternalBenchmarkSource,
+    storage: ExternalDatasetStorage,
+    datasets: BTreeMap<String, ExternalDatasetEntry>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ExternalBenchmarkSource {
     display_name: String,
     summary: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ExternalDatasetStorage {
+    relative_root: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -31,6 +43,21 @@ struct ExternalBenchmarkEntry {
     why_relevant: Vec<String>,
     local_role: Vec<String>,
     next_step: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ExternalDatasetEntry {
+    order: u32,
+    display_name: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    family: String,
+    distance: String,
+    dimensions: u32,
+    local_filename: String,
+    download_url: String,
+    usage_scope: Vec<String>,
+    why_useful: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -190,8 +217,117 @@ pub fn print_external_explainer(repo_root: &Path, benchmark_query: &str) -> Resu
     Ok(())
 }
 
+pub fn print_external_datasets(repo_root: &Path) -> Result<()> {
+    let catalog = load_dataset_catalog(repo_root)?;
+    let dataset_root = dataset_root(repo_root, &catalog.storage.relative_root);
+
+    println!("Amai external benchmark datasets");
+    println!();
+    println!("Источник: {}", catalog.source.display_name);
+    println!("{}", catalog.source.summary);
+    println!();
+    println!("Канонический локальный каталог:");
+    println!("- {}", dataset_root.display());
+    println!();
+
+    for (code, dataset) in ordered_datasets(&catalog) {
+        let path = dataset_root.join(&dataset.local_filename);
+        let (status, size) = if path.exists() {
+            let metadata = fs::metadata(&path)
+                .with_context(|| format!("failed to stat dataset {}", path.display()))?;
+            ("уже скачан", format_bytes(metadata.len()))
+        } else {
+            ("ещё не скачан", "0 B".to_owned())
+        };
+        println!("{} ({})", dataset.display_name, code);
+        println!("- Семейство: {}", dataset.family);
+        println!("- Distance: {}", dataset.distance);
+        println!("- Размерность: {}", dataset.dimensions);
+        println!("- Локальный файл: {}", path.display());
+        println!("- Статус: {} ({})", status, size);
+        println!("- Скачать: {}", dataset.download_url);
+        if !dataset.aliases.is_empty() {
+            println!("- Псевдонимы: {}", dataset.aliases.join(", "));
+        }
+        println!("- Где применять:");
+        for item in &dataset.usage_scope {
+            println!("  - {}", item);
+        }
+        println!("- Почему полезен:");
+        for item in &dataset.why_useful {
+            println!("  - {}", item);
+        }
+        println!();
+    }
+    Ok(())
+}
+
+pub fn print_external_plan(repo_root: &Path, benchmark_query: &str) -> Result<()> {
+    let registry = load_registry(repo_root)?;
+    let catalog = load_dataset_catalog(repo_root)?;
+    let (code, entry) = resolve_benchmark(&registry, benchmark_query)
+        .ok_or_else(|| anyhow!("unknown external benchmark: {benchmark_query}"))?;
+    let dataset_root = dataset_root(repo_root, &catalog.storage.relative_root);
+    let datasets = recommended_datasets(code, &catalog);
+
+    println!("Amai external benchmark adapter plan");
+    println!();
+    println!("Benchmark: {} ({})", entry.display_name, code);
+    println!("Тип: {}", entry.benchmark_kind);
+    println!("Ссылка: {}", entry.reference_url);
+    println!();
+    println!("Канонический dataset root:");
+    println!("- {}", dataset_root.display());
+    println!();
+    println!("Рекомендуемые датасеты для этого benchmark-а:");
+    for (dataset_code, dataset) in &datasets {
+        println!(
+            "- {} ({}) :: {} :: dim={} :: {}",
+            dataset.display_name,
+            dataset_code,
+            dataset.distance,
+            dataset.dimensions,
+            dataset.download_url
+        );
+    }
+    println!();
+    println!("Amai adapter contract:");
+    println!("- 1. ingest(dataset)");
+    println!("- 2. warmup(dataset)");
+    println!("- 3. run fixed workload");
+    println!("- 4. collect latency: P50/P95/P99/Max/sample_count");
+    println!("- 5. collect quality: recall/precision/hit/miss/fallback");
+    println!("- 6. compare with internal Amai cold/hot contour");
+    println!();
+    println!("Практический порядок:");
+    println!(
+        "- Сначала скачать HDF5-датасеты в {}",
+        dataset_root.display()
+    );
+    println!("- Затем прогнать внешний framework через adapter к retrieval/vector слою Amai.");
+    println!("- После этого рядом прогнать внутренний end-to-end cold/hot benchmark.");
+    println!();
+    if code == "ann_benchmarks" {
+        println!("Полезная стартовая команда для HDF5-style контура:");
+        println!(
+            "- DATASET={}/dbpedia-openai-1000k-angular.hdf5 DISTANCE=cosine docker compose up --abort-on-container-exit",
+            dataset_root.display()
+        );
+        println!();
+    }
+    println!("Следующий шаг:");
+    println!("- {}", entry.next_step);
+    Ok(())
+}
+
 fn ordered_benchmarks(registry: &ExternalBenchmarkFile) -> Vec<(&String, &ExternalBenchmarkEntry)> {
     let mut entries = registry.benchmarks.iter().collect::<Vec<_>>();
+    entries.sort_by_key(|(code, entry)| (entry.order, *code));
+    entries
+}
+
+fn ordered_datasets(catalog: &ExternalDatasetFile) -> Vec<(&String, &ExternalDatasetEntry)> {
+    let mut entries = catalog.datasets.iter().collect::<Vec<_>>();
     entries.sort_by_key(|(code, entry)| (entry.order, *code));
     entries
 }
@@ -224,6 +360,24 @@ fn normalize_key(value: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .flat_map(|ch| ch.to_lowercase())
         .collect()
+}
+
+fn recommended_datasets<'a>(
+    benchmark_code: &str,
+    catalog: &'a ExternalDatasetFile,
+) -> Vec<(&'a String, &'a ExternalDatasetEntry)> {
+    let mut entries = catalog
+        .datasets
+        .iter()
+        .filter(|(_, entry)| {
+            entry
+                .usage_scope
+                .iter()
+                .any(|scope| normalize_key(scope) == normalize_key(benchmark_code))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(code, entry)| (entry.order, *code));
+    entries
 }
 
 fn inspect_tool(tool: &str) -> ToolCheck {
@@ -303,11 +457,47 @@ fn registry_path(repo_root: &Path) -> std::path::PathBuf {
     repo_root.join("config/external_benchmark_targets.toml")
 }
 
+fn load_dataset_catalog(repo_root: &Path) -> Result<ExternalDatasetFile> {
+    let path = dataset_catalog_path(repo_root);
+    let content = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "failed to read external benchmark dataset catalog {}",
+            path.display()
+        )
+    })?;
+    toml::from_str(&content).context("failed to parse external benchmark dataset catalog")
+}
+
+fn dataset_catalog_path(repo_root: &Path) -> PathBuf {
+    repo_root.join("config/external_benchmark_datasets.toml")
+}
+
+fn dataset_root(repo_root: &Path, relative_root: &str) -> PathBuf {
+    repo_root.join(relative_root)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let bytes_f = bytes as f64;
+    if bytes_f >= GB {
+        format!("{:.2} GiB", bytes_f / GB)
+    } else if bytes_f >= MB {
+        format!("{:.2} MiB", bytes_f / MB)
+    } else if bytes_f >= KB {
+        format!("{:.2} KiB", bytes_f / KB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ExternalBenchmarkEntry, ExternalBenchmarkFile, ExternalBenchmarkSource, normalize_key,
-        ordered_benchmarks, resolve_benchmark,
+        ExternalBenchmarkEntry, ExternalBenchmarkFile, ExternalBenchmarkSource,
+        ExternalDatasetEntry, ExternalDatasetFile, ExternalDatasetStorage, normalize_key,
+        ordered_benchmarks, recommended_datasets, resolve_benchmark,
     };
     use std::collections::BTreeMap;
 
@@ -333,6 +523,14 @@ mod tests {
     fn normalize_key_drops_separators() {
         assert_eq!(normalize_key("ann-benchmarks"), "annbenchmarks");
         assert_eq!(normalize_key("Vector DB Bench"), "vectordbbench");
+    }
+
+    #[test]
+    fn recommended_datasets_match_scope() {
+        let catalog = sample_catalog();
+        let datasets = recommended_datasets("ann_benchmarks", &catalog);
+        assert_eq!(datasets.len(), 2);
+        assert_eq!(datasets[0].0.as_str(), "dbpedia_openai_1000k_angular");
     }
 
     fn sample_registry() -> ExternalBenchmarkFile {
@@ -375,6 +573,50 @@ mod tests {
                 summary: "summary".to_owned(),
             },
             benchmarks,
+        }
+    }
+
+    fn sample_catalog() -> ExternalDatasetFile {
+        let mut datasets = BTreeMap::new();
+        datasets.insert(
+            "dbpedia_openai_1000k_angular".to_owned(),
+            ExternalDatasetEntry {
+                order: 1,
+                display_name: "dbpedia-openai-1000k-angular".to_owned(),
+                aliases: vec!["dbpedia".to_owned()],
+                family: "hdf5".to_owned(),
+                distance: "cosine".to_owned(),
+                dimensions: 1536,
+                local_filename: "dbpedia-openai-1000k-angular.hdf5".to_owned(),
+                download_url: "https://example.com/dbpedia".to_owned(),
+                usage_scope: vec!["vectordbbench".to_owned(), "ann_benchmarks".to_owned()],
+                why_useful: vec!["why".to_owned()],
+            },
+        );
+        datasets.insert(
+            "sift_128_euclidean".to_owned(),
+            ExternalDatasetEntry {
+                order: 2,
+                display_name: "sift-128-euclidean".to_owned(),
+                aliases: vec!["sift".to_owned()],
+                family: "hdf5".to_owned(),
+                distance: "euclidean".to_owned(),
+                dimensions: 128,
+                local_filename: "sift-128-euclidean.hdf5".to_owned(),
+                download_url: "https://example.com/sift".to_owned(),
+                usage_scope: vec!["ann_benchmarks".to_owned()],
+                why_useful: vec!["why".to_owned()],
+            },
+        );
+        ExternalDatasetFile {
+            source: ExternalBenchmarkSource {
+                display_name: "source".to_owned(),
+                summary: "summary".to_owned(),
+            },
+            storage: ExternalDatasetStorage {
+                relative_root: "state/external-benchmarks/datasets".to_owned(),
+            },
+            datasets,
         }
     }
 }

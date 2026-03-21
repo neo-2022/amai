@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 21:59 MSK
-Ручная сверка guide/docs: 2026-03-21 21:59 MSK
+modified_at: 2026-03-21 22:06 MSK
+Ручная сверка guide/docs: 2026-03-21 22:06 MSK
 
 # Operations
 
@@ -918,7 +918,10 @@ cargo run --release -- verify token-benchmark \
 ```bash
 cargo run -- benchmark external-check
 cargo run -- benchmark external-explain --benchmark vectordbbench
+cargo run -- benchmark external-datasets
+cargo run -- benchmark external-plan --benchmark vectordbbench
 ./scripts/proof_external_benchmark_env.sh
+./scripts/proof_external_benchmark_adapter.sh
 ```
 
 Это не замена `Amai` end-to-end benchmark-ам.
@@ -937,6 +940,22 @@ cargo run -- benchmark external-explain --benchmark vectordbbench
 - `Filtered ANN benchmark datasets`
   - как payload/filter layer;
 - и только после этого сопоставлять всё с внутренним `Amai` cold/hot contour.
+
+Теперь у этого слоя materialized ещё и dataset-manifest:
+
+```bash
+config/external_benchmark_datasets.toml
+```
+
+Там уже канонически зафиксированы стартовые HDF5 datasets:
+- `dbpedia-openai-1000k-angular`
+- `snowflake-msmarco-arctic-embed-m-v1.5-angular`
+- `sift-128-euclidean`
+- `sphere-10M-meta-dpr`
+
+Их задача:
+- не заменить внутренний Amai dataset contour;
+- а дать фиксированный внешний comparative baseline для adapter-пути.
 
 ## MCP task matrix
 

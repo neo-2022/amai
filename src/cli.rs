@@ -76,6 +76,8 @@ pub enum BenchmarkCommand {
     Explain(BenchmarkArgs),
     ExternalCheck,
     ExternalExplain(BenchmarkArgs),
+    ExternalDatasets,
+    ExternalPlan(BenchmarkArgs),
 }
 
 #[derive(Debug, Subcommand)]
