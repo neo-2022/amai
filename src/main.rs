@@ -72,8 +72,26 @@ async fn main() -> Result<()> {
                 BenchmarkCommand::ExternalDatasets => {
                     external_benchmark::print_external_datasets(&repo_root)?
                 }
+                BenchmarkCommand::ExternalDownload(args) => {
+                    external_benchmark::download_datasets(
+                        &repo_root,
+                        args.dataset.as_deref(),
+                        args.force,
+                    )
+                    .await?
+                }
                 BenchmarkCommand::ExternalPlan(args) => {
                     external_benchmark::print_external_plan(&repo_root, &args.benchmark)?
+                }
+                BenchmarkCommand::ExternalAdapter(args) => {
+                    external_benchmark::run_external_adapter(
+                        &repo_root,
+                        &args.benchmark,
+                        &args.dataset,
+                        args.download_missing,
+                        args.output_dir.as_deref(),
+                    )
+                    .await?
                 }
             }
         }

@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 22:06 MSK
-Ручная сверка guide/docs: 2026-03-21 22:06 MSK
+modified_at: 2026-03-21 22:13 MSK
+Ручная сверка guide/docs: 2026-03-21 22:13 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1068,7 +1068,9 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 cargo run -- benchmark external-check
 cargo run -- benchmark external-explain --benchmark vectordbbench
 cargo run -- benchmark external-datasets
+cargo run -- benchmark external-download --dataset dbpedia_openai_1000k_angular
 cargo run -- benchmark external-plan --benchmark vectordbbench
+cargo run -- benchmark external-adapter --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular
 ./scripts/proof_external_benchmark_env.sh
 ./scripts/proof_external_benchmark_adapter.sh
 ```
@@ -1077,7 +1079,12 @@ cargo run -- benchmark external-plan --benchmark vectordbbench
 - не подменяет внутренний `Amai` cold/hot benchmark;
 - проверяет, готова ли эта машина к внешним comparative benchmark-ам;
 - печатает канонический dataset catalog для внешнего comparative contour;
+- умеет скачивать dataset-ы Rust-контуром в канонический каталог;
 - показывает adapter-plan `dataset -> ingest -> warmup -> workload -> metrics`;
+- materialize-ит реальный adapter workspace для выбранного benchmark + dataset:
+  - `summary.json`
+  - `report.md`
+  - `run_external.sh`
 - разводит 3 разных слоя:
   - `VectorDBBench`
     - общий framework `engine + dataset + scenario`;
@@ -1101,6 +1108,10 @@ HDF5-датасеты, которые уже зафиксированы как �
 
 Они не запускаются автоматически при обычном proof-cycle.
 Но они уже materialized как канонический dataset-manifest для внешнего adapter-контура, чтобы следующий шаг не жил на устной инструкции из чата.
+
+Важно:
+- для `ann-benchmarks` HDF5 datasets подходят напрямую;
+- для `VectorDBBench` текущий runner честно fail-closed показывает, что нужен conversion в custom Parquet bundle `train/test/neighbors`, а не притворяется прямой совместимостью HDF5.
 
 ## Ключевые proof-команды
 

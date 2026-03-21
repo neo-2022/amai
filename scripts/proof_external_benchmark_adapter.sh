@@ -9,3 +9,4 @@ cd "$REPO_ROOT"
 cargo run --quiet -- benchmark external-datasets
 cargo run --quiet -- benchmark external-plan --benchmark vectordbbench
 cargo run --quiet -- benchmark external-plan --benchmark ann_benchmarks
+cargo run --quiet -- benchmark external-adapter --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular

@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 22:06 MSK
-Ручная сверка guide/docs: 2026-03-21 22:06 MSK
+modified_at: 2026-03-21 22:13 MSK
+Ручная сверка guide/docs: 2026-03-21 22:13 MSK
 
 # Tests
 
@@ -50,7 +50,9 @@ modified_at: 2026-03-21 22:06 MSK
 - `cargo run -- benchmark external-check`
 - `cargo run -- benchmark external-explain --benchmark vectordbbench`
 - `cargo run -- benchmark external-datasets`
+- `cargo run -- benchmark external-download --dataset dbpedia_openai_1000k_angular`
 - `cargo run -- benchmark external-plan --benchmark vectordbbench`
+- `cargo run -- benchmark external-adapter --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular`
 - `cargo run -- verify mcp-matrix --matrix live_mcpbench_local ...`
 - `cargo run -- verify mcp-matrix --matrix mcp_universe_local ...`
 

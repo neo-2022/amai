@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 22:06 MSK
-Ручная сверка guide/docs: 2026-03-21 22:06 MSK
+modified_at: 2026-03-21 22:13 MSK
+Ручная сверка guide/docs: 2026-03-21 22:13 MSK
 
 # Operations
 
@@ -919,7 +919,9 @@ cargo run --release -- verify token-benchmark \
 cargo run -- benchmark external-check
 cargo run -- benchmark external-explain --benchmark vectordbbench
 cargo run -- benchmark external-datasets
+cargo run -- benchmark external-download --dataset dbpedia_openai_1000k_angular
 cargo run -- benchmark external-plan --benchmark vectordbbench
+cargo run -- benchmark external-adapter --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular
 ./scripts/proof_external_benchmark_env.sh
 ./scripts/proof_external_benchmark_adapter.sh
 ```
@@ -956,6 +958,23 @@ config/external_benchmark_datasets.toml
 Их задача:
 - не заменить внутренний Amai dataset contour;
 - а дать фиксированный внешний comparative baseline для adapter-пути.
+
+Следующий слой теперь уже не теоретический:
+- `external-download`
+  - Rust-контур для скачивания одного dataset-а или всего manifest-а;
+- `external-adapter`
+  - готовит реальный run workspace:
+    - `summary.json`
+    - `report.md`
+    - `run_external.sh`
+  - если dataset подходит напрямую, workspace помечается как `prepared`;
+  - если dataset не скачан, это честно помечается как `blocked_dataset_missing`;
+  - если benchmark требует другой формат данных, это честно помечается как `blocked_conversion_required`.
+
+Текущий важный инвариант:
+- `ann-benchmarks` принимает HDF5 datasets напрямую;
+- `VectorDBBench` custom dataset contour не должен притворяться, что принимает те же HDF5 без подготовки;
+- поэтому для `VectorDBBench` runner сейчас fail-closed пишет, что нужен Parquet bundle `train/test/neighbors`.
 
 ## MCP task matrix
 

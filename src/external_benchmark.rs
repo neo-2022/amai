@@ -1,9 +1,14 @@
 use anyhow::{Context, Result, anyhow};
+use reqwest::Client;
 use serde::Deserialize;
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::fs as tokio_fs;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Deserialize)]
 struct ExternalBenchmarkFile {
@@ -58,6 +63,26 @@ struct ExternalDatasetEntry {
     download_url: String,
     usage_scope: Vec<String>,
     why_useful: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdapterStatus {
+    Prepared,
+    BlockedConversionRequired,
+    BlockedDatasetMissing,
+}
+
+struct AdapterRenderContext<'a> {
+    benchmark_code: &'a str,
+    benchmark: &'a ExternalBenchmarkEntry,
+    dataset_code: &'a str,
+    dataset: &'a ExternalDatasetEntry,
+    dataset_path: &'a Path,
+    status: AdapterStatus,
+    adapter_kind: &'a str,
+    launch_commands: &'a [String],
+    comparison_commands: &'a [String],
+    upstream_dir: &'a Path,
 }
 
 #[derive(Debug, Clone)]
@@ -320,6 +345,194 @@ pub fn print_external_plan(repo_root: &Path, benchmark_query: &str) -> Result<()
     Ok(())
 }
 
+pub async fn download_datasets(
+    repo_root: &Path,
+    dataset_query: Option<&str>,
+    force: bool,
+) -> Result<()> {
+    let catalog = load_dataset_catalog(repo_root)?;
+    let dataset_root = dataset_root(repo_root, &catalog.storage.relative_root);
+    tokio_fs::create_dir_all(&dataset_root)
+        .await
+        .with_context(|| format!("failed to create {}", dataset_root.display()))?;
+    let selections = match dataset_query {
+        Some(query) => vec![
+            resolve_dataset(&catalog, query)
+                .ok_or_else(|| anyhow!("unknown external dataset: {query}"))?,
+        ],
+        None => ordered_datasets(&catalog)
+            .into_iter()
+            .map(|(code, dataset)| (code.as_str(), dataset))
+            .collect(),
+    };
+
+    println!("Amai external benchmark download");
+    println!();
+    println!("Каталог: {}", dataset_root.display());
+    println!();
+    for (code, dataset) in selections {
+        let path = dataset_root.join(&dataset.local_filename);
+        if path.exists() && !force {
+            let metadata = fs::metadata(&path)
+                .with_context(|| format!("failed to stat dataset {}", path.display()))?;
+            println!(
+                "- {} ({}) уже скачан: {}",
+                dataset.display_name,
+                code,
+                format_bytes(metadata.len())
+            );
+            continue;
+        }
+        download_dataset_file(dataset, &path).await?;
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("failed to stat dataset {}", path.display()))?;
+        println!(
+            "- {} ({}) скачан: {}",
+            dataset.display_name,
+            code,
+            format_bytes(metadata.len())
+        );
+    }
+    Ok(())
+}
+
+pub async fn run_external_adapter(
+    repo_root: &Path,
+    benchmark_query: &str,
+    dataset_query: &str,
+    download_missing: bool,
+    output_dir_override: Option<&Path>,
+) -> Result<()> {
+    let registry = load_registry(repo_root)?;
+    let catalog = load_dataset_catalog(repo_root)?;
+    let (benchmark_code, benchmark) = resolve_benchmark(&registry, benchmark_query)
+        .ok_or_else(|| anyhow!("unknown external benchmark: {benchmark_query}"))?;
+    let (dataset_code, dataset) = resolve_dataset(&catalog, dataset_query)
+        .ok_or_else(|| anyhow!("unknown external dataset: {dataset_query}"))?;
+
+    let dataset_root = dataset_root(repo_root, &catalog.storage.relative_root);
+    tokio_fs::create_dir_all(&dataset_root)
+        .await
+        .with_context(|| format!("failed to create {}", dataset_root.display()))?;
+    let dataset_path = dataset_root.join(&dataset.local_filename);
+    if !dataset_path.exists() && download_missing {
+        download_dataset_file(dataset, &dataset_path).await?;
+    }
+
+    let adapter_kind = if benchmark_code == "vectordbbench" {
+        "conversion_required"
+    } else {
+        "direct_hdf5"
+    };
+    let status = if adapter_kind == "conversion_required" {
+        AdapterStatus::BlockedConversionRequired
+    } else if !dataset_path.exists() {
+        AdapterStatus::BlockedDatasetMissing
+    } else {
+        AdapterStatus::Prepared
+    };
+    let output_dir = output_dir_override
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(|| {
+            repo_root
+                .join("state")
+                .join("external-benchmarks")
+                .join("runs")
+                .join(benchmark_code)
+                .join(dataset_code)
+                .join("latest")
+        });
+    fs::create_dir_all(&output_dir)
+        .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    let upstream_dir = repo_root
+        .join("state")
+        .join("external-benchmarks")
+        .join("upstream")
+        .join(benchmark_code);
+    let launch_commands =
+        build_launch_commands(benchmark_code, &upstream_dir, &dataset_path, dataset);
+    let comparison_commands = vec![
+        "cargo run -- verify cold-path --manifest config/cold_benchmark_manifest.toml".to_owned(),
+        "./scripts/proof_load.sh".to_owned(),
+        "./scripts/proof_accuracy.sh".to_owned(),
+    ];
+    let summary = json!({
+        "status": adapter_status_code(status),
+        "benchmark_code": benchmark_code,
+        "benchmark_display_name": benchmark.display_name,
+        "dataset_code": dataset_code,
+        "dataset_display_name": dataset.display_name,
+        "dataset_path": dataset_path,
+        "dataset_exists": dataset_path.exists(),
+        "adapter_kind": adapter_kind,
+        "output_dir": output_dir,
+        "upstream_repo_url": benchmark.upstream_git_url,
+        "upstream_clone_dir": upstream_dir,
+        "launch_commands": launch_commands,
+        "comparison_commands": comparison_commands,
+    });
+    let render_ctx = AdapterRenderContext {
+        benchmark_code,
+        benchmark,
+        dataset_code,
+        dataset,
+        dataset_path: &dataset_path,
+        status,
+        adapter_kind,
+        launch_commands: &launch_commands,
+        comparison_commands: &comparison_commands,
+        upstream_dir: &upstream_dir,
+    };
+    let report = render_adapter_report(&render_ctx);
+    let script = render_adapter_script(&render_ctx);
+
+    let summary_path = output_dir.join("summary.json");
+    let report_path = output_dir.join("report.md");
+    let script_path = output_dir.join("run_external.sh");
+    fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)
+        .with_context(|| format!("failed to write {}", summary_path.display()))?;
+    fs::write(&report_path, report)
+        .with_context(|| format!("failed to write {}", report_path.display()))?;
+    fs::write(&script_path, script)
+        .with_context(|| format!("failed to write {}", script_path.display()))?;
+    let mut permissions = fs::metadata(&script_path)?.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions)
+            .with_context(|| format!("failed to chmod {}", script_path.display()))?;
+    }
+
+    println!("Amai external benchmark adapter workspace");
+    println!();
+    println!("Benchmark: {} ({})", benchmark.display_name, benchmark_code);
+    println!("Dataset: {} ({})", dataset.display_name, dataset_code);
+    println!("Статус: {}", adapter_status_label(status));
+    println!("Adapter kind: {}", adapter_kind);
+    println!("Output dir: {}", output_dir.display());
+    println!("Summary: {}", summary_path.display());
+    println!("Report: {}", report_path.display());
+    println!("Run script: {}", script_path.display());
+    if status == AdapterStatus::BlockedDatasetMissing {
+        println!("Причина: dataset пока не скачан. Можно повторить с `--download-missing`.");
+    }
+    if status == AdapterStatus::BlockedConversionRequired {
+        println!(
+            "Причина: VectorDBBench custom dataset path требует Parquet bundle `train/test/neighbors`, а текущий dataset в HDF5. Runner уже materialized fail-closed и не притворяется прямой совместимостью."
+        );
+        if !dataset_path.exists() {
+            println!("Дополнительно: исходный HDF5 dataset тоже пока не скачан.");
+        }
+    }
+    println!();
+    println!("Сравнивать рядом с внутренним Amai contour:");
+    for command in comparison_commands {
+        println!("- {}", command);
+    }
+    Ok(())
+}
+
 fn ordered_benchmarks(registry: &ExternalBenchmarkFile) -> Vec<(&String, &ExternalBenchmarkEntry)> {
     let mut entries = registry.benchmarks.iter().collect::<Vec<_>>();
     entries.sort_by_key(|(code, entry)| (entry.order, *code));
@@ -330,6 +543,28 @@ fn ordered_datasets(catalog: &ExternalDatasetFile) -> Vec<(&String, &ExternalDat
     let mut entries = catalog.datasets.iter().collect::<Vec<_>>();
     entries.sort_by_key(|(code, entry)| (entry.order, *code));
     entries
+}
+
+fn resolve_dataset<'a>(
+    catalog: &'a ExternalDatasetFile,
+    dataset_query: &str,
+) -> Option<(&'a str, &'a ExternalDatasetEntry)> {
+    if let Some(entry) = catalog.datasets.get_key_value(dataset_query) {
+        return Some((entry.0.as_str(), entry.1));
+    }
+    let query = normalize_key(dataset_query);
+    catalog
+        .datasets
+        .iter()
+        .find(|(code, dataset)| {
+            normalize_key(code) == query
+                || normalize_key(&dataset.display_name) == query
+                || dataset
+                    .aliases
+                    .iter()
+                    .any(|alias| normalize_key(alias) == query)
+        })
+        .map(|(code, dataset)| (code.as_str(), dataset))
 }
 
 fn resolve_benchmark<'a>(
@@ -378,6 +613,148 @@ fn recommended_datasets<'a>(
         .collect::<Vec<_>>();
     entries.sort_by_key(|(code, entry)| (entry.order, *code));
     entries
+}
+
+fn build_launch_commands(
+    benchmark_code: &str,
+    upstream_dir: &Path,
+    dataset_path: &Path,
+    dataset: &ExternalDatasetEntry,
+) -> Vec<String> {
+    match benchmark_code {
+        "ann_benchmarks" => vec![
+            format!(
+                "git clone https://github.com/erikbern/ann-benchmarks.git {}",
+                upstream_dir.display()
+            ),
+            format!("cd {}", upstream_dir.display()),
+            format!(
+                "DATASET={} DISTANCE={} docker compose up --abort-on-container-exit",
+                dataset_path.display(),
+                dataset.distance
+            ),
+        ],
+        "vectordbbench" => vec![
+            format!(
+                "git clone https://github.com/zilliztech/VectorDBBench.git {}",
+                upstream_dir.display()
+            ),
+            format!("cd {}", upstream_dir.display()),
+            format!(
+                "# Сначала преобразовать {} в Parquet bundle: train.parquet / test.parquet / neighbors.parquet",
+                dataset_path.display()
+            ),
+            "docker compose up".to_owned(),
+        ],
+        _ => vec![format!(
+            "# launch contract not defined for {}",
+            benchmark_code
+        )],
+    }
+}
+
+fn adapter_status_code(status: AdapterStatus) -> &'static str {
+    match status {
+        AdapterStatus::Prepared => "prepared",
+        AdapterStatus::BlockedConversionRequired => "blocked_conversion_required",
+        AdapterStatus::BlockedDatasetMissing => "blocked_dataset_missing",
+    }
+}
+
+fn adapter_status_label(status: AdapterStatus) -> &'static str {
+    match status {
+        AdapterStatus::Prepared => "готов к следующему запуску",
+        AdapterStatus::BlockedConversionRequired => "нужна конвертация dataset",
+        AdapterStatus::BlockedDatasetMissing => "dataset ещё не скачан",
+    }
+}
+
+fn render_adapter_report(ctx: &AdapterRenderContext<'_>) -> String {
+    let captured_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!(
+        "# Amai External Adapter Report\n\n\
+captured_at_epoch_s: {captured_at}\n\n\
+## Benchmark\n\n\
+- code: `{benchmark_code}`\n\
+- name: `{benchmark_name}`\n\
+- type: `{benchmark_type}`\n\n\
+## Dataset\n\n\
+- code: `{dataset_code}`\n\
+- name: `{dataset_name}`\n\
+- format: `{dataset_family}`\n\
+- distance: `{dataset_distance}`\n\
+- dimensions: `{dataset_dimensions}`\n\
+- local path: `{dataset_path}`\n\n\
+## Adapter Status\n\n\
+- status: `{status_code}`\n\
+- label: {status_label}\n\
+- adapter_kind: `{adapter_kind}`\n\n\
+## Launch Commands\n\n\
+{launch_commands_block}\n\
+## Internal Amai Comparison Commands\n\n\
+{comparison_commands_block}\n",
+        benchmark_code = ctx.benchmark_code,
+        benchmark_name = ctx.benchmark.display_name,
+        benchmark_type = ctx.benchmark.benchmark_kind,
+        dataset_code = ctx.dataset_code,
+        dataset_name = ctx.dataset.display_name,
+        dataset_family = ctx.dataset.family,
+        dataset_distance = ctx.dataset.distance,
+        dataset_dimensions = ctx.dataset.dimensions,
+        dataset_path = ctx.dataset_path.display(),
+        status_code = adapter_status_code(ctx.status),
+        status_label = adapter_status_label(ctx.status),
+        adapter_kind = ctx.adapter_kind,
+        launch_commands_block = ctx
+            .launch_commands
+            .iter()
+            .map(|cmd| format!("- `{cmd}`\n"))
+            .collect::<String>(),
+        comparison_commands_block = ctx
+            .comparison_commands
+            .iter()
+            .map(|cmd| format!("- `{cmd}`\n"))
+            .collect::<String>(),
+    )
+}
+
+fn render_adapter_script(ctx: &AdapterRenderContext<'_>) -> String {
+    let body = if ctx.status == AdapterStatus::Prepared {
+        ctx.launch_commands
+            .iter()
+            .map(|line| format!("echo \"{}\"\n", shell_escape_echo(line)))
+            .collect::<String>()
+    } else if ctx.status == AdapterStatus::BlockedDatasetMissing {
+        format!(
+            "echo \"Dataset ещё не скачан: {}\"\nexit 2\n",
+            ctx.dataset_path.display()
+        )
+    } else {
+        format!(
+            "echo \"Для {} dataset {} пока не запускается напрямую: нужен Parquet bundle train/test/neighbors вместо HDF5.\"\n\
+echo \"Исходный файл: {}\"\n\
+echo \"Upstream repo: {}\"\n\
+exit 3\n",
+            ctx.benchmark.display_name,
+            ctx.dataset.display_name,
+            ctx.dataset_path.display(),
+            ctx.upstream_dir.display()
+        )
+    };
+    format!(
+        "#!/usr/bin/env bash\nset -euo pipefail\n\n# benchmark: {benchmark_code}\n# benchmark_name: {benchmark_name}\n# dataset: {dataset_name}\n# adapter_kind: {adapter_kind}\n\n{body}",
+        benchmark_code = ctx.benchmark_code,
+        benchmark_name = ctx.benchmark.display_name,
+        dataset_name = ctx.dataset.display_name,
+        adapter_kind = ctx.adapter_kind
+    )
+}
+
+fn shell_escape_echo(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn inspect_tool(tool: &str) -> ToolCheck {
@@ -492,12 +869,54 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+async fn download_dataset_file(dataset: &ExternalDatasetEntry, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio_fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let client = Client::new();
+    let response = client
+        .get(&dataset.download_url)
+        .send()
+        .await
+        .with_context(|| format!("failed to request {}", dataset.download_url))?
+        .error_for_status()
+        .with_context(|| format!("download failed for {}", dataset.download_url))?;
+    let temp_path = path.with_extension("part");
+    let mut file = tokio_fs::File::create(&temp_path)
+        .await
+        .with_context(|| format!("failed to create {}", temp_path.display()))?;
+    let mut response = response;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .with_context(|| format!("failed while streaming {}", dataset.download_url))?
+    {
+        file.write_all(&chunk)
+            .await
+            .with_context(|| format!("failed to write {}", temp_path.display()))?;
+    }
+    file.flush()
+        .await
+        .with_context(|| format!("failed to flush {}", temp_path.display()))?;
+    drop(file);
+    tokio_fs::rename(&temp_path, path).await.with_context(|| {
+        format!(
+            "failed to rename {} -> {}",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ExternalBenchmarkEntry, ExternalBenchmarkFile, ExternalBenchmarkSource,
         ExternalDatasetEntry, ExternalDatasetFile, ExternalDatasetStorage, normalize_key,
-        ordered_benchmarks, recommended_datasets, resolve_benchmark,
+        ordered_benchmarks, recommended_datasets, resolve_benchmark, resolve_dataset,
     };
     use std::collections::BTreeMap;
 
@@ -531,6 +950,13 @@ mod tests {
         let datasets = recommended_datasets("ann_benchmarks", &catalog);
         assert_eq!(datasets.len(), 2);
         assert_eq!(datasets[0].0.as_str(), "dbpedia_openai_1000k_angular");
+    }
+
+    #[test]
+    fn resolve_dataset_accepts_aliases() {
+        let catalog = sample_catalog();
+        let (code, _) = resolve_dataset(&catalog, "sift").expect("alias");
+        assert_eq!(code, "sift_128_euclidean");
     }
 
     fn sample_registry() -> ExternalBenchmarkFile {

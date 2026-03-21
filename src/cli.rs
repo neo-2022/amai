@@ -77,7 +77,9 @@ pub enum BenchmarkCommand {
     ExternalCheck,
     ExternalExplain(BenchmarkArgs),
     ExternalDatasets,
+    ExternalDownload(BenchmarkDatasetArgs),
     ExternalPlan(BenchmarkArgs),
+    ExternalAdapter(BenchmarkExternalAdapterArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -174,6 +176,26 @@ pub enum McpCommand {
 pub struct BenchmarkArgs {
     #[arg(long)]
     pub benchmark: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchmarkDatasetArgs {
+    #[arg(long)]
+    pub dataset: Option<String>,
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BenchmarkExternalAdapterArgs {
+    #[arg(long)]
+    pub benchmark: String,
+    #[arg(long)]
+    pub dataset: String,
+    #[arg(long, default_value_t = false)]
+    pub download_missing: bool,
+    #[arg(long)]
+    pub output_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
