@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 13:12 MSK
-Ручная сверка guide/docs: 2026-03-21 13:12 MSK
+modified_at: 2026-03-21 13:24 MSK
+Ручная сверка guide/docs: 2026-03-21 13:24 MSK
 
 # Operations
 
@@ -223,10 +223,16 @@ cd /home/art/agent-memory-index
 ```bash
 ./scripts/chat_lookup.sh --project project_alpha --namespace continuity --chat-reference current --messages-count 2
 ./scripts/chat_lookup.sh --project project_alpha --namespace continuity --at-time-rfc3339 2026-03-21T11:41:00+03:00 --messages-count 2
+./scripts/chat_lookup.sh --project project_alpha --namespace continuity --question "на чем закончили в прошлом чате, какие последние два сообщения?"
 ```
 
 Это важный инвариант: `current / previous / exact time` идут одним temporal path, а не
 разными эвристическими обходами.
+
+Если передан `--question`, helper сам должен:
+- распознать `прошлый / текущий чат`;
+- нормализовать относительное время вроде `в прошлую среду в 12:00`;
+- извлечь желаемый хвост сообщений вроде `последние два сообщения`.
 
 Пример:
 

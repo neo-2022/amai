@@ -193,6 +193,8 @@ pub struct ContinuityStartupArgs {
 pub struct ContinuityAnswerArgs {
     #[command(flatten)]
     pub startup: ContinuityStartupArgs,
+    #[arg(long)]
+    pub question: Option<String>,
     #[arg(long, default_value = "last_chat")]
     pub intent: String,
     #[arg(

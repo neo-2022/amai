@@ -1,3 +1,4 @@
+use crate::chat_question;
 use crate::cli::{
     ContinuityAnswerArgs, ContinuityHandoffArgs, ContinuityImportArgs, ContinuityStartupArgs,
 };
@@ -514,76 +515,107 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
         .unwrap_or_else(|| continuity["active_workline_summary"]["details"].clone());
     let restore = working_state::build_restore_bundle(&db, &project, &namespace).await?;
     let current_thread_id = codex_threads::current_thread_id();
-    let wants_chat_lookup = args.include_chat_messages
-        || args.at_time_rfc3339.is_some()
-        || args.chat_reference.is_some()
-        || args.intent == "previous_chat"
-        || args.intent == "chat_at_time";
-    let chat_tail =
-        if wants_chat_lookup {
-            let thread_index_snapshots = postgres::list_observability_snapshots_by_kinds(
-                &db,
-                &["continuity_thread_index"],
-                Some(200),
-            )
-            .await?;
-            if let Some(at_time_rfc3339) = &args.at_time_rfc3339 {
-                codex_threads::chat_tail_at_time(
-                    &project.repo_root,
-                    at_time_rfc3339,
-                    args.messages_count,
-                )?
+    let parsed_question = args.question.as_deref().and_then(|question| {
+        chat_question::interpret(question, chat_question::current_local_now())
+    });
+    let intent = if args.intent != "last_chat" {
+        args.intent.clone()
+    } else {
+        parsed_question
+            .as_ref()
+            .map(|value| value.intent.clone())
+            .unwrap_or_else(|| args.intent.clone())
+    };
+    let messages_count = if args.messages_count != 2 {
+        args.messages_count
+    } else {
+        parsed_question
+            .as_ref()
+            .map(|value| value.messages_count)
+            .unwrap_or(args.messages_count)
+    };
+    let chat_reference = args.chat_reference.clone().or_else(|| {
+        parsed_question
+            .as_ref()
+            .and_then(|value| value.chat_reference.clone())
+    });
+    let at_time_rfc3339 = args.at_time_rfc3339.clone().or_else(|| {
+        parsed_question
+            .as_ref()
+            .and_then(|value| value.at_time_rfc3339.clone())
+    });
+    let include_chat_messages = if args.include_chat_messages {
+        true
+    } else {
+        parsed_question
+            .as_ref()
+            .map(|value| value.include_chat_messages)
+            .unwrap_or(false)
+    };
+    let wants_chat_lookup = include_chat_messages
+        || at_time_rfc3339.is_some()
+        || chat_reference.is_some()
+        || intent == "previous_chat"
+        || intent == "chat_at_time";
+    let chat_tail = if wants_chat_lookup {
+        let thread_index_snapshots = postgres::list_observability_snapshots_by_kinds(
+            &db,
+            &["continuity_thread_index"],
+            Some(200),
+        )
+        .await?;
+        if let Some(at_time_rfc3339) = &at_time_rfc3339 {
+            codex_threads::chat_tail_at_time(&project.repo_root, at_time_rfc3339, messages_count)?
                 .or(codex_threads::chat_tail_at_time_from_snapshots(
                     &thread_index_snapshots,
                     &project.code,
                     &namespace.code,
                     at_time_rfc3339,
-                    args.messages_count,
+                    messages_count,
                 )?)
-            } else {
-                let chat_reference =
-                    args.chat_reference
-                        .as_deref()
-                        .unwrap_or(if args.intent == "previous_chat" {
-                            "previous"
-                        } else {
-                            "current"
-                        });
-                match chat_reference {
-                    "previous" => {
-                        codex_threads::previous_chat_tail(&project.repo_root, args.messages_count)?
-                            .or(codex_threads::previous_chat_tail_from_snapshots(
-                                &thread_index_snapshots,
-                                &project.code,
-                                &namespace.code,
-                                current_thread_id.as_deref(),
-                                args.messages_count,
-                            ))
-                    }
-                    "current" => {
-                        codex_threads::current_chat_tail(&project.repo_root, args.messages_count)?
-                            .or(codex_threads::current_chat_tail_from_snapshots(
-                                &thread_index_snapshots,
-                                &project.code,
-                                &namespace.code,
-                                current_thread_id.as_deref(),
-                                args.messages_count,
-                            ))
-                    }
-                    _ => None,
-                }
-            }
         } else {
-            None
-        };
+            let chat_reference =
+                chat_reference
+                    .as_deref()
+                    .unwrap_or(if intent == "previous_chat" {
+                        "previous"
+                    } else {
+                        "current"
+                    });
+            match chat_reference {
+                "previous" => {
+                    codex_threads::previous_chat_tail(&project.repo_root, messages_count)?.or(
+                        codex_threads::previous_chat_tail_from_snapshots(
+                            &thread_index_snapshots,
+                            &project.code,
+                            &namespace.code,
+                            current_thread_id.as_deref(),
+                            messages_count,
+                        ),
+                    )
+                }
+                "current" => codex_threads::current_chat_tail(&project.repo_root, messages_count)?
+                    .or(codex_threads::current_chat_tail_from_snapshots(
+                        &thread_index_snapshots,
+                        &project.code,
+                        &namespace.code,
+                        current_thread_id.as_deref(),
+                        messages_count,
+                    )),
+                _ => None,
+            }
+        }
+    } else {
+        None
+    };
     println!(
         "{}",
         render_direct_answer(
             &handoff_summary,
             restore.as_ref(),
             chat_tail.as_ref(),
-            &args.intent,
-            args.at_time_rfc3339.as_deref(),
+            &intent,
+            at_time_rfc3339.as_deref(),
         )
     );
     Ok(())

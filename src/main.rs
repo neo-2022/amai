@@ -1,4 +1,5 @@
 mod bootstrap;
+mod chat_question;
 mod cli;
 mod codex_threads;
 mod compatibility;

@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 13:12 MSK
-Ручная сверка guide/docs: 2026-03-21 13:12 MSK
+modified_at: 2026-03-21 13:24 MSK
+Ручная сверка guide/docs: 2026-03-21 13:24 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -314,6 +314,8 @@ AMAI_AGENT_SCOPE=agent_beta  ./scripts/continuity_startup.sh --project art --nam
 ./scripts/chat_lookup.sh --project art --namespace continuity --chat-reference current --messages-count 2
 ./scripts/chat_lookup.sh --project art --namespace continuity --chat-reference previous --messages-count 2
 ./scripts/chat_lookup.sh --project art --namespace continuity --at-time-rfc3339 2026-03-21T11:41:00+03:00 --messages-count 2
+./scripts/chat_lookup.sh --project art --namespace continuity --question "на чем закончили в прошлом чате, какие последние два сообщения?"
+./scripts/chat_lookup.sh --project art --namespace continuity --question "о чем мы говорили в прошлую среду в 12:00?"
 ```
 
 Это один и тот же прямой путь для трёх случаев:
@@ -329,6 +331,14 @@ AMAI_AGENT_SCOPE=agent_beta  ./scripts/continuity_startup.sh --project art --nam
 вообще импортировано в continuity namespace. При refresh `Amai` отдельно втягивает machine-readable
 `thread_index.json`, чтобы иметь полный список chat threads и их временные метки, а уже full
 rendered transcripts можно ограничивать маленьким `transcript-limit` ради скорости и размера импорта.
+
+Для обычного человека это значит ещё проще:
+- можно не помнить флаги `--chat-reference` и `--at-time-rfc3339`;
+- достаточно передать сам живой вопрос через `--question`;
+- `Amai` сам извлечёт из него:
+  - текущий или прошлый чат;
+  - нужное время;
+  - сколько последних сообщений показать.
 
 ## Как смотреть пользу онлайн без терминала
 

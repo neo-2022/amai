@@ -6,7 +6,9 @@ cd "$(dirname "$0")/.."
 intent="last_chat"
 include_chat_messages=true
 include_flag_seen=false
+question_seen=false
 args=()
+freeform_question=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,15 +54,50 @@ while [[ $# -gt 0 ]]; do
       args+=("$1")
       shift
       ;;
-    *)
+    --question)
+      question_seen=true
+      args+=("$1" "$2")
+      shift 2
+      ;;
+    --question=*)
+      question_seen=true
       args+=("$1")
       shift
+      ;;
+    --project|--namespace|--repo-root|--messages-count)
+      args+=("$1" "$2")
+      shift 2
+      ;;
+    --project=*|--namespace=*|--repo-root=*|--messages-count=*)
+      args+=("$1")
+      shift
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        freeform_question+=("$1")
+        shift
+      done
+      ;;
+    *)
+      if [[ "$1" == -* ]]; then
+        args+=("$1")
+        shift
+      else
+        freeform_question+=("$1")
+        shift
+      fi
       ;;
   esac
 done
 
+if [[ ${#freeform_question[@]} -gt 0 && "$question_seen" == false ]]; then
+  args+=(--question "${freeform_question[*]}")
+  question_seen=true
+fi
+
 final_args=(cargo run --quiet -- continuity answer --intent "$intent")
-if [[ "$include_chat_messages" == true && "$include_flag_seen" == false ]]; then
+if [[ "$include_chat_messages" == true && "$include_flag_seen" == false && "$question_seen" == false ]]; then
   final_args+=(--include-chat-messages)
 fi
 final_args+=("${args[@]}")

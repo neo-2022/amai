@@ -129,7 +129,7 @@ pub fn previous_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTa
     let messages = extract_last_messages(&rendered_path, count)?;
     Ok(Some(ChatTail {
         thread_id: entry.thread_id,
-        title: entry.title,
+        title: sanitize_chat_title(&entry.title, &messages),
         messages,
     }))
 }
@@ -189,7 +189,7 @@ pub fn current_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTai
     let messages = extract_last_messages(&rendered_path, count)?;
     Ok(Some(ChatTail {
         thread_id: entry.thread_id,
-        title: entry.title,
+        title: sanitize_chat_title(&entry.title, &messages),
         messages,
     }))
 }
@@ -225,7 +225,7 @@ pub fn previous_chat_tail_from_snapshots(
         .unwrap_or_default();
     Some(ChatTail {
         thread_id: node["thread_id"].as_str().unwrap_or_default().to_string(),
-        title: node["title"].as_str().unwrap_or_default().to_string(),
+        title: sanitize_chat_title(node["title"].as_str().unwrap_or_default(), &messages),
         messages,
     })
 }
@@ -270,7 +270,7 @@ pub fn current_chat_tail_from_snapshots(
         .unwrap_or_default();
     Some(ChatTail {
         thread_id: node["thread_id"].as_str().unwrap_or_default().to_string(),
-        title: node["title"].as_str().unwrap_or_default().to_string(),
+        title: sanitize_chat_title(node["title"].as_str().unwrap_or_default(), &messages),
         messages,
     })
 }
@@ -355,14 +355,14 @@ pub fn chat_tail_at_time_from_snapshots(
     if let Some(messages) = snapshot_rollout_messages_at_time(node, target_epoch_s, count)? {
         return Ok(Some(ChatTail {
             thread_id: node["thread_id"].as_str().unwrap_or_default().to_string(),
-            title: node["title"].as_str().unwrap_or_default().to_string(),
+            title: sanitize_chat_title(node["title"].as_str().unwrap_or_default(), &messages),
             messages,
         }));
     }
     let messages = snapshot_messages(node, count).unwrap_or_default();
     Ok(Some(ChatTail {
         thread_id: node["thread_id"].as_str().unwrap_or_default().to_string(),
-        title: node["title"].as_str().unwrap_or_default().to_string(),
+        title: sanitize_chat_title(node["title"].as_str().unwrap_or_default(), &messages),
         messages,
     }))
 }
@@ -621,7 +621,7 @@ fn build_previous_chat_tail(
     let summary = rollout_summary_from_path(Path::new(rollout_path), count)?;
     Ok(ChatTail {
         thread_id: thread_id.to_string(),
-        title: title.to_string(),
+        title: sanitize_chat_title(title, &summary.tail_messages),
         messages: summary.tail_messages,
     })
 }
@@ -635,9 +635,36 @@ fn build_chat_tail_at_time(
         rollout_summary_from_path_at_time(Path::new(&record.rollout_path), target_epoch_s, count)?;
     Ok(ChatTail {
         thread_id: record.thread_id.clone(),
-        title: record.title.clone(),
+        title: sanitize_chat_title(&record.title, &summary.tail_messages),
         messages: summary.tail_messages,
     })
+}
+
+fn sanitize_chat_title(title: &str, messages: &[TranscriptMessage]) -> String {
+    let collapsed_title = collapse_text(title, 160);
+    if !looks_like_noisy_title(&collapsed_title) {
+        return collapsed_title;
+    }
+    let fallback = messages
+        .iter()
+        .find(|message| message.role == "user" && !message.text.trim().is_empty())
+        .map(|message| collapse_text(&message.text, 160))
+        .unwrap_or_default();
+    if fallback.is_empty() {
+        collapsed_title
+    } else {
+        fallback
+    }
+}
+
+fn looks_like_noisy_title(title: &str) -> bool {
+    let normalized = title.to_lowercase();
+    title.contains('\n')
+        || title.len() > 120
+        || normalized.starts_with("agents.md прочитан")
+        || normalized.starts_with("continue strictly")
+        || normalized.contains("перед любой содержательной работой")
+        || normalized.contains("<instructions>")
 }
 
 fn snapshot_messages(node: &Value, count: usize) -> Option<Vec<TranscriptMessage>> {
@@ -1570,5 +1597,38 @@ mod tests {
         assert_eq!(tail.messages[0].text, "старый вопрос");
         assert_eq!(tail.messages[1].role, "assistant");
         assert_eq!(tail.messages[1].text, "старый ответ");
+    }
+
+    #[test]
+    fn noisy_title_is_replaced_with_real_user_message() {
+        let snapshots = vec![ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::nil(),
+            snapshot_kind: "continuity_thread_index".to_string(),
+            created_at_epoch_ms: 1,
+            payload: json!({
+                "continuity_thread_index": {
+                    "project": {"code": "art"},
+                    "namespace": {"code": "continuity"},
+                    "thread_id": "thread-1",
+                    "title": "AGENTS.md прочитан.\nПродолжай строго из /home/art/Art",
+                    "created_at_epoch_s": 1_742_553_600,
+                    "updated_at_epoch_s": 1_742_553_660,
+                    "last_user_message": "о чем мы говорили?",
+                    "last_assistant_message": "про temporal lookup"
+                }
+            }),
+        }];
+
+        let tail = chat_tail_at_time_from_snapshots(
+            &snapshots,
+            "art",
+            "continuity",
+            "2025-03-04T12:01:00Z",
+            2,
+        )
+        .expect("tail result")
+        .expect("tail");
+
+        assert_eq!(tail.title, "о чем мы говорили?");
     }
 }
