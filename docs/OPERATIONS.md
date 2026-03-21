@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 18:45 MSK
-Ручная сверка guide/docs: 2026-03-21 18:45 MSK
+modified_at: 2026-03-21 19:11 MSK
+Ручная сверка guide/docs: 2026-03-21 19:11 MSK
 
 # Operations
 
@@ -1359,6 +1359,7 @@ Launcher human dashboard теперь:
 - пишет PID в `state/human_dashboard.pid`;
 - складывает лог в `tmp/human_dashboard.log`;
 - не требует держать терминал открытым только ради живой панели.
+- по умолчанию обновляет страницу раз в `1` секунду, чтобы live-картина была ближе к текущему состоянию.
 
 Встроенный exporter:
 
@@ -1409,18 +1410,28 @@ Grafana login берётся из `.env`:
   - текущее рабочее окно профиля;
   - всё время;
   - отдельный benchmark больше не подменяет собой третью карту.
-- верхние latency-карты human dashboard теперь тоже live-first, а не benchmark-first:
-  - `Retrieval mix сейчас`
-  - `Retrieval hot сейчас`
-  - `Retrieval cold сейчас`
-- крупное значение на такой карте означает текущий live latency-показатель;
-- подпись карты сразу показывает:
-  - `Max` в текущей сессии;
-  - `P50`
-  - `P95`
-  - `P99`
-  - `sample_count`
-  по этому же live-срезу.
+- human dashboard теперь жёстко разводит три источника:
+  - live поток текущей сессии;
+  - живые system probes;
+  - последний сохранённый benchmark;
+- верхние latency-карты human dashboard теперь live-first, а не benchmark-first:
+  - `Живой retrieval mix`
+  - `Живой hot retrieval`
+  - `Живой cold retrieval`
+- крупное значение на такой карте означает последнее живое измерение прямо сейчас;
+- статус такой карты считается по `live P95` этой же выборки, а не по чужому benchmark-layer;
+- внутри карты теперь отдельными строками сразу показываются:
+  - `Эталон`;
+  - `Сейчас`;
+  - `P99`;
+  - `Max`;
+  - `sample_count`;
+- benchmark-карты отдельно показывают:
+  - `Эталон / Сейчас`;
+  - покрытие выборки;
+  - `repo_count`;
+  - `query_slice_count`;
+- спецтермины и англицизмы на human dashboard теперь имеют русскую подсказку по `?` при наведении.
 - runtime scrape targets и monitoring ports не должны быть вшиты в конфиг как абсолютные литералы;
 - поэтому monitoring profile рендерится из `.env` перед `docker compose --profile monitoring up`.
 - token-economy metrics тоже приходят в exporter:

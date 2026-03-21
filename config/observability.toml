@@ -1,12 +1,12 @@
-modified_at = "2026-03-21 02:00 MSK"
-"Ручная сверка guide/docs" = "2026-03-21 02:00 MSK"
+modified_at = "2026-03-21 19:11 MSK"
+"Ручная сверка guide/docs" = "2026-03-21 19:11 MSK"
 
 [snapshot]
 postgres_query_probe_iterations = 20
 nats_publish_probe_iterations = 20
 
 [dashboard]
-refresh_ms = 5000
+refresh_ms = 1000
 
 [postgres]
 target_connection_usage_ratio = 0.80

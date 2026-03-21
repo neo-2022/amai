@@ -8,6 +8,8 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use sysinfo::{Disks, System};
+use time::macros::format_description;
+use time::{OffsetDateTime, UtcOffset};
 
 #[derive(Debug, Clone, Deserialize)]
 struct InstallState {
@@ -323,6 +325,96 @@ pub fn render_html(refresh_ms: u64) -> String {
       line-height: 1.5;
     }
 
+    .card-source {
+      margin-top: 8px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .metric-rows {
+      margin: 14px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 8px;
+    }
+
+    .metric-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      padding-top: 8px;
+      border-top: 1px solid var(--surface-border);
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .metric-row-value {
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.35;
+      font-weight: 700;
+      text-align: right;
+    }
+
+    .hint-anchor {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      border: 1px solid var(--surface-border);
+      background: var(--surface);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      cursor: help;
+      flex: 0 0 auto;
+    }
+
+    .hint-anchor::after {
+      content: attr(data-tip);
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 10px);
+      transform: translateX(-50%) translateY(4px);
+      min-width: 220px;
+      max-width: 320px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(8, 13, 17, 0.96);
+      color: #f7fafc;
+      font-size: 12px;
+      line-height: 1.45;
+      text-transform: none;
+      letter-spacing: normal;
+      white-space: normal;
+      opacity: 0;
+      pointer-events: none;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
+      transition: opacity 0.14s ease, transform 0.14s ease;
+      z-index: 20;
+    }
+
+    .hint-anchor:hover::after,
+    .hint-anchor:focus-visible::after {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
     .service-headline {
       margin: 0 0 10px;
       font-size: 22px;
@@ -419,10 +511,11 @@ pub fn render_html(refresh_ms: u64) -> String {
           <img class="brand-mark" src="/brand/amai_mark.svg" alt="Amai">
           <div class="eyebrow">Amai Human Dashboard</div>
         </div>
-        <h1>Amai: живая польза на одной странице.</h1>
+        <h1>Amai: понятная картина без гадания.</h1>
         <p class="lead">
-          Здесь сразу видно главное: сколько токенов уже сэкономлено, насколько быстро отвечает
-          <code>Amai</code>, не течёт ли один проект в другой и всё ли в порядке у внутренних сервисов.
+          Здесь каждая цифра подписана честно: это живой поток прямо сейчас, последний проверочный
+          прогон или текущий системный probe. Для каждой метрики есть <code>Эталон</code>,
+          <code>Сейчас</code> и объяснение, что именно она означает.
         </p>
         <div class="hero-cards" id="hero-cards"></div>
       </div>
@@ -440,30 +533,39 @@ pub fn render_html(refresh_ms: u64) -> String {
     </section>
 
     <section class="panel section">
-      <h2>Скорость и защита контекста</h2>
+      <h2>Живой Поток Сейчас</h2>
       <p class="muted">
-        Здесь собраны уже не общие слова, а рабочие инженерные цифры: быстрый повторный запрос,
-        первый запрос без прогрева и контроль того, что контекст одного проекта не протекает в другой.
+        Это именно текущая живая сессия. Здесь нет старых benchmark-цифр: только потоковые метрики,
+        которые меняются по мере новых запросов и автообновляются на странице.
       </p>
       <div class="cards" id="top-cards"></div>
     </section>
 
     <section class="panel section">
-      <h2>Машина и установка</h2>
+      <h2>Последние Проверочные Прогоны</h2>
       <p class="muted">
-        Этот блок нужен не для инженеров, а чтобы вы сразу видели: на каком железе сейчас всё
-        работает и к какому клиенту уже привязана установка.
+        Эти цифры не потоковые. Это последние сохранённые проверочные прогоны, которые нужны,
+        чтобы сравнивать систему с её целями на честных измерениях.
       </p>
-      <div class="cards" id="machine-cards"></div>
+      <div class="cards" id="benchmark-cards"></div>
     </section>
 
     <section class="panel section">
-      <h2>Внутренние сервисы</h2>
+      <h2>Сервисы Прямо Сейчас</h2>
       <p class="muted">
-        Ниже показано, что происходит внутри: база метаданных, семантический поиск, очередь
-        событий и точность изоляции.
+        Это живые системные показатели: база метаданных, векторный слой и очередь событий.
+        Если какая-то строка берётся не из live probe, а из последнего измеренного прогона,
+        это будет подписано явно.
       </p>
       <div class="cards" id="service-cards"></div>
+    </section>
+
+    <section class="panel section">
+      <h2>Машина И Установка</h2>
+      <p class="muted">
+        Здесь видно, на каком железе сейчас всё работает и к какому клиенту уже привязана установка.
+      </p>
+      <div class="cards" id="machine-cards"></div>
     </section>
 
     <section class="panel section">
@@ -472,7 +574,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     </section>
 
     <section class="panel section">
-      <h2>Что означают слова на этой странице</h2>
+      <h2>Что Означают Термины И Метрики</h2>
       <div class="cards" id="glossary-cards"></div>
     </section>
   </div>
@@ -498,6 +600,25 @@ pub fn render_html(refresh_ms: u64) -> String {
       }
       element.textContent = text;
       return element;
+    }
+
+    function helpBadge(tooltip) {
+      const badge = document.createElement("span");
+      badge.className = "hint-anchor";
+      badge.tabIndex = 0;
+      badge.setAttribute("data-tip", tooltip);
+      badge.textContent = "?";
+      return badge;
+    }
+
+    function labelWithTooltip(text, tooltip) {
+      const wrap = document.createElement("span");
+      wrap.className = "metric-label";
+      wrap.appendChild(textNode("span", "", text));
+      if (tooltip) {
+        wrap.appendChild(helpBadge(tooltip));
+      }
+      return wrap;
     }
 
     function renderSummary(meta, headline) {
@@ -555,13 +676,29 @@ pub fn render_html(refresh_ms: u64) -> String {
 
         const top = document.createElement("div");
         top.className = "card-top";
-        top.appendChild(textNode("p", "card-title", card.title));
+        top.appendChild(labelWithTooltip(card.title, card.title_tooltip));
         top.appendChild(textNode("div", `status-pill ${statusClass(card.status)}`, card.status_label));
         element.appendChild(top);
 
         const valueClass = kind === "service-card" ? "service-headline" : "card-value";
         element.appendChild(textNode("p", valueClass, card.value));
+        if (card.source_label) {
+          element.appendChild(textNode("p", "card-source", card.source_label));
+        }
         element.appendChild(textNode("p", "card-note", card.note));
+
+        if (card.rows && card.rows.length > 0) {
+          const list = document.createElement("ul");
+          list.className = "metric-rows";
+          card.rows.forEach((row) => {
+            const item = document.createElement("li");
+            item.className = "metric-row";
+            item.appendChild(labelWithTooltip(row.label, row.tooltip));
+            item.appendChild(textNode("span", "metric-row-value", row.value));
+            list.appendChild(item);
+          });
+          element.appendChild(list);
+        }
 
         if (card.details && card.details.length > 0) {
           const list = document.createElement("ul");
@@ -627,8 +764,9 @@ pub fn render_html(refresh_ms: u64) -> String {
         renderLinks(payload.links);
         renderCards("hero-cards", payload.hero_cards, "metric-card hero-metric-card");
         renderCards("top-cards", payload.top_cards, "metric-card");
-        renderCards("machine-cards", payload.machine_cards, "metric-card");
+        renderCards("benchmark-cards", payload.benchmark_cards, "metric-card");
         renderCards("service-cards", payload.service_cards, "service-card");
+        renderCards("machine-cards", payload.machine_cards, "metric-card");
         renderWarnings(payload.warnings);
         renderGlossary(payload.glossary);
       } catch (error) {
@@ -676,6 +814,7 @@ pub fn build_payload(
         "headline": build_headline(snapshot, captured_at_epoch_ms),
         "hero_cards": build_hero_cards(snapshot),
         "top_cards": build_top_cards(snapshot),
+        "benchmark_cards": build_benchmark_cards(snapshot),
         "machine_cards": build_machine_cards(machine.as_ref(), install_state.as_ref()),
         "service_cards": build_service_cards(snapshot),
         "warnings": build_warnings(snapshot),
@@ -715,32 +854,242 @@ fn build_top_cards(snapshot: &Value) -> Vec<Value> {
         live_latency_card(
             snapshot,
             "mixed",
-            "Retrieval mix сейчас",
-            "Это живая смешанная картина по последним Amai-запросам в текущей сессии. Крупное число на карточке — показатель прямо сейчас.",
-            worst_status(
-                status_for_metric_prefix(snapshot, "retrieval.hot"),
-                status_for_metric_prefix(snapshot, "retrieval.cold"),
+            "Живой retrieval mix",
+            Some(
+                "Смешанная задержка по последним живым запросам этой сессии. Здесь нет benchmark-цифр: это потоковая картина из реальных запросов, которые пришли уже после старта страницы.",
             ),
+            "Это живая смешанная картина по последним Amai-запросам в текущей сессии.",
         ),
         live_latency_card(
             snapshot,
             "hot",
-            "Retrieval hot сейчас",
-            "Это живые повторные запросы по уже прогретому кэшу. Крупное число на карточке — показатель прямо сейчас.",
-            status_for_metric_prefix(snapshot, "retrieval.hot"),
+            "Живой hot retrieval",
+            Some(
+                "Повторные запросы по уже прогретому кэшу. Это быстрый путь текущей сессии, а не отдельный stress/load benchmark.",
+            ),
+            "Это живые повторные запросы по уже прогретому кэшу.",
         ),
         live_latency_card(
             snapshot,
             "cold",
-            "Retrieval cold сейчас",
-            "Это живые запросы без готового fast-cache и без подмены component metrics. Крупное число на карточке — показатель прямо сейчас.",
-            status_for_metric_prefix(snapshot, "retrieval.cold"),
+            "Живой cold retrieval",
+            Some(
+                "Первый запрос без fast-cache внутри текущей сессии. Это живая оперативная метрика, а не последний сохранённый cold benchmark.",
+            ),
+            "Это живые запросы без готового fast-cache и без подмены component metrics.",
         ),
-        card(
-            "Cross-project leakage",
-            format_f64_count(snapshot["latest_retrieval_accuracy"]["accuracy_verification"]["cross_project_leakage"].as_f64()),
-            "Должно быть ровно 0. Иначе один проект начал подтекать в другой.".to_string(),
-            status_for_metric_prefix(snapshot, "accuracy.cross_project_leakage"),
+    ]
+}
+
+fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
+    let hot_load = &snapshot["latest_retrieval_load_hot"]["load_verification"];
+    let cold_contour = &snapshot["latest_cold_path_benchmark"]["cold_benchmark"];
+    let accuracy = &snapshot["latest_retrieval_accuracy"]["accuracy_verification"];
+    let thresholds = &snapshot["thresholds"];
+
+    vec![
+        card_with_rows(
+            "Последний hot stress-прогон",
+            format_optional(hot_load["qps"].as_f64(), |v| format!("{v:.2} qps")),
+            "Это не живой поток чата, а последний сохранённый нагрузочный прогон по горячему пути.".to_string(),
+            status_for_metric_prefix(snapshot, "load."),
+            Some(source_label(
+                "Источник: последний сохранённый load verification snapshot",
+                hot_load["captured_at_epoch_ms"].as_u64(),
+            )),
+            Some("QPS показывает, сколько запросов в секунду выдержал прогретый быстрый путь в отдельном нагрузочном прогоне.".to_string()),
+            vec![
+                metric_row(
+                    "Эталон QPS",
+                    format_optional(thresholds["load"]["hot_qps"]["target"].as_f64(), |v| format!("{v:.0} qps")),
+                    Some("Целевой минимум для отдельного горячего нагрузочного прогона."),
+                ),
+                metric_row(
+                    "Сейчас QPS",
+                    format_optional(hot_load["qps"].as_f64(), |v| format!("{v:.2} qps")),
+                    Some("Фактический результат последнего сохранённого hot stress-прогона."),
+                ),
+                metric_row(
+                    "Эталон hot P95",
+                    format_ms(thresholds["retrieval"]["hot_live_p95_ms"]["target"].as_f64()),
+                    Some("Stretch-goal для горячего p95: почти все быстрые повторные запросы должны укладываться в эту границу."),
+                ),
+                metric_row(
+                    "Сейчас hot P95",
+                    format_ms(hot_load["p95_ms"].as_f64()),
+                    Some("Фактический p95 последнего hot stress-прогона."),
+                ),
+                metric_row(
+                    "Эталон error rate",
+                    format_percent(thresholds["load"]["hot_error_rate"]["target"].as_f64()),
+                    Some("Под нагрузкой ошибки должны быть близки к нулю."),
+                ),
+                metric_row(
+                    "Сейчас error rate",
+                    format_percent(hot_load["error_rate"].as_f64()),
+                    Some("Доля ошибок в последнем сохранённом hot stress-прогоне."),
+                ),
+                metric_row(
+                    "Сейчас workers",
+                    format_u64(hot_load["workers"].as_u64()),
+                    Some("Сколько параллельных worker-ов участвовало в последнем hot stress-прогоне."),
+                ),
+                metric_row(
+                    "Сейчас выборка",
+                    format_u64(
+                        hot_load["success_count"]
+                            .as_u64()
+                            .zip(hot_load["error_count"].as_u64())
+                            .map(|(success, errors)| success + errors),
+                    ),
+                    Some("Сколько отдельных запросов вошло в последний hot stress-прогон."),
+                ),
+            ],
+        ),
+        card_with_rows(
+            "Последний cold contour",
+            format_ms(cold_contour["machine_readable_summary"]["p95"].as_f64()),
+            "Это последний честный end-to-end cold benchmark по реальным репозиториям и query slices.".to_string(),
+            cold_contour_status(snapshot),
+            Some(source_label(
+                "Источник: последний сохранённый end-to-end cold benchmark",
+                cold_contour["captured_at_epoch_ms"].as_u64(),
+            )),
+            Some("Cold contour меряет полный путь policy -> retrieval -> ranking -> pack assembly -> provenance -> orchestration.".to_string()),
+            vec![
+                metric_row(
+                    "Эталон cold P95",
+                    format_ms(cold_contour["profile"]["target_p95_ms"].as_f64()),
+                    Some("Цель для p95 в полном cold end-to-end пути."),
+                ),
+                metric_row(
+                    "Сейчас cold P95",
+                    format_ms(cold_contour["machine_readable_summary"]["p95"].as_f64()),
+                    Some("Фактический p95 последнего end-to-end cold benchmark."),
+                ),
+                metric_row(
+                    "Эталон cold P99",
+                    format_ms(cold_contour["profile"]["target_p99_ms"].as_f64()),
+                    Some("Цель для p99 в полном cold end-to-end пути."),
+                ),
+                metric_row(
+                    "Сейчас cold P99",
+                    format_ms(cold_contour["machine_readable_summary"]["p99"].as_f64()),
+                    Some("Фактический p99 последнего end-to-end cold benchmark."),
+                ),
+                metric_row(
+                    "Эталон cold Max",
+                    format_ms(cold_contour["profile"]["target_max_ms"].as_f64()),
+                    Some("Самый большой выброс в cold benchmark должен оставаться в этой границе."),
+                ),
+                metric_row(
+                    "Сейчас cold Max",
+                    format_ms(cold_contour["machine_readable_summary"]["max"].as_f64()),
+                    Some("Самый большой выброс в последнем cold benchmark."),
+                ),
+                metric_row(
+                    "Эталон precision",
+                    format_ratio_percent(cold_contour["profile"]["min_precision"].as_f64()),
+                    Some("Доля выданного контекста, которая оказалась релевантной."),
+                ),
+                metric_row(
+                    "Сейчас precision",
+                    format_ratio_percent(cold_contour["machine_readable_summary"]["precision"].as_f64()),
+                    Some("Фактическая точность последнего cold benchmark."),
+                ),
+                metric_row(
+                    "Эталон recall",
+                    format_ratio_percent(cold_contour["profile"]["min_recall"].as_f64()),
+                    Some("Насколько полно система нашла нужные целевые данные."),
+                ),
+                metric_row(
+                    "Сейчас recall",
+                    format_ratio_percent(cold_contour["machine_readable_summary"]["recall"].as_f64()),
+                    Some("Фактическая полнота последнего cold benchmark."),
+                ),
+                metric_row(
+                    "Эталон hit rate",
+                    format_ratio_percent(cold_contour["profile"]["min_target_hit_rate"].as_f64()),
+                    Some("Доля запросов, где система действительно попала в нужную цель."),
+                ),
+                metric_row(
+                    "Сейчас hit rate",
+                    format_ratio_percent(cold_contour["machine_readable_summary"]["hit_rate"].as_f64()),
+                    Some("Фактическая доля успешных попаданий в цели в последнем cold benchmark."),
+                ),
+                metric_row(
+                    "Сейчас выборка",
+                    format_u64(cold_contour["machine_readable_summary"]["sample_count"].as_u64()),
+                    Some("Сколько cold-запросов вошло в итоговый benchmark."),
+                ),
+                metric_row(
+                    "Сейчас repo count",
+                    format_u64(cold_contour["machine_readable_summary"]["repo_count"].as_u64()),
+                    Some("Сколько разных репозиториев вошло в последний cold benchmark."),
+                ),
+                metric_row(
+                    "Сейчас query slices",
+                    format_u64(cold_contour["machine_readable_summary"]["query_slice_count"].as_u64()),
+                    Some("Сколько разных типов запросов покрывает последний cold benchmark."),
+                ),
+                metric_row(
+                    "Сейчас duration",
+                    format_optional(
+                        cold_contour["machine_readable_summary"]["duration"].as_f64(),
+                        |value| format!("{value:.2} сек."),
+                    ),
+                    Some("Сколько длился полный последний cold benchmark."),
+                ),
+            ],
+        ),
+        card_with_rows(
+            "Последняя проверка точности и изоляции",
+            format_f64_count(accuracy["cross_project_leakage"].as_f64()),
+            "Этот блок не потоковый: он показывает последний сохранённый accuracy/isolation verification contour.".to_string(),
+            worst_status(
+                status_for_metric_prefix(snapshot, "accuracy.cross_project_leakage"),
+                worst_status(
+                    status_for_metric_prefix(snapshot, "accuracy.symbol_precision"),
+                    status_for_metric_prefix(snapshot, "accuracy.semantic_precision"),
+                ),
+            ),
+            Some(source_label(
+                "Источник: последний сохранённый retrieval accuracy verification",
+                accuracy["captured_at_epoch_ms"].as_u64(),
+            )),
+            Some("Проверка точности и изоляции показывает, не течёт ли один проект в другой и насколько точно Amai попадает в нужные символы и семантику.".to_string()),
+            vec![
+                metric_row(
+                    "Эталон leakage",
+                    "0".to_string(),
+                    Some("Для строгой проектной изоляции утечки между проектами должны быть равны нулю."),
+                ),
+                metric_row(
+                    "Сейчас leakage",
+                    format_f64_count(accuracy["cross_project_leakage"].as_f64()),
+                    Some("Фактическое число утечек между проектами в последнем verification contour."),
+                ),
+                metric_row(
+                    "Эталон symbol precision",
+                    format_ratio_percent(thresholds["accuracy"]["symbol_precision"]["target"].as_f64()),
+                    Some("Насколько точно retrieval попадает в нужные символы, функции и сущности."),
+                ),
+                metric_row(
+                    "Сейчас symbol precision",
+                    format_ratio_percent(accuracy["symbol_precision"].as_f64()),
+                    Some("Фактическая точность по символам в последнем verification contour."),
+                ),
+                metric_row(
+                    "Эталон semantic precision",
+                    format_ratio_percent(thresholds["accuracy"]["semantic_precision"]["target"].as_f64()),
+                    Some("Насколько точно семантический слой попадает в правильный контекст."),
+                ),
+                metric_row(
+                    "Сейчас semantic precision",
+                    format_ratio_percent(accuracy["semantic_precision"].as_f64()),
+                    Some("Фактическая семантическая точность в последнем verification contour."),
+                ),
+            ],
         ),
     ]
 }
@@ -940,140 +1289,140 @@ fn build_machine_cards(
 
 fn build_service_cards(snapshot: &Value) -> Vec<Value> {
     vec![
-        service_card(
+        card_with_rows(
             "PostgreSQL",
             format_ms(snapshot["postgres"]["query_probe_p95_ms"].as_f64()),
-            "Это база метаданных, policy, проектов и continuity-снимков.".to_string(),
-            status_for_metric_prefix(snapshot, "postgres."),
+            "Живой probe базы метаданных, policy, проектов и continuity-снимков.".to_string(),
+            combine_statuses(&[
+                status_for_metric_name(snapshot, "postgres.query_probe_p95_ms"),
+                status_for_metric_name(snapshot, "postgres.connection_usage_ratio"),
+                status_for_metric_name(snapshot, "postgres.replica_lag_seconds"),
+                status_for_metric_name(snapshot, "postgres.deadlocks_total"),
+            ]),
+            Some("Источник: живой PostgreSQL probe, обновляется на каждом refresh dashboard".to_string()),
+            Some("PostgreSQL probe — это короткий живой замер базы метаданных, а не исторический benchmark.".to_string()),
             vec![
-                format!(
-                    "Загрузка соединений: {}.",
-                    format_ratio_percent(snapshot["postgres"]["connection_usage_ratio"].as_f64())
+                metric_row(
+                    "Эталон probe P95",
+                    format_ms(snapshot["thresholds"]["postgres"]["query_probe_p95_ms"]["target"].as_f64()),
+                    Some("Целевой p95 для короткого живого PostgreSQL probe."),
                 ),
-                format!(
-                    "TPS между snapshot-ами: {}.",
-                    format_optional(snapshot["postgres"]["transactions_per_sec"].as_f64(), |v| format!("{v:.2}"))
+                metric_row(
+                    "Сейчас probe P95",
+                    format_ms(snapshot["postgres"]["query_probe_p95_ms"].as_f64()),
+                    Some("Фактический p95 живого PostgreSQL probe на этом refresh."),
                 ),
-                format!(
-                    "Deadlocks: {}.",
-                    format_f64_count(snapshot["postgres"]["deadlocks_total"].as_f64())
+                metric_row(
+                    "Эталон usage",
+                    format_ratio_percent(snapshot["thresholds"]["postgres"]["connection_usage_ratio"]["target"].as_f64()),
+                    Some("Желаемая доля занятых соединений PostgreSQL."),
                 ),
-                format!(
-                    "WAL throughput: {}.",
-                    format_optional(snapshot["postgres"]["wal_bytes_per_sec"].as_f64(), human_bytes_per_sec)
+                metric_row(
+                    "Сейчас usage",
+                    format_ratio_percent(snapshot["postgres"]["connection_usage_ratio"].as_f64()),
+                    Some("Фактическая доля занятых соединений прямо сейчас."),
+                ),
+                metric_row(
+                    "Сейчас TPS",
+                    format_optional(snapshot["postgres"]["transactions_per_sec"].as_f64(), |v| format!("{v:.2}")),
+                    Some("Сколько транзакций в секунду база делает между snapshot-ами."),
+                ),
+                metric_row(
+                    "Сейчас WAL throughput",
+                    format_optional(snapshot["postgres"]["wal_bytes_per_sec"].as_f64(), human_bytes_per_sec),
+                    Some("Скорость записи журнала WAL между snapshot-ами."),
                 ),
             ],
         ),
-        service_card(
+        card_with_rows(
             "Qdrant",
-            format_ms(snapshot["latest_retrieval_cold"]["retrieval_runtime"]["stage_p95_ms"]["semantic_search_ms"].as_f64()),
-            "Это семантический слой. Он ускоряет recall, но не заменяет source of truth.".to_string(),
-            status_for_metric_prefix(snapshot, "qdrant."),
+            format_optional(snapshot["qdrant"]["memory_resident_bytes"].as_f64(), human_bytes),
+            "Живые системные показатели векторного слоя. Здесь показаны только действительно живые системные числа, а не исторический search-benchmark.".to_string(),
+            combine_statuses(&[
+                status_for_metric_name(snapshot, "qdrant.index_optimize_queue"),
+                status_for_metric_name(snapshot, "qdrant.update_queue_length"),
+            ]),
+            Some("Источник: live Qdrant /metrics, обновляется на каждом refresh dashboard".to_string()),
+            Some("Qdrant — векторный слой. Он помогает recall, но не является source of truth для continuity или кода.".to_string()),
             vec![
-                format!(
-                    "Optimize queue: {}.",
-                    format_f64_count(snapshot["qdrant"]["index_optimize_queue"].as_f64())
+                metric_row(
+                    "Эталон optimize queue",
+                    format_f64_count(snapshot["thresholds"]["qdrant"]["optimize_queue"]["target"].as_f64()),
+                    Some("Целевой максимум очереди оптимизации индекса."),
                 ),
-                format!(
-                    "Update queue: {}.",
-                    format_f64_count(snapshot["qdrant"]["update_queue_length"].as_f64())
+                metric_row(
+                    "Сейчас optimize queue",
+                    format_f64_count(snapshot["qdrant"]["index_optimize_queue"].as_f64()),
+                    Some("Текущая очередь оптимизации индекса Qdrant."),
                 ),
-                format!(
-                    "Resident memory: {}.",
-                    format_optional(snapshot["qdrant"]["memory_resident_bytes"].as_f64(), human_bytes)
+                metric_row(
+                    "Эталон update queue",
+                    format_f64_count(snapshot["thresholds"]["qdrant"]["update_queue_length"]["target"].as_f64()),
+                    Some("Желаемая длина очереди обновлений Qdrant."),
+                ),
+                metric_row(
+                    "Сейчас update queue",
+                    format_f64_count(snapshot["qdrant"]["update_queue_length"].as_f64()),
+                    Some("Текущая длина очереди обновлений Qdrant."),
+                ),
+                metric_row(
+                    "Сейчас resident memory",
+                    format_optional(snapshot["qdrant"]["memory_resident_bytes"].as_f64(), human_bytes),
+                    Some("Объём памяти, который Qdrant держит в resident state прямо сейчас."),
+                ),
+                metric_row(
+                    "Сейчас points",
+                    format_f64_count(snapshot["qdrant"]["points_count"].as_f64()),
+                    Some("Сколько точек сейчас лежит в активной кодовой коллекции Qdrant."),
+                ),
+                metric_row(
+                    "Сейчас segments",
+                    format_f64_count(snapshot["qdrant"]["segments_count"].as_f64()),
+                    Some("Сколько сегментов сейчас держит Qdrant. Много мелких сегментов может быть признаком будущей оптимизации."),
                 ),
             ],
         ),
-        service_card(
+        card_with_rows(
             "NATS / JetStream",
             format_ms(snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
-            "Это event/work plane. Через него идут фоновые события и очереди, а не source of truth.".to_string(),
-            status_for_metric_prefix(snapshot, "nats."),
+            "Живой probe очереди событий и фонового work plane.".to_string(),
+            combine_statuses(&[
+                status_for_metric_name(snapshot, "nats.publish_probe_p95_ms"),
+                status_for_metric_name(snapshot, "nats.consumer_lag_msgs"),
+                status_for_metric_name(snapshot, "nats.jetstream_disk_usage_ratio"),
+            ]),
+            Some("Источник: живой NATS/JetStream probe, обновляется на каждом refresh dashboard".to_string()),
+            Some("NATS / JetStream — event и work plane для фоновых событий и очередей.".to_string()),
             vec![
-                format!(
-                    "Consumer lag: {}.",
-                    format_f64_count(snapshot["nats"]["consumer_lag_msgs"].as_f64())
+                metric_row(
+                    "Эталон publish P95",
+                    format_ms(snapshot["thresholds"]["nats"]["publish_probe_p95_ms"]["target"].as_f64()),
+                    Some("Целевой p95 для живого publish probe."),
                 ),
-                format!(
-                    "JetStream disk usage: {}.",
-                    format_ratio_percent(snapshot["nats"]["jetstream_disk_usage_ratio"].as_f64())
+                metric_row(
+                    "Сейчас publish P95",
+                    format_ms(snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
+                    Some("Фактический p95 для живого publish probe на этом refresh."),
                 ),
-                format!(
-                    "Connections: {}.",
-                    format_f64_count(snapshot["nats"]["connections"].as_f64())
+                metric_row(
+                    "Эталон lag",
+                    format_f64_count(snapshot["thresholds"]["nats"]["consumer_lag_msgs"]["target"].as_f64()),
+                    Some("Желаемый максимум непрочитанных сообщений."),
                 ),
-            ],
-        ),
-        service_card(
-            "Точность и изоляция",
-            format_ratio_percent(snapshot["latest_retrieval_accuracy"]["accuracy_verification"]["symbol_precision"].as_f64()),
-            "Этот блок отвечает на главный вопрос: не течёт ли один проект в другой и насколько надёжно Amai попадает в нужный код.".to_string(),
-            worst_status(
-                status_for_metric_prefix(snapshot, "parser."),
-                status_for_metric_prefix(snapshot, "accuracy."),
-            ),
-            vec![
-                format!(
-                    "Cross-project leakage: {}.",
-                    format_f64_count(snapshot["latest_retrieval_accuracy"]["accuracy_verification"]["cross_project_leakage"].as_f64())
+                metric_row(
+                    "Сейчас lag",
+                    format_f64_count(snapshot["nats"]["consumer_lag_msgs"].as_f64()),
+                    Some("Текущая consumer lag в JetStream."),
                 ),
-                format!(
-                    "Semantic precision: {}.",
-                    format_ratio_percent(snapshot["latest_retrieval_accuracy"]["accuracy_verification"]["semantic_precision"].as_f64())
+                metric_row(
+                    "Эталон disk usage",
+                    format_ratio_percent(snapshot["thresholds"]["nats"]["jetstream_disk_usage_ratio"]["target"].as_f64()),
+                    Some("Желаемая доля занятого диска JetStream."),
                 ),
-                format!(
-                    "Parser coverage: {}.",
-                    format_ratio_percent(snapshot["latest_index_project"]["index_project"]["parser_coverage_ratio"].as_f64())
-                ),
-            ],
-        ),
-        service_card(
-            "Нагрузка",
-            format_optional(snapshot["latest_retrieval_load_hot"]["load_verification"]["qps"].as_f64(), |v| format!("{v:.2} qps")),
-            "Здесь видно, выдерживает ли прогретый быстрый путь реальную конкуренцию, а не один удачный запрос.".to_string(),
-            status_for_metric_prefix(snapshot, "load."),
-            vec![
-                format!(
-                    "Hot error rate: {}.",
-                    format_percent(snapshot["latest_retrieval_load_hot"]["load_verification"]["error_rate"].as_f64())
-                ),
-                format!(
-                    "Cold retrieval p95: {}.",
-                    format_ms(snapshot["latest_retrieval_cold"]["benchmark"]["p95_ms"].as_f64())
-                ),
-                format!(
-                    "Hot retrieval p95: {}.",
-                    format_ms(snapshot["latest_retrieval_hot"]["benchmark"]["p95_ms"].as_f64())
-                ),
-            ],
-        ),
-        service_card(
-            "Cold contour",
-            snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["executive_summary"]["verdict"]
-                .as_str()
-                .unwrap_or("ещё нет данных")
-                .to_string(),
-            "Это последний честный end-to-end cold benchmark по реальным репозиториям и query slices, а не component-only latency.".to_string(),
-            cold_contour_status(snapshot),
-            vec![
-                format!(
-                    "P50 / P95 / P99 / Max: {} / {} / {} / {}.",
-                    format_ms(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["p50"].as_f64()),
-                    format_ms(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["p95"].as_f64()),
-                    format_ms(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["p99"].as_f64()),
-                    format_ms(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["max"].as_f64()),
-                ),
-                format!(
-                    "Precision / Recall / Hit rate: {} / {} / {}.",
-                    format_ratio_percent(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["precision"].as_f64()),
-                    format_ratio_percent(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["recall"].as_f64()),
-                    format_ratio_percent(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["hit_rate"].as_f64()),
-                ),
-                format!(
-                    "Repo count / query slices / samples: {} / {} / {}.",
-                    format_u64(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["repo_count"].as_u64()),
-                    format_u64(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["query_slice_count"].as_u64()),
-                    format_u64(snapshot["latest_cold_path_benchmark"]["cold_benchmark"]["machine_readable_summary"]["sample_count"].as_u64()),
+                metric_row(
+                    "Сейчас disk usage",
+                    format_ratio_percent(snapshot["nats"]["jetstream_disk_usage_ratio"].as_f64()),
+                    Some("Текущая доля занятого диска JetStream."),
                 ),
             ],
         ),
@@ -1104,16 +1453,52 @@ fn build_glossary() -> Vec<Value> {
             "meaning": "Первый запрос после старта или без прогрева. Он всегда тяжелее и поэтому медленнее."
         }),
         json!({
+            "term": "P50 / P95 / P99 / Max",
+            "meaning": "P50 — середина выборки. P95 — почти все запросы, кроме тяжёлого хвоста. P99 — ещё более строгий хвост. Max — самый тяжёлый одиночный выброс."
+        }),
+        json!({
+            "term": "QPS",
+            "meaning": "Сколько запросов в секунду выдержала система в отдельном нагрузочном прогоне. Это не live поток страницы, а результат последнего benchmark."
+        }),
+        json!({
+            "term": "Recall",
+            "meaning": "Насколько полно система нашла всё нужное. Если recall низкий, часть правильного ответа просто не была найдена."
+        }),
+        json!({
+            "term": "Precision",
+            "meaning": "Насколько чисто система попала в нужный контекст. Если precision низкий, система тянет лишнее и шумное."
+        }),
+        json!({
+            "term": "Hit rate",
+            "meaning": "Доля запросов, где Amai реально попал в нужную цель: файл, символ, документ или нужный фрагмент контекста."
+        }),
+        json!({
+            "term": "Fallback rate",
+            "meaning": "Как часто системе пришлось отходить на запасной путь, потому что основной retrieval или ranking не справился сам."
+        }),
+        json!({
             "term": "Cross-project leakage",
             "meaning": "Случай, когда контекст одного проекта просочился в другой. Для строгого режима это должно быть только 0."
         }),
         json!({
-            "term": "Parser coverage",
-            "meaning": "Насколько код был разобран структурно через AST, а не грубым текстовым fallback-поиском."
+            "term": "Live probe",
+            "meaning": "Короткий живой системный замер, который пересчитывается прямо при refresh панели. Это не исторический snapshot и не benchmark."
+        }),
+        json!({
+            "term": "Cold contour",
+            "meaning": "Честный end-to-end cold benchmark: policy, retrieval, ranking, pack assembly, provenance и orchestration вместе, а не по отдельности."
+        }),
+        json!({
+            "term": "Resident memory",
+            "meaning": "Объём памяти, который сервис реально держит в RAM прямо сейчас, а не просто зарезервировал теоретически."
+        }),
+        json!({
+            "term": "Semantic search",
+            "meaning": "Поиск по смысловой близости, а не по точному совпадению слов. Полезен для recall, но не заменяет lexical/source-of-truth слой."
         }),
         json!({
             "term": "Token savings",
-            "meaning": "Сколько токенов Amai сэкономил по сравнению с наивной подачей слишком большого объёма контекста."
+            "meaning": "Сколько токенов Amai сэкономил по сравнению с реалистичным baseline-путём без потери качества."
         }),
         json!({
             "term": "SLA summary",
@@ -1288,63 +1673,98 @@ fn disk_available_for_path(disks: &Disks, path: &Path) -> Option<u64> {
 }
 
 fn card(title: &str, value: String, note: String, status: &str) -> Value {
-    json!({
-        "title": title,
-        "value": value,
-        "note": note,
-        "status": status,
-        "status_label": status_label(status),
-    })
+    card_with_rows(title, value, note, status, None, None, Vec::new())
 }
 
 fn live_latency_card(
     snapshot: &Value,
     state: &str,
     title: &str,
+    title_tooltip: Option<&str>,
     intro: &str,
-    fallback_status: &str,
 ) -> Value {
     let Some(slice) = latency_slice(snapshot, state) else {
-        return card(
+        return card_with_rows(
             title,
             "ещё нет данных".to_string(),
             format!("{intro} В текущей сессии Amai ещё не накопил живую выборку этого типа."),
             "unknown",
+            Some("Источник: живая выборка текущей сессии".to_string()),
+            title_tooltip.map(str::to_string),
+            Vec::new(),
         );
     };
 
     let sample_count = slice["sample_count"].as_u64().unwrap_or(0);
     if sample_count == 0 {
-        return card(
+        return card_with_rows(
             title,
             "ещё нет данных".to_string(),
             format!("{intro} В текущей сессии Amai ещё не накопил живую выборку этого типа."),
             "unknown",
+            Some("Источник: живая выборка текущей сессии".to_string()),
+            title_tooltip.map(str::to_string),
+            Vec::new(),
         );
     }
 
-    card(
+    let (target, alert, critical) = live_latency_thresholds(snapshot, state);
+    let p95 = slice["p95_latency_ms"].as_f64();
+    card_with_rows(
         title,
         format_ms(slice["current_latency_ms"].as_f64()),
         format!(
-            "{} Максимум в этой сессии: {}. Выборка: {}. P50: {}. P95: {}. P99: {}.",
-            intro,
-            format_ms(slice["max_latency_ms"].as_f64()),
-            format_u64(Some(sample_count)),
-            format_ms(slice["p50_latency_ms"].as_f64()),
-            format_ms(slice["p95_latency_ms"].as_f64()),
-            format_ms(slice["p99_latency_ms"].as_f64()),
+            "{} Крупное число на карточке — последнее измерение прямо сейчас. Статус карточки считается по live P95 этой же выборки, а не по чужому benchmark-слою.",
+            intro
         ),
-        fallback_status,
+        status_from_threshold(p95, target, alert, critical),
+        Some("Источник: живая выборка текущей сессии, обновляется при новых запросах".to_string()),
+        title_tooltip.map(str::to_string),
+        vec![
+            metric_row(
+                "Эталон live P95",
+                format_ms(Some(target)),
+                Some(
+                    "Целевая граница для живой текущей выборки. Для hot она строже, для mix/cold — ближе к общему retrieval SLA.",
+                ),
+            ),
+            metric_row(
+                "Сейчас live P95",
+                format_ms(slice["p95_latency_ms"].as_f64()),
+                Some("Почти весь живой хвост текущей выборки этой сессии."),
+            ),
+            metric_row(
+                "Сейчас live P99",
+                format_ms(slice["p99_latency_ms"].as_f64()),
+                Some("Ещё более строгий хвост текущей живой выборки."),
+            ),
+            metric_row(
+                "Сейчас live Max",
+                format_ms(slice["max_latency_ms"].as_f64()),
+                Some("Самый тяжёлый одиночный запрос внутри текущей живой выборки."),
+            ),
+            metric_row(
+                "Сейчас последнее измерение",
+                format_ms(slice["current_latency_ms"].as_f64()),
+                Some("Последний фактически пришедший запрос этого типа."),
+            ),
+            metric_row(
+                "Сейчас выборка",
+                format_u64(Some(sample_count)),
+                Some("Сколько живых запросов этого типа уже вошло в расчёт текущей сессии."),
+            ),
+        ],
     )
 }
 
-fn service_card(
+fn card_with_rows(
     title: &str,
     value: String,
     note: String,
     status: &str,
-    details: Vec<String>,
+    source_label: Option<String>,
+    title_tooltip: Option<String>,
+    rows: Vec<Value>,
 ) -> Value {
     json!({
         "title": title,
@@ -1352,7 +1772,17 @@ fn service_card(
         "note": note,
         "status": status,
         "status_label": status_label(status),
-        "details": details,
+        "source_label": source_label,
+        "title_tooltip": title_tooltip,
+        "rows": rows,
+    })
+}
+
+fn metric_row(label: &str, value: String, tooltip: Option<&str>) -> Value {
+    json!({
+        "label": label,
+        "value": value,
+        "tooltip": tooltip,
     })
 }
 
@@ -1362,6 +1792,38 @@ fn status_label(status: &str) -> &'static str {
         "alert" => "внимание",
         "critical" => "критично",
         _ => "нет данных",
+    }
+}
+
+fn live_latency_thresholds(snapshot: &Value, state: &str) -> (f64, f64, f64) {
+    let key = if state == "hot" {
+        "hot_live_p95_ms"
+    } else {
+        "cold_live_p95_ms"
+    };
+    let thresholds = &snapshot["thresholds"]["retrieval"][key];
+    (
+        thresholds["target"].as_f64().unwrap_or(0.0),
+        thresholds["alert"].as_f64().unwrap_or(f64::INFINITY),
+        thresholds["critical"].as_f64().unwrap_or(f64::INFINITY),
+    )
+}
+
+fn status_from_threshold(
+    value: Option<f64>,
+    target: f64,
+    alert: f64,
+    _critical: f64,
+) -> &'static str {
+    let Some(value) = value else {
+        return "unknown";
+    };
+    if value <= target {
+        "pass"
+    } else if value <= alert {
+        "alert"
+    } else {
+        "critical"
     }
 }
 
@@ -1434,6 +1896,36 @@ fn status_for_metric_prefix(snapshot: &Value, prefix: &str) -> &'static str {
         });
     }
     current.unwrap_or("unknown")
+}
+
+fn status_for_metric_name(snapshot: &Value, metric_name: &str) -> &'static str {
+    snapshot["sla"]["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|check| check["metric"].as_str() == Some(metric_name))
+        .and_then(|check| check["status"].as_str())
+        .and_then(normalize_status)
+        .unwrap_or("unknown")
+}
+
+fn combine_statuses(statuses: &[&str]) -> &'static str {
+    statuses
+        .iter()
+        .copied()
+        .filter_map(normalize_status)
+        .reduce(worst_status)
+        .unwrap_or("unknown")
+}
+
+fn normalize_status(status: &str) -> Option<&'static str> {
+    match status {
+        "pass" => Some("pass"),
+        "alert" => Some("alert"),
+        "critical" => Some("critical"),
+        "unknown" => Some("unknown"),
+        _ => None,
+    }
 }
 
 fn worst_status(left: &str, right: &str) -> &'static str {
@@ -1511,15 +2003,32 @@ fn human_timestamp(epoch_ms: u64) -> String {
     if epoch_ms == 0 {
         return "ещё нет данных".to_string();
     }
-    let secs = epoch_ms / 1000;
-    format!("epoch {secs}")
+    let nanos = (epoch_ms as i128) * 1_000_000;
+    let Ok(offset) = UtcOffset::from_hms(3, 0, 0) else {
+        return "ещё нет данных".to_string();
+    };
+    let Ok(datetime) = OffsetDateTime::from_unix_timestamp_nanos(nanos) else {
+        return "ещё нет данных".to_string();
+    };
+    let format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second] MSK");
+    datetime
+        .to_offset(offset)
+        .format(&format)
+        .unwrap_or_else(|_| "ещё нет данных".to_string())
 }
 
 fn human_epoch_seconds(epoch_seconds: u64) -> String {
     if epoch_seconds == 0 {
         return "ещё нет данных".to_string();
     }
-    format!("epoch {epoch_seconds}")
+    human_timestamp(epoch_seconds.saturating_mul(1000))
+}
+
+fn source_label(prefix: &str, epoch_ms: Option<u64>) -> String {
+    match epoch_ms.filter(|value| *value > 0) {
+        Some(epoch_ms) => format!("{prefix}. Измерено: {}.", human_timestamp(epoch_ms)),
+        None => prefix.to_string(),
+    }
 }
 
 fn client_display_name(key: &str) -> &str {

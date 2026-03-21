@@ -230,6 +230,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
     let payload = json!({
         "captured_at_epoch_ms": captured_at_epoch_ms,
         "stack_name": cfg.stack_name,
+        "thresholds": profile_thresholds_json(&profile),
         "postgres": with_postgres_rates(&postgres_live, previous.as_ref()),
         "qdrant": qdrant_live,
         "nats": nats_live,
@@ -249,6 +250,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
     let snapshot = json!({
         "captured_at_epoch_ms": captured_at_epoch_ms,
         "stack_name": cfg.stack_name,
+        "thresholds": payload["thresholds"].clone(),
         "postgres": payload["postgres"].clone(),
         "qdrant": payload["qdrant"].clone(),
         "nats": payload["nats"].clone(),
@@ -269,6 +271,101 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         let _ = postgres::insert_observability_snapshot(&db, "system_snapshot", &snapshot).await?;
     }
     Ok(snapshot)
+}
+
+fn profile_thresholds_json(profile: &ObservabilityProfile) -> Value {
+    json!({
+        "postgres": {
+            "query_probe_p95_ms": {
+                "target": profile.postgres.target_query_probe_p95_ms,
+                "alert": profile.postgres.alert_query_probe_p95_ms,
+                "critical": profile.postgres.critical_query_probe_p95_ms,
+            },
+            "connection_usage_ratio": {
+                "target": profile.postgres.target_connection_usage_ratio,
+                "alert": profile.postgres.alert_connection_usage_ratio,
+                "critical": profile.postgres.critical_connection_usage_ratio,
+            },
+        },
+        "qdrant": {
+            "optimize_queue": {
+                "target": profile.qdrant.target_index_optimize_queue,
+                "alert": profile.qdrant.alert_index_optimize_queue,
+                "critical": profile.qdrant.critical_index_optimize_queue,
+            },
+            "update_queue_length": {
+                "target": profile.qdrant.target_update_queue_length,
+                "alert": profile.qdrant.alert_update_queue_length,
+                "critical": profile.qdrant.critical_update_queue_length,
+            },
+            "search_p95_ms": {
+                "target": profile.qdrant.target_search_p95_ms,
+                "alert": profile.qdrant.alert_search_p95_ms,
+                "critical": profile.qdrant.critical_search_p95_ms,
+            },
+        },
+        "nats": {
+            "publish_probe_p95_ms": {
+                "target": profile.nats.target_publish_p95_ms,
+                "alert": profile.nats.alert_publish_p95_ms,
+                "critical": profile.nats.critical_publish_p95_ms,
+            },
+            "consumer_lag_msgs": {
+                "target": profile.nats.target_consumer_lag_msgs,
+                "alert": profile.nats.alert_consumer_lag_msgs,
+                "critical": profile.nats.critical_consumer_lag_msgs,
+            },
+            "jetstream_disk_usage_ratio": {
+                "target": profile.nats.target_jetstream_disk_usage_ratio,
+                "alert": profile.nats.alert_jetstream_disk_usage_ratio,
+                "critical": profile.nats.critical_jetstream_disk_usage_ratio,
+            },
+        },
+        "retrieval": {
+            "cold_live_p95_ms": {
+                "target": profile.retrieval.target_p95_ms,
+                "alert": profile.retrieval.alert_p95_ms,
+                "critical": profile.retrieval.critical_p95_ms,
+            },
+            "hot_live_p95_ms": {
+                "target": profile.retrieval.stretch_hot_p95_ms,
+                "alert": profile.retrieval.target_p95_ms,
+                "critical": profile.retrieval.alert_p95_ms,
+            },
+        },
+        "accuracy": {
+            "symbol_precision": {
+                "target": profile.accuracy.target_symbol_precision,
+                "alert": profile.accuracy.alert_symbol_precision,
+                "critical": profile.accuracy.critical_symbol_precision,
+            },
+            "semantic_precision": {
+                "target": profile.accuracy.target_semantic_precision,
+                "alert": profile.accuracy.alert_semantic_precision,
+                "critical": profile.accuracy.critical_semantic_precision,
+            },
+            "cross_project_leakage": {
+                "target": 0.0,
+                "alert": 0.0,
+                "critical": 0.0,
+            },
+        },
+        "load": {
+            "hot_qps": {
+                "target": profile.load.target_hot_qps,
+                "alert": profile.load.alert_hot_qps,
+                "critical": profile.load.critical_hot_qps,
+            },
+            "hot_error_rate": {
+                "target": profile.load.target_hot_error_rate,
+                "alert": profile.load.alert_hot_error_rate,
+                "critical": profile.load.critical_hot_error_rate,
+            },
+        },
+        "dashboard": {
+            "refresh_ms": profile.dashboard.refresh_ms,
+        },
+    })
 }
 
 async fn metrics_handler(State(state): State<ObserveState>) -> impl IntoResponse {
