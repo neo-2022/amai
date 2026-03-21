@@ -360,7 +360,7 @@ fn compose_restore_bundle(
         if is_meta_continuity_event(event) {
             continue;
         }
-        collect_unique_strings(&mut active_files, &event["active_files"]);
+        collect_active_files(&mut active_files, &event["active_files"]);
         collect_unique_strings(&mut visible_projects, &event["visible_projects"]);
         if let Some(query) = event["query"].as_str().filter(|value| !value.is_empty()) {
             push_unique(&mut recent_queries, query.to_string());
@@ -723,7 +723,10 @@ fn extract_paths_from_text(text: &str) -> Vec<String> {
     for token in text.split_whitespace() {
         let cleaned = token
             .trim_matches(|ch: char| {
-                matches!(ch, '(' | ')' | '[' | ']' | '"' | '\'' | ',' | ';' | '`' | '|')
+                matches!(
+                    ch,
+                    '(' | ')' | '[' | ']' | '"' | '\'' | ',' | ';' | '`' | '|'
+                )
             })
             .trim_end_matches(['.', ':', '`', '|']);
         if cleaned.starts_with("/home/") {
@@ -845,6 +848,21 @@ fn collect_unique_strings(target: &mut Vec<String>, value: &Value) {
     }
 }
 
+fn collect_active_files(target: &mut Vec<String>, value: &Value) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    for item in items {
+        if let Some(text) = item
+            .as_str()
+            .map(normalize_recorded_path)
+            .filter(|text| !text.is_empty())
+        {
+            push_unique(target, text);
+        }
+    }
+}
+
 fn collect_open_questions(target: &mut Vec<String>, value: &Value) {
     let Some(items) = value.as_array() else {
         return;
@@ -858,6 +876,20 @@ fn collect_open_questions(target: &mut Vec<String>, value: &Value) {
             push_unique(target, text.to_string());
         }
     }
+}
+
+fn normalize_recorded_path(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '(' | ')' | '[' | ']' | '"' | '\'' | ',' | ';' | '`' | '|'
+            )
+        })
+        .trim_end_matches(['.', ':', '`', '|'])
+        .trim()
+        .to_string()
 }
 
 fn collect_materialized_notes(target: &mut Vec<String>, value: &Value) {
@@ -999,6 +1031,14 @@ mod tests {
             paths
                 .iter()
                 .any(|path| path.contains("/home/art/agent-memory-index/src/token_budget.rs"))
+        );
+    }
+
+    #[test]
+    fn normalize_recorded_path_trims_trailing_markup() {
+        assert_eq!(
+            normalize_recorded_path("/home/art/Art/scripts/tools/amai_art_continuity_refresh.sh`"),
+            "/home/art/Art/scripts/tools/amai_art_continuity_refresh.sh"
         );
     }
 
