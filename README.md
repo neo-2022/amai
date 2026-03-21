@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 04:07 MSK
-Ручная сверка guide/docs: 2026-03-21 04:07 MSK
+modified_at: 2026-03-21 04:26 MSK
+Ручная сверка guide/docs: 2026-03-21 04:26 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -619,6 +619,16 @@ cargo run --release -- observe reverify-token-ledger --apply
   - `ide_search_top_files` для file/config/symbol lookup;
   - `semantic_top_k` для architecture/bugfix вопросов;
   - `legacy_pre_amai` для onboarding path.
+- quality layer стал глубже и тоже materialized в runtime:
+  - `quality_tier`
+    - `retrieval`
+    - `task_proxy`
+    - `task_success_recovered`
+    - `partial`
+  - `head_hit_target`
+    - показывает, попал ли уже верхний слой retrieval в ожидаемую цель, а не только “нашлось что-то где-то”.
+  - `task_success_like_rate`
+    - доля событий, где контур уже дошёл до более сильного task-level proxy, а не остановился на одном retrieval parity.
 
 Это важно не для красоты, а для честности:
 - если `Amai` сначала сэкономил токены, но потом заставил делать follow-up, retry или correction, эти токены теперь идут в штраф;
@@ -626,6 +636,9 @@ cargo run --release -- observe reverify-token-ledger --apply
 - если follow-up реально исправил предыдущий промах, у успешного события quality method может стать:
   - `hybrid_task_success`;
   - это значит, что `Amai` не просто что-то нашёл, а довёл цепочку до полезного результата.
+- если follow-up не понадобился и нужная цель попала прямо в верхние retrieval hits, событие может получить:
+  - `hybrid_task_proxy`;
+  - это честнее, чем просто `retrieval_parity`, но всё ещё не притворяется полноценным answer-LLM judge.
 
 ## Честно о скорости и пределах
 

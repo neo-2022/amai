@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 04:07 MSK
-Ручная сверка guide/docs: 2026-03-21 04:07 MSK
+modified_at: 2026-03-21 04:26 MSK
+Ручная сверка guide/docs: 2026-03-21 04:26 MSK
 
 # Operations
 
@@ -725,6 +725,11 @@ cargo run --release -- verify token-benchmark-suite \
     - `ide_search_top_files` для file/config/symbol path;
     - `semantic_top_k` для architecture/bugfix path;
     - `legacy_pre_amai` для onboarding path;
+  - quality gate больше не состоит только из `quality_ok`:
+    - runtime пишет `quality_tier`;
+    - пишет `head_hit_target`;
+    - summary считает `task_success_like_rate`;
+    - `hybrid_task_proxy` означает, что цель попала в верхние retrieval hits без follow-up;
   - успешный recovery-follow-up может получить `quality_method = hybrid_task_success`;
   - и его `recovery_tokens` уже включают стоимость предыдущего промаха.
 

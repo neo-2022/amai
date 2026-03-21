@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 04:07 MSK
-Ручная сверка guide/docs: 2026-03-21 04:07 MSK
+modified_at: 2026-03-21 04:26 MSK
+Ручная сверка guide/docs: 2026-03-21 04:26 MSK
 
 # Token Ledger
 
@@ -113,6 +113,8 @@ Ledger не имеет права смешивать:
 - `target_kind`
 - `baseline_hit_target`
 - `amai_hit_target`
+- `head_hit_target`
+- `quality_tier`
 - `needed_followup`
 - `followup_count`
 - `source_breakdown`
@@ -188,6 +190,16 @@ Ledger не имеет права смешивать:
 
 Минимальное production-правило:
 - headline KPI можно считать только по событиям, где `quality_ok = true`.
+
+При этом полезно держать более честный градиент качества, а не только boolean:
+- `retrieval`
+  - цель формально найдена;
+- `task_proxy`
+  - цель уже попала в верхние retrieval hits без follow-up;
+- `task_success_recovered`
+  - полезный результат достигнут через recovery chain;
+- `partial`
+  - есть зацепки, но до quality gate ещё не дотянуто.
 
 ## Recovery penalties
 

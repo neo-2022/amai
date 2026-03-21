@@ -92,6 +92,8 @@ struct TokenBudgetEvent {
     quality_ok: bool,
     quality_score: f64,
     quality_method: String,
+    quality_tier: String,
+    head_hit_target: bool,
     needed_followup: bool,
     followup_count: u64,
     followup_of_event_id: Option<String>,
@@ -115,6 +117,8 @@ struct QualityVerdict {
     quality_ok: bool,
     quality_score: f64,
     quality_method: &'static str,
+    quality_tier: &'static str,
+    head_hit_target: bool,
     needed_followup: bool,
     followup_count: u64,
 }
@@ -342,6 +346,8 @@ pub async fn record_verify_benchmark_event(db: &Client, benchmark_payload: &Valu
                 "quality_ok": true,
                 "quality_score": 1.0,
                 "quality_method": "benchmark_assumption",
+                "quality_tier": "benchmark",
+                "head_hit_target": true,
             },
             "shape": {
                 "sources_count": 0,
@@ -556,6 +562,14 @@ async fn enrich_live_event_payload(
                 "hybrid_followup_pending".to_string()
             }),
         );
+        quality.insert(
+            "quality_tier".to_string(),
+            Value::String(if quality_ok {
+                "task_success_recovered".to_string()
+            } else {
+                "partial".to_string()
+            }),
+        );
 
         let mut previous_payload = row.payload.clone();
         let previous_node = previous_payload["token_budget_event"]
@@ -752,6 +766,13 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
             "legacy_unverified"
         })
         .to_string();
+    let quality_tier = node["quality"]["quality_tier"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    let head_hit_target = node["quality"]["head_hit_target"]
+        .as_bool()
+        .unwrap_or(false);
     let needed_followup = node["followup"]["needed_followup"]
         .as_bool()
         .unwrap_or(!quality_ok);
@@ -811,6 +832,8 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         quality_ok,
         quality_score,
         quality_method,
+        quality_tier,
+        head_hit_target,
         needed_followup,
         followup_count,
         followup_of_event_id,
@@ -849,6 +872,8 @@ fn needs_live_reverification(payload: &Value) -> bool {
         .map(|value| value.is_empty() || value == "unknown")
         .unwrap_or(true)
         || node.get("latency_ms").is_none()
+        || node["quality"].get("quality_tier").is_none()
+        || node["quality"].get("head_hit_target").is_none()
         || node["shape"].get("pack_token_count").is_none()
         || node["shape"].get("deduped_token_count").is_none()
         || node["followup"].is_null()
@@ -955,12 +980,32 @@ fn apply_reverification_metadata(
         .get_mut("quality")
         .and_then(Value::as_object_mut)
     {
+        let head_hit_target = quality
+            .get("head_hit_target")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         quality.insert(
             "quality_method".to_string(),
             Value::String(if quality_ok {
-                "reverified_retrieval_parity".to_string()
+                if head_hit_target {
+                    "reverified_task_proxy".to_string()
+                } else {
+                    "reverified_retrieval_parity".to_string()
+                }
             } else {
                 "reverified_retrieval_miss".to_string()
+            }),
+        );
+        quality.insert(
+            "quality_tier".to_string(),
+            Value::String(if quality_ok {
+                if head_hit_target {
+                    "task_proxy".to_string()
+                } else {
+                    "retrieval".to_string()
+                }
+            } else {
+                "partial".to_string()
             }),
         );
         quality.insert(
@@ -1048,7 +1093,9 @@ fn repair_legacy_token_event_payload(payload: &Value) -> Option<Value> {
             json!({
                 "quality_ok": false,
                 "quality_score": 0.0,
-                "quality_method": "legacy_unverified"
+                "quality_method": "legacy_unverified",
+                "quality_tier": "unverified",
+                "head_hit_target": false
             }),
         );
         changed = true;
@@ -1311,6 +1358,7 @@ fn summarize_events(
             "savings_factor": 0.0,
             "avg_saved_tokens_per_event": 0.0,
             "quality_ok_rate": 0.0,
+            "task_success_like_rate": 0.0,
             "fallback_rate": 0.0,
             "median_recovery_tokens": 0.0,
             "p95_latency_ms": 0.0,
@@ -1359,6 +1407,15 @@ fn summarize_events(
     };
     let avg_saved_tokens_per_event = total_saved_tokens as f64 / events.len() as f64;
     let quality_ok_events = events.iter().filter(|event| event.quality_ok).count() as f64;
+    let task_success_like_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.quality_tier.as_str(),
+                "task_proxy" | "task_success_recovered"
+            )
+        })
+        .count() as f64;
     let legacy_unverified_events = events
         .iter()
         .filter(|event| event.quality_method == "legacy_unverified")
@@ -1383,6 +1440,7 @@ fn summarize_events(
         .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     let p95_latency_ms = percentile_from_sorted(&latency_values, 0.95);
     let quality_ok_rate = quality_ok_events * 100.0 / events.len() as f64;
+    let task_success_like_rate = task_success_like_events * 100.0 / events.len() as f64;
     let fallback_rate = fallback_events * 100.0 / events.len() as f64;
     let started_at_epoch_ms = events
         .first()
@@ -1419,6 +1477,7 @@ fn summarize_events(
         "savings_factor": savings_factor,
         "avg_saved_tokens_per_event": avg_saved_tokens_per_event,
         "quality_ok_rate": quality_ok_rate,
+        "task_success_like_rate": task_success_like_rate,
         "fallback_rate": fallback_rate,
         "median_recovery_tokens": median_recovery_tokens,
         "p95_latency_ms": p95_latency_ms,
@@ -1555,6 +1614,7 @@ fn query_slice_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementC
                     "counted_events": summary["counted_events"],
                     "verified_effective_savings_pct": summary["verified_effective_savings_pct"],
                     "quality_ok_rate": summary["quality_ok_rate"],
+                    "task_success_like_rate": summary["task_success_like_rate"],
                     "fallback_rate": summary["fallback_rate"],
                     "p95_latency_ms": summary["p95_latency_ms"],
                 })
@@ -1745,6 +1805,14 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
         Value::String(event.quality_method.clone()),
     );
     object.insert(
+        "quality_tier".to_string(),
+        Value::String(event.quality_tier.clone()),
+    );
+    object.insert(
+        "head_hit_target".to_string(),
+        Value::Bool(event.head_hit_target),
+    );
+    object.insert(
         "needed_followup".to_string(),
         Value::Bool(event.needed_followup),
     );
@@ -1909,6 +1977,8 @@ fn build_event_payload(
                 "quality_ok": quality.quality_ok,
                 "quality_score": quality.quality_score,
                 "quality_method": quality.quality_method,
+                "quality_tier": quality.quality_tier,
+                "head_hit_target": quality.head_hit_target,
             },
             "followup": {
                 "needed_followup": quality.needed_followup,
@@ -2070,6 +2140,7 @@ fn derive_quality_verdict(
         .as_bool()
         .unwrap_or(false);
     let total_hits = exact_hits + symbol_hits + lexical_hits + semantic_hits;
+    let query_terms = extract_query_terms(payload["query"].as_str().unwrap_or_default());
     let target_kind = match query_type {
         "onboarding_query" | "docs_lookup" => "document",
         "config_lookup" | "code_lookup" => "file",
@@ -2090,11 +2161,21 @@ fn derive_quality_verdict(
         "evidence_bundle" => total_hits >= 2,
         _ => total_hits > 0,
     };
+    let head_hit_target = top_hit_matches_task(payload, target_kind, &query_terms);
     let quality_ok = baseline_hit_target && amai_hit_target && !semantic_guard_abstained;
+    let task_success_proxy = quality_ok
+        && match target_kind {
+            "document" | "file" | "symbol" => head_hit_target,
+            "cross_file_trace" => head_hit_target && total_hits >= 2,
+            "evidence_bundle" => head_hit_target && total_hits >= 3,
+            _ => head_hit_target,
+        };
     let quality_score = match target_kind {
         "cross_file_trace" => {
-            if quality_ok {
+            if task_success_proxy {
                 1.0
+            } else if quality_ok {
+                0.85
             } else if total_hits > 0 && !semantic_guard_abstained {
                 0.5
             } else {
@@ -2102,8 +2183,10 @@ fn derive_quality_verdict(
             }
         }
         "evidence_bundle" => {
-            if quality_ok {
+            if task_success_proxy {
                 1.0
+            } else if quality_ok {
+                0.9
             } else if total_hits > 0 && !semantic_guard_abstained {
                 0.6
             } else {
@@ -2111,12 +2194,25 @@ fn derive_quality_verdict(
             }
         }
         _ => {
-            if quality_ok {
+            if task_success_proxy {
                 1.0
+            } else if quality_ok {
+                0.8
+            } else if total_hits > 0 && !semantic_guard_abstained {
+                0.4
             } else {
                 0.0
             }
         }
+    };
+    let (quality_method, quality_tier) = if task_success_proxy {
+        ("hybrid_task_proxy", "task_proxy")
+    } else if quality_ok {
+        ("hybrid_retrieval_parity", "retrieval")
+    } else if total_hits > 0 && !semantic_guard_abstained {
+        ("hybrid_partial_retrieval", "partial")
+    } else {
+        ("hybrid_retrieval_parity", "retrieval")
     };
     QualityVerdict {
         target_kind,
@@ -2124,10 +2220,89 @@ fn derive_quality_verdict(
         amai_hit_target,
         quality_ok,
         quality_score,
-        quality_method: "hybrid_retrieval_parity",
+        quality_method,
+        quality_tier,
+        head_hit_target,
         needed_followup: !quality_ok,
         followup_count: 0,
     }
+}
+
+fn top_hit_matches_task(payload: &Value, target_kind: &str, query_terms: &[String]) -> bool {
+    let items = top_retrieval_items(payload, 3);
+    items
+        .into_iter()
+        .any(|item| retrieval_item_matches_task(item, target_kind, query_terms))
+}
+
+fn top_retrieval_items(payload: &Value, limit: usize) -> Vec<&Value> {
+    let retrieval = &payload["retrieval"];
+    let mut items = Vec::new();
+    for section in [
+        "exact_documents",
+        "symbol_hits",
+        "lexical_chunks",
+        "semantic_chunks",
+    ] {
+        for item in retrieval[section].as_array().into_iter().flatten() {
+            items.push(item);
+            if items.len() >= limit {
+                return items;
+            }
+        }
+    }
+    items
+}
+
+fn retrieval_item_matches_task(item: &Value, target_kind: &str, query_terms: &[String]) -> bool {
+    let kind_matches = match target_kind {
+        "document" => {
+            item.get("snippet").is_some()
+                || item.get("content").is_some()
+                || ledger_item_relative_path(item).is_some_and(is_document_like_path)
+        }
+        "file" => ledger_item_relative_path(item).is_some(),
+        "symbol" => item["name"].as_str().is_some(),
+        "cross_file_trace" => {
+            ledger_item_relative_path(item).is_some() || item["name"].as_str().is_some()
+        }
+        "evidence_bundle" => {
+            ledger_item_relative_path(item).is_some() || item["content"].as_str().is_some()
+        }
+        _ => true,
+    };
+    kind_matches && retrieval_item_matches_query(item, query_terms)
+}
+
+fn retrieval_item_matches_query(item: &Value, query_terms: &[String]) -> bool {
+    if query_terms.is_empty() {
+        return false;
+    }
+    let mut haystacks = Vec::new();
+    if let Some(value) = ledger_item_relative_path(item) {
+        haystacks.push(value.to_lowercase());
+    }
+    if let Some(value) = item["name"].as_str() {
+        haystacks.push(value.to_lowercase());
+    }
+    if let Some(value) = item["snippet"].as_str() {
+        haystacks.push(value.to_lowercase());
+    }
+    if let Some(value) = item["content"].as_str() {
+        haystacks.push(value.to_lowercase());
+    }
+    haystacks
+        .into_iter()
+        .any(|haystack| query_terms.iter().any(|term| haystack.contains(term)))
+}
+
+fn is_document_like_path(path: &str) -> bool {
+    let lowered = path.to_lowercase();
+    lowered.ends_with(".md")
+        || lowered.ends_with(".txt")
+        || lowered.contains("readme")
+        || lowered.contains("docs/")
+        || lowered.contains("guide")
 }
 
 fn count_lexical_fallback_chunks(payload: &Value) -> usize {
@@ -2807,7 +2982,11 @@ mod tests {
             }
         });
         let verdict = derive_quality_verdict(
-            &payload,
+            &json!({
+                "query": "run symbol",
+                "retrieval": payload["retrieval"].clone(),
+                "quality": payload["quality"].clone()
+            }),
             "symbol_lookup",
             &NaiveScope {
                 files: vec![json!({"relative_path": "src/main.rs"})],
@@ -2818,7 +2997,9 @@ mod tests {
         assert!(verdict.baseline_hit_target);
         assert!(verdict.amai_hit_target);
         assert!(verdict.quality_ok);
-        assert_eq!(verdict.quality_method, "hybrid_retrieval_parity");
+        assert_eq!(verdict.quality_method, "hybrid_task_proxy");
+        assert_eq!(verdict.quality_tier, "task_proxy");
+        assert!(verdict.head_hit_target);
     }
 
     #[test]
@@ -2856,6 +3037,8 @@ mod tests {
             quality_ok: true,
             quality_score: 1.0,
             quality_method: "hybrid_task_success".to_string(),
+            quality_tier: "task_success_recovered".to_string(),
+            head_hit_target: true,
             needed_followup: false,
             followup_count: 1,
             followup_of_event_id: Some("event-0".to_string()),
@@ -2913,7 +3096,9 @@ mod tests {
                     "quality": {
                         "quality_ok": true,
                         "quality_score": 1.0,
-                        "quality_method": "hybrid_task_success"
+                        "quality_method": "hybrid_task_success",
+                        "quality_tier": "task_success_recovered",
+                        "head_hit_target": true
                     },
                     "followup": {
                         "needed_followup": false,
@@ -3068,7 +3253,9 @@ mod tests {
                 "latency_ms": 12.0,
                 "quality": {
                     "quality_ok": true,
-                    "quality_method": "retrieval_parity"
+                    "quality_method": "retrieval_parity",
+                    "quality_tier": "retrieval",
+                    "head_hit_target": true
                 },
                 "followup": {
                     "needed_followup": false,
@@ -3090,7 +3277,9 @@ mod tests {
                 "quality": {
                     "quality_ok": true,
                     "quality_score": 1.0,
-                    "quality_method": "retrieval_parity"
+                    "quality_method": "retrieval_parity",
+                    "quality_tier": "retrieval",
+                    "head_hit_target": true
                 }
             }
         });
@@ -3113,10 +3302,8 @@ mod tests {
         assert_eq!(event["event_id"], "existing-event");
         assert_eq!(event["timestamp_utc"], 12345);
         assert_eq!(event["traffic_class"], "live");
-        assert_eq!(
-            event["quality"]["quality_method"],
-            "reverified_retrieval_parity"
-        );
+        assert_eq!(event["quality"]["quality_method"], "reverified_task_proxy");
+        assert_eq!(event["quality"]["quality_tier"], "task_proxy");
         assert_eq!(
             event["reverification"]["previous_quality_method"],
             "legacy_unverified"
@@ -3167,6 +3354,8 @@ mod tests {
                 quality_ok: true,
                 quality_score: 1.0,
                 quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
                 needed_followup: false,
                 followup_count: 0,
                 followup_of_event_id: None,
@@ -3227,6 +3416,8 @@ mod tests {
                     quality_ok: false,
                     quality_score: 0.0,
                     quality_method: "hybrid_retrieval_parity".to_string(),
+                    quality_tier: "retrieval".to_string(),
+                    head_hit_target: false,
                     needed_followup: true,
                     followup_count: 0,
                     followup_of_event_id: None,
@@ -3274,6 +3465,8 @@ mod tests {
                     quality_ok: true,
                     quality_score: 1.0,
                     quality_method: "hybrid_retrieval_parity".to_string(),
+                    quality_tier: "retrieval".to_string(),
+                    head_hit_target: true,
                     needed_followup: false,
                     followup_count: 0,
                     followup_of_event_id: None,
