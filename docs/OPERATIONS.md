@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 21:42 MSK
-Ручная сверка guide/docs: 2026-03-21 21:42 MSK
+modified_at: 2026-03-21 21:48 MSK
+Ручная сверка guide/docs: 2026-03-21 21:48 MSK
 
 # Operations
 
@@ -809,7 +809,7 @@ cargo run --release -- verify load \
 - `p99 < 0.020ms`
 - `max < 0.5ms`
 - `error_rate = 0`
-- `workers > 8`
+- `workers > 16`
 - `sample_count > 10000`
 
 Важно:
@@ -1470,7 +1470,7 @@ Grafana login берётся из `.env`:
   - `P99 < 0.020 ms`
   - `Max < 0.5 ms`
   - `error rate < 0.00%`
-  - `workers > 8`
+  - `workers > 16`
   - `sample_count > 10000`
 - спецтермины и англицизмы на human dashboard теперь имеют русскую подсказку при наведении курсора на сам термин, без отдельного значка `?`.
 - runtime scrape targets и monitoring ports не должны быть вшиты в конфиг как абсолютные литералы;

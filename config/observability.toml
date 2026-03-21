@@ -1,5 +1,5 @@
-modified_at = "2026-03-21 21:47 MSK"
-"Ручная сверка guide/docs" = "2026-03-21 21:47 MSK"
+modified_at = "2026-03-21 21:48 MSK"
+"Ручная сверка guide/docs" = "2026-03-21 21:48 MSK"
 
 [snapshot]
 postgres_query_probe_iterations = 20
@@ -75,7 +75,7 @@ target_hot_p50_ms = 0.012
 target_hot_p95_ms = 0.015
 target_hot_p99_ms = 0.020
 target_hot_max_ms = 0.5
-target_hot_workers = 8
+target_hot_workers = 16
 target_hot_sample_count = 10000
 alert_hot_qps = 30000.0
 critical_hot_qps = 20000.0
