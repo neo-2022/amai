@@ -1,7 +1,7 @@
 use crate::postgres::ObservabilitySnapshotRecord;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::env;
 use std::fs;
@@ -55,6 +55,28 @@ struct RolloutSummary {
     tail_messages: Vec<TranscriptMessage>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThreadIndexSummary {
+    #[serde(default)]
+    pub started_at: String,
+    #[serde(default)]
+    pub ended_at: String,
+    #[serde(default)]
+    pub messages_count: usize,
+    #[serde(default)]
+    pub last_user_message: String,
+    #[serde(default)]
+    pub last_assistant_message: String,
+    #[serde(default)]
+    pub summary_headline: String,
+    #[serde(default)]
+    pub summary_next_step: String,
+    #[serde(default)]
+    pub created_at_epoch_s: i64,
+    #[serde(default)]
+    pub updated_at_epoch_s: i64,
+}
+
 #[derive(Debug, Deserialize)]
 struct ThreadIndexFile {
     #[serde(default)]
@@ -75,6 +97,10 @@ struct ThreadIndexEntry {
     raw_mirror: String,
     #[serde(default)]
     rendered_transcript: String,
+    #[serde(default)]
+    summary_headline: String,
+    #[serde(default)]
+    summary_next_step: String,
 }
 
 const SYNTHETIC_AGENTS_PREFIX: &str = "# AGENTS.md instructions for ";
@@ -85,6 +111,42 @@ pub fn current_thread_id() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+pub fn derive_thread_index_summary(
+    cwd: Option<&str>,
+    rendered_transcript: Option<&Path>,
+    source_rollout: Option<&Path>,
+    raw_mirror: Option<&Path>,
+) -> Result<Option<ThreadIndexSummary>> {
+    if let Some(path) = rendered_transcript.filter(|path| path.exists()) {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if let Some(summary) =
+            rendered_transcript_summary(&content, &path.display().to_string(), cwd)
+        {
+            return Ok(Some(thread_index_summary_from_value(&summary)));
+        }
+    }
+
+    let rollout_path = source_rollout
+        .filter(|path| path.exists())
+        .or_else(|| raw_mirror.filter(|path| path.exists()));
+    let Some(path) = rollout_path else {
+        return Ok(None);
+    };
+    let summary = rollout_summary_from_path(path, 2)?;
+    Ok(Some(ThreadIndexSummary {
+        started_at: summary.started_at.clone(),
+        ended_at: summary.ended_at.clone(),
+        messages_count: summary.messages_count,
+        last_user_message: summary.last_user_message,
+        last_assistant_message: summary.last_assistant_message,
+        summary_headline: summary.summary_headline.unwrap_or_default(),
+        summary_next_step: summary.summary_next_step.unwrap_or_default(),
+        created_at_epoch_s: parse_rfc3339_epoch_s(&summary.started_at).unwrap_or_default(),
+        updated_at_epoch_s: parse_rfc3339_epoch_s(&summary.ended_at).unwrap_or_default(),
+    }))
 }
 
 pub fn previous_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTail>> {
@@ -134,16 +196,24 @@ pub fn previous_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTa
     Ok(Some(ChatTail {
         thread_id: entry.thread_id,
         title: sanitize_chat_title(&entry.title, &messages),
-        summary_headline: messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "assistant")
-            .and_then(|message| compact_headline_from_text(&message.text, 220)),
-        summary_next_step: messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "assistant")
-            .and_then(|message| compact_next_step_from_text(&message.text)),
+        summary_headline: if entry.summary_headline.is_empty() {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "assistant")
+                .and_then(|message| compact_headline_from_text(&message.text, 220))
+        } else {
+            Some(entry.summary_headline)
+        },
+        summary_next_step: if entry.summary_next_step.is_empty() {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "assistant")
+                .and_then(|message| compact_next_step_from_text(&message.text))
+        } else {
+            Some(entry.summary_next_step)
+        },
         messages,
     }))
 }
@@ -204,16 +274,24 @@ pub fn current_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTai
     Ok(Some(ChatTail {
         thread_id: entry.thread_id,
         title: sanitize_chat_title(&entry.title, &messages),
-        summary_headline: messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "assistant")
-            .and_then(|message| compact_headline_from_text(&message.text, 220)),
-        summary_next_step: messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "assistant")
-            .and_then(|message| compact_next_step_from_text(&message.text)),
+        summary_headline: if entry.summary_headline.is_empty() {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "assistant")
+                .and_then(|message| compact_headline_from_text(&message.text, 220))
+        } else {
+            Some(entry.summary_headline)
+        },
+        summary_next_step: if entry.summary_next_step.is_empty() {
+            messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "assistant")
+                .and_then(|message| compact_next_step_from_text(&message.text))
+        } else {
+            Some(entry.summary_next_step)
+        },
         messages,
     }))
 }
@@ -539,6 +617,32 @@ pub fn rendered_transcript_summary(
         "created_at_epoch_s": record.as_ref().map(|item| item.created_at_epoch_s).unwrap_or_default(),
         "updated_at_epoch_s": record.as_ref().map(|item| item.updated_at_epoch_s).unwrap_or_default(),
     }))
+}
+
+fn thread_index_summary_from_value(value: &Value) -> ThreadIndexSummary {
+    ThreadIndexSummary {
+        started_at: value["started_at"].as_str().unwrap_or_default().to_string(),
+        ended_at: value["ended_at"].as_str().unwrap_or_default().to_string(),
+        messages_count: value["messages_count"].as_u64().unwrap_or_default() as usize,
+        last_user_message: value["last_user_message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        last_assistant_message: value["last_assistant_message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        summary_headline: value["summary_headline"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        summary_next_step: value["summary_next_step"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        created_at_epoch_s: value["created_at_epoch_s"].as_i64().unwrap_or_default(),
+        updated_at_epoch_s: value["updated_at_epoch_s"].as_i64().unwrap_or_default(),
+    }
 }
 
 fn previous_thread_record(

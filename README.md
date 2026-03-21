@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 14:04 MSK
-Ручная сверка guide/docs: 2026-03-21 14:04 MSK
+modified_at: 2026-03-21 14:26 MSK
+Ручная сверка guide/docs: 2026-03-21 14:26 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -331,6 +331,18 @@ AMAI_AGENT_SCOPE=agent_beta  ./scripts/continuity_startup.sh --project art --nam
 вообще импортировано в continuity namespace. При refresh `Amai` отдельно втягивает machine-readable
 `thread_index.json`, чтобы иметь полный список chat threads и их временные метки, а уже full
 rendered transcripts можно ограничивать маленьким `transcript-limit` ради скорости и размера импорта.
+
+Этот шаг теперь идёт отдельным upstream enrich-path, а не поздним пересчётом в момент ответа:
+
+```bash
+./scripts/enrich_thread_index.sh --input state/continuity-imports/art/thread_index.json
+```
+
+Этот helper:
+- читает raw `thread_index.json`;
+- materialize-ит compact поля thread summary заранее;
+- пишет enriched index, который потом уже уходит в temporal import;
+- позволяет `previous chat` и `exact time` отвечать быстрее и стабильнее.
 
 Дополнительно `Amai` теперь materialize-ит в temporal index не только `thread_id`, время и хвост
 сообщений, но и короткие поля:

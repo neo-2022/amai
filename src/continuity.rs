@@ -1,6 +1,7 @@
 use crate::chat_question;
 use crate::cli::{
     ContinuityAnswerArgs, ContinuityHandoffArgs, ContinuityImportArgs, ContinuityStartupArgs,
+    ContinuityThreadIndexEnrichArgs,
 };
 use crate::codex_threads;
 use crate::config::AppConfig;
@@ -8,7 +9,7 @@ use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, Projec
 use crate::s3;
 use crate::working_state;
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -27,13 +28,13 @@ struct ContinuitySource {
     artifact_kind: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct ContinuityThreadIndexFile {
     #[serde(default)]
     threads: Vec<ContinuityThreadIndexEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct ContinuityThreadIndexEntry {
     #[serde(default)]
     thread_id: String,
@@ -49,6 +50,24 @@ struct ContinuityThreadIndexEntry {
     raw_mirror: String,
     #[serde(default)]
     rendered_transcript: String,
+    #[serde(default)]
+    started_at: String,
+    #[serde(default)]
+    ended_at: String,
+    #[serde(default)]
+    messages_count: usize,
+    #[serde(default)]
+    last_user_message: String,
+    #[serde(default)]
+    last_assistant_message: String,
+    #[serde(default)]
+    summary_headline: String,
+    #[serde(default)]
+    summary_next_step: String,
+    #[serde(default)]
+    created_at_epoch_s: i64,
+    #[serde(default)]
+    updated_at_epoch_s: i64,
 }
 
 const MAX_SEARCHABLE_CONTINUITY_BYTES: usize = 12_000;
@@ -282,6 +301,66 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
     Ok(())
 }
 
+pub fn enrich_thread_index_file(args: &ContinuityThreadIndexEnrichArgs) -> Result<()> {
+    let input_path = canonical_path(&args.input)?;
+    let output_path = args
+        .output
+        .as_ref()
+        .map(|path| resolve_output_path(path))
+        .transpose()?
+        .unwrap_or_else(|| input_path.clone());
+    let raw = fs::read_to_string(&input_path)
+        .with_context(|| format!("failed to read {}", input_path.display()))?;
+    let mut index: ContinuityThreadIndexFile = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", input_path.display()))?;
+    let mut enriched_threads = 0usize;
+
+    for entry in &mut index.threads {
+        let summary = codex_threads::derive_thread_index_summary(
+            Some(&entry.cwd),
+            non_empty_path(&entry.rendered_transcript),
+            non_empty_path(&entry.source_rollout),
+            non_empty_path(&entry.raw_mirror),
+        )?;
+        let Some(summary) = summary else {
+            continue;
+        };
+        entry.started_at = summary.started_at;
+        entry.ended_at = summary.ended_at;
+        entry.messages_count = summary.messages_count;
+        entry.last_user_message = summary.last_user_message;
+        entry.last_assistant_message = summary.last_assistant_message;
+        entry.summary_headline = summary.summary_headline;
+        entry.summary_next_step = summary.summary_next_step;
+        entry.created_at_epoch_s = summary.created_at_epoch_s;
+        entry.updated_at_epoch_s = summary.updated_at_epoch_s;
+        enriched_threads += 1;
+    }
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(
+        &output_path,
+        serde_json::to_string_pretty(&index)
+            .context("failed to serialize enriched thread index")?
+            + "\n",
+    )
+    .with_context(|| format!("failed to write {}", output_path.display()))?;
+
+    let payload = json!({
+        "thread_index_enrich": {
+            "input": input_path.display().to_string(),
+            "output": output_path.display().to_string(),
+            "threads_seen": index.threads.len(),
+            "threads_enriched": enriched_threads,
+        }
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
 async fn import_thread_index_snapshots(
     db: &Client,
     project: &ProjectRecord,
@@ -302,18 +381,37 @@ async fn import_thread_index_snapshots(
             continue;
         }
 
-        let summary = if entry.rendered_transcript.is_empty() {
-            None
-        } else {
-            fs::read_to_string(&entry.rendered_transcript)
-                .ok()
-                .and_then(|content| {
-                    codex_threads::rendered_transcript_summary(
-                        &content,
-                        &entry.rendered_transcript,
-                        Some(&entry.cwd),
-                    )
+        let summary = if entry.summary_headline.is_empty()
+            && entry.summary_next_step.is_empty()
+            && entry.started_at.is_empty()
+            && entry.ended_at.is_empty()
+            && entry.messages_count == 0
+            && entry.last_user_message.is_empty()
+            && entry.last_assistant_message.is_empty()
+            && entry.created_at_epoch_s == 0
+            && entry.updated_at_epoch_s == 0
+        {
+            codex_threads::derive_thread_index_summary(
+                Some(&entry.cwd),
+                non_empty_path(&entry.rendered_transcript),
+                non_empty_path(&entry.source_rollout),
+                non_empty_path(&entry.raw_mirror),
+            )?
+            .map(|summary| {
+                json!({
+                    "started_at": summary.started_at,
+                    "ended_at": summary.ended_at,
+                    "messages_count": summary.messages_count,
+                    "last_user_message": summary.last_user_message,
+                    "last_assistant_message": summary.last_assistant_message,
+                    "summary_headline": summary.summary_headline,
+                    "summary_next_step": summary.summary_next_step,
+                    "created_at_epoch_s": summary.created_at_epoch_s,
+                    "updated_at_epoch_s": summary.updated_at_epoch_s,
                 })
+            })
+        } else {
+            None
         };
         let payload = json!({
             "continuity_thread_index": {
@@ -327,21 +425,21 @@ async fn import_thread_index_snapshots(
                     "display_name": namespace.display_name,
                 },
                 "thread_id": entry.thread_id,
-                "title": summary.as_ref().map(|value| value["title"].clone()).unwrap_or_else(|| json!(entry.title)),
-                "cwd": summary.as_ref().map(|value| value["cwd"].clone()).unwrap_or_else(|| json!(entry.cwd)),
-                "first_user_message": summary.as_ref().map(|value| value["first_user_message"].clone()).unwrap_or_else(|| json!(entry.first_user_message)),
-                "started_at": summary.as_ref().map(|value| value["started_at"].clone()).unwrap_or_else(|| json!("")),
-                "ended_at": summary.as_ref().map(|value| value["ended_at"].clone()).unwrap_or_else(|| json!("")),
-                "messages_count": summary.as_ref().map(|value| value["messages_count"].clone()).unwrap_or_else(|| json!(0)),
-                "last_user_message": summary.as_ref().map(|value| value["last_user_message"].clone()).unwrap_or_else(|| json!("")),
-                "last_assistant_message": summary.as_ref().map(|value| value["last_assistant_message"].clone()).unwrap_or_else(|| json!("")),
-                "summary_headline": summary.as_ref().map(|value| value["summary_headline"].clone()).unwrap_or_else(|| json!("")),
-                "summary_next_step": summary.as_ref().map(|value| value["summary_next_step"].clone()).unwrap_or_else(|| json!("")),
+                "title": json!(entry.title),
+                "cwd": json!(entry.cwd),
+                "first_user_message": json!(entry.first_user_message),
+                "started_at": summary.as_ref().map(|value| value["started_at"].clone()).unwrap_or_else(|| json!(entry.started_at)),
+                "ended_at": summary.as_ref().map(|value| value["ended_at"].clone()).unwrap_or_else(|| json!(entry.ended_at)),
+                "messages_count": summary.as_ref().map(|value| value["messages_count"].clone()).unwrap_or_else(|| json!(entry.messages_count)),
+                "last_user_message": summary.as_ref().map(|value| value["last_user_message"].clone()).unwrap_or_else(|| json!(entry.last_user_message)),
+                "last_assistant_message": summary.as_ref().map(|value| value["last_assistant_message"].clone()).unwrap_or_else(|| json!(entry.last_assistant_message)),
+                "summary_headline": summary.as_ref().map(|value| value["summary_headline"].clone()).unwrap_or_else(|| json!(entry.summary_headline)),
+                "summary_next_step": summary.as_ref().map(|value| value["summary_next_step"].clone()).unwrap_or_else(|| json!(entry.summary_next_step)),
                 "rendered_transcript": if entry.rendered_transcript.is_empty() { json!("") } else { json!(entry.rendered_transcript) },
                 "source_rollout": if entry.source_rollout.is_empty() { json!("") } else { json!(entry.source_rollout) },
                 "raw_rollout": if entry.raw_mirror.is_empty() { json!("") } else { json!(entry.raw_mirror) },
-                "created_at_epoch_s": summary.as_ref().map(|value| value["created_at_epoch_s"].clone()).unwrap_or_else(|| json!(0)),
-                "updated_at_epoch_s": summary.as_ref().map(|value| value["updated_at_epoch_s"].clone()).unwrap_or_else(|| json!(0)),
+                "created_at_epoch_s": summary.as_ref().map(|value| value["created_at_epoch_s"].clone()).unwrap_or_else(|| json!(entry.created_at_epoch_s)),
+                "updated_at_epoch_s": summary.as_ref().map(|value| value["updated_at_epoch_s"].clone()).unwrap_or_else(|| json!(entry.updated_at_epoch_s)),
             }
         });
         let _ = postgres::insert_observability_snapshot(db, "continuity_thread_index", &payload)
@@ -1326,6 +1424,14 @@ fn canonical_path(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("failed to resolve {}", path.display()))
 }
 
+fn resolve_output_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    let cwd = std::env::current_dir().context("failed to resolve current directory")?;
+    Ok(cwd.join(path))
+}
+
 fn canonical_string(path: &Path) -> Result<String> {
     Ok(canonical_path(path)?.display().to_string())
 }
@@ -1363,6 +1469,10 @@ fn hex_sha256(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn non_empty_path(value: &str) -> Option<&Path> {
+    (!value.is_empty()).then(|| Path::new(value))
+}
+
 fn human_epoch_ms(value: Option<u64>) -> String {
     value
         .filter(|value| *value > 0)
@@ -1385,9 +1495,14 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_next_step_from_text, is_meta_continuity_handoff, render_direct_answer};
+    use super::{
+        enrich_thread_index_file, extract_next_step_from_text, is_meta_continuity_handoff,
+        render_direct_answer,
+    };
+    use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, TranscriptMessage};
     use serde_json::json;
+    use std::fs;
 
     #[test]
     fn render_direct_answer_prefers_concise_restore_bundle() {
@@ -1518,5 +1633,55 @@ mod tests {
         let text = "Сводка.\nБлижайший обязательный следующий шаг: Следующий обязательный шаг: materialize compact thread summaries.`|";
         let next_step = extract_next_step_from_text(text).expect("next step");
         assert_eq!(next_step, "materialize compact thread summaries.");
+    }
+
+    #[test]
+    fn enrich_thread_index_file_writes_compact_summary_fields() {
+        let temp_root =
+            std::env::temp_dir().join(format!("amai-thread-index-{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_root);
+        let rollout_path = temp_root.join("rollout.jsonl");
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-21T12:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"на чем закончили?"}]}}
+{"timestamp":"2026-03-21T12:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"По `Amai` активная линия тогда была `Amai compact thread summaries materialized`.\nБлижайший обязательный следующий шаг: Вынести summary_headline и summary_next_step вверх."}]}}
+"#,
+        )
+        .expect("write rollout");
+        let input_path = temp_root.join("thread_index.json");
+        let output_path = temp_root.join("thread_index.enriched.json");
+        fs::write(
+            &input_path,
+            format!(
+                "{{\"threads\":[{{\"thread_id\":\"thread-1\",\"title\":\"test\",\"cwd\":\"/home/art/Art\",\"source_rollout\":\"{}\",\"raw_mirror\":\"{}\",\"rendered_transcript\":\"\"}}]}}\n",
+                rollout_path.display(),
+                rollout_path.display()
+            ),
+        )
+        .expect("write thread index");
+
+        enrich_thread_index_file(&ContinuityThreadIndexEnrichArgs {
+            input: input_path.clone(),
+            output: Some(output_path.clone()),
+        })
+        .expect("enrich");
+
+        let enriched: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&output_path).expect("read output"))
+                .expect("parse output");
+        assert_eq!(
+            enriched["threads"][0]["summary_headline"],
+            json!("Amai compact thread summaries materialized")
+        );
+        assert_eq!(
+            enriched["threads"][0]["summary_next_step"],
+            json!("Вынести summary_headline и summary_next_step вверх.")
+        );
+        assert_eq!(enriched["threads"][0]["messages_count"], json!(2));
+
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&input_path);
+        let _ = fs::remove_file(&rollout_path);
+        let _ = fs::remove_dir_all(&temp_root);
     }
 }

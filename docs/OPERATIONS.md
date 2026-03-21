@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 14:04 MSK
-Ручная сверка guide/docs: 2026-03-21 14:04 MSK
+modified_at: 2026-03-21 14:26 MSK
+Ручная сверка guide/docs: 2026-03-21 14:26 MSK
 
 # Operations
 
@@ -163,6 +163,10 @@ cd /home/art/agent-memory-index
 - bootstrap snapshot по-прежнему собирается из transcript mirror;
 - full rendered transcripts в import остаются ограниченными `ART_TRANSCRIPT_LIMIT=3`;
 - но полный temporal index импортируется отдельно из `~/.memory/transcripts/codex/thread_index.json`.
+- перед import raw thread index теперь проходит через Rust enrich-step и пишет
+  `state/continuity-imports/art/thread_index.enriched.json`;
+- именно этот enriched файл потом передаётся в `continuity import`, чтобы compact summary-поля
+  уже были готовы до записи в `PostgreSQL`.
 
 Именно поэтому корректный proof сейчас выглядит так:
 - `Rendered transcripts` в startup остаётся маленьким числом;
@@ -177,6 +181,20 @@ cd /home/art/agent-memory-index
   `Следующий шаг: Следующий шаг: ...`;
 - за счёт этого `previous chat` и `exact time` живут на более готовом temporal snapshot, а не на
   позднем post-hoc parsing.
+
+Если нужно прогнать этот upstream enrich отдельно руками:
+
+```bash
+cd /home/art/agent-memory-index
+./scripts/enrich_thread_index.sh \
+  --input state/continuity-imports/art/thread_index.json \
+  --output state/continuity-imports/art/thread_index.enriched.json
+```
+
+Это read-only к transcript index и write-only к enriched JSON:
+- исходный `thread_index.json` не трогается;
+- enriched copy используется как import input;
+- temporal lookup затем питается уже этим machine-readable snapshot.
 
 ## Working-state recovery и multi-agent изоляция
 

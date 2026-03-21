@@ -53,6 +53,9 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 continuity::import_sources(&cfg, &args).await?;
             }
+            ContinuityCommand::EnrichThreadIndex(args) => {
+                continuity::enrich_thread_index_file(&args)?;
+            }
             ContinuityCommand::Startup(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

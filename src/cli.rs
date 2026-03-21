@@ -75,6 +75,7 @@ pub enum DeploymentCommand {
 #[derive(Debug, Subcommand)]
 pub enum ContinuityCommand {
     Import(ContinuityImportArgs),
+    EnrichThreadIndex(ContinuityThreadIndexEnrichArgs),
     Startup(ContinuityStartupArgs),
     Restore(ContinuityStartupArgs),
     Answer(ContinuityAnswerArgs),
@@ -177,6 +178,14 @@ pub struct ContinuityImportArgs {
     pub memory_dir: Option<PathBuf>,
     #[arg(long)]
     pub transcript_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ContinuityThreadIndexEnrichArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
