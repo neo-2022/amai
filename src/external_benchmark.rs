@@ -651,7 +651,12 @@ pub fn print_external_harvest(
         None
     };
     let external_results = collect_external_result_summaries(&output_dir)?;
-    let run_status = reconcile_run_status(run_status, &external_results);
+    let run_status = reconcile_run_status_with_runtime(
+        run_status,
+        &external_results,
+        Some(&output_dir),
+        summary_json["benchmark_qdrant_http_url"].as_str(),
+    );
 
     println!("Amai external benchmark harvest");
     println!();
@@ -741,6 +746,36 @@ pub fn print_external_harvest(
         println!("- {}", command);
     }
     Ok(())
+}
+
+pub(crate) fn benchmark_run_active_for_qdrant_http_url(
+    repo_root: &Path,
+    qdrant_http_url: &str,
+) -> Option<bool> {
+    let output_dir = latest_matching_output_dir_for_qdrant_http_url(repo_root, qdrant_http_url)?;
+    let summary_path = output_dir.join("summary.json");
+    let summary_text = fs::read_to_string(&summary_path).ok()?;
+    let summary_json: Value = serde_json::from_str(&summary_text).ok()?;
+    let status_path = output_dir.join("run_status.json");
+    let run_status = if status_path.exists() {
+        let raw = fs::read_to_string(&status_path).ok()?;
+        serde_json::from_str::<Value>(&raw).ok()
+    } else {
+        None
+    };
+    let external_results = collect_external_result_summaries(&output_dir).ok()?;
+    let run_status = reconcile_run_status_with_runtime(
+        run_status,
+        &external_results,
+        Some(&output_dir),
+        summary_json["benchmark_qdrant_http_url"].as_str(),
+    );
+    Some(
+        run_status
+            .as_ref()
+            .and_then(|value| value["state"].as_str())
+            == Some("running"),
+    )
 }
 
 fn ordered_benchmarks(registry: &ExternalBenchmarkFile) -> Vec<(&String, &ExternalBenchmarkEntry)> {
@@ -1486,6 +1521,121 @@ fn reconcile_run_status(
     }))
 }
 
+fn reconcile_run_status_with_runtime(
+    run_status: Option<Value>,
+    external_results: &[ExternalResultSummary],
+    output_dir: Option<&Path>,
+    benchmark_qdrant_http_url: Option<&str>,
+) -> Option<Value> {
+    let run_status = reconcile_run_status(run_status, external_results)?;
+    if run_status["state"].as_str() != Some("running") {
+        return Some(run_status);
+    }
+    let runner_pid = run_status["runner_pid"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok());
+    let runner_alive = if let Some(runner_pid) = runner_pid {
+        process_is_alive(runner_pid)
+    } else {
+        benchmark_runner_process_alive(output_dir, benchmark_qdrant_http_url)
+    };
+    if runner_alive {
+        return Some(run_status);
+    }
+    Some(json!({
+        "state": "finished_error",
+        "exit_code": run_status["exit_code"].clone(),
+        "message": "runner process is no longer alive and result files did not appear",
+        "started_at_epoch_s": run_status["started_at_epoch_s"].clone(),
+        "finished_at_epoch_s": now_epoch_s(),
+        "result_verdict": "no_results",
+        "runner_pid": run_status["runner_pid"].clone(),
+    }))
+}
+
+fn latest_matching_output_dir_for_qdrant_http_url(
+    repo_root: &Path,
+    qdrant_http_url: &str,
+) -> Option<PathBuf> {
+    let runs_root = repo_root
+        .join("state")
+        .join("external-benchmarks")
+        .join("runs");
+    let mut best: Option<(u64, PathBuf)> = None;
+    for benchmark_entry in fs::read_dir(&runs_root).ok()? {
+        let benchmark_entry = benchmark_entry.ok()?;
+        if !benchmark_entry.path().is_dir() {
+            continue;
+        }
+        for dataset_entry in fs::read_dir(benchmark_entry.path()).ok()? {
+            let dataset_entry = dataset_entry.ok()?;
+            if !dataset_entry.path().is_dir() {
+                continue;
+            }
+            let output_dir = dataset_entry.path().join("latest");
+            let summary_path = output_dir.join("summary.json");
+            if !summary_path.is_file() {
+                continue;
+            }
+            let summary_text = fs::read_to_string(&summary_path).ok()?;
+            let summary_json: Value = serde_json::from_str(&summary_text).ok()?;
+            if summary_json["benchmark_qdrant_http_url"].as_str() != Some(qdrant_http_url) {
+                continue;
+            }
+            let modified_rank = fs::metadata(&summary_path)
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            match &best {
+                Some((best_rank, _)) if *best_rank > modified_rank => {}
+                _ => best = Some((modified_rank, output_dir)),
+            }
+        }
+    }
+    best.map(|(_, output_dir)| output_dir)
+}
+
+fn benchmark_runner_process_alive(
+    output_dir: Option<&Path>,
+    benchmark_qdrant_http_url: Option<&str>,
+) -> bool {
+    let script_marker = output_dir.map(|path| path.join("run_external.sh").display().to_string());
+    let Some(proc_entries) = fs::read_dir("/proc").ok() else {
+        return false;
+    };
+    for entry in proc_entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !file_name.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        if cmdline.is_empty() {
+            continue;
+        }
+        let command = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+        if let Some(script_marker) = &script_marker
+            && command.contains(script_marker)
+        {
+            return true;
+        }
+        if let Some(qdrant_http_url) = benchmark_qdrant_http_url
+            && command.contains("vectordbbench")
+            && command.contains(qdrant_http_url)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn process_is_alive(pid: u32) -> bool {
     Path::new("/proc").join(pid.to_string()).exists()
 }
@@ -1603,7 +1753,8 @@ mod tests {
         ExternalDatasetEntry, ExternalDatasetFile, ExternalDatasetStorage, ExternalResultSummary,
         VectorDbBenchBundle, adapter_compatibility_overrides, ann_benchmark_dataset_name,
         build_launch_commands, determine_adapter_status, normalize_key, ordered_benchmarks,
-        recommended_datasets, reconcile_run_status, resolve_benchmark, resolve_dataset,
+        recommended_datasets, reconcile_run_status, reconcile_run_status_with_runtime,
+        resolve_benchmark, resolve_dataset,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1738,6 +1889,29 @@ mod tests {
         );
         assert_eq!(reconciled["result_verdict"].as_str(), Some("no_results"));
         assert_eq!(reconciled["runner_pid"].as_u64(), Some(u32::MAX as u64));
+    }
+
+    #[test]
+    fn reconcile_run_status_with_runtime_marks_missing_runner_without_pid_as_error() {
+        let run_status = json!({
+            "state": "running",
+            "exit_code": null,
+            "message": "upstream launch started",
+            "started_at_epoch_s": 123,
+        });
+        let reconciled = reconcile_run_status_with_runtime(
+            Some(run_status),
+            &[],
+            Some(Path::new("/tmp/amai-nonexistent-run")),
+            Some("http://127.0.0.1:19999"),
+        )
+        .expect("reconciled");
+        assert_eq!(reconciled["state"].as_str(), Some("finished_error"));
+        assert_eq!(
+            reconciled["message"].as_str(),
+            Some("runner process is no longer alive and result files did not appear")
+        );
+        assert_eq!(reconciled["result_verdict"].as_str(), Some("no_results"));
     }
 
     #[test]

@@ -6,7 +6,9 @@ use std::env;
 use std::fs;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sysinfo::{Disks, System};
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
@@ -1402,26 +1404,132 @@ fn build_machine_cards(
 ) -> Vec<Value> {
     let mut cards = Vec::new();
     if let Some(machine) = machine {
-        cards.push(card(
+        cards.push(card_with_rows(
             "CPU",
             format!("{} потоков", machine.logical_cpus),
             machine.cpu_model.clone(),
             "pass",
+            None,
+            Some("Статический профиль процессора плюс живые текущие показатели загрузки и температуры.".to_string()),
+            vec![
+                metric_row(
+                    "Сейчас нагрузка",
+                    format_optional(machine.cpu_usage_percent, |value| format!("{value:.1}%")),
+                    Some("Живая текущая загрузка CPU по всей системе."),
+                ),
+                metric_row(
+                    "Сейчас температура",
+                    format_optional(machine.cpu_temperature_celsius, format_celsius),
+                    Some("Текущая температура CPU по датчику Tctl."),
+                ),
+                metric_row(
+                    "Сейчас максимум частоты",
+                    format_optional(machine.cpu_max_mhz, |value| format!("{value:.0} MHz")),
+                    Some("Максимальная частота процессора, которую система сообщает прямо сейчас."),
+                ),
+            ],
         ));
-        cards.push(card(
+        cards.push(card_with_rows(
             "Оперативная память",
             format!("{:.2} GiB", machine.total_memory_gib),
             format!(
-                "Свободно сейчас {:.2} GiB, тип: {}.",
-                machine.available_memory_gib, machine.memory_type
+                "Тип: {}. Скорость: {}.",
+                machine.memory_type, machine.memory_speed_label
             ),
             "pass",
+            None,
+            Some(
+                "Статический профиль RAM плюс живые показатели текущего использования.".to_string(),
+            ),
+            vec![
+                metric_row(
+                    "Сейчас тип",
+                    machine.memory_type.clone(),
+                    Some("Автоматически определённый тип оперативной памяти."),
+                ),
+                metric_row(
+                    "Сейчас скорость",
+                    machine.memory_speed_label.clone(),
+                    Some("Автоматически определённая скорость оперативной памяти."),
+                ),
+                metric_row(
+                    "Сейчас занято",
+                    format!("{:.2} GiB", machine.used_memory_gib),
+                    Some("Сколько оперативной памяти занято прямо сейчас."),
+                ),
+                metric_row(
+                    "Сейчас свободно",
+                    format!("{:.2} GiB", machine.available_memory_gib),
+                    Some("Сколько оперативной памяти система считает доступной прямо сейчас."),
+                ),
+                metric_row(
+                    "Сейчас usage",
+                    format_optional(machine.memory_used_percent, |value| format!("{value:.1}%")),
+                    Some("Текущая доля занятой оперативной памяти."),
+                ),
+                metric_row(
+                    "Сейчас swap",
+                    format!(
+                        "{:.2} / {:.2} GiB",
+                        machine.swap_used_gib, machine.swap_total_gib
+                    ),
+                    Some("Использование swap прямо сейчас."),
+                ),
+            ],
         ));
-        cards.push(card(
-            "Свободный диск",
-            format!("{:.2} GiB", machine.available_disk_gib),
-            "Это запас под индексы, артефакты, кэш и сборки.".to_string(),
+        cards.push(card_with_rows(
+            "Основной диск",
+            machine.disk_kind.clone(),
+            format!(
+                "Устройство: {}. Модель: {}.",
+                machine.disk_device.as_deref().unwrap_or("ещё нет данных"),
+                machine.disk_model
+            ),
             "pass",
+            None,
+            Some("Статические характеристики основного диска плюс живая температура и текущая нагрузка ввода-вывода.".to_string()),
+            vec![
+                metric_row(
+                    "Сейчас объём",
+                    format!("{:.2} GiB", machine.disk_total_gib),
+                    Some("Полный размер основного диска."),
+                ),
+                metric_row(
+                    "Сейчас свободно",
+                    format!("{:.2} GiB", machine.disk_available_gib),
+                    Some("Сколько свободного места осталось на основном диске."),
+                ),
+                metric_row(
+                    "Сейчас usage",
+                    format_optional(machine.disk_used_percent, |value| format!("{value:.1}%")),
+                    Some("Текущая доля занятого пространства на основном диске."),
+                ),
+                metric_row(
+                    "Сейчас нагрузка",
+                    format_optional(machine.disk_busy_percent, |value| format!("{value:.1}%")),
+                    Some("Насколько диск был занят операциями ввода-вывода между двумя последними refresh панели."),
+                ),
+                metric_row(
+                    "Сейчас чтение",
+                    format_optional(machine.disk_read_mib_per_sec, |value| format!("{value:.2} MiB/s")),
+                    Some("Текущая скорость чтения между двумя последними refresh панели."),
+                ),
+                metric_row(
+                    "Сейчас запись",
+                    format_optional(machine.disk_write_mib_per_sec, |value| format!("{value:.2} MiB/s")),
+                    Some("Текущая скорость записи между двумя последними refresh панели."),
+                ),
+                metric_row(
+                    "Сейчас температура",
+                    format_optional(machine.disk_temperature_celsius, format_celsius),
+                    Some("Температура NVMe/SSD по живому датчику."),
+                ),
+                metric_row(
+                    "Сейчас firmware",
+                    machine.disk_firmware.clone(),
+                    Some("Версия прошивки основного диска."),
+                ),
+            ],
         ));
     } else {
         cards.push(card(
@@ -1610,10 +1718,11 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
     let benchmark = &snapshot["benchmark_qdrant"];
     let configured = benchmark["configured"].as_bool().unwrap_or(false);
     let available = benchmark["available"].as_bool().unwrap_or(false);
+    let active = benchmark["active"].as_bool().unwrap_or(false);
     let from_last_success = benchmark["from_last_success"].as_bool().unwrap_or(false);
     let status = if !configured {
         "unknown"
-    } else if !available {
+    } else if !active || !available {
         "alert"
     } else {
         combine_statuses(&[
@@ -1634,8 +1743,10 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
     } else {
         "не настроено".to_string()
     };
-    let note = if available {
+    let note = if active && available {
         "Живые системные показатели отдельного Qdrant, который сейчас занят внешним benchmark-прогоном. Эти числа не смешиваются с Amai live.".to_string()
+    } else if !active && available {
+        "Тест сейчас не запущен. Показаны последние доступные системные показатели отдельного benchmark-Qdrant, чтобы вы не теряли картину после остановки прогона.".to_string()
     } else if from_last_success {
         "Показаны последние сохранённые результаты внешнего benchmark-Qdrant. Новый тест сейчас не запущен, но последние успешные числа сохранены для сравнения.".to_string()
     } else if configured {
@@ -1643,9 +1754,14 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
     } else {
         "Отдельный benchmark-Qdrant ещё не настроен. Когда внешний прогон будет идти через выделенный инстанс, здесь появятся его живые системные числа.".to_string()
     };
-    let source_label = if available {
+    let source_label = if active && available {
         Some(format!(
             "Источник: live Qdrant /metrics внешнего бенча ({}), обновляется на каждом refresh dashboard",
+            benchmark["http_url"].as_str().unwrap_or("unknown")
+        ))
+    } else if !active && available {
+        Some(format!(
+            "Источник: последние доступные live Qdrant /metrics внешнего бенча ({}). Тест сейчас не запущен.",
             benchmark["http_url"].as_str().unwrap_or("unknown")
         ))
     } else if from_last_success {
@@ -1698,7 +1814,7 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
             Some("Сколько сегментов сейчас держит внешний benchmark-Qdrant."),
         ),
     ];
-    let status_label_override = if configured && !available {
+    let status_label_override = if configured && !active {
         Some("тест не запущен".to_string())
     } else {
         None
@@ -1891,11 +2007,55 @@ fn load_install_state(repo_root: &Path) -> Result<Option<InstallState>> {
 struct MachineSummary {
     cpu_model: String,
     logical_cpus: usize,
+    cpu_usage_percent: Option<f64>,
+    cpu_temperature_celsius: Option<f64>,
+    cpu_max_mhz: Option<f64>,
     total_memory_gib: f64,
     available_memory_gib: f64,
+    used_memory_gib: f64,
+    memory_used_percent: Option<f64>,
     memory_type: String,
-    available_disk_gib: f64,
+    memory_speed_label: String,
+    swap_total_gib: f64,
+    swap_used_gib: f64,
+    disk_device: Option<String>,
+    disk_model: String,
+    disk_kind: String,
+    disk_total_gib: f64,
+    disk_available_gib: f64,
+    disk_used_percent: Option<f64>,
+    disk_busy_percent: Option<f64>,
+    disk_read_mib_per_sec: Option<f64>,
+    disk_write_mib_per_sec: Option<f64>,
+    disk_temperature_celsius: Option<f64>,
+    disk_firmware: String,
 }
+
+#[derive(Debug, Clone)]
+struct CpuLoadSample {
+    total: u64,
+    idle: u64,
+}
+
+#[derive(Debug, Clone)]
+struct DiskIoSample {
+    device: String,
+    read_sectors: u64,
+    write_sectors: u64,
+    io_millis: u64,
+    captured_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct DiskLiveStats {
+    busy_percent: Option<f64>,
+    read_mib_per_sec: Option<f64>,
+    write_mib_per_sec: Option<f64>,
+}
+
+static CPU_LOAD_CACHE: OnceLock<Mutex<Option<CpuLoadSample>>> = OnceLock::new();
+static DISK_IO_CACHE: OnceLock<Mutex<Option<DiskIoSample>>> = OnceLock::new();
+static CPU_MAX_MHZ_CACHE: OnceLock<Option<f64>> = OnceLock::new();
 
 fn collect_machine_summary(repo_root: &Path) -> Result<MachineSummary> {
     let mut system = System::new_all();
@@ -1906,35 +2066,213 @@ fn collect_machine_summary(repo_root: &Path) -> Result<MachineSummary> {
         .map(|cpu| cpu.brand().trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "модель CPU не определена".to_string());
+    let cpu_max_mhz = read_lscpu_numeric_field("CPU max MHz:");
     let disks = Disks::new_with_refreshed_list();
+    let total_memory_gib = bytes_to_gib(system.total_memory());
+    let available_memory_gib = bytes_to_gib(system.available_memory());
+    let used_memory_gib = (total_memory_gib - available_memory_gib).max(0.0);
+    let memory_used_percent = percentage_from_parts(used_memory_gib, total_memory_gib);
+    let swap_total_gib = bytes_to_gib(system.total_swap());
+    let swap_used_gib = bytes_to_gib(system.used_swap());
+    let (memory_type, memory_speed_label) = detect_memory_characteristics();
+    let disk_device = detect_disk_device_for_path(repo_root);
+    let disk_space = disk_space_for_path(&disks, repo_root);
+    let disk_total_gib = disk_space
+        .map(|(total, _)| bytes_to_gib(total))
+        .unwrap_or_default();
+    let disk_available_gib = disk_space
+        .map(|(_, available)| bytes_to_gib(available))
+        .unwrap_or_default();
+    let disk_used_percent = percentage_from_parts(
+        (disk_total_gib - disk_available_gib).max(0.0),
+        disk_total_gib,
+    );
+    let disk_model = disk_device
+        .as_deref()
+        .and_then(read_disk_model)
+        .unwrap_or_else(|| "модель диска не определена".to_string());
+    let disk_kind = disk_device
+        .as_deref()
+        .map(detect_disk_kind)
+        .unwrap_or_else(|| "тип диска не определён".to_string());
+    let disk_live = disk_device.as_deref().and_then(read_disk_live_stats);
+    let disk_firmware = disk_device
+        .as_deref()
+        .and_then(read_disk_firmware)
+        .unwrap_or_else(|| "ещё нет данных".to_string());
+    let disk_temperature_celsius = disk_device.as_deref().and_then(read_disk_temperature);
     Ok(MachineSummary {
         cpu_model,
         logical_cpus: system.cpus().len(),
-        total_memory_gib: bytes_to_gib(system.total_memory()),
-        available_memory_gib: bytes_to_gib(system.available_memory()),
-        memory_type: detect_memory_type()
-            .unwrap_or_else(|| "система не дала определить автоматически".to_string()),
-        available_disk_gib: disk_available_for_path(&disks, repo_root)
-            .map(bytes_to_gib)
-            .unwrap_or_default(),
+        cpu_usage_percent: read_cpu_usage_percent(),
+        cpu_temperature_celsius: read_hwmon_temperature("k10temp", "Tctl"),
+        cpu_max_mhz,
+        total_memory_gib,
+        available_memory_gib,
+        used_memory_gib,
+        memory_used_percent,
+        memory_type,
+        memory_speed_label,
+        swap_total_gib,
+        swap_used_gib,
+        disk_device,
+        disk_model,
+        disk_kind,
+        disk_total_gib,
+        disk_available_gib,
+        disk_used_percent,
+        disk_busy_percent: disk_live.as_ref().and_then(|live| live.busy_percent),
+        disk_read_mib_per_sec: disk_live.as_ref().and_then(|live| live.read_mib_per_sec),
+        disk_write_mib_per_sec: disk_live.as_ref().and_then(|live| live.write_mib_per_sec),
+        disk_temperature_celsius,
+        disk_firmware,
     })
 }
 
-fn detect_memory_type() -> Option<String> {
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn percentage_from_parts(value: f64, total: f64) -> Option<f64> {
+    if total <= 0.0 {
+        None
+    } else {
+        Some((value / total) * 100.0)
+    }
+}
+
+fn read_cpu_usage_percent() -> Option<f64> {
+    let (total, idle) = read_cpu_totals()?;
+    let cache = CPU_LOAD_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().ok()?;
+    let previous = guard.replace(CpuLoadSample { total, idle });
+    let previous = previous?;
+    let delta_total = total.saturating_sub(previous.total);
+    if delta_total == 0 {
+        return None;
+    }
+    let delta_idle = idle.saturating_sub(previous.idle);
+    Some(((delta_total.saturating_sub(delta_idle)) as f64 / delta_total as f64) * 100.0)
+}
+
+fn read_cpu_totals() -> Option<(u64, u64)> {
+    let line = fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .next()?
+        .to_string();
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "cpu" {
+        return None;
+    }
+    let values = parts
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    if values.len() < 5 {
+        return None;
+    }
+    let total = values.iter().sum();
+    let idle = values[3].saturating_add(values[4]);
+    Some((total, idle))
+}
+
+fn read_lscpu_numeric_field(prefix: &str) -> Option<f64> {
+    if prefix == "CPU max MHz:" {
+        return CPU_MAX_MHZ_CACHE
+            .get_or_init(|| read_lscpu_numeric_field_uncached(prefix))
+            .to_owned();
+    }
+    read_lscpu_numeric_field_uncached(prefix)
+}
+
+fn read_lscpu_numeric_field_uncached(prefix: &str) -> Option<f64> {
+    let output = Command::new("lscpu").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text
+        .lines()
+        .find(|line| line.trim_start().starts_with(prefix))?;
+    let digits = line
+        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .find(|part| !part.is_empty())?;
+    digits.parse::<f64>().ok()
+}
+
+fn read_hwmon_temperature(chip_name: &str, label: &str) -> Option<f64> {
+    let hwmon_root = Path::new("/sys/class/hwmon");
+    for entry in fs::read_dir(hwmon_root).ok()?.flatten() {
+        let path = entry.path();
+        let name = fs::read_to_string(path.join("name")).ok()?;
+        if name.trim() != chip_name {
+            continue;
+        }
+        for index in 1..=6 {
+            let label_path = path.join(format!("temp{index}_label"));
+            let input_path = path.join(format!("temp{index}_input"));
+            if !input_path.is_file() {
+                continue;
+            }
+            let current_label = fs::read_to_string(&label_path)
+                .ok()
+                .map(|text| text.trim().to_string())
+                .unwrap_or_else(|| format!("temp{index}"));
+            if current_label != label {
+                continue;
+            }
+            let raw = fs::read_to_string(&input_path).ok()?;
+            let milli_celsius = raw.trim().parse::<f64>().ok()?;
+            return Some(milli_celsius / 1000.0);
+        }
+    }
+    None
+}
+
+fn detect_memory_characteristics() -> (String, String) {
     for (program, args) in [
+        ("sudo", vec!["-n", "dmidecode", "--type", "17"]),
         ("dmidecode", vec!["--type", "17"]),
         ("lshw", vec!["-class", "memory"]),
     ] {
-        let output = std::process::Command::new(program)
-            .args(args)
-            .output()
-            .ok()?;
+        let output = Command::new(program).args(args).output().ok();
+        let Some(output) = output else {
+            continue;
+        };
         if !output.status.success() {
             continue;
         }
         let text = String::from_utf8_lossy(&output.stdout);
-        if let Some(found) = extract_memory_generation(&text) {
-            return Some(found);
+        let memory_type = extract_memory_generation(&text)
+            .unwrap_or_else(|| "система не дала определить автоматически".to_string());
+        let memory_speed = extract_memory_speed(&text)
+            .map(|value| format!("{value} MT/s"))
+            .unwrap_or_else(|| "не удалось определить автоматически".to_string());
+        return (memory_type, memory_speed);
+    }
+    (
+        "система не дала определить автоматически".to_string(),
+        "не удалось определить автоматически".to_string(),
+    )
+}
+
+fn extract_memory_speed(text: &str) -> Option<u64> {
+    for line in text.lines() {
+        let line = line.trim();
+        if !(line.contains("Speed:")
+            || line.contains("Configured Memory Speed:")
+            || line.contains("clock:"))
+        {
+            continue;
+        }
+        let digits = line
+            .split(|ch: char| !ch.is_ascii_digit())
+            .find(|part| !part.is_empty())?;
+        if let Ok(value) = digits.parse::<u64>() {
+            return Some(value);
         }
     }
     None
@@ -1949,13 +2287,162 @@ fn extract_memory_generation(text: &str) -> Option<String> {
     None
 }
 
-fn disk_available_for_path(disks: &Disks, path: &Path) -> Option<u64> {
+fn disk_space_for_path(disks: &Disks, path: &Path) -> Option<(u64, u64)> {
     let canonical = path.canonicalize().ok()?;
     disks
         .iter()
         .filter(|disk| canonical.starts_with(disk.mount_point()))
         .max_by_key(|disk| disk.mount_point().as_os_str().len())
-        .map(|disk| disk.available_space())
+        .map(|disk| (disk.total_space(), disk.available_space()))
+}
+
+fn detect_disk_device_for_path(path: &Path) -> Option<String> {
+    let output = Command::new("df")
+        .arg("--output=source")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let source = text
+        .lines()
+        .skip(1)
+        .find(|line| !line.trim().is_empty())?
+        .trim();
+    normalize_block_device_name(source)
+}
+
+fn normalize_block_device_name(source: &str) -> Option<String> {
+    let source = source.strip_prefix("/dev/").unwrap_or(source).trim();
+    if source.is_empty() {
+        return None;
+    }
+    if let Some((base, suffix)) = source.rsplit_once('p')
+        && suffix.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return Some(base.to_string());
+    }
+    let trimmed = source.trim_end_matches(|ch: char| ch.is_ascii_digit());
+    if trimmed.is_empty() {
+        Some(source.to_string())
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn read_disk_model(device: &str) -> Option<String> {
+    fs::read_to_string(format!("/sys/class/block/{device}/device/model"))
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+fn read_disk_firmware(device: &str) -> Option<String> {
+    fs::read_to_string(format!("/sys/class/block/{device}/device/firmware_rev"))
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+fn detect_disk_kind(device: &str) -> String {
+    if device.starts_with("nvme") {
+        return "NVMe SSD".to_string();
+    }
+    let rotational = fs::read_to_string(format!("/sys/class/block/{device}/queue/rotational"))
+        .ok()
+        .map(|text| text.trim() == "1");
+    match rotational {
+        Some(false) => "SSD".to_string(),
+        Some(true) => "HDD".to_string(),
+        None => "тип диска не определён".to_string(),
+    }
+}
+
+fn read_disk_temperature(device: &str) -> Option<f64> {
+    let device_model = read_disk_model(device);
+    let device_serial = fs::read_to_string(format!("/sys/class/block/{device}/device/serial"))
+        .ok()
+        .map(|text| text.trim().to_string());
+    for entry in fs::read_dir("/sys/class/hwmon").ok()?.flatten() {
+        let path = entry.path();
+        let name = fs::read_to_string(path.join("name")).ok()?;
+        if name.trim() != "nvme" {
+            continue;
+        }
+        let model_matches = device_model.as_deref().is_some_and(|expected| {
+            fs::read_to_string(path.join("device/model"))
+                .ok()
+                .map(|actual| actual.trim() == expected)
+                .unwrap_or(false)
+        });
+        let serial_matches = device_serial.as_deref().is_some_and(|expected| {
+            fs::read_to_string(path.join("device/serial"))
+                .ok()
+                .map(|actual| actual.trim() == expected)
+                .unwrap_or(false)
+        });
+        if !model_matches && !serial_matches {
+            continue;
+        }
+        let raw = fs::read_to_string(path.join("temp1_input")).ok()?;
+        let milli_celsius = raw.trim().parse::<f64>().ok()?;
+        return Some(milli_celsius / 1000.0);
+    }
+    None
+}
+
+fn read_disk_live_stats(device: &str) -> Option<DiskLiveStats> {
+    let (read_sectors, write_sectors, io_millis) = read_disk_counters(device)?;
+    let captured_at_ms = now_epoch_ms();
+    let cache = DISK_IO_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().ok()?;
+    let previous = guard.replace(DiskIoSample {
+        device: device.to_string(),
+        read_sectors,
+        write_sectors,
+        io_millis,
+        captured_at_ms,
+    });
+    let previous = previous?;
+    if previous.device != device {
+        return None;
+    }
+    let delta_ms = captured_at_ms.saturating_sub(previous.captured_at_ms);
+    if delta_ms == 0 {
+        return None;
+    }
+    let delta_seconds = delta_ms as f64 / 1000.0;
+    let read_bytes = read_sectors
+        .saturating_sub(previous.read_sectors)
+        .saturating_mul(512);
+    let write_bytes = write_sectors
+        .saturating_sub(previous.write_sectors)
+        .saturating_mul(512);
+    let busy_percent =
+        ((io_millis.saturating_sub(previous.io_millis)) as f64 / delta_ms as f64) * 100.0;
+    Some(DiskLiveStats {
+        busy_percent: Some(busy_percent.min(100.0)),
+        read_mib_per_sec: Some(read_bytes as f64 / 1024.0 / 1024.0 / delta_seconds),
+        write_mib_per_sec: Some(write_bytes as f64 / 1024.0 / 1024.0 / delta_seconds),
+    })
+}
+
+fn read_disk_counters(device: &str) -> Option<(u64, u64, u64)> {
+    let line = fs::read_to_string("/proc/diskstats")
+        .ok()?
+        .lines()
+        .find(|line| line.split_whitespace().nth(2) == Some(device))?
+        .to_string();
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    if fields.len() < 14 {
+        return None;
+    }
+    let read_sectors = fields[5].parse::<u64>().ok()?;
+    let write_sectors = fields[9].parse::<u64>().ok()?;
+    let io_millis = fields[12].parse::<u64>().ok()?;
+    Some((read_sectors, write_sectors, io_millis))
 }
 
 fn card(title: &str, value: String, note: String, status: &str) -> Value {
@@ -2640,6 +3127,10 @@ fn human_bytes_per_sec(value: f64) -> String {
     format!("{}/s", human_bytes(value))
 }
 
+fn format_celsius(value: f64) -> String {
+    format!("{value:.1}°C")
+}
+
 fn elapsed_since_epoch_label(start_epoch_ms: Option<u64>, end_epoch_ms: Option<u64>) -> String {
     let Some(start_epoch_ms) = start_epoch_ms.filter(|value| *value > 0) else {
         return "ещё нет данных".to_string();
@@ -2794,5 +3285,39 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!labels.contains(&"Что это значит"));
         assert!(!labels.contains(&"Техническая причина"));
+    }
+
+    #[test]
+    fn benchmark_qdrant_card_marks_stopped_test_even_if_metrics_are_still_available() {
+        let snapshot = json!({
+            "thresholds": {
+                "qdrant": {
+                    "optimize_queue": { "target": 10.0 },
+                    "update_queue_length": { "target": 0.0 }
+                }
+            },
+            "benchmark_qdrant": {
+                "configured": true,
+                "available": true,
+                "active": false,
+                "from_last_success": false,
+                "http_url": "http://127.0.0.1:7633",
+                "memory_resident_bytes": 219709440.0,
+                "points_count": 218800.0,
+                "segments_count": 8.0,
+                "index_optimize_queue": 0.0,
+                "update_queue_length": 0.0
+            }
+        });
+        let card = benchmark_qdrant_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("alert"));
+        assert_eq!(card["status_label"].as_str(), Some("тест не запущен"));
+        assert_eq!(card["value"].as_str(), Some("209.53 MiB"));
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Тест сейчас не запущен")
+        );
     }
 }

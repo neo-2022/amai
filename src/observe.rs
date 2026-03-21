@@ -1,5 +1,5 @@
 use crate::config::{AppConfig, discover_repo_root};
-use crate::{dashboard, nats, postgres, s3, token_budget};
+use crate::{dashboard, external_benchmark, nats, postgres, s3, token_budget};
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Router,
@@ -711,12 +711,21 @@ async fn collect_optional_benchmark_qdrant_live(cfg: &AppConfig, http: &reqwest:
             "reason": "missing benchmark qdrant collection config",
         });
     };
+    let benchmark_active = discover_repo_root(None)
+        .ok()
+        .and_then(|repo_root| {
+            external_benchmark::benchmark_run_active_for_qdrant_http_url(
+                &repo_root,
+                qdrant_http_url,
+            )
+        })
+        .unwrap_or(false);
     match collect_qdrant_live_from(qdrant_http_url, collection_code, http).await {
         Ok(mut value) => {
             if let Some(object) = value.as_object_mut() {
                 object.insert("available".to_string(), Value::Bool(true));
                 object.insert("configured".to_string(), Value::Bool(true));
-                object.insert("active".to_string(), Value::Bool(true));
+                object.insert("active".to_string(), Value::Bool(benchmark_active));
                 object.insert("from_last_success".to_string(), Value::Bool(false));
                 object.insert(
                     "http_url".to_string(),
