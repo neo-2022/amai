@@ -18,12 +18,16 @@ axum = "0.8.6"
 aws-config = "1.8.10"
 aws-credential-types = "1.2.8"
 aws-sdk-s3 = "1.127.0"
+arrow-array = "56.2.0"
+arrow-schema = "56.2.0"
 clap = { version = "4.6.0", features = ["derive"] }
 dirs = "6.0.0"
 dotenvy = "0.15.7"
 fastembed = "5.13.0"
 hex = "0.4.3"
+hdf5 = { package = "hdf5-metno", version = "0.12.3", features = ["static"] }
 ignore = "0.4.25"
+parquet = { version = "56.2.0", features = ["arrow"] }
 qdrant-client = "1.17.0"
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.33.0", features = ["bundled"] }

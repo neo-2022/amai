@@ -220,6 +220,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         );
     }
     let qdrant_live = collect_qdrant_live(cfg, &http).await?;
+    let benchmark_qdrant_live = collect_optional_benchmark_qdrant_live(cfg, &http).await;
     let nats_live = collect_nats_live(cfg, &http, &profile.snapshot).await?;
     let s3_live = collect_s3_live(cfg).await?;
 
@@ -248,6 +249,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "thresholds": profile_thresholds_json(&profile),
         "postgres": with_postgres_rates(&postgres_live, previous.as_ref()),
         "qdrant": qdrant_live,
+        "benchmark_qdrant": benchmark_qdrant_live,
         "nats": nats_live,
         "s3": s3_live,
         "latest_index_project": latest_index,
@@ -268,6 +270,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "thresholds": payload["thresholds"].clone(),
         "postgres": payload["postgres"].clone(),
         "qdrant": payload["qdrant"].clone(),
+        "benchmark_qdrant": payload["benchmark_qdrant"].clone(),
         "nats": payload["nats"].clone(),
         "s3": payload["s3"].clone(),
         "latest_index_project": payload["latest_index_project"].clone(),
@@ -649,9 +652,13 @@ fn with_postgres_rates(current: &Value, previous: Option<&Value>) -> Value {
     value
 }
 
-async fn collect_qdrant_live(cfg: &AppConfig, http: &reqwest::Client) -> Result<Value> {
+async fn collect_qdrant_live_from(
+    qdrant_http_url: &str,
+    collection_code: &str,
+    http: &reqwest::Client,
+) -> Result<Value> {
     let metrics_text = http
-        .get(format!("{}/metrics", cfg.qdrant_http_url))
+        .get(format!("{}/metrics", qdrant_http_url))
         .send()
         .await
         .context("failed to query qdrant metrics endpoint")?
@@ -662,7 +669,7 @@ async fn collect_qdrant_live(cfg: &AppConfig, http: &reqwest::Client) -> Result<
     let collection: Value = http
         .get(format!(
             "{}/collections/{}",
-            cfg.qdrant_http_url, cfg.qdrant_collection_code
+            qdrant_http_url, collection_code
         ))
         .send()
         .await
@@ -683,6 +690,51 @@ async fn collect_qdrant_live(cfg: &AppConfig, http: &reqwest::Client) -> Result<
         "points_count": result["points_count"].clone(),
         "segments_count": result["segments_count"].clone(),
     }))
+}
+
+async fn collect_qdrant_live(cfg: &AppConfig, http: &reqwest::Client) -> Result<Value> {
+    collect_qdrant_live_from(&cfg.qdrant_http_url, &cfg.qdrant_collection_code, http).await
+}
+
+async fn collect_optional_benchmark_qdrant_live(cfg: &AppConfig, http: &reqwest::Client) -> Value {
+    let Some(qdrant_http_url) = cfg.benchmark_qdrant_http_url.as_deref() else {
+        return json!({
+            "available": false,
+            "configured": false,
+            "reason": "missing benchmark qdrant config",
+        });
+    };
+    let Some(collection_code) = cfg.benchmark_qdrant_collection_code.as_deref() else {
+        return json!({
+            "available": false,
+            "configured": false,
+            "reason": "missing benchmark qdrant collection config",
+        });
+    };
+    match collect_qdrant_live_from(qdrant_http_url, collection_code, http).await {
+        Ok(mut value) => {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("available".to_string(), Value::Bool(true));
+                object.insert("configured".to_string(), Value::Bool(true));
+                object.insert(
+                    "http_url".to_string(),
+                    Value::String(qdrant_http_url.to_string()),
+                );
+                object.insert(
+                    "collection_code".to_string(),
+                    Value::String(collection_code.to_string()),
+                );
+            }
+            value
+        }
+        Err(error) => json!({
+            "available": false,
+            "configured": true,
+            "http_url": qdrant_http_url,
+            "collection_code": collection_code,
+            "reason": format!("{error:#}"),
+        }),
+    }
 }
 
 async fn collect_nats_live(

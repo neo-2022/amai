@@ -13,6 +13,7 @@ mod dashboard;
 mod deployment;
 mod edge_cache;
 mod external_benchmark;
+mod external_benchmark_conversion;
 mod indexer;
 mod language;
 mod mcp;

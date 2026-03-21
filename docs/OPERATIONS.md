@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 22:51 MSK
-Ручная сверка guide/docs: 2026-03-21 22:51 MSK
+modified_at: 2026-03-22 00:43 MSK
+Ручная сверка guide/docs: 2026-03-22 00:43 MSK
 
 # Operations
 
@@ -921,8 +921,8 @@ cargo run -- benchmark external-explain --benchmark vectordbbench
 cargo run -- benchmark external-datasets
 cargo run -- benchmark external-download --dataset dbpedia_openai_1000k_angular
 cargo run -- benchmark external-plan --benchmark vectordbbench
-cargo run -- benchmark external-adapter --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular
-cargo run -- benchmark external-harvest --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular
+cargo run -- benchmark external-adapter --benchmark vectordbbench --dataset dbpedia_openai_1000k_angular
+cargo run -- benchmark external-harvest --benchmark vectordbbench --dataset dbpedia_openai_1000k_angular
 ./scripts/proof_external_benchmark_env.sh
 ./scripts/proof_external_benchmark_adapter.sh
 ```
@@ -963,13 +963,25 @@ config/external_benchmark_datasets.toml
 Следующий слой теперь уже не теоретический:
 - `external-download`
   - Rust-контур для скачивания одного dataset-а или всего manifest-а;
-- `external-adapter`
+  - `external-adapter`
   - готовит реальный run workspace:
   - `summary.json`
   - `report.md`
   - `run_external.sh`
   - `run_status.json`
   - `run_external.log`
+  - для `VectorDBBench` теперь уже materialize-ит Rust conversion contour:
+    - читает HDF5 dataset;
+    - пишет custom Parquet bundle `train/test/neighbors`;
+    - кладёт рядом `conversion_manifest.json`;
+    - только после этого помечает adapter как `prepared`;
+    - перед новым run очищает старый `vectordbbench-results`, чтобы `latest/` не подмешивал прошлые `result_*.json`;
+    - materialize-ит Amai-managed local compatibility patch для `QdrantLocal`:
+      - transport `timeout = 600`;
+      - расширение upstream CLI флагом `--timeout`;
+      - без изменения case threshold и dataset semantics;
+    - затем честно запускает upstream `vectordbbench qdrantlocal ...`;
+    - если в `.env` заданы `AMI_BENCHMARK_QDRANT_HTTP_URL` и `AMI_BENCHMARK_QDRANT_COLLECTION_CODE`, human dashboard отдельно показывает живые системные числа именно этого benchmark-Qdrant;
   - для `ann-benchmarks` `run_external.sh` теперь идёт безопасным upstream path:
     - локальный `.venv`
     - `pip install -r requirements.txt`
@@ -978,6 +990,7 @@ config/external_benchmark_datasets.toml
     - `python run.py --dataset ... --algorithm qdrant`
   - `external-harvest`
     - читает workspace короткой сводкой без разбора полного Docker-лога;
+    - поднимает `result_verdict` и label из реальных `result_*.json`, а не только `exit code`;
   - `docker compose up` здесь больше не является каноническим launch-path, потому что при отсутствии compose-файла upstream он может по ошибке подцепить parent compose другого проекта;
   - если dataset подходит напрямую и upstream default path реально доступен, workspace помечается как `prepared`;
   - если dataset не скачан, это честно помечается как `blocked_dataset_missing`;
@@ -989,8 +1002,12 @@ config/external_benchmark_datasets.toml
 - но только если upstream уже знает этот dataset по имени в своём `DATASETS` registry;
 - если upstream qdrant path помечен `disabled: true` в canonical config, `Amai` не имеет права продолжать показывать такой contour как `prepared`;
 - если файл существует, но dataset не поддержан upstream напрямую, `Amai` обязан пометить contour как `blocked_unsupported_dataset`;
-- `VectorDBBench` custom dataset contour не должен притворяться, что принимает те же HDF5 без подготовки;
-- поэтому для `VectorDBBench` runner сейчас fail-closed пишет, что нужен Parquet bundle `train/test/neighbors`.
+- `VectorDBBench` custom dataset contour не должен притворяться, что принимает те же HDF5 напрямую;
+- поэтому `Amai` теперь сначала materialize-ит Parquet bundle `train/test/neighbors`,
+  и только потом запускает реальный upstream contour;
+- `summary.json` теперь должен явно нести `compatibility_overrides`, если честный запуск требует
+  локального Amai-managed patch в upstream workspace;
+- для этого Rust conversion path нужен `cmake` в `PATH`, иначе bundled HDF5 crate не соберётся.
 
 ## MCP task matrix
 
@@ -1445,6 +1462,7 @@ Launcher human dashboard теперь:
 - складывает лог в `tmp/human_dashboard.log`;
 - не требует держать терминал открытым только ради живой панели.
 - по умолчанию обновляет страницу раз в `1` секунду, чтобы live-картина была ближе к текущему состоянию.
+- если локальный `cmake` уже materialized в `state/tooling/cmake-venv/bin`, launcher сам подхватывает этот `PATH`, чтобы observability-path не падал только из-за отсутствия системного `cmake`.
 
 Встроенный exporter:
 
@@ -1500,6 +1518,12 @@ Grafana login берётся из `.env`:
   - живые system probes;
   - последний сохранённый benchmark;
 - benchmark-карточки теперь обязаны прямо писать слово `benchmark` в source label, а live-карточки — прямо писать, что benchmark-данные туда не подмешиваются;
+- `Qdrant` в human dashboard теперь intentionally разделён на два разных live-инстанса:
+  - `Qdrant Amai live`
+    - основной векторный слой `Amai`;
+  - `Qdrant внешнего бенча`
+    - отдельный live-инстанс для внешнего benchmark-прогона;
+  - этим карточкам запрещено делить между собой `points / segments / resident memory`;
 - live latency слой на human dashboard теперь схлопнут в один общий блок `Как Amai отвечает сейчас`, а не размазан по трём похожим карточкам;
 - сверху в этом блоке стоят две крупные живые цифры:
   - `Повторный запрос`

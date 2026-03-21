@@ -1511,14 +1511,14 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
             ],
         ),
         card_with_rows(
-            "Qdrant",
+            "Qdrant Amai live",
             format_optional(snapshot["qdrant"]["memory_resident_bytes"].as_f64(), human_bytes),
             "Живые системные показатели векторного слоя. Здесь показаны только действительно живые системные числа, а не исторический search-benchmark.".to_string(),
             combine_statuses(&[
                 status_for_metric_name(snapshot, "qdrant.index_optimize_queue"),
                 status_for_metric_name(snapshot, "qdrant.update_queue_length"),
             ]),
-            Some("Источник: live Qdrant /metrics, обновляется на каждом refresh dashboard".to_string()),
+            Some("Источник: live Qdrant /metrics Amai, обновляется на каждом refresh dashboard".to_string()),
             Some("Qdrant — векторный слой. Он помогает recall, но не является source of truth для continuity или кода.".to_string()),
             vec![
                 metric_row(
@@ -1558,6 +1558,7 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                 ),
             ],
         ),
+        benchmark_qdrant_live_card(snapshot),
         card_with_rows(
             "NATS / JetStream",
             format_ms(snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
@@ -1603,6 +1604,135 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
             ],
         ),
     ]
+}
+
+fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
+    let benchmark = &snapshot["benchmark_qdrant"];
+    let configured = benchmark["configured"].as_bool().unwrap_or(false);
+    let available = benchmark["available"].as_bool().unwrap_or(false);
+    let human_reason = benchmark["reason"]
+        .as_str()
+        .map(humanize_benchmark_qdrant_reason);
+    let status = if !configured {
+        "unknown"
+    } else if !available {
+        "alert"
+    } else {
+        combine_statuses(&[
+            status_at_most_or_equal(
+                benchmark["index_optimize_queue"].as_f64(),
+                snapshot["thresholds"]["qdrant"]["optimize_queue"]["target"].as_f64(),
+            ),
+            status_at_most_or_equal(
+                benchmark["update_queue_length"].as_f64(),
+                snapshot["thresholds"]["qdrant"]["update_queue_length"]["target"].as_f64(),
+            ),
+        ])
+    };
+    let value = if available {
+        format_optional(benchmark["memory_resident_bytes"].as_f64(), human_bytes)
+    } else if configured {
+        "бенч сейчас не активен".to_string()
+    } else {
+        "не настроено".to_string()
+    };
+    let note = if available {
+        "Живые системные показатели отдельного Qdrant, который сейчас занят внешним benchmark-прогоном. Эти числа не смешиваются с Amai live.".to_string()
+    } else if let Some(reason) = &human_reason {
+        reason.clone()
+    } else if configured {
+        "Отдельный benchmark-Qdrant настроен, но сейчас не отвечает или внешний прогон не активен."
+            .to_string()
+    } else {
+        "Отдельный benchmark-Qdrant ещё не настроен. Когда внешний прогон будет идти через выделенный инстанс, здесь появятся его живые системные числа.".to_string()
+    };
+    let source_label = if available {
+        Some(format!(
+            "Источник: live Qdrant /metrics внешнего бенча ({}), обновляется на каждом refresh dashboard",
+            benchmark["http_url"].as_str().unwrap_or("unknown")
+        ))
+    } else {
+        Some(
+            "Источник: отдельный benchmark-Qdrant. Эта карточка никогда не берёт данные из Amai live."
+                .to_string(),
+        )
+    };
+    let mut rows = vec![
+        metric_row(
+            "Эталон optimize queue",
+            format_f64_count(snapshot["thresholds"]["qdrant"]["optimize_queue"]["target"].as_f64()),
+            Some("Целевой максимум очереди оптимизации индекса для внешнего benchmark-Qdrant."),
+        ),
+        metric_row(
+            "Сейчас optimize queue",
+            format_f64_count(benchmark["index_optimize_queue"].as_f64()),
+            Some("Текущая очередь оптимизации индекса у внешнего benchmark-Qdrant."),
+        ),
+        metric_row(
+            "Эталон update queue",
+            format_f64_count(
+                snapshot["thresholds"]["qdrant"]["update_queue_length"]["target"].as_f64(),
+            ),
+            Some("Желаемая длина очереди обновлений у внешнего benchmark-Qdrant."),
+        ),
+        metric_row(
+            "Сейчас update queue",
+            format_f64_count(benchmark["update_queue_length"].as_f64()),
+            Some("Текущая длина очереди обновлений у внешнего benchmark-Qdrant."),
+        ),
+        metric_row(
+            "Сейчас resident memory",
+            format_optional(benchmark["memory_resident_bytes"].as_f64(), human_bytes),
+            Some("Объём памяти, который отдельный benchmark-Qdrant держит прямо сейчас."),
+        ),
+        metric_row(
+            "Сейчас points",
+            format_f64_count(benchmark["points_count"].as_f64()),
+            Some("Сколько точек сейчас загружено во внешний benchmark-Qdrant."),
+        ),
+        metric_row(
+            "Сейчас segments",
+            format_f64_count(benchmark["segments_count"].as_f64()),
+            Some("Сколько сегментов сейчас держит внешний benchmark-Qdrant."),
+        ),
+    ];
+    if let Some(reason) = human_reason {
+        rows.push(metric_row(
+            "Что это значит",
+            reason,
+            Some(
+                "Человеческое объяснение, почему отдельный benchmark-Qdrant сейчас не даёт live-метрики.",
+            ),
+        ));
+    }
+    if let Some(reason) = benchmark["reason"].as_str() {
+        rows.push(metric_row(
+            "Техническая причина",
+            reason.to_string(),
+            Some(
+                "Сырая техническая причина, которую вернул источник live-метрик benchmark-Qdrant.",
+            ),
+        ));
+    }
+    card_with_rows(
+        "Qdrant внешнего бенча",
+        value,
+        note,
+        status,
+        source_label,
+        Some("Это отдельный инстанс Qdrant для внешнего benchmark-прогона. Он не должен смешиваться с основным Qdrant Amai.".to_string()),
+        rows,
+    )
+}
+
+fn humanize_benchmark_qdrant_reason(reason: &str) -> String {
+    if reason.contains("Connection reset by peer") || reason.contains("error sending request") {
+        return "Внешний benchmark-Qdrant перестал отвечать по HTTP. Обычно это значит, что отдельный benchmark-инстанс завис или сломался после прогона, поэтому live-метрики с него сейчас снять нельзя.".to_string();
+    }
+    if reason.contains("failed to query qdrant metrics endpoint") {
+        return "Внешний benchmark-Qdrant сейчас не отдал live-метрики. Значит отдельный benchmark-инстанс не отвечает так, как должен, и цифры с него временно недоступны.".to_string();
+    }
+    reason.to_string()
 }
 
 fn build_warnings(snapshot: &Value) -> Vec<String> {

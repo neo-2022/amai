@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 22:51 MSK
-Ручная сверка guide/docs: 2026-03-21 22:51 MSK
+modified_at: 2026-03-22 00:18 MSK
+Ручная сверка guide/docs: 2026-03-22 00:18 MSK
 
 # Tests
 
@@ -52,16 +52,21 @@ modified_at: 2026-03-21 22:51 MSK
 - `cargo run -- benchmark external-datasets`
 - `cargo run -- benchmark external-download --dataset dbpedia_openai_1000k_angular`
 - `cargo run -- benchmark external-plan --benchmark vectordbbench`
-- `cargo run -- benchmark external-adapter --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular`
-- `cargo run -- benchmark external-harvest --benchmark ann_benchmarks --dataset dbpedia_openai_1000k_angular`
+- `cargo run -- benchmark external-adapter --benchmark vectordbbench --dataset dbpedia_openai_1000k_angular`
+- `cargo run -- benchmark external-harvest --benchmark vectordbbench --dataset dbpedia_openai_1000k_angular`
 - `cargo run -- verify mcp-matrix --matrix live_mcpbench_local ...`
 - `cargo run -- verify mcp-matrix --matrix mcp_universe_local ...`
 
 Для `external-adapter` важный инвариант теперь такой:
 - `run_external.sh` должен быть реальным безопасным launch-path, а не `echo`-заглушкой;
+- для `VectorDBBench` это теперь означает `Rust HDF5 -> Parquet conversion + upstream qdrantlocal launch`;
+- для `VectorDBBench/QdrantLocal` launch-path теперь дополнительно обязан:
+  - очищать старый `vectordbbench-results` перед повторным run;
+  - materialize-ить local compatibility patch для `timeout = 600`;
+  - считать итог честно по `result label`, а не только по `exit code`;
 - для `ann-benchmarks` это означает `.venv + requirements + install.py + run.py`;
 - если upstream держит canonical launch path в `disabled: true`, `Amai` обязан выдавать `blocked_upstream_disabled`, а не ложный `prepared`;
-- `external-harvest` должен уметь одной короткой командой показать `summary/report/script/status/log`;
+- `external-harvest` должен уметь одной короткой командой показать `summary/report/script/status/log`, а после завершения ещё и поднять реальные `result_*.json`;
 - ложный `docker compose up` без явного compose-файла больше не считается допустимым proof-path.
 
 Когда появятся отдельные integration tests с поднимаемым stack fixture, они materialize-ятся именно здесь.
