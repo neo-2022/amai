@@ -149,8 +149,14 @@ pub fn derive_thread_index_summary(
     }))
 }
 
-pub fn previous_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTail>> {
-    if let Some(record) = previous_thread_record(repo_root, current_thread_id().as_deref())? {
+pub fn nth_previous_chat_tail(
+    repo_root: &str,
+    offset: usize,
+    count: usize,
+) -> Result<Option<ChatTail>> {
+    let offset = offset.max(1);
+    if let Some(record) = previous_thread_record(repo_root, current_thread_id().as_deref(), offset)?
+    {
         return build_previous_chat_tail(
             &record.thread_id,
             &record.title,
@@ -172,10 +178,16 @@ pub fn previous_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTa
         .threads
         .sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
     let current_thread = current_thread_id();
-    let Some(entry) = index.threads.into_iter().rev().find(|item| {
-        item.cwd.starts_with(repo_root)
-            && Some(item.thread_id.as_str()) != current_thread.as_deref()
-    }) else {
+    let Some(entry) = index
+        .threads
+        .into_iter()
+        .rev()
+        .filter(|item| {
+            item.cwd.starts_with(repo_root)
+                && Some(item.thread_id.as_str()) != current_thread.as_deref()
+        })
+        .nth(offset.saturating_sub(1))
+    else {
         return Ok(None);
     };
 
@@ -296,13 +308,15 @@ pub fn current_chat_tail(repo_root: &str, count: usize) -> Result<Option<ChatTai
     }))
 }
 
-pub fn previous_chat_tail_from_snapshots(
+pub fn nth_previous_chat_tail_from_snapshots(
     snapshots: &[ObservabilitySnapshotRecord],
     project_code: &str,
     namespace_code: &str,
     current_thread_id: Option<&str>,
+    offset: usize,
     count: usize,
 ) -> Option<ChatTail> {
+    let offset = offset.max(1);
     let snapshot = snapshots
         .iter()
         .filter(|snapshot| {
@@ -313,14 +327,24 @@ pub fn previous_chat_tail_from_snapshots(
                 && snapshot.payload["continuity_thread_index"]["thread_id"].as_str()
                     != current_thread_id
         })
-        .max_by_key(|snapshot| {
-            (
+        .collect::<Vec<_>>();
+    let mut scoped = snapshot
+        .into_iter()
+        .map(|snapshot| {
+            let key = (
                 snapshot.payload["continuity_thread_index"]["updated_at_epoch_s"]
                     .as_i64()
                     .unwrap_or_default(),
                 snapshot.created_at_epoch_ms,
-            )
-        })?;
+            );
+            (key, snapshot)
+        })
+        .collect::<Vec<_>>();
+    scoped.sort_by(|left, right| right.0.cmp(&left.0));
+    let snapshot = scoped
+        .into_iter()
+        .nth(offset.saturating_sub(1))
+        .map(|(_, snapshot)| snapshot)?;
     let node = &snapshot.payload["continuity_thread_index"];
     let messages = snapshot_messages(node, count)
         .or_else(|| snapshot_rollout_messages(node, count).ok().flatten())
@@ -654,6 +678,7 @@ fn thread_index_summary_from_value(value: &Value) -> ThreadIndexSummary {
 fn previous_thread_record(
     repo_root: &str,
     current_thread_id: Option<&str>,
+    offset: usize,
 ) -> Result<Option<ThreadRecord>> {
     let Some(db_path) = codex_db_path() else {
         return Ok(None);
@@ -679,7 +704,7 @@ fn previous_thread_record(
             OR (updated_at = ?3 AND id < ?4)
           )
         ORDER BY updated_at DESC, id DESC
-        LIMIT 1
+        LIMIT 1 OFFSET ?5
         "#
     } else {
         r#"
@@ -688,7 +713,7 @@ fn previous_thread_record(
         WHERE (cwd = ?1 OR cwd LIKE ?2)
           AND (?3 IS NULL OR id != ?3)
         ORDER BY updated_at DESC, id DESC
-        LIMIT 1
+        LIMIT 1 OFFSET ?4
         "#
     };
 
@@ -699,7 +724,8 @@ fn previous_thread_record(
                 repo_root,
                 repo_prefix,
                 current.updated_at_epoch_s,
-                current.thread_id
+                current.thread_id,
+                offset.saturating_sub(1) as i64
             ],
             map_thread_record,
         )
@@ -707,7 +733,12 @@ fn previous_thread_record(
     } else {
         conn.query_row(
             query,
-            params![repo_root, repo_prefix, current_thread_id],
+            params![
+                repo_root,
+                repo_prefix,
+                current_thread_id,
+                offset.saturating_sub(1) as i64
+            ],
             map_thread_record,
         )
         .optional()?
@@ -1808,8 +1839,8 @@ mod tests {
     use super::{
         chat_tail_at_time_from_snapshots, collapse_text, compact_headline_from_text,
         compact_next_step_from_text, extract_chat_messages_from_rollout_text,
-        extract_last_messages, parse_rfc3339_epoch_s, parse_role_heading,
-        previous_chat_tail_from_snapshots, rendered_transcript_summary, rollout_summary_from_path,
+        extract_last_messages, nth_previous_chat_tail_from_snapshots, parse_rfc3339_epoch_s,
+        parse_role_heading, rendered_transcript_summary, rollout_summary_from_path,
         select_messages_for_time, select_tail_messages,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
@@ -2150,11 +2181,12 @@ mod tests {
             }),
         }];
 
-        let tail = previous_chat_tail_from_snapshots(
+        let tail = nth_previous_chat_tail_from_snapshots(
             &snapshots,
             "art",
             "continuity",
             Some("current-thread"),
+            1,
             2,
         )
         .expect("tail");
@@ -2163,5 +2195,73 @@ mod tests {
             tail.title,
             "Amai startup restore pack enriched and committed"
         );
+    }
+
+    #[test]
+    fn nth_previous_chat_tail_from_snapshots_picks_second_previous_thread() {
+        let snapshots = vec![
+            ObservabilitySnapshotRecord {
+                snapshot_id: Uuid::new_v4(),
+                snapshot_kind: "continuity_thread_index".to_string(),
+                created_at_epoch_ms: 30,
+                payload: json!({
+                    "continuity_thread_index": {
+                        "project": {"code": "art"},
+                        "namespace": {"code": "continuity"},
+                        "thread_id": "thread-3",
+                        "title": "current",
+                        "updated_at_epoch_s": 30,
+                        "last_user_message": "current user",
+                        "last_assistant_message": "current assistant"
+                    }
+                }),
+            },
+            ObservabilitySnapshotRecord {
+                snapshot_id: Uuid::new_v4(),
+                snapshot_kind: "continuity_thread_index".to_string(),
+                created_at_epoch_ms: 20,
+                payload: json!({
+                    "continuity_thread_index": {
+                        "project": {"code": "art"},
+                        "namespace": {"code": "continuity"},
+                        "thread_id": "thread-2",
+                        "title": "previous",
+                        "updated_at_epoch_s": 20,
+                        "last_user_message": "previous user",
+                        "last_assistant_message": "previous assistant"
+                    }
+                }),
+            },
+            ObservabilitySnapshotRecord {
+                snapshot_id: Uuid::new_v4(),
+                snapshot_kind: "continuity_thread_index".to_string(),
+                created_at_epoch_ms: 10,
+                payload: json!({
+                    "continuity_thread_index": {
+                        "project": {"code": "art"},
+                        "namespace": {"code": "continuity"},
+                        "thread_id": "thread-1",
+                        "title": "second previous",
+                        "updated_at_epoch_s": 10,
+                        "last_user_message": "second previous user",
+                        "last_assistant_message": "second previous assistant"
+                    }
+                }),
+            },
+        ];
+
+        let tail = nth_previous_chat_tail_from_snapshots(
+            &snapshots,
+            "art",
+            "continuity",
+            Some("thread-3"),
+            2,
+            2,
+        )
+        .expect("tail");
+
+        assert_eq!(tail.thread_id, "thread-1");
+        assert_eq!(tail.messages[0].text, "second previous user");
+        assert_eq!(tail.messages[1].text, "second previous assistant");
     }
 }

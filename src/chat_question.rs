@@ -44,7 +44,9 @@ pub fn interpret(question: &str, now: OffsetDateTime) -> Option<ChatQuestionInte
     }
 
     let intent = match chat_reference.as_deref() {
-        Some("previous") => "previous_chat",
+        Some(reference) if reference == "previous" || reference.starts_with("previous:") => {
+            "previous_chat"
+        }
         _ => "last_chat",
     }
     .to_string();
@@ -97,6 +99,15 @@ fn trim_datetime_token(token: &str) -> &str {
 
 fn detect_chat_reference(question: &str) -> Option<String> {
     let mentions_chat = question.contains("чат");
+    if mentions_chat && question.contains("позапрош") {
+        return Some("previous:2".to_string());
+    }
+    if mentions_chat
+        && let Some(offset) = extract_chats_ago_offset(question)
+        && offset >= 1
+    {
+        return Some(format!("previous:{offset}"));
+    }
     if mentions_chat
         && (question.contains("прошл")
             || question.contains("предыдущ")
@@ -253,8 +264,8 @@ fn parse_relative_datetime(question: &str, now: OffsetDateTime) -> Option<Offset
         now.date()
     } else if let Some((weekday, modifier)) = extract_weekday_reference(question) {
         match modifier {
-            WeekdayModifier::Previous => previous_weekday(now.date(), weekday),
-            WeekdayModifier::Next => next_weekday(now.date(), weekday),
+            WeekdayModifier::Previous(weeks) => previous_weekday(now.date(), weekday, weeks),
+            WeekdayModifier::Next(weeks) => next_weekday(now.date(), weekday, weeks),
             WeekdayModifier::Current => current_weekday(now.date(), weekday),
         }
     } else {
@@ -266,13 +277,15 @@ fn parse_relative_datetime(question: &str, now: OffsetDateTime) -> Option<Offset
 
 fn extract_weekday_reference(question: &str) -> Option<(Weekday, WeekdayModifier)> {
     let weekday = detect_weekday(question)?;
-    let modifier = if question.contains("прошл")
+    let modifier = if question.contains("позапрош") {
+        WeekdayModifier::Previous(2)
+    } else if question.contains("прошл")
         || question.contains("предыдущ")
         || question.contains("last ")
     {
-        WeekdayModifier::Previous
+        WeekdayModifier::Previous(1)
     } else if question.contains("следующ") || question.contains("next ") {
-        WeekdayModifier::Next
+        WeekdayModifier::Next(1)
     } else {
         WeekdayModifier::Current
     };
@@ -297,20 +310,28 @@ fn detect_weekday(question: &str) -> Option<Weekday> {
     None
 }
 
-fn previous_weekday(mut date: Date, target: Weekday) -> Date {
+fn previous_weekday(mut date: Date, target: Weekday, count: u8) -> Date {
+    let mut remaining = count.max(1);
     loop {
         date -= Duration::days(1);
         if date.weekday() == target {
-            return date;
+            remaining -= 1;
+            if remaining == 0 {
+                return date;
+            }
         }
     }
 }
 
-fn next_weekday(mut date: Date, target: Weekday) -> Date {
+fn next_weekday(mut date: Date, target: Weekday, count: u8) -> Date {
+    let mut remaining = count.max(1);
     loop {
         date += Duration::days(1);
         if date.weekday() == target {
-            return date;
+            remaining -= 1;
+            if remaining == 0 {
+                return date;
+            }
         }
     }
 }
@@ -350,9 +371,30 @@ fn parse_time_token(candidate: &str) -> Option<Time> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WeekdayModifier {
-    Previous,
-    Next,
+    Previous(u8),
+    Next(u8),
     Current,
+}
+
+fn extract_chats_ago_offset(question: &str) -> Option<usize> {
+    if !question.contains("назад") {
+        return None;
+    }
+    let tokens = tokenize_words(question);
+    for (index, token) in tokens.iter().enumerate() {
+        if !token.starts_with("чат") && token != "chat" {
+            continue;
+        }
+        for candidate in tokens[..index].iter().rev().take(3) {
+            if let Ok(value) = candidate.parse::<usize>() {
+                return Some(value);
+            }
+            if let Some(value) = parse_small_number_word(candidate) {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -382,6 +424,24 @@ mod tests {
     }
 
     #[test]
+    fn interprets_penultimate_chat_reference() {
+        let parsed = interpret("что было в позапрошлом чате?", fixed_now()).expect("parsed");
+
+        assert_eq!(parsed.intent, "previous_chat");
+        assert_eq!(parsed.chat_reference.as_deref(), Some("previous:2"));
+        assert!(parsed.include_chat_messages);
+    }
+
+    #[test]
+    fn interprets_numeric_chats_ago_reference() {
+        let parsed = interpret("что было 3 чата назад?", fixed_now()).expect("parsed");
+
+        assert_eq!(parsed.intent, "previous_chat");
+        assert_eq!(parsed.chat_reference.as_deref(), Some("previous:3"));
+        assert!(parsed.include_chat_messages);
+    }
+
+    #[test]
     fn interprets_relative_russian_weekday_and_time() {
         let parsed =
             interpret("о чем мы говорили в прошлую среду в 12:00?", fixed_now()).expect("parsed");
@@ -392,6 +452,21 @@ mod tests {
             Some("2026-03-18T12:00:00+03:00")
         );
         assert!(parsed.include_chat_messages);
+    }
+
+    #[test]
+    fn interprets_penultimate_weekday_reference() {
+        let parsed = interpret(
+            "о чем мы говорили в позапрошлую среду в 12:00?",
+            fixed_now(),
+        )
+        .expect("parsed");
+
+        assert_eq!(parsed.intent, "chat_at_time");
+        assert_eq!(
+            parsed.at_time_rfc3339.as_deref(),
+            Some("2026-03-11T12:00:00+03:00")
+        );
     }
 
     #[test]

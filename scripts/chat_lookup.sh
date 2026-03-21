@@ -23,14 +23,14 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --chat-reference)
-      if [[ "${2:-}" == "previous" && "$intent" == "last_chat" ]]; then
+      if [[ "${2:-}" == previous* && "$intent" == "last_chat" ]]; then
         intent="previous_chat"
       fi
       args+=("$1" "$2")
       shift 2
       ;;
     --chat-reference=*)
-      if [[ "${1#*=}" == "previous" && "$intent" == "last_chat" ]]; then
+      if [[ "${1#*=}" == previous* && "$intent" == "last_chat" ]]; then
         intent="previous_chat"
       fi
       args+=("$1")

@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 14:40 MSK
-Ручная сверка guide/docs: 2026-03-21 14:40 MSK
+modified_at: 2026-03-21 15:08 MSK
+Ручная сверка guide/docs: 2026-03-21 15:08 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -303,6 +303,7 @@ scripts\install_amai.cmd --client codex
 - `continuity startup`
   - печатает human-readable стартовую сводку для нового чата;
   - и сразу добавляет `Chat-start restore pack`, который уже нужно считать восстановленным рабочим контекстом для первого содержательного ответа;
+  - теперь в этом выводе печатается и готовый `prompt_text`, чтобы новый чат получал не только summary, но и прямой compact restore для первого ответа;
 - `continuity restore`
   - печатает raw restore-bundle JSON целиком;
   - теперь в этом JSON есть не только `working_state_restore`, но и отдельный `chat_start_restore` с готовым `prompt_text`.
@@ -328,8 +329,11 @@ AMAI_AGENT_SCOPE=agent_beta  ./scripts/continuity_startup.sh --project art --nam
 ```bash
 ./scripts/chat_lookup.sh --project art --namespace continuity --chat-reference current --messages-count 2
 ./scripts/chat_lookup.sh --project art --namespace continuity --chat-reference previous --messages-count 2
+./scripts/chat_lookup.sh --project art --namespace continuity --chat-reference previous:2 --messages-count 2
 ./scripts/chat_lookup.sh --project art --namespace continuity --at-time-rfc3339 2026-03-21T11:41:00+03:00 --messages-count 2
 ./scripts/chat_lookup.sh --project art --namespace continuity --question "на чем закончили в прошлом чате, какие последние два сообщения?"
+./scripts/chat_lookup.sh --project art --namespace continuity --question "что было в позапрошлом чате?"
+./scripts/chat_lookup.sh --project art --namespace continuity --question "о чем мы говорили в позапрошлую среду в 12:00?"
 ./scripts/chat_lookup.sh --project art --namespace continuity --question "о чем мы говорили в прошлую среду в 12:00?"
 ```
 
@@ -341,6 +345,10 @@ AMAI_AGENT_SCOPE=agent_beta  ./scripts/continuity_startup.sh --project art --nam
 То есть вопрос вида `что было в прошлую среду в 12:00` теперь не должен разваливаться на
 несколько обходов через transcript search. `Amai` сначала берёт thread index, потом выбирает
 подходящий chat по времени и только затем поднимает нужные сообщения.
+
+Если время выходит за пределы известных чатов, `Amai` теперь должен отвечать честно:
+- не подсовывать ближайший текущий thread;
+- а писать, что для этого момента нет точного совпадения в известных чатах.
 
 Важно: полнота temporal lookup теперь не должна зависеть от того, сколько full transcript-боди
 вообще импортировано в continuity namespace. При refresh `Amai` отдельно втягивает machine-readable

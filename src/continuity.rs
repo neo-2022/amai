@@ -627,7 +627,7 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
     let parsed_question = args.question.as_deref().and_then(|question| {
         chat_question::interpret(question, chat_question::current_local_now())
     });
-    let intent = if args.intent != "last_chat" {
+    let mut intent = if args.intent != "last_chat" {
         args.intent.clone()
     } else {
         parsed_question
@@ -648,6 +648,13 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
             .as_ref()
             .and_then(|value| value.chat_reference.clone())
     });
+    let parsed_chat_reference = chat_reference
+        .as_deref()
+        .map(parse_chat_reference_spec)
+        .unwrap_or(("current", 1));
+    if intent == "last_chat" && parsed_chat_reference.0 == "previous" {
+        intent = "previous_chat".to_string();
+    }
     let at_time_rfc3339 = args.at_time_rfc3339.clone().or_else(|| {
         parsed_question
             .as_ref()
@@ -683,26 +690,27 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
                     messages_count,
                 )?)
         } else {
-            let chat_reference =
-                chat_reference
-                    .as_deref()
-                    .unwrap_or(if intent == "previous_chat" {
-                        "previous"
-                    } else {
-                        "current"
-                    });
-            match chat_reference {
-                "previous" => {
-                    codex_threads::previous_chat_tail(&project.repo_root, messages_count)?.or(
-                        codex_threads::previous_chat_tail_from_snapshots(
-                            &thread_index_snapshots,
-                            &project.code,
-                            &namespace.code,
-                            current_thread_id.as_deref(),
-                            messages_count,
-                        ),
-                    )
-                }
+            let (chat_reference_kind, chat_reference_offset) = if chat_reference.is_some() {
+                parsed_chat_reference
+            } else if intent == "previous_chat" {
+                ("previous", 1)
+            } else {
+                ("current", 1)
+            };
+            match chat_reference_kind {
+                "previous" => codex_threads::nth_previous_chat_tail(
+                    &project.repo_root,
+                    chat_reference_offset,
+                    messages_count,
+                )?
+                .or(codex_threads::nth_previous_chat_tail_from_snapshots(
+                    &thread_index_snapshots,
+                    &project.code,
+                    &namespace.code,
+                    current_thread_id.as_deref(),
+                    chat_reference_offset,
+                    messages_count,
+                )),
                 "current" => codex_threads::current_chat_tail(&project.repo_root, messages_count)?
                     .or(codex_threads::current_chat_tail_from_snapshots(
                         &thread_index_snapshots,
@@ -725,6 +733,11 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
             chat_tail.as_ref(),
             &intent,
             at_time_rfc3339.as_deref(),
+            if wants_chat_lookup && parsed_chat_reference.0 == "previous" {
+                parsed_chat_reference.1
+            } else {
+                1
+            },
         )
     );
     Ok(())
@@ -815,6 +828,7 @@ fn render_direct_answer(
     chat_tail: Option<&codex_threads::ChatTail>,
     intent: &str,
     at_time_rfc3339: Option<&str>,
+    previous_chat_offset: usize,
 ) -> String {
     let heading = match intent {
         "continue" => "Продолжаем с этой линии:",
@@ -857,6 +871,9 @@ fn render_direct_answer(
     let answer_next_step = thread_next_step.as_deref().unwrap_or(&project_next_step);
 
     let mut lines = vec![format!("{heading} {answer_headline}")];
+    if intent == "previous_chat" && previous_chat_offset > 1 {
+        lines.push(format!("Смещение назад по чатам: {previous_chat_offset}"));
+    }
     if intent != "previous_chat"
         && intent != "chat_at_time"
         && let Some(restore_node) = restore.map(|value| &value["working_state_restore"])
@@ -923,6 +940,15 @@ fn render_direct_answer(
         "Ближайший обязательный следующий шаг: {answer_next_step}"
     ));
     lines.join("\n")
+}
+
+fn parse_chat_reference_spec(value: &str) -> (&str, usize) {
+    let trimmed = value.trim();
+    if let Some(offset) = trimmed.strip_prefix("previous:") {
+        let parsed = offset.parse::<usize>().ok().filter(|value| *value > 0);
+        return ("previous", parsed.unwrap_or(1));
+    }
+    (trimmed, 1)
 }
 
 async fn load_startup_context(
@@ -1169,6 +1195,15 @@ fn print_chat_start_restore_human(value: &Value) {
         "- Thread count в temporal index: {}",
         node["thread_count"].as_u64().unwrap_or(0)
     );
+    if let Some(prompt_text) = node["prompt_text"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Prompt-text restore уже готов для первого содержательного ответа:");
+        for line in prompt_text.lines() {
+            println!("  {line}");
+        }
+    }
 }
 
 fn summarize_chat_tail_headline(chat_tail: &codex_threads::ChatTail) -> Option<String> {
@@ -1764,7 +1799,7 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::{
         build_chat_start_restore, enrich_thread_index_file, extract_next_step_from_text,
-        is_meta_continuity_handoff, render_direct_answer,
+        is_meta_continuity_handoff, parse_chat_reference_spec, render_direct_answer,
     };
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, TranscriptMessage};
@@ -1796,7 +1831,7 @@ mod tests {
             }
         });
 
-        let answer = render_direct_answer(&handoff, Some(&restore), None, "last_chat", None);
+        let answer = render_direct_answer(&handoff, Some(&restore), None, "last_chat", None, 1);
 
         assert!(
             answer
@@ -1851,6 +1886,7 @@ mod tests {
             Some(&chat_tail),
             "chat_at_time",
             Some("2026-03-19T12:00:00+03:00"),
+            1,
         );
 
         assert!(answer.contains("Что было в чате на этот момент: про temporal lookup"));
@@ -1887,7 +1923,8 @@ mod tests {
             ],
         };
 
-        let answer = render_direct_answer(&handoff, None, Some(&chat_tail), "previous_chat", None);
+        let answer =
+            render_direct_answer(&handoff, None, Some(&chat_tail), "previous_chat", None, 1);
 
         assert!(answer.contains("На чём закончился прошлый чат: Закончили на temporal contour."));
         assert!(
@@ -1909,6 +1946,7 @@ mod tests {
             None,
             "chat_at_time",
             Some("2099-01-01T12:00:00Z"),
+            1,
         );
 
         assert!(answer.contains(
@@ -1922,10 +1960,37 @@ mod tests {
     }
 
     #[test]
+    fn render_direct_answer_marks_ordinal_previous_chat_lookup() {
+        let handoff = json!({
+            "headline": "Current project line",
+            "next_step": "Current project next step."
+        });
+        let chat_tail = ChatTail {
+            thread_id: "thread-2".to_string(),
+            title: "чат про continuity".to_string(),
+            summary_headline: Some("Закончили на temporal contour.".to_string()),
+            summary_next_step: Some("Проверить новый чат ещё раз.".to_string()),
+            messages: vec![],
+        };
+
+        let answer =
+            render_direct_answer(&handoff, None, Some(&chat_tail), "previous_chat", None, 3);
+
+        assert!(answer.contains("Смещение назад по чатам: 3"));
+    }
+
+    #[test]
     fn extract_next_step_normalizes_nested_labels() {
         let text = "Сводка.\nБлижайший обязательный следующий шаг: Следующий обязательный шаг: materialize compact thread summaries.`|";
         let next_step = extract_next_step_from_text(text).expect("next step");
         assert_eq!(next_step, "materialize compact thread summaries.");
+    }
+
+    #[test]
+    fn parse_chat_reference_spec_supports_previous_offsets() {
+        assert_eq!(parse_chat_reference_spec("previous"), ("previous", 1));
+        assert_eq!(parse_chat_reference_spec("previous:2"), ("previous", 2));
+        assert_eq!(parse_chat_reference_spec("current"), ("current", 1));
     }
 
     #[test]
