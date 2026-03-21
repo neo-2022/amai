@@ -49,7 +49,14 @@ struct MatrixTask {
     retrieval_mode: Option<String>,
     budget_profile: Option<String>,
     agent_scope: Option<String>,
+    seed_agent_scope: Option<String>,
     expected_error_contains: Option<String>,
+    #[serde(default)]
+    bootstrap_lines: Vec<String>,
+    seed_headline: Option<String>,
+    seed_next_step: Option<String>,
+    #[serde(default)]
+    seed_details_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -638,6 +645,7 @@ async fn run_continuity_restore_task(task: &MatrixTask, expect_success: bool) ->
         .namespace
         .as_deref()
         .ok_or_else(|| anyhow!("continuity restore task requires namespace"))?;
+    ensure_continuity_seed(task, project, namespace).await?;
     let exe = std::env::current_exe().context("failed to resolve current amai executable")?;
     let mut command = ProcessCommand::new(exe);
     command
@@ -702,6 +710,110 @@ async fn run_continuity_restore_task(task: &MatrixTask, expect_success: bool) ->
         "status": "fail_closed",
         "stderr": stderr.trim(),
     }))
+}
+
+async fn ensure_continuity_seed(task: &MatrixTask, project: &str, namespace: &str) -> Result<()> {
+    let repo_root = std::env::temp_dir()
+        .join("amai-mcp-matrix-projects")
+        .join(project);
+    fs::create_dir_all(&repo_root)
+        .with_context(|| format!("failed to create {}", repo_root.display()))?;
+    let bootstrap_path = std::env::temp_dir().join(format!(
+        "amai-mcp-matrix-{}.md",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let bootstrap_lines = if task.bootstrap_lines.is_empty() {
+        vec![
+            "# Synthetic continuity bootstrap".to_string(),
+            "This continuity namespace exists only for the MCP matrix restore contour.".to_string(),
+        ]
+    } else {
+        task.bootstrap_lines.clone()
+    };
+    fs::write(&bootstrap_path, format!("{}\n", bootstrap_lines.join("\n")))
+        .with_context(|| format!("failed to write {}", bootstrap_path.display()))?;
+    let display_name = project.replace('_', " ");
+    let output = ProcessCommand::new(std::env::current_exe()?)
+        .arg("continuity")
+        .arg("import")
+        .arg("--project")
+        .arg(project)
+        .arg("--display-name")
+        .arg(&display_name)
+        .arg("--repo-root")
+        .arg(&repo_root)
+        .arg("--namespace")
+        .arg(namespace)
+        .arg("--bootstrap-file")
+        .arg(&bootstrap_path)
+        .arg("--transcript-limit")
+        .arg("0")
+        .output()
+        .await
+        .context("failed to run continuity import seed for MCP matrix")?;
+    let cleanup_result = fs::remove_file(&bootstrap_path)
+        .with_context(|| format!("failed to remove {}", bootstrap_path.display()));
+    if !output.status.success() {
+        return Err(anyhow!(
+            "continuity seed import failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    cleanup_result?;
+    let handoff_path = std::env::temp_dir().join(format!(
+        "amai-mcp-matrix-handoff-{}.md",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let handoff_lines = if task.seed_details_lines.is_empty() {
+        vec!["- Synthetic owner-scope fact for the MCP continuity matrix.".to_string()]
+    } else {
+        task.seed_details_lines.clone()
+    };
+    fs::write(&handoff_path, format!("{}\n", handoff_lines.join("\n")))
+        .with_context(|| format!("failed to write {}", handoff_path.display()))?;
+    let mut handoff = ProcessCommand::new(std::env::current_exe()?);
+    handoff
+        .arg("continuity")
+        .arg("handoff")
+        .arg("--project")
+        .arg(project)
+        .arg("--namespace")
+        .arg(namespace)
+        .arg("--headline")
+        .arg(
+            task.seed_headline
+                .as_deref()
+                .unwrap_or("Synthetic continuity seed"),
+        )
+        .arg("--next-step")
+        .arg(
+            task.seed_next_step
+                .as_deref()
+                .unwrap_or("This scope exists only for measured MCP continuity restore."),
+        )
+        .arg("--details-file")
+        .arg(&handoff_path);
+    if let Some(seed_scope) = task
+        .seed_agent_scope
+        .as_deref()
+        .or(task.agent_scope.as_deref())
+    {
+        handoff.env("AMAI_AGENT_SCOPE", seed_scope);
+    }
+    let handoff_output = handoff
+        .output()
+        .await
+        .context("failed to run continuity handoff seed for MCP matrix")?;
+    let handoff_cleanup = fs::remove_file(&handoff_path)
+        .with_context(|| format!("failed to remove {}", handoff_path.display()));
+    if !handoff_output.status.success() {
+        return Err(anyhow!(
+            "continuity seed handoff failed: {}",
+            String::from_utf8_lossy(&handoff_output.stderr).trim()
+        ));
+    }
+    handoff_cleanup?;
+    Ok(())
 }
 
 fn assert_tool_error_contains(response: &Value, expected: &str) -> Result<Value> {

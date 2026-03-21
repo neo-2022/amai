@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 16:50 MSK
-Ручная сверка guide/docs: 2026-03-21 16:50 MSK
+modified_at: 2026-03-21 17:17 MSK
+Ручная сверка guide/docs: 2026-03-21 17:17 MSK
 
 # Operations
 
@@ -895,6 +895,70 @@ cargo run -- verify mcp-matrix --matrix mcp_universe_local --project project_alp
 - fail-closed restore для изолированного agent scope.
 
 Это уже не “кажется, MCP работает”, а measured local benchmark contour с честным pass/fail и class breakdown.
+
+## Memory task matrix
+
+Это отдельный measured contour уже не про `MCP`, а про саму память `Amai`.
+
+Референс здесь другой:
+- `Letta Leaderboard`
+- <https://www.letta.com/blog/letta-leaderboard>
+
+Запуск:
+
+```bash
+./scripts/proof_memory_task_matrix.sh
+```
+
+Или напрямую:
+
+```bash
+cargo run -- verify memory-matrix --matrix letta_memory_local
+```
+
+Что делает этот contour:
+- мерит память отдельно по двум слоям:
+  - `core`
+  - `archival`
+- отдельно проверяет 4 класса задач:
+  - `read`
+  - `write`
+  - `update`
+  - `isolation`
+
+Что именно проверяется сейчас:
+- `core memory read`
+  - поднимает ли `working-state restore` сохранённый факт;
+- `core memory write`
+  - переживает ли факт новый `restore`;
+- `core memory update`
+  - остаётся ли новое значение главным, а старое уходит из authoritative поля;
+- `core scope isolation`
+  - не течёт ли память между разными `agent_scope`;
+- `archival memory read`
+  - находит ли `context pack` сохранённый continuity-документ;
+- `archival memory write`
+  - становится ли новый факт реально searchable;
+- `archival memory update`
+  - вытесняет ли новый факт старый в archival слое;
+- `archival project isolation`
+  - не течёт ли continuity-документ в соседний проект.
+
+Что считает этот contour:
+- `tasks_total`
+- `tasks_passed`
+- `tasks_failed`
+- `success_rate`
+- `mean_score`
+- `p50/p95/max latency`
+- `class_breakdown`
+- `layer_breakdown`
+
+Это полезно тем, что `Amai` теперь можно проверять не только словами “у нас есть память”, а реальным локальным экзаменом:
+- умеет ли память читать;
+- умеет ли писать;
+- умеет ли обновлять конфликтующий факт;
+- не ломает ли изоляцию.
 
 ## Token benchmark suite proof
 

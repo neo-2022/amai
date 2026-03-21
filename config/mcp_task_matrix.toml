@@ -143,18 +143,37 @@ expected_error_contains = "namespace"
 [tasks.continuity_restore_default_scope_success]
 order = 12
 class = "isolation"
-display_name = "Default Art continuity scope restores successfully"
+display_name = "Default synthetic continuity scope restores successfully"
 kind = "continuity_restore_success"
-project = "art"
+project = "mcp_continuity_alpha"
 namespace = "continuity"
-agent_scope = "art::continuity::default"
+agent_scope = "mcp::continuity::default"
+bootstrap_lines = [
+  "# Synthetic continuity bootstrap",
+  "This namespace exists only for the measured MCP continuity restore contour."
+]
+seed_headline = "Synthetic MCP continuity seed"
+seed_next_step = "Default continuity scope should restore this working-state."
+seed_details_lines = [
+  "- Synthetic owner-scope fact for the measured MCP continuity matrix."
+]
 
 [tasks.continuity_restore_isolated_scope_fail_closed]
 order = 13
 class = "isolation"
 display_name = "Isolated agent scope does not see чужой working-state"
 kind = "continuity_restore_fail_closed"
-project = "art"
+project = "mcp_continuity_alpha"
 namespace = "continuity"
-agent_scope = "art::continuity::matrix_isolated"
+agent_scope = "mcp::continuity::matrix_isolated"
+seed_agent_scope = "mcp::continuity::default"
 expected_error_contains = "no working-state restore bundle found"
+bootstrap_lines = [
+  "# Synthetic continuity bootstrap",
+  "This namespace exists only for the measured MCP continuity restore contour."
+]
+seed_headline = "Synthetic MCP continuity seed"
+seed_next_step = "Only the owner scope should restore this working-state."
+seed_details_lines = [
+  "- Synthetic owner-scope fact for the measured MCP continuity matrix."
+]

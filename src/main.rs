@@ -13,6 +13,7 @@ mod indexer;
 mod language;
 mod mcp;
 mod mcp_task_matrix;
+mod memory_task_matrix;
 mod nats;
 mod observe;
 mod onboarding;
@@ -269,6 +270,11 @@ async fn main() -> Result<()> {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
                 mcp_task_matrix::run_matrix(&cfg, &args).await?;
+            }
+            VerifyCommand::MemoryMatrix(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                memory_task_matrix::run_matrix(&cfg, &args).await?;
             }
             VerifyCommand::Accuracy(args) => {
                 let cfg = config::AppConfig::from_env()?;

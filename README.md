@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 16:50 MSK
-Ручная сверка guide/docs: 2026-03-21 16:50 MSK
+modified_at: 2026-03-21 17:17 MSK
+Ручная сверка guide/docs: 2026-03-21 17:17 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -977,6 +977,19 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
   - multi-agent isolation;
 - даёт честный локальный bridge между `Amai` и классами `LiveMCPBench` / `MCP-Universe`.
 
+Отдельно materialized и memory-eval слой по мотивам `Letta Leaderboard`:
+
+```bash
+./scripts/proof_memory_task_matrix.sh
+```
+
+Он проверяет уже не `MCP`, а саму память `Amai`:
+- умеет ли `core memory` поднять сохранённый факт;
+- переживает ли факт новый restore/startup;
+- заменяется ли старое значение новым при update;
+- не течёт ли память между agent scopes;
+- не течёт ли archival memory между проектами.
+
 Что это даёт простыми словами:
 - `list`
   - показывает всю карту benchmark-семейств;
@@ -998,6 +1011,7 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 ./scripts/proof_hostile.sh
 ./scripts/proof_benchmark_matrix.sh
 ./scripts/proof_mcp_task_matrix.sh
+./scripts/proof_memory_task_matrix.sh
 ./scripts/proof_token_benchmark.sh
 ./scripts/proof_observability.sh
 ./scripts/proof_mcp.sh

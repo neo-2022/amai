@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 16:50 MSK
-Ручная сверка guide/docs: 2026-03-21 16:50 MSK
+modified_at: 2026-03-21 17:17 MSK
+Ручная сверка guide/docs: 2026-03-21 17:17 MSK
 
 # Architecture
 
@@ -65,6 +65,8 @@ Event/work plane:
 - `src/benchmark_matrix.rs`
 - `config/mcp_task_matrix.toml`
 - `src/mcp_task_matrix.rs`
+- `config/memory_task_matrix.toml`
+- `src/memory_task_matrix.rs`
 
 Зачем это нужно:
 - не терять связь между нашими proof-контрами и внешним benchmark landscape;
@@ -74,6 +76,8 @@ Event/work plane:
 Источник внешней карты:
 - `philschmid/ai-agent-benchmark-compendium`
 - <https://github.com/philschmid/ai-agent-benchmark-compendium>
+- `Letta Leaderboard`
+- <https://www.letta.com/blog/letta-leaderboard>
 
 Важный архитектурный закон:
 - внешний compendium для `Amai` — это не runtime dependency;
@@ -84,12 +88,25 @@ Event/work plane:
   - карта benchmark-классов и их продуктового статуса для `Amai`;
 - `mcp_task_matrix.toml`
   - уже живой measured eval contour для MCP-класса задач.
+- `memory_task_matrix.toml`
+  - отдельный measured eval contour для памяти:
+  - `core read`
+  - `core write`
+  - `core update`
+  - `archival read`
+  - `archival write`
+  - `archival update`
+  - `multi-agent isolation`
+  - `multi-project isolation`
 
 То есть первая матрица отвечает на вопрос:
 - что именно нужно benchmark-ить вообще?
 
 А вторая отвечает:
 - какие конкретные MCP-задачи `Amai` уже реально проходит и с какими measured цифрами?
+
+А третья отвечает:
+- какие memory-задачи `Amai` уже реально проходит и сохраняет ли он рабочее состояние честно, а не только красиво рассказывает про память.
 
 Не source of truth для state/policy.
 

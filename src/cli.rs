@@ -142,6 +142,7 @@ pub enum VerifyCommand {
     TokenBenchmarkSuite(Box<VerifyTokenBenchmarkSuiteArgs>),
     TextCompare(Box<VerifyTextCompareArgs>),
     McpMatrix(Box<VerifyMcpMatrixArgs>),
+    MemoryMatrix(Box<VerifyMemoryMatrixArgs>),
     Accuracy(VerifyAccuracyArgs),
     Load(Box<VerifyLoadArgs>),
     Hostile(VerifyHostileArgs),
@@ -516,6 +517,20 @@ pub struct VerifyMcpMatrixArgs {
     pub budget_profile: String,
     #[arg(long)]
     pub min_success_rate: Option<f64>,
+    #[arg(long)]
+    pub max_p95_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct VerifyMemoryMatrixArgs {
+    #[arg(long, default_value = "letta_memory_local")]
+    pub matrix: String,
+    #[arg(long, default_value = "memory_eval")]
+    pub project_prefix: String,
+    #[arg(long)]
+    pub min_success_rate: Option<f64>,
+    #[arg(long)]
+    pub min_mean_score: Option<f64>,
     #[arg(long)]
     pub max_p95_ms: Option<f64>,
 }
