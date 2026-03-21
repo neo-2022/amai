@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 11:24 MSK
-Ручная сверка guide/docs: 2026-03-21 11:24 MSK
+modified_at: 2026-03-21 11:47 MSK
+Ручная сверка guide/docs: 2026-03-21 11:47 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -276,11 +276,15 @@ scripts\install_amai.cmd --client codex
 Если хотите проверить это не на словах, а живьём:
 
 ```bash
+./scripts/continuity_answer.sh --project art --namespace continuity --intent last_chat
 ./scripts/continuity_startup.sh --project art --namespace continuity
 ./scripts/continuity_restore.sh --project art --namespace continuity
 ```
 
 Разница такая:
+- `continuity answer`
+  - печатает уже готовый короткий ответ для continuity-вопросов вроде `на чём остановились`;
+  - это read-only путь без нового handoff;
 - `continuity startup`
   - печатает human-readable стартовую сводку для нового чата;
 - `continuity restore`

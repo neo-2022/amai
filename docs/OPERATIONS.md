@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 11:24 MSK
-Ручная сверка guide/docs: 2026-03-21 11:24 MSK
+modified_at: 2026-03-21 11:47 MSK
+Ручная сверка guide/docs: 2026-03-21 11:47 MSK
 
 # Operations
 
@@ -177,6 +177,18 @@ cd /home/art/agent-memory-index
 
 Если агент один, это обычно уже работает без ручной настройки.
 Если агентов несколько, задавайте каждому свой `AMAI_AGENT_SCOPE`.
+
+Для вопросов вида `на чём остановились` теперь есть отдельный read-only путь:
+
+```bash
+./scripts/continuity_answer.sh --project project_alpha --namespace continuity --intent last_chat
+```
+
+Он:
+- сам использует тот же continuity слой;
+- отдаёт сразу готовый короткий ответ;
+- не требует отдельной цепочки `startup -> restore/context`;
+- не должен порождать новый handoff.
 
 Пример:
 

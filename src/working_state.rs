@@ -298,7 +298,12 @@ fn compose_restore_bundle(
     namespace: &Value,
     events: &[ObservabilitySnapshotRecord],
 ) -> Value {
-    let latest = &events[0].payload["working_state_event"];
+    let latest_event = events
+        .iter()
+        .map(|snapshot| &snapshot.payload["working_state_event"])
+        .find(|event| !is_meta_continuity_event(event))
+        .unwrap_or(&events[0].payload["working_state_event"]);
+    let latest = latest_event;
     let session_id = latest["session_id"].as_str().unwrap_or_default();
     let latest_recorded_at = latest["recorded_at_epoch_ms"]
         .as_u64()
@@ -314,7 +319,10 @@ fn compose_restore_bundle(
     if let Some(handoff) = events
         .iter()
         .map(|snapshot| &snapshot.payload["working_state_event"])
-        .find(|event| event["event_kind"].as_str() == Some("continuity_handoff"))
+        .find(|event| {
+            event["event_kind"].as_str() == Some("continuity_handoff")
+                && !is_meta_continuity_event(event)
+        })
     {
         if let Some(value) = handoff["headline"]
             .as_str()
@@ -343,6 +351,9 @@ fn compose_restore_bundle(
 
     for snapshot in events.iter().take(MAX_RECENT_ACTIONS) {
         let event = &snapshot.payload["working_state_event"];
+        if is_meta_continuity_event(event) {
+            continue;
+        }
         collect_unique_strings(&mut active_files, &event["active_files"]);
         collect_unique_strings(&mut visible_projects, &event["visible_projects"]);
         if let Some(query) = event["query"].as_str().filter(|value| !value.is_empty()) {
@@ -412,6 +423,28 @@ fn compose_restore_bundle(
             "is_preliminary": events.len() < 3,
         }
     })
+}
+
+fn is_meta_continuity_event(event: &Value) -> bool {
+    if event["event_kind"].as_str() != Some("continuity_handoff") {
+        return false;
+    }
+    let headline = event["headline"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    let next_step = event["next_step_hint"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    let summary = event["summary"].as_str().unwrap_or_default().to_lowercase();
+    headline.contains("continuity restored")
+        || headline.contains("continuity reported")
+        || headline.contains("restored and reported for new chat")
+        || next_step.contains("ждать указание пользователя")
+        || summary.contains("пользователь спросил, на чем остановились")
+        || summary.contains("пользователь спросил, на чём остановились")
+        || summary.contains("обязательный startup-path")
 }
 
 fn select_relevant_events(
@@ -794,6 +827,18 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
+    struct FakeSnapshotSpec<'a> {
+        project_code: &'a str,
+        namespace_code: &'a str,
+        agent_scope: &'a str,
+        session_id: &'a str,
+        event_kind: &'a str,
+        headline: &'a str,
+        next_step_hint: &'a str,
+        summary: &'a str,
+        offset: i64,
+    }
+
     #[test]
     fn derive_open_questions_marks_human_questions() {
         let questions = derive_open_questions("Почему dashboard не показывает нужный файл?");
@@ -858,6 +903,41 @@ mod tests {
         assert!(selected.is_empty());
     }
 
+    #[test]
+    fn compose_restore_bundle_ignores_meta_continuity_handoff() {
+        let meta = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Continuity restored and reported for new chat",
+            next_step_hint: "Ждать указание пользователя",
+            summary: "Пользователь спросил, на чём остановились",
+            offset: 3,
+        });
+        let real = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Amai startup restore pack enriched and committed",
+            next_step_hint: "Сделать auto-injection restore pack прямо в chat-start prompt.",
+            summary: "Materialized working-state recovery contour.",
+            offset: 2,
+        });
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[meta, real],
+        );
+        assert_eq!(
+            bundle["working_state_restore"]["current_goal"],
+            json!("Amai startup restore pack enriched and committed")
+        );
+    }
+
     fn fake_snapshot(
         project_code: &str,
         namespace_code: &str,
@@ -866,24 +946,41 @@ mod tests {
         headline: &str,
         offset: i64,
     ) -> ObservabilitySnapshotRecord {
+        fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code,
+            namespace_code,
+            agent_scope,
+            session_id,
+            event_kind: "retrieval_context_pack",
+            headline,
+            next_step_hint: "",
+            summary: "",
+            offset,
+        })
+    }
+
+    fn fake_snapshot_with_kind(spec: FakeSnapshotSpec<'_>) -> ObservabilitySnapshotRecord {
         ObservabilitySnapshotRecord {
             snapshot_id: Uuid::new_v4(),
             snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
             payload: json!({
                 "working_state_event": {
                     "project": {
-                        "code": project_code,
+                        "code": spec.project_code,
                     },
                     "namespace": {
-                        "code": namespace_code,
+                        "code": spec.namespace_code,
                     },
-                    "agent_scope": agent_scope,
-                    "session_id": session_id,
-                    "headline": headline,
-                    "recorded_at_epoch_ms": offset,
+                    "agent_scope": spec.agent_scope,
+                    "session_id": spec.session_id,
+                    "event_kind": spec.event_kind,
+                    "headline": spec.headline,
+                    "next_step_hint": spec.next_step_hint,
+                    "summary": spec.summary,
+                    "recorded_at_epoch_ms": spec.offset,
                 }
             }),
-            created_at_epoch_ms: offset,
+            created_at_epoch_ms: spec.offset,
         }
     }
 }

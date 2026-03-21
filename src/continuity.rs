@@ -1,4 +1,6 @@
-use crate::cli::{ContinuityHandoffArgs, ContinuityImportArgs, ContinuityStartupArgs};
+use crate::cli::{
+    ContinuityAnswerArgs, ContinuityHandoffArgs, ContinuityImportArgs, ContinuityStartupArgs,
+};
 use crate::config::AppConfig;
 use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, ProjectRecord};
 use crate::s3;
@@ -333,6 +335,43 @@ pub async fn print_restore(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
     Ok(())
 }
 
+pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Result<()> {
+    let db = postgres::connect_admin(cfg).await?;
+    let project = resolve_project(&db, &args.startup).await?;
+    let namespace =
+        postgres::find_namespace_by_code(&db, project.project_id, &args.startup.namespace)
+            .await?
+            .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.startup.namespace))?;
+    let snapshots =
+        postgres::list_observability_snapshots_by_kinds(&db, &["continuity_import"], Some(50))
+            .await?;
+    let latest = snapshots
+        .into_iter()
+        .find(|snapshot| {
+            snapshot.payload["continuity_import"]["project"]["code"].as_str()
+                == Some(project.code.as_str())
+                && snapshot.payload["continuity_import"]["namespace"]["code"].as_str()
+                    == Some(namespace.code.as_str())
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "no continuity import found for {}::{}",
+                project.code,
+                namespace.code
+            )
+        })?;
+    let continuity = &latest.payload["continuity_import"];
+    let handoff_summary = latest_handoff_summary(&db, &project, &namespace)
+        .await?
+        .unwrap_or_else(|| continuity["active_workline_summary"]["details"].clone());
+    let restore = working_state::build_restore_bundle(&db, &project, &namespace).await?;
+    println!(
+        "{}",
+        render_direct_answer(&handoff_summary, restore.as_ref(), &args.intent)
+    );
+    Ok(())
+}
+
 pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> Result<()> {
     let mut db = postgres::connect_admin(cfg).await?;
     let project = postgres::get_project_by_code(&db, &args.project).await?;
@@ -410,6 +449,78 @@ pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> R
     .await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
+}
+
+fn render_direct_answer(handoff_summary: &Value, restore: Option<&Value>, intent: &str) -> String {
+    let heading = match intent {
+        "continue" => "Продолжаем с этой линии:",
+        "handoff" => "Текущий handoff в Amai:",
+        _ => "На чём остановились:",
+    };
+    let headline = handoff_summary["headline"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    let next_step = handoff_summary["next_step"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+
+    let mut lines = vec![format!("{heading} {headline}")];
+    if let Some(restore_node) = restore.map(|value| &value["working_state_restore"]) {
+        if let Some(summary) = summarize_materialized_notes(&restore_node["materialized_notes"]) {
+            lines.push(format!("Что уже materialized: {summary}"));
+        }
+        if let Some(summary) = summarize_recent_actions(&restore_node["recent_actions"]) {
+            lines.push(format!("Последние действия: {summary}"));
+        }
+        if let Some(summary) = summarize_string_list(&restore_node["active_files"], 3) {
+            lines.push(format!("Активные файлы: {summary}"));
+        }
+        if restore_node["restore_confidence"].as_str() == Some("preliminary") {
+            lines.push(
+                "Статус continuity: предварительно, потому что живая выборка ещё маленькая."
+                    .to_string(),
+            );
+        }
+    }
+    lines.push(format!("Ближайший обязательный следующий шаг: {next_step}"));
+    lines.join("\n")
+}
+
+fn summarize_materialized_notes(value: &Value) -> Option<String> {
+    summarize_string_list(value, 2)
+}
+
+fn summarize_recent_actions(value: &Value) -> Option<String> {
+    let items = value.as_array()?;
+    let mut entries = Vec::new();
+    for item in items.iter().take(2) {
+        if let Some(text) = item["headline"].as_str().filter(|value| !value.is_empty()) {
+            entries.push(text.to_string());
+        } else if let Some(text) = item["summary"].as_str().filter(|value| !value.is_empty()) {
+            entries.push(text.to_string());
+        }
+    }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries.join("; "))
+    }
+}
+
+fn summarize_string_list(value: &Value, limit: usize) -> Option<String> {
+    let items = value.as_array()?;
+    let values = items
+        .iter()
+        .filter_map(|item| item.as_str())
+        .filter(|item| !item.is_empty())
+        .take(limit)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.join("; "))
+    }
 }
 
 fn collect_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<Vec<ContinuitySource>> {
@@ -545,6 +656,17 @@ async fn latest_handoff_summary(
                 == Some(project.code.as_str())
                 && snapshot.payload["continuity_handoff"]["namespace"]["code"].as_str()
                     == Some(namespace.code.as_str())
+                && !is_meta_continuity_handoff(
+                    snapshot.payload["continuity_handoff"]["headline"]
+                        .as_str()
+                        .unwrap_or_default(),
+                    snapshot.payload["continuity_handoff"]["next_step"]
+                        .as_str()
+                        .unwrap_or_default(),
+                    snapshot.payload["continuity_handoff"]["details"]
+                        .as_str()
+                        .unwrap_or_default(),
+                )
         })
         .map(|snapshot| {
             json!({
@@ -559,6 +681,20 @@ async fn latest_handoff_summary(
                     .unwrap_or_default(),
             })
         }))
+}
+
+fn is_meta_continuity_handoff(headline: &str, next_step: &str, details: &str) -> bool {
+    let headline_lc = headline.to_lowercase();
+    let next_step_lc = next_step.to_lowercase();
+    let details_lc = details.to_lowercase();
+    headline_lc.contains("continuity restored")
+        || headline_lc.contains("continuity reported")
+        || headline_lc.contains("restored and reported for new chat")
+        || headline_lc.contains("reported for new chat")
+        || next_step_lc.contains("ждать указание пользователя")
+        || details_lc.contains("пользователь спросил, на чем остановились")
+        || details_lc.contains("пользователь спросил, на чём остановились")
+        || details_lc.contains("ответить именно по последней зафиксированной точке")
 }
 
 fn render_handoff_markdown(headline: &str, next_step: &str, details: &str) -> String {
@@ -817,5 +953,61 @@ fn shell_quote(value: &str) -> String {
         value.to_string()
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_meta_continuity_handoff, render_direct_answer};
+    use serde_json::json;
+
+    #[test]
+    fn render_direct_answer_prefers_concise_restore_bundle() {
+        let handoff = json!({
+            "headline": "Amai startup restore pack enriched and committed",
+            "next_step": "Сделать auto-injection restore pack прямо в chat-start prompt."
+        });
+        let restore = json!({
+            "working_state_restore": {
+                "materialized_notes": [
+                    "startup теперь поднимает materialized решения из handoff details",
+                    "показывает недавние действия, а не только headline и next step"
+                ],
+                "recent_actions": [
+                    {"headline": "Проверили новый чат на реальном старте"},
+                    {"headline": "Усилили startup restore pack"}
+                ],
+                "active_files": [
+                    "/home/art/agent-memory-index/src/continuity.rs",
+                    "/home/art/Art/AGENTS.md"
+                ],
+                "restore_confidence": "high"
+            }
+        });
+
+        let answer = render_direct_answer(&handoff, Some(&restore), "last_chat");
+
+        assert!(
+            answer
+                .contains("На чём остановились: Amai startup restore pack enriched and committed")
+        );
+        assert!(answer.contains("Что уже materialized: startup теперь поднимает materialized решения из handoff details; показывает недавние действия, а не только headline и next step"));
+        assert!(answer.contains("Последние действия: Проверили новый чат на реальном старте; Усилили startup restore pack"));
+        assert!(answer.contains("Активные файлы: /home/art/agent-memory-index/src/continuity.rs; /home/art/Art/AGENTS.md"));
+        assert!(answer.contains("Ближайший обязательный следующий шаг: Сделать auto-injection restore pack прямо в chat-start prompt."));
+    }
+
+    #[test]
+    fn meta_continuity_handoff_is_detected() {
+        assert!(is_meta_continuity_handoff(
+            "Continuity restored and reported for new chat",
+            "Ждать указание пользователя",
+            "Пользователь спросил, на чём остановились в прошлом чате."
+        ));
+        assert!(!is_meta_continuity_handoff(
+            "Amai startup restore pack enriched and committed",
+            "Сделать auto-injection restore pack прямо в chat-start prompt.",
+            "Materialized рабочий контур в continuity."
+        ));
     }
 }

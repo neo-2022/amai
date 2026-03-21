@@ -77,6 +77,7 @@ pub enum ContinuityCommand {
     Import(ContinuityImportArgs),
     Startup(ContinuityStartupArgs),
     Restore(ContinuityStartupArgs),
+    Answer(ContinuityAnswerArgs),
     Handoff(ContinuityHandoffArgs),
 }
 
@@ -184,6 +185,14 @@ pub struct ContinuityStartupArgs {
     pub repo_root: Option<PathBuf>,
     #[arg(long, default_value = "continuity")]
     pub namespace: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ContinuityAnswerArgs {
+    #[command(flatten)]
+    pub startup: ContinuityStartupArgs,
+    #[arg(long, default_value = "last_chat")]
+    pub intent: String,
 }
 
 #[derive(Debug, Clone, Args)]

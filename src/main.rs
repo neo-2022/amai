@@ -61,6 +61,11 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 continuity::print_restore(&cfg, &args).await?;
             }
+            ContinuityCommand::Answer(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                continuity::print_answer(&cfg, &args).await?;
+            }
             ContinuityCommand::Handoff(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
