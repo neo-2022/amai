@@ -867,6 +867,20 @@ fn render_direct_answer(
         ));
         return lines.join("\n");
     }
+    if intent == "previous_chat" && chat_tail.is_none() {
+        let mut lines = vec![
+            "На чём закончился прошлый чат: для такого смещения назад нет известного чата."
+                .to_string(),
+        ];
+        if previous_chat_offset > 1 {
+            lines.push(format!("Смещение назад по чатам: {previous_chat_offset}"));
+        }
+        lines.push(format!("Текущая активная линия проекта сейчас: {headline}"));
+        lines.push(format!(
+            "Ближайший обязательный следующий шаг: {project_next_step}"
+        ));
+        return lines.join("\n");
+    }
     let answer_headline = thread_headline.as_deref().unwrap_or(headline);
     let answer_next_step = thread_next_step.as_deref().unwrap_or(&project_next_step);
 
@@ -895,18 +909,20 @@ fn render_direct_answer(
         }
     }
     if let Some(chat_tail) = chat_tail {
-        let title = if chat_tail.title.trim().is_empty() {
-            chat_tail.thread_id.as_str()
-        } else {
-            chat_tail.title.as_str()
-        };
+        let title = select_chat_tail_label(chat_tail, answer_headline);
         if let Some(at_time_rfc3339) = at_time_rfc3339 {
             lines.push(format!("Целевой момент времени: {at_time_rfc3339}"));
-            lines.push(format!("Подходящий chat thread: {title}"));
+            if let Some(title) = title.as_deref() {
+                lines.push(format!("Подходящий chat thread: {title}"));
+            }
         } else if intent == "previous_chat" {
-            lines.push(format!("Предыдущий чат по времени: {title}"));
+            if let Some(title) = title.as_deref() {
+                lines.push(format!("Предыдущий чат по времени: {title}"));
+            }
         } else {
-            lines.push(format!("Найденный chat thread: {title}"));
+            if let Some(title) = title.as_deref() {
+                lines.push(format!("Найденный chat thread: {title}"));
+            }
         }
         if !chat_tail.messages.is_empty() {
             let label = if at_time_rfc3339.is_some() {
@@ -940,6 +956,47 @@ fn render_direct_answer(
         "Ближайший обязательный следующий шаг: {answer_next_step}"
     ));
     lines.join("\n")
+}
+
+fn select_chat_tail_label(
+    chat_tail: &codex_threads::ChatTail,
+    answer_headline: &str,
+) -> Option<String> {
+    let _thread_id = chat_tail.thread_id.trim();
+    let normalized_answer = collapse_answer_text(answer_headline, 220);
+    let normalized_answer = normalized_answer.trim();
+    for candidate in [
+        chat_tail.title.trim(),
+        chat_tail.summary_headline.as_deref().unwrap_or("").trim(),
+    ] {
+        if candidate.is_empty() {
+            continue;
+        }
+        let normalized = collapse_answer_text(candidate, 220);
+        if normalized.trim().is_empty()
+            || normalized.trim() == normalized_answer
+            || looks_like_noisy_chat_label(&normalized)
+        {
+            continue;
+        }
+        return Some(normalized);
+    }
+    None
+}
+
+fn looks_like_noisy_chat_label(label: &str) -> bool {
+    let normalized = label.trim().to_lowercase();
+    normalized.starts_with("agents.md прочитан")
+        || normalized.contains("agents.md прочитан")
+        || normalized.starts_with("продолжай строго")
+        || normalized.contains("продолжай строго")
+        || normalized.starts_with("# context from my ide setup")
+        || normalized.contains("## active file:")
+        || normalized.contains("## open tabs:")
+        || normalized.contains("перед любой содержательной работой")
+        || normalized.contains("<instructions>")
+        || normalized.ends_with('?')
+        || normalized.chars().count() < 4
 }
 
 fn parse_chat_reference_spec(value: &str) -> (&str, usize) {
@@ -1960,6 +2017,25 @@ mod tests {
     }
 
     #[test]
+    fn render_direct_answer_reports_missing_previous_chat_match_without_fake_fallback() {
+        let handoff = json!({
+            "headline": "Current project line",
+            "next_step": "Current project next step."
+        });
+
+        let answer = render_direct_answer(&handoff, None, None, "previous_chat", None, 30);
+
+        assert!(answer.contains(
+            "На чём закончился прошлый чат: для такого смещения назад нет известного чата."
+        ));
+        assert!(answer.contains("Смещение назад по чатам: 30"));
+        assert!(answer.contains("Текущая активная линия проекта сейчас: Current project line"));
+        assert!(
+            answer.contains("Ближайший обязательный следующий шаг: Current project next step.")
+        );
+    }
+
+    #[test]
     fn render_direct_answer_marks_ordinal_previous_chat_lookup() {
         let handoff = json!({
             "headline": "Current project line",
@@ -1977,6 +2053,59 @@ mod tests {
             render_direct_answer(&handoff, None, Some(&chat_tail), "previous_chat", None, 3);
 
         assert!(answer.contains("Смещение назад по чатам: 3"));
+    }
+
+    #[test]
+    fn render_direct_answer_omits_redundant_noisy_chat_label() {
+        let handoff = json!({
+            "headline": "Current project line",
+            "next_step": "Current project next step."
+        });
+        let chat_tail = ChatTail {
+            thread_id: "thread-3".to_string(),
+            title: "AGENTS.md прочитан. Продолжай строго из `/home/art/Art`.".to_string(),
+            summary_headline: Some(
+                "Amai ordinal chat recovery and prompt restore materialized".to_string(),
+            ),
+            summary_next_step: None,
+            messages: vec![TranscriptMessage {
+                role: "assistant".to_string(),
+                text: "Amai ordinal chat recovery and prompt restore materialized".to_string(),
+            }],
+        };
+
+        let answer = render_direct_answer(&handoff, None, Some(&chat_tail), "last_chat", None, 1);
+
+        assert!(
+            !answer.contains("Найденный chat thread: AGENTS.md прочитан"),
+            "noisy chat label must be suppressed"
+        );
+    }
+
+    #[test]
+    fn render_direct_answer_omits_continue_strictly_label() {
+        let handoff = json!({
+            "headline": "Current project line",
+            "next_step": "Current project next step."
+        });
+        let chat_tail = ChatTail {
+            thread_id: "thread-4".to_string(),
+            title: "Продолжай строго из `/home/art/Art` и строго по `/home/art/Art/AGENTS.md`."
+                .to_string(),
+            summary_headline: Some("Human continuity summary".to_string()),
+            summary_next_step: None,
+            messages: vec![TranscriptMessage {
+                role: "assistant".to_string(),
+                text: "Human continuity summary".to_string(),
+            }],
+        };
+
+        let answer = render_direct_answer(&handoff, None, Some(&chat_tail), "last_chat", None, 1);
+
+        assert!(
+            !answer.contains("Найденный chat thread: Продолжай строго"),
+            "system-style chat label must be suppressed"
+        );
     }
 
     #[test]

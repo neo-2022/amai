@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 15:08 MSK
-Ручная сверка guide/docs: 2026-03-21 15:08 MSK
+modified_at: 2026-03-21 15:39 MSK
+Ручная сверка guide/docs: 2026-03-21 15:39 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -336,6 +336,12 @@ AMAI_AGENT_SCOPE=agent_beta  ./scripts/continuity_startup.sh --project art --nam
 ./scripts/chat_lookup.sh --project art --namespace continuity --question "о чем мы говорили в позапрошлую среду в 12:00?"
 ./scripts/chat_lookup.sh --project art --namespace continuity --question "о чем мы говорили в прошлую среду в 12:00?"
 ```
+
+Этот helper теперь ведёт себя строже и понятнее:
+- bare CLI path тоже должен работать из другого каталога, потому что `Amai` сам дочитывает свой `.env` из канонического repo root;
+- если `previous:30` или вопрос указывает на момент вне диапазона известных чатов, ответ обязан fail-closed, а не подменять это текущим handoff;
+- шумные thread labels уровня `AGENTS.md прочитан`, `Продолжай строго`, `# Context from my IDE setup`, `## Active file`, `## Open tabs` больше не должны попадать в human answer;
+- если полезного human label нет, helper лучше опускает строку про chat thread, чем показывает UUID или технический мусор.
 
 Это один и тот же прямой путь для трёх случаев:
 - `current chat`

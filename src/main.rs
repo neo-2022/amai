@@ -33,11 +33,12 @@ use cli::{
     DeploymentCommand, IndexCommand, McpCommand, NamespaceCommand, ObserveCommand, ProjectCommand,
     RelationCommand, VerifyCommand,
 };
+use std::path::Path;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenvy::dotenv().ok();
+    load_env_contour();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_target(false)
@@ -321,4 +322,13 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn load_env_contour() {
+    dotenvy::dotenv().ok();
+    if std::env::var_os("AMI_STACK_NAME").is_some() {
+        return;
+    }
+    let manifest_env = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
+    dotenvy::from_path_override(&manifest_env).ok();
 }

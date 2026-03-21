@@ -860,7 +860,11 @@ fn sanitize_chat_title(title: &str, messages: &[TranscriptMessage]) -> String {
         .unwrap_or_default();
     let title_is_just_first_question =
         !first_user_message.is_empty() && collapsed_title == first_user_message;
-    if !looks_like_noisy_title(&collapsed_title) && !title_is_just_first_question {
+    let title_needs_summary_fallback = looks_like_noisy_title(&collapsed_title)
+        || title_is_just_first_question
+        || looks_like_weak_question_title(&collapsed_title)
+        || collapsed_title.chars().count() < 4;
+    if !title_needs_summary_fallback {
         return collapsed_title;
     }
     if let Some(assistant_summary) = messages
@@ -885,9 +889,20 @@ fn looks_like_noisy_title(title: &str) -> bool {
     title.contains('\n')
         || title.len() > 120
         || normalized.starts_with("agents.md прочитан")
+        || normalized.contains("agents.md прочитан")
+        || normalized.starts_with("продолжай строго")
+        || normalized.contains("продолжай строго")
         || normalized.starts_with("continue strictly")
+        || normalized.starts_with("# context from my ide setup")
+        || normalized.contains("## active file:")
+        || normalized.contains("## open tabs:")
         || normalized.contains("перед любой содержательной работой")
         || normalized.contains("<instructions>")
+}
+
+fn looks_like_weak_question_title(title: &str) -> bool {
+    let trimmed = title.trim();
+    trimmed.ends_with('?') || trimmed.ends_with('؟')
 }
 
 fn compact_headline_from_text(text: &str, max_chars: usize) -> Option<String> {
@@ -2162,6 +2177,39 @@ mod tests {
     }
 
     #[test]
+    fn dotted_agents_title_is_still_treated_as_noise() {
+        let snapshots = vec![ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::nil(),
+            snapshot_kind: "continuity_thread_index".to_string(),
+            created_at_epoch_ms: 1,
+            payload: json!({
+                "continuity_thread_index": {
+                    "project": {"code": "art"},
+                    "namespace": {"code": "continuity"},
+                    "thread_id": "thread-dot",
+                    "title": "AGENTS.md прочитан. Продолжай строго из `/home/art/Art`.",
+                    "created_at_epoch_s": 1_742_553_600,
+                    "updated_at_epoch_s": 1_742_553_660,
+                    "last_user_message": "что делать дальше?",
+                    "last_assistant_message": "Compact continuity label"
+                }
+            }),
+        }];
+
+        let tail = nth_previous_chat_tail_from_snapshots(
+            &snapshots,
+            "art",
+            "continuity",
+            Some("current-thread"),
+            1,
+            1,
+        )
+        .expect("tail");
+
+        assert_eq!(tail.title, "Compact continuity label");
+    }
+
+    #[test]
     fn question_like_title_prefers_assistant_summary_over_first_user_message() {
         let snapshots = vec![ObservabilitySnapshotRecord {
             snapshot_id: Uuid::nil(),
@@ -2195,6 +2243,105 @@ mod tests {
             tail.title,
             "Amai startup restore pack enriched and committed"
         );
+    }
+
+    #[test]
+    fn short_or_question_only_title_prefers_assistant_summary() {
+        let snapshots = vec![ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::nil(),
+            snapshot_kind: "continuity_thread_index".to_string(),
+            created_at_epoch_ms: 1,
+            payload: json!({
+                "continuity_thread_index": {
+                    "project": {"code": "art"},
+                    "namespace": {"code": "continuity"},
+                    "thread_id": "thread-short",
+                    "title": "работает?",
+                    "created_at_epoch_s": 1_742_553_600,
+                    "updated_at_epoch_s": 1_742_553_660,
+                    "last_user_message": "работает?",
+                    "last_assistant_message": "Контур exact-time lookup materialized"
+                }
+            }),
+        }];
+
+        let tail = nth_previous_chat_tail_from_snapshots(
+            &snapshots,
+            "art",
+            "continuity",
+            Some("current-thread"),
+            1,
+            2,
+        )
+        .expect("tail");
+
+        assert_eq!(tail.title, "Контур exact-time lookup materialized");
+    }
+
+    #[test]
+    fn continue_strictly_style_title_is_treated_as_noise() {
+        let snapshots = vec![ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::nil(),
+            snapshot_kind: "continuity_thread_index".to_string(),
+            created_at_epoch_ms: 1,
+            payload: json!({
+                "continuity_thread_index": {
+                    "project": {"code": "art"},
+                    "namespace": {"code": "continuity"},
+                    "thread_id": "thread-strict",
+                    "title": "Продолжай строго из `/home/art/Art` и строго по `/home/art/Art/AGENTS.md`.",
+                    "created_at_epoch_s": 1_742_553_600,
+                    "updated_at_epoch_s": 1_742_553_660,
+                    "last_user_message": "что дальше?",
+                    "last_assistant_message": "Human continuity label"
+                }
+            }),
+        }];
+
+        let tail = nth_previous_chat_tail_from_snapshots(
+            &snapshots,
+            "art",
+            "continuity",
+            Some("current-thread"),
+            1,
+            1,
+        )
+        .expect("tail");
+
+        assert_eq!(tail.title, "Human continuity label");
+    }
+
+    #[test]
+    fn ide_setup_title_is_treated_as_noise() {
+        let snapshots = vec![ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::nil(),
+            snapshot_kind: "continuity_thread_index".to_string(),
+            created_at_epoch_ms: 1,
+            payload: json!({
+                "continuity_thread_index": {
+                    "project": {"code": "art"},
+                    "namespace": {"code": "continuity"},
+                    "thread_id": "thread-ide",
+                    "title": "# Context from my IDE setup: ## Active file: core/src/lib.rs ## Open tabs: - lib.rs",
+                    "created_at_epoch_s": 1_742_553_600,
+                    "updated_at_epoch_s": 1_742_553_660,
+                    "last_user_message": "что там было?",
+                    "last_assistant_message": "Human exact-time summary"
+                }
+            }),
+        }];
+
+        let tail = nth_previous_chat_tail_from_snapshots(
+            &snapshots,
+            "art",
+            "continuity",
+            Some("current-thread"),
+            1,
+            1,
+        )
+        .expect("tail");
+
+        assert_eq!(tail.title, "Human exact-time summary");
     }
 
     #[test]

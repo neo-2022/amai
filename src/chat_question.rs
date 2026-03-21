@@ -109,19 +109,21 @@ fn detect_chat_reference(question: &str) -> Option<String> {
         return Some(format!("previous:{offset}"));
     }
     if mentions_chat
-        && (question.contains("прошл")
-            || question.contains("предыдущ")
-            || question.contains("последн"))
-    {
-        return Some("previous".to_string());
-    }
-    if mentions_chat
         && (question.contains("текущ")
             || question.contains("этот чат")
             || question.contains("этом чате")
             || question.contains("current chat"))
     {
         return Some("current".to_string());
+    }
+    if mentions_chat
+        && (question.contains("прошл")
+            || question.contains("предыдущ")
+            || question.contains("последний чат")
+            || question.contains("последнем чате")
+            || question.contains("last chat"))
+    {
+        return Some("previous".to_string());
     }
     None
 }
@@ -487,6 +489,28 @@ mod tests {
         assert_eq!(parsed.intent, "last_chat");
         assert_eq!(parsed.chat_reference.as_deref(), Some("current"));
         assert!(parsed.include_chat_messages);
+    }
+
+    #[test]
+    fn interprets_current_chat_even_with_last_message_phrase() {
+        let parsed = interpret(
+            "на чем остановились в текущем чате, покажи последнее сообщение",
+            fixed_now(),
+        )
+        .expect("parsed");
+
+        assert_eq!(parsed.intent, "last_chat");
+        assert_eq!(parsed.chat_reference.as_deref(), Some("current"));
+        assert_eq!(parsed.messages_count, 1);
+        assert!(parsed.include_chat_messages);
+    }
+
+    #[test]
+    fn interprets_last_chat_phrase_as_previous_chat() {
+        let parsed = interpret("что было в последнем чате?", fixed_now()).expect("parsed");
+
+        assert_eq!(parsed.intent, "previous_chat");
+        assert_eq!(parsed.chat_reference.as_deref(), Some("previous"));
     }
 
     #[test]

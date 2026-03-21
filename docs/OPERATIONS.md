@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 15:08 MSK
-Ручная сверка guide/docs: 2026-03-21 15:08 MSK
+modified_at: 2026-03-21 15:39 MSK
+Ручная сверка guide/docs: 2026-03-21 15:39 MSK
 
 # Operations
 
@@ -291,6 +291,11 @@ cd /home/art/agent-memory-index
 Если задан момент времени вне известного диапазона чатов, temporal contour обязан fail-closed:
 - не выбирать ближайший текущий chat молча;
 - а отвечать, что для этого момента нет точного совпадения в известных чатах.
+
+Дополнительно operational law теперь такой:
+- direct CLI path через `cargo run --manifest-path /home/art/agent-memory-index/Cargo.toml -- ...` тоже должен поднимать `Amai .env` без ручного `cd` в repo root;
+- user-facing temporal answers не должны выводить UUID thread-а или системные заголовки среды вместо человеческого label;
+- к системному шуму относятся и IDE-import titles вида `# Context from my IDE setup`, `## Active file`, `## Open tabs`.
 
 Пример:
 
