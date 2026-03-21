@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 03:21 MSK
-Ручная сверка guide/docs: 2026-03-21 03:21 MSK
+modified_at: 2026-03-21 03:33 MSK
+Ручная сверка guide/docs: 2026-03-21 03:33 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -593,6 +593,20 @@ cargo run --release -- observe reverify-token-ledger --apply
   - сколько реально занял этот retrieval event;
 - `query_slices`
   - отдельная сводка по типам запросов, а не одна усреднённая куча.
+- `temperature_slices`
+  - отдельная сводка по состоянию запроса:
+    - `cold`
+    - `warm`
+    - дальше при накоплении могут появляться:
+      - `post_restart`
+      - `post_warmup`
+      - `post_reindex`
+- `median_recovery_tokens`
+  - сколько токенов обычно пришлось вернуть назад на исправление, если первый ответ `Amai` оказался недостаточным.
+
+Это важно не для красоты, а для честности:
+- если `Amai` сначала сэкономил токены, но потом заставил делать follow-up, retry или correction, эти токены теперь идут в штраф;
+- headline при этом считается уже не по сырой экономии, а по `Verified Effective Savings %`.
 
 ## Честно о скорости и пределах
 

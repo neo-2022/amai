@@ -115,6 +115,14 @@ struct QualityVerdict {
     followup_count: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FollowupEventKey<'a> {
+    query: &'a str,
+    query_hash: &'a str,
+    query_type: &'a str,
+    target_kind: &'a str,
+}
+
 #[derive(Debug)]
 struct NaiveScopeFile {
     project_code: String,
@@ -351,6 +359,7 @@ async fn collect_report(
     let profile = resolve_profile(&config, requested_profile, repo_root)?;
     let mut events = load_events(db, include_verify_events, limit).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
+    let events = reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
 
     let now_epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -376,6 +385,7 @@ async fn collect_report(
         .unwrap_or_else(|| json!(null));
     let source_breakdown = source_breakdown(&events, &config.measurement);
     let query_slices = query_slice_breakdown(&events, &config.measurement);
+    let temperature_slices = temperature_slice_breakdown(&events, &config.measurement);
     let current_session_summary =
         summarize_events(&session_events, now_epoch_ms, &config.measurement);
     let rolling_window_summary = if profile.rolling_window_hours.is_some() {
@@ -414,6 +424,7 @@ async fn collect_report(
             "lifetime": lifetime_summary,
             "source_breakdown": source_breakdown,
             "query_slices": query_slices,
+            "temperature_slices": temperature_slices,
         }
     }))
 }
@@ -917,6 +928,105 @@ fn current_session_events(
     session
 }
 
+fn reconcile_followup_recovery(
+    events: &[TokenBudgetEvent],
+    session_gap_ms: i64,
+) -> Vec<TokenBudgetEvent> {
+    let mut reconciled = events.to_vec();
+    for follower_index in 1..reconciled.len() {
+        if reconciled[follower_index].traffic_class != "live" {
+            continue;
+        }
+        let follower_ts = reconciled[follower_index].created_at_epoch_ms;
+        let follower_project = reconciled[follower_index].project.clone();
+        let follower_namespace = reconciled[follower_index].namespace.clone();
+        let follower_key = followup_event_key(&reconciled[follower_index]);
+        let follower_context_tokens = reconciled[follower_index].context_tokens;
+
+        for current_index in (0..follower_index).rev() {
+            if reconciled[current_index].traffic_class != "live"
+                || !reconciled[current_index].needed_followup
+            {
+                continue;
+            }
+            if follower_ts.saturating_sub(reconciled[current_index].created_at_epoch_ms)
+                > session_gap_ms
+            {
+                break;
+            }
+            if reconciled[current_index].project != follower_project
+                || reconciled[current_index].namespace != follower_namespace
+            {
+                continue;
+            }
+            let current_key = followup_event_key(&reconciled[current_index]);
+            if !followup_queries_related(current_key, follower_key) {
+                continue;
+            }
+            let recovery_tokens = reconciled[current_index]
+                .recovery_tokens
+                .saturating_add(follower_context_tokens);
+            reconciled[current_index].recovery_tokens = recovery_tokens;
+            reconciled[current_index].followup_count =
+                reconciled[current_index].followup_count.saturating_add(1);
+            reconciled[current_index].effective_saved_tokens = reconciled[current_index]
+                .naive_tokens as i64
+                - (reconciled[current_index].context_tokens as i64 + recovery_tokens as i64);
+            reconciled[current_index].effective_savings_percent = percent_from_signed(
+                reconciled[current_index].effective_saved_tokens,
+                reconciled[current_index].naive_tokens,
+            );
+            break;
+        }
+    }
+    reconciled
+}
+
+fn followup_event_key(event: &TokenBudgetEvent) -> FollowupEventKey<'_> {
+    FollowupEventKey {
+        query: &event.query,
+        query_hash: &event.query_hash,
+        query_type: &event.query_type,
+        target_kind: &event.target_kind,
+    }
+}
+
+fn followup_queries_related(current: FollowupEventKey<'_>, follower: FollowupEventKey<'_>) -> bool {
+    if !current.query_hash.is_empty() && current.query_hash == follower.query_hash {
+        return true;
+    }
+    if current.query_type != follower.query_type {
+        return false;
+    }
+    if current.target_kind != follower.target_kind {
+        return false;
+    }
+    if normalized_query(current.query) == normalized_query(follower.query) {
+        return true;
+    }
+    query_terms_overlap_count(current.query, follower.query) >= 2
+}
+
+fn query_terms_overlap_count(left: &str, right: &str) -> usize {
+    let left_terms = extract_query_terms(left);
+    if left_terms.is_empty() {
+        return 0;
+    }
+    let right_terms = extract_query_terms(right);
+    if right_terms.is_empty() {
+        return 0;
+    }
+    let right_set = right_terms.into_iter().collect::<HashSet<_>>();
+    left_terms
+        .into_iter()
+        .filter(|term| right_set.contains(term))
+        .count()
+}
+
+fn normalized_query(query: &str) -> String {
+    extract_query_terms(query).join(" ")
+}
+
 fn summarize_events(
     events: &[TokenBudgetEvent],
     now_epoch_ms: i64,
@@ -943,6 +1053,7 @@ fn summarize_events(
             "avg_saved_tokens_per_event": 0.0,
             "quality_ok_rate": 0.0,
             "fallback_rate": 0.0,
+            "median_recovery_tokens": 0.0,
             "p95_latency_ms": 0.0,
             "started_at_epoch_ms": Value::Null,
             "ended_at_epoch_ms": Value::Null,
@@ -997,6 +1108,13 @@ fn summarize_events(
         .iter()
         .filter(|event| event.fallback_triggered)
         .count() as f64;
+    let mut recovery_values = events
+        .iter()
+        .map(|event| event.recovery_tokens as f64)
+        .collect::<Vec<_>>();
+    recovery_values
+        .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let median_recovery_tokens = percentile_from_sorted(&recovery_values, 0.5);
     let mut latency_values = events
         .iter()
         .map(|event| event.latency_ms)
@@ -1039,6 +1157,7 @@ fn summarize_events(
         "avg_saved_tokens_per_event": avg_saved_tokens_per_event,
         "quality_ok_rate": quality_ok_rate,
         "fallback_rate": fallback_rate,
+        "median_recovery_tokens": median_recovery_tokens,
         "p95_latency_ms": p95_latency_ms,
         "started_at_epoch_ms": started_at_epoch_ms,
         "ended_at_epoch_ms": ended_at_epoch_ms,
@@ -1174,6 +1293,42 @@ fn query_slice_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementC
                     "verified_effective_savings_pct": summary["verified_effective_savings_pct"],
                     "quality_ok_rate": summary["quality_ok_rate"],
                     "fallback_rate": summary["fallback_rate"],
+                    "p95_latency_ms": summary["p95_latency_ms"],
+                })
+            })
+            .collect(),
+    )
+}
+
+fn temperature_slice_breakdown(
+    events: &[TokenBudgetEvent],
+    measurement: &MeasurementConfig,
+) -> Value {
+    let mut grouped = BTreeMap::<String, Vec<TokenBudgetEvent>>::new();
+    for event in events {
+        grouped
+            .entry(event.cold_warm_state.clone())
+            .or_default()
+            .push(event.clone());
+    }
+    Value::Array(
+        grouped
+            .into_iter()
+            .map(|(state, items)| {
+                let summary = summarize_events(
+                    &items,
+                    items
+                        .last()
+                        .map(|item| item.created_at_epoch_ms)
+                        .unwrap_or_default(),
+                    measurement,
+                );
+                json!({
+                    "state": state,
+                    "events_count": summary["events_count"],
+                    "counted_events": summary["counted_events"],
+                    "verified_effective_savings_pct": summary["verified_effective_savings_pct"],
+                    "median_recovery_tokens": summary["median_recovery_tokens"],
                     "p95_latency_ms": summary["p95_latency_ms"],
                 })
             })
@@ -1993,8 +2148,9 @@ mod tests {
     use super::{
         MeasurementConfig, NaiveScope, TokenBudgetEvent, apply_reverification_metadata,
         build_product_headline, derive_baseline_strategy, derive_quality_verdict,
-        derive_query_type, derive_traffic_class, include_traffic_class_in_report,
-        needs_live_reverification, repair_legacy_token_event_payload, summarize_events,
+        derive_query_type, derive_traffic_class, followup_queries_related,
+        include_traffic_class_in_report, needs_live_reverification, reconcile_followup_recovery,
+        repair_legacy_token_event_payload, summarize_events,
     };
     use serde_json::json;
 
@@ -2322,5 +2478,151 @@ mod tests {
         assert_eq!(summary["preliminary"], false);
         assert_eq!(summary["counted_events"], 1);
         assert_eq!(summary["verified_effective_savings_pct"], 93.75);
+    }
+
+    #[test]
+    fn followup_recovery_is_attributed_to_previous_needed_followup_event() {
+        let reconciled = reconcile_followup_recovery(
+            &[
+                TokenBudgetEvent {
+                    created_at_epoch_ms: 1000,
+                    event_id: "event-1".to_string(),
+                    timestamp_utc: 1000,
+                    snapshot_kind: "token_budget_event".to_string(),
+                    source_kind: "live_context_pack".to_string(),
+                    traffic_class: "live".to_string(),
+                    project: "art".to_string(),
+                    namespace: "continuity".to_string(),
+                    query: "find dashboard token bug".to_string(),
+                    query_hash: "hash-1".to_string(),
+                    query_type: "code_lookup".to_string(),
+                    target_kind: "file".to_string(),
+                    baseline_hit_target: true,
+                    amai_hit_target: false,
+                    cold_warm_state: "cold".to_string(),
+                    baseline_strategy: "naive_top_files".to_string(),
+                    retrieval_mode: Some("local_strict".to_string()),
+                    tokenizer: "o200k_base".to_string(),
+                    latency_ms: 10.0,
+                    saved_tokens: 900,
+                    naive_tokens: 1000,
+                    context_tokens: 100,
+                    recovery_tokens: 0,
+                    effective_saved_tokens: 900,
+                    savings_factor: 10.0,
+                    savings_percent: 90.0,
+                    effective_savings_percent: 90.0,
+                    quality_ok: false,
+                    quality_score: 0.0,
+                    quality_method: "hybrid_retrieval_parity".to_string(),
+                    needed_followup: true,
+                    followup_count: 0,
+                    fallback_triggered: false,
+                    fallback_count: 0,
+                    document_hits: 0,
+                    symbol_hits_count: 0,
+                    file_hits: 0,
+                    sources_count: 0,
+                    chunks_count: 0,
+                    pack_token_count: 100,
+                    deduped_token_count: 100,
+                },
+                TokenBudgetEvent {
+                    created_at_epoch_ms: 2000,
+                    event_id: "event-2".to_string(),
+                    timestamp_utc: 2000,
+                    snapshot_kind: "token_budget_event".to_string(),
+                    source_kind: "live_context_pack".to_string(),
+                    traffic_class: "live".to_string(),
+                    project: "art".to_string(),
+                    namespace: "continuity".to_string(),
+                    query: "dashboard token bug file".to_string(),
+                    query_hash: "hash-2".to_string(),
+                    query_type: "code_lookup".to_string(),
+                    target_kind: "file".to_string(),
+                    baseline_hit_target: true,
+                    amai_hit_target: true,
+                    cold_warm_state: "warm".to_string(),
+                    baseline_strategy: "naive_top_files".to_string(),
+                    retrieval_mode: Some("local_strict".to_string()),
+                    tokenizer: "o200k_base".to_string(),
+                    latency_ms: 4.0,
+                    saved_tokens: 800,
+                    naive_tokens: 1000,
+                    context_tokens: 120,
+                    recovery_tokens: 0,
+                    effective_saved_tokens: 800,
+                    savings_factor: 8.0,
+                    savings_percent: 80.0,
+                    effective_savings_percent: 80.0,
+                    quality_ok: true,
+                    quality_score: 1.0,
+                    quality_method: "hybrid_retrieval_parity".to_string(),
+                    needed_followup: false,
+                    followup_count: 0,
+                    fallback_triggered: false,
+                    fallback_count: 0,
+                    document_hits: 1,
+                    symbol_hits_count: 0,
+                    file_hits: 1,
+                    sources_count: 1,
+                    chunks_count: 1,
+                    pack_token_count: 120,
+                    deduped_token_count: 120,
+                },
+            ],
+            30 * 60_000,
+        );
+
+        assert_eq!(reconciled[0].recovery_tokens, 120);
+        assert_eq!(reconciled[0].followup_count, 1);
+        assert_eq!(reconciled[0].effective_saved_tokens, 780);
+        assert_eq!(reconciled[0].effective_savings_percent, 78.0);
+    }
+
+    #[test]
+    fn followup_query_matching_requires_same_shape_and_meaningful_overlap() {
+        assert!(followup_queries_related(
+            super::FollowupEventKey {
+                query: "find dashboard token bug",
+                query_hash: "",
+                query_type: "code_lookup",
+                target_kind: "file",
+            },
+            super::FollowupEventKey {
+                query: "dashboard token bug file",
+                query_hash: "",
+                query_type: "code_lookup",
+                target_kind: "file",
+            },
+        ));
+        assert!(!followup_queries_related(
+            super::FollowupEventKey {
+                query: "find dashboard token bug",
+                query_hash: "",
+                query_type: "code_lookup",
+                target_kind: "file",
+            },
+            super::FollowupEventKey {
+                query: "dashboard config",
+                query_hash: "",
+                query_type: "config_lookup",
+                target_kind: "file",
+            },
+        ));
+        assert!(!followup_queries_related(
+            super::FollowupEventKey {
+                query: "find dashboard token bug",
+                query_hash: "",
+                query_type: "code_lookup",
+                target_kind: "file",
+            },
+            super::FollowupEventKey {
+                query: "dashboard token",
+                query_hash: "",
+                query_type: "code_lookup",
+                target_kind: "symbol",
+            },
+        ));
     }
 }

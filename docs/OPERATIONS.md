@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 03:21 MSK
-Ручная сверка guide/docs: 2026-03-21 03:21 MSK
+modified_at: 2026-03-21 03:33 MSK
+Ручная сверка guide/docs: 2026-03-21 03:33 MSK
 
 # Operations
 
@@ -699,6 +699,21 @@ cargo run --release -- verify token-benchmark-suite \
     - `symbol_lookup`
     - `architecture_question`
     - и другие, если они реально накоплены в live-потоке.
+- `temperature_slices`
+  - отдельные срезы по состоянию retrieval:
+    - `cold`
+    - `warm`
+    - `post_restart`
+    - `post_warmup`
+    - `post_reindex`
+- `median_recovery_tokens`
+  - медианный штраф на follow-up/retry/correction токены;
+  - нужен затем, чтобы видеть не только красивую экономию, но и цену ошибок retrieval.
+
+Главная честная поправка теперь такая:
+- headline считается не просто по raw savings;
+- recovery penalties теперь вычитаются из результата;
+- при live report один follow-up штрафует только ближайшее подходящее незакрытое событие, а не раздувает статистику несколько раз.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе:
