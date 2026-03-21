@@ -2,6 +2,7 @@
 name = "art-memory-agent-index"
 version = "0.1.0"
 edition = "2024"
+default-run = "amai"
 license = "Apache-2.0 OR MIT"
 description = "Art-memory-agent-index (Amai): Rust-first control plane for multi-project AI-agent continuity and retrieval"
 readme = "README.md"

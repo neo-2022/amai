@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 03:37 MSK
-Ручная сверка guide/docs: 2026-03-21 03:37 MSK
+modified_at: 2026-03-21 10:52 MSK
+Ручная сверка guide/docs: 2026-03-21 10:52 MSK
 
 # MCP Integration
 
@@ -83,6 +83,13 @@ scripts\install_amai.cmd
 - открыть repo в VS Code;
 - сделать `Reload Window`;
 - проверить, что MCP server виден клиенту.
+
+Отдельно важно:
+- локальный compatibility entrypoint `memory` теперь тоже может быть Amai-backed;
+- если install шёл локально, `memory mcp` должен запускать именно `Amai`, а не старый внешний bridge;
+- в локальном `~/.codex/config.toml` можно использовать:
+  - `command = "/home/art/.local/bin/memory"`
+  - `args = ["mcp"]`
 
 В финальном выводе установки теперь видно:
 - версию и ревизию `Amai`;

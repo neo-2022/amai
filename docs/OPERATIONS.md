@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 05:47 MSK
-Ручная сверка guide/docs: 2026-03-21 05:47 MSK
+modified_at: 2026-03-21 10:52 MSK
+Ручная сверка guide/docs: 2026-03-21 10:52 MSK
 
 # Operations
 
@@ -27,6 +27,7 @@ cd /home/art/agent-memory-index
 - поднимает stack;
 - materialize-ит bootstrap;
 - собирает release binary;
+- ставит внешний compatibility bridge `memory -> Amai`;
 - пишет готовый MCP config для клиента.
 
 `install_amai.sh` делает ещё один шаг поверх этого:
@@ -34,6 +35,7 @@ cd /home/art/agent-memory-index
 - пытается определить, какой клиент наиболее вероятен;
 - работает как более человеческое имя для product install path.
 - если запускать его повторно, он не должен плодить дубликаты, а должен аккуратно пересинхронизировать текущую установку.
+- после локальной установки `~/.local/bin/memory` больше не должен указывать на старый bridge; он должен запускать `Amai` compatibility runner.
 
 Если нужен cheap remote/smoke contour под слабый VPS:
 

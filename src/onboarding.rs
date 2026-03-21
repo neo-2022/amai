@@ -4,6 +4,7 @@ use crate::mcp;
 use crate::observe;
 use crate::profiles;
 use anyhow::{Context, Result, anyhow, bail};
+use dirs::home_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -23,6 +24,10 @@ struct InstallState {
     client_config: String,
     stack_profile: String,
     installed_at_epoch_seconds: u64,
+    #[serde(default)]
+    memory_bridge_path: Option<String>,
+    #[serde(default)]
+    memory_bridge_backup_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +71,13 @@ struct InstallMetricsSummary {
     token_headline_scope_label: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct MemoryBridgeInstallSummary {
+    bridge_path: PathBuf,
+    backup_path: Option<PathBuf>,
+    status: String,
+}
+
 pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     let repo_root = discover_repo_root(args.cwd.as_deref())?;
     let remote_mode = args.ssh_destination.is_some();
@@ -77,6 +89,7 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     let mut local_preflight_report: Option<profiles::PreflightReport> = None;
     let mut local_machine_summary: Option<InstallMachineSummary> = None;
     let mut local_metrics_summary: Option<InstallMetricsSummary> = None;
+    let mut local_memory_bridge_summary: Option<MemoryBridgeInstallSummary> = None;
 
     let target = client_resolution.target.clone();
     let output = resolve_output_path(&repo_root, &target, args.output.as_ref())?;
@@ -130,6 +143,8 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
             .await?;
         }
 
+        local_memory_bridge_summary = Some(install_memory_bridge(&repo_root)?);
+
         if let Ok(cfg) = config::AppConfig::from_env() {
             local_metrics_summary = collect_install_metrics_summary(&cfg).await.ok();
         }
@@ -153,6 +168,13 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
             client_config: output.display().to_string(),
             stack_profile: args.stack_profile.clone(),
             installed_at_epoch_seconds: current_epoch_seconds(),
+            memory_bridge_path: local_memory_bridge_summary
+                .as_ref()
+                .map(|summary| summary.bridge_path.display().to_string()),
+            memory_bridge_backup_path: local_memory_bridge_summary
+                .as_ref()
+                .and_then(|summary| summary.backup_path.as_ref())
+                .map(|path| path.display().to_string()),
         },
     )?;
 
@@ -203,6 +225,13 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         "Где установлен config: {}",
         install_scope_status(&target.install_scope)
     );
+    if let Some(summary) = &local_memory_bridge_summary {
+        println!("Внешний memory bridge: {}", summary.status);
+        println!("Файл bridge: {}", summary.bridge_path.display());
+        if let Some(path) = &summary.backup_path {
+            println!("Резерв старого memory bridge: {}", path.display());
+        }
+    }
     println!(
         "Release binary готов: {}",
         if release_ready { "да" } else { "нет" }
@@ -420,6 +449,87 @@ fn save_install_state(repo_root: &Path, state: &InstallState) -> Result<()> {
     let content =
         serde_json::to_string_pretty(state).context("failed to serialize install state")?;
     fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn install_memory_bridge(repo_root: &Path) -> Result<MemoryBridgeInstallSummary> {
+    let bin_dir = home_dir()
+        .ok_or_else(|| anyhow!("failed to resolve home directory for memory bridge"))?
+        .join(".local/bin");
+    fs::create_dir_all(&bin_dir)
+        .with_context(|| format!("failed to create {}", bin_dir.display()))?;
+    let bridge_path = bin_dir.join("memory");
+    let target = repo_root.join("scripts/run_memory_bridge.sh");
+    if !target.is_file() {
+        bail!("Amai memory bridge runner is missing: {}", target.display());
+    }
+
+    let mut backup_path = None;
+    let status = if let Ok(current_target) = fs::read_link(&bridge_path) {
+        if current_target == target {
+            "Amai bridge уже был установлен и остался активным.".to_string()
+        } else {
+            let backup = bridge_path.with_extension("pre-amai-backup");
+            if !backup.exists() {
+                fs::rename(&bridge_path, &backup).with_context(|| {
+                    format!(
+                        "failed to preserve previous memory bridge {} -> {}",
+                        bridge_path.display(),
+                        backup.display()
+                    )
+                })?;
+            } else {
+                fs::remove_file(&bridge_path)
+                    .with_context(|| format!("failed to replace {}", bridge_path.display()))?;
+            }
+            std::os::unix::fs::symlink(&target, &bridge_path).with_context(|| {
+                format!(
+                    "failed to create Amai memory bridge {} -> {}",
+                    bridge_path.display(),
+                    target.display()
+                )
+            })?;
+            backup_path = Some(backup);
+            "Старый memory bridge заменён на Amai.".to_string()
+        }
+    } else if bridge_path.exists() {
+        let backup = bridge_path.with_extension("pre-amai-backup");
+        if !backup.exists() {
+            fs::rename(&bridge_path, &backup).with_context(|| {
+                format!(
+                    "failed to preserve previous memory bridge {} -> {}",
+                    bridge_path.display(),
+                    backup.display()
+                )
+            })?;
+        } else {
+            fs::remove_file(&bridge_path)
+                .with_context(|| format!("failed to replace {}", bridge_path.display()))?;
+        }
+        std::os::unix::fs::symlink(&target, &bridge_path).with_context(|| {
+            format!(
+                "failed to create Amai memory bridge {} -> {}",
+                bridge_path.display(),
+                target.display()
+            )
+        })?;
+        backup_path = Some(backup);
+        "Старый memory executable заменён на Amai.".to_string()
+    } else {
+        std::os::unix::fs::symlink(&target, &bridge_path).with_context(|| {
+            format!(
+                "failed to create Amai memory bridge {} -> {}",
+                bridge_path.display(),
+                target.display()
+            )
+        })?;
+        "Amai memory bridge установлен впервые.".to_string()
+    };
+
+    Ok(MemoryBridgeInstallSummary {
+        bridge_path,
+        backup_path,
+        status,
+    })
 }
 
 fn build_install_status(
@@ -740,6 +850,7 @@ fn confirm_local_installation(
 
 pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
     let repo_root = discover_repo_root(args.cwd.as_deref())?;
+    let install_state_before = load_install_state(&repo_root)?;
     let client_resolution = resolve_client_target(&repo_root, &args.client, false)?;
     let target = client_resolution.target.clone();
     let output = resolve_output_path(&repo_root, &target, args.output.as_ref())?;
@@ -753,7 +864,7 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
             ssh_destination: None,
             remote_repo_root: None,
             command: None,
-            cwd: Some(repo_root),
+            cwd: Some(repo_root.clone()),
             output: Some(output.clone()),
         },
         args.purge_empty_file,
@@ -774,12 +885,61 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
     println!("client_config: {}", output.display());
     println!("server_removed: {}", result.removed);
     println!("file_purged: {}", result.purged_file);
+    if let Some(state) = &install_state_before {
+        if let Some(memory_bridge_path) = &state.memory_bridge_path {
+            println!("memory_bridge: {}", memory_bridge_path);
+        }
+        if let Some(memory_bridge_backup_path) = &state.memory_bridge_backup_path {
+            println!("memory_bridge_backup: {}", memory_bridge_backup_path);
+        }
+    }
+    if let Some(summary) =
+        restore_memory_bridge(repo_root.as_path(), install_state_before.as_ref())?
+    {
+        println!("memory_bridge_restore: {}", summary);
+    }
     if let Some(backup) = backup {
         println!("backup_file: {}", backup.display());
     }
     println!("next_step_1: reload the client window or restart the client");
     println!("next_step_2: verify that Amai is no longer listed as an MCP server");
     Ok(())
+}
+
+fn restore_memory_bridge(repo_root: &Path, state: Option<&InstallState>) -> Result<Option<String>> {
+    let Some(state) = state else {
+        return Ok(None);
+    };
+    let Some(bridge_path) = state.memory_bridge_path.as_ref().map(PathBuf::from) else {
+        return Ok(None);
+    };
+    let expected_target = repo_root.join("scripts/run_memory_bridge.sh");
+    let current_target = match fs::read_link(&bridge_path) {
+        Ok(target) => target,
+        Err(_) => return Ok(None),
+    };
+    if current_target != expected_target {
+        return Ok(None);
+    }
+    if let Some(backup) = state.memory_bridge_backup_path.as_ref().map(PathBuf::from)
+        && backup.exists()
+    {
+        fs::remove_file(&bridge_path)
+            .with_context(|| format!("failed to remove {}", bridge_path.display()))?;
+        fs::rename(&backup, &bridge_path).with_context(|| {
+            format!(
+                "failed to restore previous memory bridge {} -> {}",
+                backup.display(),
+                bridge_path.display()
+            )
+        })?;
+        return Ok(Some("предыдущий memory bridge восстановлен".to_string()));
+    }
+    fs::remove_file(&bridge_path)
+        .with_context(|| format!("failed to remove {}", bridge_path.display()))?;
+    Ok(Some(
+        "Amai memory bridge удалён без восстановления старого bridge".to_string(),
+    ))
 }
 
 fn discover_repo_root(explicit: Option<&Path>) -> Result<PathBuf> {
