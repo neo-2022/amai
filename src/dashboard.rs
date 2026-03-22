@@ -1,4 +1,5 @@
 use crate::config::{self, AppConfig};
+use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary, collect_machine_summary};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -6,10 +7,7 @@ use std::env;
 use std::fs;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use sysinfo::{Disks, System};
+use std::time::Duration;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -74,7 +72,10 @@ pub fn render_html(refresh_ms: u64) -> String {
       --critical-soft: rgba(182, 56, 43, 0.12);
       --unknown: #61717a;
       --unknown-soft: rgba(97, 113, 122, 0.12);
-      --shadow: 0 18px 44px rgba(28, 43, 49, 0.12);
+      --shadow:
+        0 2px 0 rgba(31, 45, 51, 0.14),
+        0 18px 30px -20px rgba(20, 31, 36, 0.34),
+        0 42px 96px -44px rgba(20, 31, 36, 0.24);
       --border: rgba(30, 42, 47, 0.10);
       --surface: rgba(255, 255, 255, 0.72);
       --surface-raised: rgba(255, 255, 255, 0.78);
@@ -82,6 +83,12 @@ pub fn render_html(refresh_ms: u64) -> String {
       --surface-border: rgba(30, 42, 47, 0.08);
       --hero-glow: rgba(13, 107, 111, 0.11);
       --error-border: rgba(182, 56, 43, 0.18);
+      --panel-edge-glow: inset 0 1px 0 rgba(255, 255, 255, 0.62);
+      --card-inner-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.52),
+        inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+        inset 0 20px 38px -30px rgba(19, 31, 36, 0.34),
+        0 12px 22px -18px rgba(15, 25, 31, 0.16);
     }
 
     * { box-sizing: border-box; }
@@ -114,7 +121,17 @@ pub fn render_html(refresh_ms: u64) -> String {
       border: 1px solid var(--border);
       border-radius: 24px;
       box-shadow: var(--shadow);
+      position: relative;
       backdrop-filter: blur(14px);
+    }
+
+    .panel::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      box-shadow: var(--panel-edge-glow);
     }
 
     .hero-main {
@@ -238,6 +255,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       border-radius: 18px;
       background: var(--surface);
       border: 1px solid var(--surface-border);
+      box-shadow: var(--card-inner-shadow);
     }
 
     .side-block h2,
@@ -278,6 +296,27 @@ pub fn render_html(refresh_ms: u64) -> String {
       gap: 14px;
     }
 
+    .machine-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      align-items: start;
+    }
+
+    .machine-grid .machine-compact {
+      padding: 14px 16px;
+    }
+
+    .machine-grid .machine-compact .card-value {
+      font-size: clamp(20px, 2.8vw, 28px);
+    }
+
+    .machine-grid .machine-compact .card-note {
+      font-size: 13px;
+    }
+
+    .machine-grid .machine-compact .metric-row {
+      padding-top: 6px;
+    }
+
     .metric-card,
     .service-card,
     .glossary-card,
@@ -286,6 +325,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       border-radius: 20px;
       border: 1px solid var(--surface-border);
       background: var(--surface-raised);
+      box-shadow: var(--card-inner-shadow);
     }
 
     .metric-card.pass,
@@ -585,6 +625,16 @@ pub fn render_html(refresh_ms: u64) -> String {
       .compare-grid {
         grid-template-columns: 1fr;
       }
+
+      .machine-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 640px) {
+      .machine-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -652,7 +702,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       <p class="muted">
         Здесь видно, на каком железе сейчас всё работает и к какому клиенту уже привязана установка.
       </p>
-      <div class="cards" id="machine-cards"></div>
+      <div class="cards machine-grid" id="machine-cards"></div>
     </section>
 
     <section class="panel section">
@@ -818,6 +868,9 @@ pub fn render_html(refresh_ms: u64) -> String {
         }
         const element = document.createElement("article");
         element.className = `${kind} ${statusClass(card.status)}`;
+        if (card.extra_class) {
+          element.classList.add(card.extra_class);
+        }
 
         const top = document.createElement("div");
         top.className = "card-top";
@@ -1141,7 +1194,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Цель для p95 в полном cold end-to-end пути."),
                 ),
                 metric_row(
-                    "Сейчас cold P95",
+                    "Измерено cold P95",
                     format_ms(cold_contour["machine_readable_summary"]["p95"].as_f64()),
                     Some("Фактический p95 последнего end-to-end cold benchmark."),
                 ),
@@ -1151,7 +1204,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Цель для p99 в полном cold end-to-end пути."),
                 ),
                 metric_row(
-                    "Сейчас cold P99",
+                    "Измерено cold P99",
                     format_ms(cold_contour["machine_readable_summary"]["p99"].as_f64()),
                     Some("Фактический p99 последнего end-to-end cold benchmark."),
                 ),
@@ -1161,7 +1214,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Самый большой выброс в cold benchmark должен оставаться в этой границе."),
                 ),
                 metric_row(
-                    "Сейчас cold Max",
+                    "Измерено cold Max",
                     format_ms(cold_contour["machine_readable_summary"]["max"].as_f64()),
                     Some("Самый большой выброс в последнем cold benchmark."),
                 ),
@@ -1171,7 +1224,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Доля выданного контекста, которая оказалась релевантной."),
                 ),
                 metric_row(
-                    "Сейчас precision",
+                    "Измерено precision",
                     format_ratio_percent(cold_contour["machine_readable_summary"]["precision"].as_f64()),
                     Some("Фактическая точность последнего cold benchmark."),
                 ),
@@ -1181,7 +1234,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Насколько полно система нашла нужные целевые данные."),
                 ),
                 metric_row(
-                    "Сейчас recall",
+                    "Измерено recall",
                     format_ratio_percent(cold_contour["machine_readable_summary"]["recall"].as_f64()),
                     Some("Фактическая полнота последнего cold benchmark."),
                 ),
@@ -1191,27 +1244,27 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Доля запросов, где система действительно попала в нужную цель."),
                 ),
                 metric_row(
-                    "Сейчас hit rate",
+                    "Измерено hit rate",
                     format_ratio_percent(cold_contour["machine_readable_summary"]["hit_rate"].as_f64()),
                     Some("Фактическая доля успешных попаданий в цели в последнем cold benchmark."),
                 ),
                 metric_row(
-                    "Сейчас выборка",
+                    "Измерено выборка",
                     format_u64(cold_contour["machine_readable_summary"]["sample_count"].as_u64()),
                     Some("Сколько cold-запросов вошло в итоговый benchmark."),
                 ),
                 metric_row(
-                    "Сейчас repo count",
+                    "Измерено repo count",
                     format_u64(cold_contour["machine_readable_summary"]["repo_count"].as_u64()),
                     Some("Сколько разных репозиториев вошло в последний cold benchmark."),
                 ),
                 metric_row(
-                    "Сейчас query slices",
+                    "Измерено query slices",
                     format_u64(cold_contour["machine_readable_summary"]["query_slice_count"].as_u64()),
                     Some("Сколько разных типов запросов покрывает последний cold benchmark."),
                 ),
                 metric_row(
-                    "Сейчас duration",
+                    "Измерено duration",
                     format_optional(
                         cold_contour["machine_readable_summary"]["duration"].as_f64(),
                         |value| format!("{value:.2} сек."),
@@ -1243,7 +1296,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Для строгой проектной изоляции утечки между проектами должны быть равны нулю."),
                 ),
                 metric_row(
-                    "Сейчас leakage",
+                    "Измерено leakage",
                     format_f64_count(accuracy["cross_project_leakage"].as_f64()),
                     Some("Фактическое число утечек между проектами в последнем verification contour."),
                 ),
@@ -1253,7 +1306,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Насколько точно retrieval попадает в нужные символы, функции и сущности."),
                 ),
                 metric_row(
-                    "Сейчас symbol precision",
+                    "Измерено symbol precision",
                     format_ratio_percent(accuracy["symbol_precision"].as_f64()),
                     Some("Фактическая точность по символам в последнем verification contour."),
                 ),
@@ -1263,7 +1316,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Насколько точно семантический слой попадает в правильный контекст."),
                 ),
                 metric_row(
-                    "Сейчас semantic precision",
+                    "Измерено semantic precision",
                     format_ratio_percent(accuracy["semantic_precision"].as_f64()),
                     Some("Фактическая семантическая точность в последнем verification contour."),
                 ),
@@ -1407,25 +1460,31 @@ fn build_machine_cards(
         cards.push(card_with_rows(
             "CPU",
             format!("{} потоков", machine.logical_cpus),
-            machine.cpu_model.clone(),
+            match machine.physical_cpus {
+                Some(physical) => format!(
+                    "{}. Физических ядер: {}. Логических потоков: {}.",
+                    machine.cpu_model, physical, machine.logical_cpus
+                ),
+                None => machine.cpu_model.clone(),
+            },
             "pass",
-            None,
-            Some("Статический профиль процессора плюс живые текущие показатели загрузки и температуры.".to_string()),
+            Some(machine.cpu_source_label.clone()),
+            Some("Автоматически собранный профиль CPU. Набор live-полей зависит от ОС и доступных сенсоров, но источник всегда определяется без хардкода под текущую машину.".to_string()),
             vec![
                 metric_row(
-                    "Сейчас нагрузка",
+                    "Нагрузка",
                     format_optional(machine.cpu_usage_percent, |value| format!("{value:.1}%")),
                     Some("Живая текущая загрузка CPU по всей системе."),
                 ),
                 metric_row(
-                    "Сейчас температура",
+                    "Температура",
                     format_optional(machine.cpu_temperature_celsius, format_celsius),
-                    Some("Текущая температура CPU по датчику Tctl."),
+                    Some("Текущая температура CPU по доступному сенсору этой ОС."),
                 ),
                 metric_row(
-                    "Сейчас максимум частоты",
+                    "Максимум частоты",
                     format_optional(machine.cpu_max_mhz, |value| format!("{value:.0} MHz")),
-                    Some("Максимальная частота процессора, которую система сообщает прямо сейчас."),
+                    Some("Максимальная частота процессора, которую система смогла определить автоматически."),
                 ),
             ],
         ));
@@ -1437,38 +1496,38 @@ fn build_machine_cards(
                 machine.memory_type, machine.memory_speed_label
             ),
             "pass",
-            None,
+            Some(machine.memory_source_label.clone()),
             Some(
-                "Статический профиль RAM плюс живые показатели текущего использования.".to_string(),
+                "Автоматически собранный профиль RAM. Тип и скорость берутся через цепочку OS-specific providers, а live usage идёт из системного runtime.".to_string(),
             ),
             vec![
                 metric_row(
-                    "Сейчас тип",
+                    "Тип",
                     machine.memory_type.clone(),
                     Some("Автоматически определённый тип оперативной памяти."),
                 ),
                 metric_row(
-                    "Сейчас скорость",
+                    "Скорость",
                     machine.memory_speed_label.clone(),
                     Some("Автоматически определённая скорость оперативной памяти."),
                 ),
                 metric_row(
-                    "Сейчас занято",
+                    "Занято",
                     format!("{:.2} GiB", machine.used_memory_gib),
                     Some("Сколько оперативной памяти занято прямо сейчас."),
                 ),
                 metric_row(
-                    "Сейчас свободно",
+                    "Свободно",
                     format!("{:.2} GiB", machine.available_memory_gib),
                     Some("Сколько оперативной памяти система считает доступной прямо сейчас."),
                 ),
                 metric_row(
-                    "Сейчас usage",
+                    "Использование",
                     format_optional(machine.memory_used_percent, |value| format!("{value:.1}%")),
                     Some("Текущая доля занятой оперативной памяти."),
                 ),
                 metric_row(
-                    "Сейчас swap",
+                    "Swap",
                     format!(
                         "{:.2} / {:.2} GiB",
                         machine.swap_used_gib, machine.swap_total_gib
@@ -1486,51 +1545,52 @@ fn build_machine_cards(
                 machine.disk_model
             ),
             "pass",
-            None,
-            Some("Статические характеристики основного диска плюс живая температура и текущая нагрузка ввода-вывода.".to_string()),
+            Some(machine.disk_source_label.clone()),
+            Some("Автоматически собранный профиль основного диска. Где ОС даёт live I/O и термоданные, они показываются здесь; где не даёт, панель честно оставляет поле пустым.".to_string()),
             vec![
                 metric_row(
-                    "Сейчас объём",
+                    "Объём",
                     format!("{:.2} GiB", machine.disk_total_gib),
                     Some("Полный размер основного диска."),
                 ),
                 metric_row(
-                    "Сейчас свободно",
+                    "Свободно",
                     format!("{:.2} GiB", machine.disk_available_gib),
                     Some("Сколько свободного места осталось на основном диске."),
                 ),
                 metric_row(
-                    "Сейчас usage",
+                    "Использование",
                     format_optional(machine.disk_used_percent, |value| format!("{value:.1}%")),
                     Some("Текущая доля занятого пространства на основном диске."),
                 ),
                 metric_row(
-                    "Сейчас нагрузка",
+                    "Нагрузка",
                     format_optional(machine.disk_busy_percent, |value| format!("{value:.1}%")),
                     Some("Насколько диск был занят операциями ввода-вывода между двумя последними refresh панели."),
                 ),
                 metric_row(
-                    "Сейчас чтение",
+                    "Чтение",
                     format_optional(machine.disk_read_mib_per_sec, |value| format!("{value:.2} MiB/s")),
                     Some("Текущая скорость чтения между двумя последними refresh панели."),
                 ),
                 metric_row(
-                    "Сейчас запись",
+                    "Запись",
                     format_optional(machine.disk_write_mib_per_sec, |value| format!("{value:.2} MiB/s")),
                     Some("Текущая скорость записи между двумя последними refresh панели."),
                 ),
                 metric_row(
-                    "Сейчас температура",
+                    "Температура",
                     format_optional(machine.disk_temperature_celsius, format_celsius),
                     Some("Температура NVMe/SSD по живому датчику."),
                 ),
                 metric_row(
-                    "Сейчас firmware",
+                    "Firmware",
                     machine.disk_firmware.clone(),
                     Some("Версия прошивки основного диска."),
                 ),
             ],
         ));
+        cards.extend(build_accelerator_cards(&machine.accelerators));
     } else {
         cards.push(card(
             "Машина",
@@ -1541,31 +1601,185 @@ fn build_machine_cards(
     }
 
     if let Some(install_state) = install_state {
-        cards.push(card(
-            "Установленный клиент",
-            client_display_name(&install_state.client_key).to_string(),
-            format!(
-                "Профиль: {}. Config: {}.",
-                install_state.stack_profile, install_state.client_config
+        cards.push(with_extra_class(
+            card(
+                "Установленный клиент",
+                client_display_name(&install_state.client_key).to_string(),
+                format!(
+                    "Профиль: {}. Config: {}.",
+                    install_state.stack_profile, install_state.client_config
+                ),
+                "pass",
             ),
-            "pass",
+            "machine-compact",
         ));
-        cards.push(card(
-            "Сборка",
-            install_state.package_version.clone(),
-            format!(
-                "Ревизия: {}. Установлено: {}.",
-                install_state.repo_revision,
-                human_epoch_seconds(install_state.installed_at_epoch_seconds)
+        cards.push(with_extra_class(
+            card(
+                "Сборка",
+                install_state.package_version.clone(),
+                format!(
+                    "Ревизия: {}. Установлено: {}.",
+                    install_state.repo_revision,
+                    human_epoch_seconds(install_state.installed_at_epoch_seconds)
+                ),
+                "pass",
             ),
-            "pass",
+            "machine-compact",
         ));
     } else {
-        cards.push(card(
-            "Установка",
-            "ещё не найдена".to_string(),
-            "state/install_state.json пока не найден, поэтому панель не видит последнюю user-facing установку.".to_string(),
+        cards.push(with_extra_class(
+            card(
+                "Установка",
+                "ещё не найдена".to_string(),
+                "state/install_state.json пока не найден, поэтому панель не видит последнюю user-facing установку.".to_string(),
+                "unknown",
+            ),
+            "machine-compact",
+        ));
+    }
+    cards
+}
+
+fn build_accelerator_cards(accelerators: &[AcceleratorSummary]) -> Vec<Value> {
+    let mut cards = Vec::new();
+    let Some(primary) = accelerators.first() else {
+        cards.push(card_with_rows(
+            "Графика и ускорители",
+            "не обнаружено".to_string(),
+            "Автоопределение не нашло доступный GPU, iGPU, eGPU или другой ускоритель в этой среде.".to_string(),
             "unknown",
+            Some("Источник: accelerator auto-detect provider chain".to_string()),
+            Some("Этот блок показывает все найденные графические и AI-ускорители: встроенную графику, дискретные GPU, внешние GPU и другие accelerator-устройства.".to_string()),
+            vec![
+                metric_row(
+                    "Устройств",
+                    "0".to_string(),
+                    Some("Сколько графических и accelerator-устройств удалось обнаружить автоматически."),
+                ),
+                metric_row(
+                    "Основное устройство",
+                    "не обнаружено".to_string(),
+                    Some("Какое устройство система выбрала бы основным для показа, если бы оно было найдено."),
+                ),
+            ],
+        ));
+        return cards;
+    };
+
+    let additional_count = accelerators.len().saturating_sub(1);
+    let primary_note = match &primary.driver_version {
+        Some(driver) => format!(
+            "{}. Стек: {}. Драйвер: {}.",
+            primary.kind_label, primary.backend, driver
+        ),
+        None => format!("{}. Стек: {}.", primary.kind_label, primary.backend),
+    };
+    let mut primary_rows = vec![
+        metric_row(
+            "Устройств",
+            accelerators.len().to_string(),
+            Some("Сколько графических и accelerator-устройств система обнаружила автоматически."),
+        ),
+        metric_row(
+            "Тип",
+            primary.kind_label.clone(),
+            Some("Какой тип ускорителя система определила для основного устройства."),
+        ),
+        metric_row(
+            "Стек",
+            primary.backend.clone(),
+            Some("Какой vendor stack или runtime система смогла определить автоматически."),
+        ),
+        metric_row(
+            "Драйвер",
+            primary
+                .driver_version
+                .clone()
+                .unwrap_or_else(|| "данные недоступны".to_string()),
+            Some("Версия драйвера или runtime, если provider смог её определить."),
+        ),
+        metric_row(
+            "Память",
+            format_optional(primary.total_vram_gib, |value| format!("{value:.2} GiB")),
+            Some("Полный объём видеопамяти или локальной памяти ускорителя, если provider дал это поле."),
+        ),
+        metric_row(
+            "Использовано памяти",
+            format_optional(primary.used_vram_gib, |value| format!("{value:.2} GiB")),
+            Some("Сколько памяти ускорителя занято прямо сейчас."),
+        ),
+        metric_row(
+            "Нагрузка",
+            format_optional(primary.utilization_percent, |value| format!("{value:.1}%")),
+            Some("Текущая загрузка основного ускорителя, если live provider умеет её отдавать."),
+        ),
+        metric_row(
+            "Температура",
+            format_optional(primary.temperature_celsius, format_celsius),
+            Some("Текущая температура основного ускорителя по доступному live provider."),
+        ),
+        metric_row(
+            "Мощность",
+            format_optional(primary.power_watts, |value| format!("{value:.2} W")),
+            Some("Текущее энергопотребление основного ускорителя, если provider умеет его отдавать."),
+        ),
+    ];
+    if additional_count > 0 {
+        primary_rows.push(metric_row(
+            "Другие устройства",
+            accelerators[1..]
+                .iter()
+                .map(|item| format!("{}: {}", item.kind_label, item.model))
+                .collect::<Vec<_>>()
+                .join("; "),
+            Some("Остальные найденные ускорители в этой машине."),
+        ));
+    }
+    cards.push(card_with_rows(
+        "Графика и ускорители",
+        primary.model.clone(),
+        primary_note,
+        if primary.detected { "pass" } else { "unknown" },
+        Some(primary.source_label.clone()),
+        Some("Основным показывается ускоритель с самым богатым live-профилем. Остальные устройства перечислены ниже или отдельными карточками.".to_string()),
+        primary_rows,
+    ));
+
+    for accelerator in accelerators.iter().skip(1) {
+        cards.push(with_extra_class(
+            card_with_rows(
+                "Доп. ускоритель",
+                accelerator.model.clone(),
+                match &accelerator.driver_version {
+                    Some(driver) => format!(
+                        "{}. Стек: {}. Драйвер: {}.",
+                        accelerator.kind_label, accelerator.backend, driver
+                    ),
+                    None => format!("{}. Стек: {}.", accelerator.kind_label, accelerator.backend),
+                },
+                if accelerator.detected { "pass" } else { "unknown" },
+                Some(accelerator.source_label.clone()),
+                Some("Дополнительное графическое или accelerator-устройство, найденное в этой машине.".to_string()),
+                vec![
+                    metric_row("Тип", accelerator.kind_label.clone(), Some("Определённый тип дополнительного ускорителя.")),
+                    metric_row(
+                        "Память",
+                        format_optional(accelerator.total_vram_gib, |value| format!("{value:.2} GiB")),
+                        Some("Полный объём памяти дополнительного ускорителя, если provider смог его дать."),
+                    ),
+                    metric_row(
+                        "Нагрузка",
+                        format_optional(accelerator.utilization_percent, |value| format!("{value:.1}%")),
+                        Some("Текущая загрузка дополнительного ускорителя, если live provider умеет её отдавать."),
+                    ),
+                    metric_row(
+                        "Температура",
+                        format_optional(accelerator.temperature_celsius, format_celsius),
+                        Some("Текущая температура дополнительного ускорителя, если live provider умеет её отдавать."),
+                    ),
+                ],
+            ),
+            "machine-compact",
         ));
     }
     cards
@@ -1592,7 +1806,7 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Целевой p95 для короткого живого PostgreSQL probe."),
                 ),
                 metric_row(
-                    "Сейчас probe P95",
+                    "Измерено probe P95",
                     format_ms(snapshot["postgres"]["query_probe_p95_ms"].as_f64()),
                     Some("Фактический p95 живого PostgreSQL probe на этом refresh."),
                 ),
@@ -1602,17 +1816,17 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Желаемая доля занятых соединений PostgreSQL."),
                 ),
                 metric_row(
-                    "Сейчас usage",
+                    "Измерено usage",
                     format_ratio_percent(snapshot["postgres"]["connection_usage_ratio"].as_f64()),
                     Some("Фактическая доля занятых соединений прямо сейчас."),
                 ),
                 metric_row(
-                    "Сейчас TPS",
+                    "Измерено TPS",
                     format_optional(snapshot["postgres"]["transactions_per_sec"].as_f64(), |v| format!("{v:.2}")),
                     Some("Сколько транзакций в секунду база делает между snapshot-ами."),
                 ),
                 metric_row(
-                    "Сейчас WAL throughput",
+                    "Измерено WAL throughput",
                     format_optional(snapshot["postgres"]["wal_bytes_per_sec"].as_f64(), human_bytes_per_sec),
                     Some("Скорость записи журнала WAL между snapshot-ами."),
                 ),
@@ -1635,7 +1849,7 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Целевой максимум очереди оптимизации индекса."),
                 ),
                 metric_row(
-                    "Сейчас optimize queue",
+                    "Optimize queue",
                     format_f64_count(snapshot["qdrant"]["index_optimize_queue"].as_f64()),
                     Some("Текущая очередь оптимизации индекса Qdrant."),
                 ),
@@ -1645,22 +1859,22 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Желаемая длина очереди обновлений Qdrant."),
                 ),
                 metric_row(
-                    "Сейчас update queue",
+                    "Update queue",
                     format_f64_count(snapshot["qdrant"]["update_queue_length"].as_f64()),
                     Some("Текущая длина очереди обновлений Qdrant."),
                 ),
                 metric_row(
-                    "Сейчас resident memory",
+                    "Resident memory",
                     format_optional(snapshot["qdrant"]["memory_resident_bytes"].as_f64(), human_bytes),
                     Some("Объём памяти, который Qdrant держит в resident state прямо сейчас."),
                 ),
                 metric_row(
-                    "Сейчас points",
+                    "Points",
                     format_f64_count(snapshot["qdrant"]["points_count"].as_f64()),
                     Some("Сколько точек сейчас лежит в активной кодовой коллекции Qdrant."),
                 ),
                 metric_row(
-                    "Сейчас segments",
+                    "Segments",
                     format_f64_count(snapshot["qdrant"]["segments_count"].as_f64()),
                     Some("Сколько сегментов сейчас держит Qdrant. Много мелких сегментов может быть признаком будущей оптимизации."),
                 ),
@@ -1685,7 +1899,7 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Целевой p95 для живого publish probe."),
                 ),
                 metric_row(
-                    "Сейчас publish P95",
+                    "Измерено publish P95",
                     format_ms(snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
                     Some("Фактический p95 для живого publish probe на этом refresh."),
                 ),
@@ -1695,7 +1909,7 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Желаемый максимум непрочитанных сообщений."),
                 ),
                 metric_row(
-                    "Сейчас lag",
+                    "Измерено lag",
                     format_f64_count(snapshot["nats"]["consumer_lag_msgs"].as_f64()),
                     Some("Текущая consumer lag в JetStream."),
                 ),
@@ -1705,7 +1919,7 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Желаемая доля занятого диска JetStream."),
                 ),
                 metric_row(
-                    "Сейчас disk usage",
+                    "Измерено disk usage",
                     format_ratio_percent(snapshot["nats"]["jetstream_disk_usage_ratio"].as_f64()),
                     Some("Текущая доля занятого диска JetStream."),
                 ),
@@ -1743,12 +1957,14 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
     } else {
         "не настроено".to_string()
     };
+    let snapshot_mode = !active;
+    let live_or_snapshot_label = if snapshot_mode { "Последний срез" } else { "" };
     let note = if active && available {
         "Живые системные показатели отдельного Qdrant, который сейчас занят внешним benchmark-прогоном. Эти числа не смешиваются с Amai live.".to_string()
     } else if !active && available {
-        "Тест сейчас не запущен. Показаны последние доступные системные показатели отдельного benchmark-Qdrant, чтобы вы не теряли картину после остановки прогона.".to_string()
+        "Тест сейчас не запущен. Показан последний измеренный срез отдельного benchmark-Qdrant, чтобы вы не теряли картину после остановки прогона.".to_string()
     } else if from_last_success {
-        "Показаны последние сохранённые результаты внешнего benchmark-Qdrant. Новый тест сейчас не запущен, но последние успешные числа сохранены для сравнения.".to_string()
+        "Показан последний сохранённый срез внешнего benchmark-Qdrant. Новый тест сейчас не запущен, но последние успешные числа сохранены для сравнения.".to_string()
     } else if configured {
         "Отдельный benchmark-Qdrant настроен, но тест сейчас не запущен. Значения появятся после первого успешного прогона.".to_string()
     } else {
@@ -1761,12 +1977,12 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
         ))
     } else if !active && available {
         Some(format!(
-            "Источник: последние доступные live Qdrant /metrics внешнего бенча ({}). Тест сейчас не запущен.",
+            "Источник: последний измеренный срез Qdrant /metrics внешнего бенча ({}). Тест сейчас не запущен.",
             benchmark["http_url"].as_str().unwrap_or("unknown")
         ))
     } else if from_last_success {
         Some(format!(
-            "Источник: последние сохранённые live Qdrant /metrics внешнего бенча ({}). Тест сейчас не запущен.",
+            "Источник: последний сохранённый срез Qdrant /metrics внешнего бенча ({}). Тест сейчас не запущен.",
             benchmark["http_url"].as_str().unwrap_or("unknown")
         ))
     } else {
@@ -1782,9 +1998,13 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
             Some("Целевой максимум очереди оптимизации индекса для внешнего benchmark-Qdrant."),
         ),
         metric_row(
-            "Сейчас optimize queue",
+            &prefixed_metric_label(live_or_snapshot_label, "optimize queue"),
             format_f64_count(benchmark["index_optimize_queue"].as_f64()),
-            Some("Текущая очередь оптимизации индекса у внешнего benchmark-Qdrant."),
+            Some(if snapshot_mode {
+                "Последняя измеренная очередь оптимизации индекса у внешнего benchmark-Qdrant перед остановкой теста."
+            } else {
+                "Текущая очередь оптимизации индекса у внешнего benchmark-Qdrant."
+            }),
         ),
         metric_row(
             "Эталон update queue",
@@ -1794,24 +2014,40 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
             Some("Желаемая длина очереди обновлений у внешнего benchmark-Qdrant."),
         ),
         metric_row(
-            "Сейчас update queue",
+            &prefixed_metric_label(live_or_snapshot_label, "update queue"),
             format_f64_count(benchmark["update_queue_length"].as_f64()),
-            Some("Текущая длина очереди обновлений у внешнего benchmark-Qdrant."),
+            Some(if snapshot_mode {
+                "Последняя измеренная длина очереди обновлений у внешнего benchmark-Qdrant перед остановкой теста."
+            } else {
+                "Текущая длина очереди обновлений у внешнего benchmark-Qdrant."
+            }),
         ),
         metric_row(
-            "Сейчас resident memory",
+            &prefixed_metric_label(live_or_snapshot_label, "resident memory"),
             format_optional(benchmark["memory_resident_bytes"].as_f64(), human_bytes),
-            Some("Объём памяти, который отдельный benchmark-Qdrant держит прямо сейчас."),
+            Some(if snapshot_mode {
+                "Объём памяти в последнем измеренном срезе внешнего benchmark-Qdrant."
+            } else {
+                "Объём памяти, который отдельный benchmark-Qdrant держит прямо сейчас."
+            }),
         ),
         metric_row(
-            "Сейчас points",
+            &prefixed_metric_label(live_or_snapshot_label, "points"),
             format_f64_count(benchmark["points_count"].as_f64()),
-            Some("Сколько точек сейчас загружено во внешний benchmark-Qdrant."),
+            Some(if snapshot_mode {
+                "Сколько точек было загружено во внешний benchmark-Qdrant в последнем измеренном срезе."
+            } else {
+                "Сколько точек сейчас загружено во внешний benchmark-Qdrant."
+            }),
         ),
         metric_row(
-            "Сейчас segments",
+            &prefixed_metric_label(live_or_snapshot_label, "segments"),
             format_f64_count(benchmark["segments_count"].as_f64()),
-            Some("Сколько сегментов сейчас держит внешний benchmark-Qdrant."),
+            Some(if snapshot_mode {
+                "Сколько сегментов держал внешний benchmark-Qdrant в последнем измеренном срезе."
+            } else {
+                "Сколько сегментов сейчас держит внешний benchmark-Qdrant."
+            }),
         ),
     ];
     let status_label_override = if configured && !active {
@@ -2003,450 +2239,15 @@ fn load_install_state(repo_root: &Path) -> Result<Option<InstallState>> {
     Ok(Some(state))
 }
 
-#[derive(Debug, Clone)]
-struct MachineSummary {
-    cpu_model: String,
-    logical_cpus: usize,
-    cpu_usage_percent: Option<f64>,
-    cpu_temperature_celsius: Option<f64>,
-    cpu_max_mhz: Option<f64>,
-    total_memory_gib: f64,
-    available_memory_gib: f64,
-    used_memory_gib: f64,
-    memory_used_percent: Option<f64>,
-    memory_type: String,
-    memory_speed_label: String,
-    swap_total_gib: f64,
-    swap_used_gib: f64,
-    disk_device: Option<String>,
-    disk_model: String,
-    disk_kind: String,
-    disk_total_gib: f64,
-    disk_available_gib: f64,
-    disk_used_percent: Option<f64>,
-    disk_busy_percent: Option<f64>,
-    disk_read_mib_per_sec: Option<f64>,
-    disk_write_mib_per_sec: Option<f64>,
-    disk_temperature_celsius: Option<f64>,
-    disk_firmware: String,
-}
-
-#[derive(Debug, Clone)]
-struct CpuLoadSample {
-    total: u64,
-    idle: u64,
-}
-
-#[derive(Debug, Clone)]
-struct DiskIoSample {
-    device: String,
-    read_sectors: u64,
-    write_sectors: u64,
-    io_millis: u64,
-    captured_at_ms: u64,
-}
-
-#[derive(Debug, Clone)]
-struct DiskLiveStats {
-    busy_percent: Option<f64>,
-    read_mib_per_sec: Option<f64>,
-    write_mib_per_sec: Option<f64>,
-}
-
-static CPU_LOAD_CACHE: OnceLock<Mutex<Option<CpuLoadSample>>> = OnceLock::new();
-static DISK_IO_CACHE: OnceLock<Mutex<Option<DiskIoSample>>> = OnceLock::new();
-static CPU_MAX_MHZ_CACHE: OnceLock<Option<f64>> = OnceLock::new();
-
-fn collect_machine_summary(repo_root: &Path) -> Result<MachineSummary> {
-    let mut system = System::new_all();
-    system.refresh_memory();
-    let cpu_model = system
-        .cpus()
-        .first()
-        .map(|cpu| cpu.brand().trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "модель CPU не определена".to_string());
-    let cpu_max_mhz = read_lscpu_numeric_field("CPU max MHz:");
-    let disks = Disks::new_with_refreshed_list();
-    let total_memory_gib = bytes_to_gib(system.total_memory());
-    let available_memory_gib = bytes_to_gib(system.available_memory());
-    let used_memory_gib = (total_memory_gib - available_memory_gib).max(0.0);
-    let memory_used_percent = percentage_from_parts(used_memory_gib, total_memory_gib);
-    let swap_total_gib = bytes_to_gib(system.total_swap());
-    let swap_used_gib = bytes_to_gib(system.used_swap());
-    let (memory_type, memory_speed_label) = detect_memory_characteristics();
-    let disk_device = detect_disk_device_for_path(repo_root);
-    let disk_space = disk_space_for_path(&disks, repo_root);
-    let disk_total_gib = disk_space
-        .map(|(total, _)| bytes_to_gib(total))
-        .unwrap_or_default();
-    let disk_available_gib = disk_space
-        .map(|(_, available)| bytes_to_gib(available))
-        .unwrap_or_default();
-    let disk_used_percent = percentage_from_parts(
-        (disk_total_gib - disk_available_gib).max(0.0),
-        disk_total_gib,
-    );
-    let disk_model = disk_device
-        .as_deref()
-        .and_then(read_disk_model)
-        .unwrap_or_else(|| "модель диска не определена".to_string());
-    let disk_kind = disk_device
-        .as_deref()
-        .map(detect_disk_kind)
-        .unwrap_or_else(|| "тип диска не определён".to_string());
-    let disk_live = disk_device.as_deref().and_then(read_disk_live_stats);
-    let disk_firmware = disk_device
-        .as_deref()
-        .and_then(read_disk_firmware)
-        .unwrap_or_else(|| "ещё нет данных".to_string());
-    let disk_temperature_celsius = disk_device.as_deref().and_then(read_disk_temperature);
-    Ok(MachineSummary {
-        cpu_model,
-        logical_cpus: system.cpus().len(),
-        cpu_usage_percent: read_cpu_usage_percent(),
-        cpu_temperature_celsius: read_hwmon_temperature("k10temp", "Tctl"),
-        cpu_max_mhz,
-        total_memory_gib,
-        available_memory_gib,
-        used_memory_gib,
-        memory_used_percent,
-        memory_type,
-        memory_speed_label,
-        swap_total_gib,
-        swap_used_gib,
-        disk_device,
-        disk_model,
-        disk_kind,
-        disk_total_gib,
-        disk_available_gib,
-        disk_used_percent,
-        disk_busy_percent: disk_live.as_ref().and_then(|live| live.busy_percent),
-        disk_read_mib_per_sec: disk_live.as_ref().and_then(|live| live.read_mib_per_sec),
-        disk_write_mib_per_sec: disk_live.as_ref().and_then(|live| live.write_mib_per_sec),
-        disk_temperature_celsius,
-        disk_firmware,
-    })
-}
-
-fn now_epoch_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-fn percentage_from_parts(value: f64, total: f64) -> Option<f64> {
-    if total <= 0.0 {
-        None
-    } else {
-        Some((value / total) * 100.0)
-    }
-}
-
-fn read_cpu_usage_percent() -> Option<f64> {
-    let (total, idle) = read_cpu_totals()?;
-    let cache = CPU_LOAD_CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().ok()?;
-    let previous = guard.replace(CpuLoadSample { total, idle });
-    let previous = previous?;
-    let delta_total = total.saturating_sub(previous.total);
-    if delta_total == 0 {
-        return None;
-    }
-    let delta_idle = idle.saturating_sub(previous.idle);
-    Some(((delta_total.saturating_sub(delta_idle)) as f64 / delta_total as f64) * 100.0)
-}
-
-fn read_cpu_totals() -> Option<(u64, u64)> {
-    let line = fs::read_to_string("/proc/stat")
-        .ok()?
-        .lines()
-        .next()?
-        .to_string();
-    let mut parts = line.split_whitespace();
-    if parts.next()? != "cpu" {
-        return None;
-    }
-    let values = parts
-        .filter_map(|part| part.parse::<u64>().ok())
-        .collect::<Vec<_>>();
-    if values.len() < 5 {
-        return None;
-    }
-    let total = values.iter().sum();
-    let idle = values[3].saturating_add(values[4]);
-    Some((total, idle))
-}
-
-fn read_lscpu_numeric_field(prefix: &str) -> Option<f64> {
-    if prefix == "CPU max MHz:" {
-        return CPU_MAX_MHZ_CACHE
-            .get_or_init(|| read_lscpu_numeric_field_uncached(prefix))
-            .to_owned();
-    }
-    read_lscpu_numeric_field_uncached(prefix)
-}
-
-fn read_lscpu_numeric_field_uncached(prefix: &str) -> Option<f64> {
-    let output = Command::new("lscpu").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let line = text
-        .lines()
-        .find(|line| line.trim_start().starts_with(prefix))?;
-    let digits = line
-        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
-        .find(|part| !part.is_empty())?;
-    digits.parse::<f64>().ok()
-}
-
-fn read_hwmon_temperature(chip_name: &str, label: &str) -> Option<f64> {
-    let hwmon_root = Path::new("/sys/class/hwmon");
-    for entry in fs::read_dir(hwmon_root).ok()?.flatten() {
-        let path = entry.path();
-        let name = fs::read_to_string(path.join("name")).ok()?;
-        if name.trim() != chip_name {
-            continue;
-        }
-        for index in 1..=6 {
-            let label_path = path.join(format!("temp{index}_label"));
-            let input_path = path.join(format!("temp{index}_input"));
-            if !input_path.is_file() {
-                continue;
-            }
-            let current_label = fs::read_to_string(&label_path)
-                .ok()
-                .map(|text| text.trim().to_string())
-                .unwrap_or_else(|| format!("temp{index}"));
-            if current_label != label {
-                continue;
-            }
-            let raw = fs::read_to_string(&input_path).ok()?;
-            let milli_celsius = raw.trim().parse::<f64>().ok()?;
-            return Some(milli_celsius / 1000.0);
-        }
-    }
-    None
-}
-
-fn detect_memory_characteristics() -> (String, String) {
-    for (program, args) in [
-        ("sudo", vec!["-n", "dmidecode", "--type", "17"]),
-        ("dmidecode", vec!["--type", "17"]),
-        ("lshw", vec!["-class", "memory"]),
-    ] {
-        let output = Command::new(program).args(args).output().ok();
-        let Some(output) = output else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let memory_type = extract_memory_generation(&text)
-            .unwrap_or_else(|| "система не дала определить автоматически".to_string());
-        let memory_speed = extract_memory_speed(&text)
-            .map(|value| format!("{value} MT/s"))
-            .unwrap_or_else(|| "не удалось определить автоматически".to_string());
-        return (memory_type, memory_speed);
-    }
-    (
-        "система не дала определить автоматически".to_string(),
-        "не удалось определить автоматически".to_string(),
-    )
-}
-
-fn extract_memory_speed(text: &str) -> Option<u64> {
-    for line in text.lines() {
-        let line = line.trim();
-        if !(line.contains("Speed:")
-            || line.contains("Configured Memory Speed:")
-            || line.contains("clock:"))
-        {
-            continue;
-        }
-        let digits = line
-            .split(|ch: char| !ch.is_ascii_digit())
-            .find(|part| !part.is_empty())?;
-        if let Ok(value) = digits.parse::<u64>() {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn extract_memory_generation(text: &str) -> Option<String> {
-    for candidate in ["DDR5", "LPDDR5", "DDR4", "LPDDR4", "DDR3"] {
-        if text.contains(candidate) {
-            return Some(candidate.to_string());
-        }
-    }
-    None
-}
-
-fn disk_space_for_path(disks: &Disks, path: &Path) -> Option<(u64, u64)> {
-    let canonical = path.canonicalize().ok()?;
-    disks
-        .iter()
-        .filter(|disk| canonical.starts_with(disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().as_os_str().len())
-        .map(|disk| (disk.total_space(), disk.available_space()))
-}
-
-fn detect_disk_device_for_path(path: &Path) -> Option<String> {
-    let output = Command::new("df")
-        .arg("--output=source")
-        .arg(path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let source = text
-        .lines()
-        .skip(1)
-        .find(|line| !line.trim().is_empty())?
-        .trim();
-    normalize_block_device_name(source)
-}
-
-fn normalize_block_device_name(source: &str) -> Option<String> {
-    let source = source.strip_prefix("/dev/").unwrap_or(source).trim();
-    if source.is_empty() {
-        return None;
-    }
-    if let Some((base, suffix)) = source.rsplit_once('p')
-        && suffix.chars().all(|ch| ch.is_ascii_digit())
-    {
-        return Some(base.to_string());
-    }
-    let trimmed = source.trim_end_matches(|ch: char| ch.is_ascii_digit());
-    if trimmed.is_empty() {
-        Some(source.to_string())
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn read_disk_model(device: &str) -> Option<String> {
-    fs::read_to_string(format!("/sys/class/block/{device}/device/model"))
-        .ok()
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-}
-
-fn read_disk_firmware(device: &str) -> Option<String> {
-    fs::read_to_string(format!("/sys/class/block/{device}/device/firmware_rev"))
-        .ok()
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-}
-
-fn detect_disk_kind(device: &str) -> String {
-    if device.starts_with("nvme") {
-        return "NVMe SSD".to_string();
-    }
-    let rotational = fs::read_to_string(format!("/sys/class/block/{device}/queue/rotational"))
-        .ok()
-        .map(|text| text.trim() == "1");
-    match rotational {
-        Some(false) => "SSD".to_string(),
-        Some(true) => "HDD".to_string(),
-        None => "тип диска не определён".to_string(),
-    }
-}
-
-fn read_disk_temperature(device: &str) -> Option<f64> {
-    let device_model = read_disk_model(device);
-    let device_serial = fs::read_to_string(format!("/sys/class/block/{device}/device/serial"))
-        .ok()
-        .map(|text| text.trim().to_string());
-    for entry in fs::read_dir("/sys/class/hwmon").ok()?.flatten() {
-        let path = entry.path();
-        let name = fs::read_to_string(path.join("name")).ok()?;
-        if name.trim() != "nvme" {
-            continue;
-        }
-        let model_matches = device_model.as_deref().is_some_and(|expected| {
-            fs::read_to_string(path.join("device/model"))
-                .ok()
-                .map(|actual| actual.trim() == expected)
-                .unwrap_or(false)
-        });
-        let serial_matches = device_serial.as_deref().is_some_and(|expected| {
-            fs::read_to_string(path.join("device/serial"))
-                .ok()
-                .map(|actual| actual.trim() == expected)
-                .unwrap_or(false)
-        });
-        if !model_matches && !serial_matches {
-            continue;
-        }
-        let raw = fs::read_to_string(path.join("temp1_input")).ok()?;
-        let milli_celsius = raw.trim().parse::<f64>().ok()?;
-        return Some(milli_celsius / 1000.0);
-    }
-    None
-}
-
-fn read_disk_live_stats(device: &str) -> Option<DiskLiveStats> {
-    let (read_sectors, write_sectors, io_millis) = read_disk_counters(device)?;
-    let captured_at_ms = now_epoch_ms();
-    let cache = DISK_IO_CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().ok()?;
-    let previous = guard.replace(DiskIoSample {
-        device: device.to_string(),
-        read_sectors,
-        write_sectors,
-        io_millis,
-        captured_at_ms,
-    });
-    let previous = previous?;
-    if previous.device != device {
-        return None;
-    }
-    let delta_ms = captured_at_ms.saturating_sub(previous.captured_at_ms);
-    if delta_ms == 0 {
-        return None;
-    }
-    let delta_seconds = delta_ms as f64 / 1000.0;
-    let read_bytes = read_sectors
-        .saturating_sub(previous.read_sectors)
-        .saturating_mul(512);
-    let write_bytes = write_sectors
-        .saturating_sub(previous.write_sectors)
-        .saturating_mul(512);
-    let busy_percent =
-        ((io_millis.saturating_sub(previous.io_millis)) as f64 / delta_ms as f64) * 100.0;
-    Some(DiskLiveStats {
-        busy_percent: Some(busy_percent.min(100.0)),
-        read_mib_per_sec: Some(read_bytes as f64 / 1024.0 / 1024.0 / delta_seconds),
-        write_mib_per_sec: Some(write_bytes as f64 / 1024.0 / 1024.0 / delta_seconds),
-    })
-}
-
-fn read_disk_counters(device: &str) -> Option<(u64, u64, u64)> {
-    let line = fs::read_to_string("/proc/diskstats")
-        .ok()?
-        .lines()
-        .find(|line| line.split_whitespace().nth(2) == Some(device))?
-        .to_string();
-    let fields = line.split_whitespace().collect::<Vec<_>>();
-    if fields.len() < 14 {
-        return None;
-    }
-    let read_sectors = fields[5].parse::<u64>().ok()?;
-    let write_sectors = fields[9].parse::<u64>().ok()?;
-    let io_millis = fields[12].parse::<u64>().ok()?;
-    Some((read_sectors, write_sectors, io_millis))
-}
-
 fn card(title: &str, value: String, note: String, status: &str) -> Value {
     card_with_rows(title, value, note, status, None, None, Vec::new())
+}
+
+fn with_extra_class(mut card: Value, extra_class: &str) -> Value {
+    if let Some(object) = card.as_object_mut() {
+        object.insert("extra_class".to_string(), Value::from(extra_class));
+    }
+    card
 }
 
 fn live_latency_compare_card(snapshot: &Value) -> Value {
@@ -2633,6 +2434,14 @@ fn metric_row(label: &str, value: String, tooltip: Option<&str>) -> Value {
         "value": value,
         "tooltip": tooltip,
     })
+}
+
+fn prefixed_metric_label(prefix: &str, metric: &str) -> String {
+    if prefix.trim().is_empty() {
+        metric.to_string()
+    } else {
+        format!("{prefix} {metric}")
+    }
 }
 
 fn hot_load_benchmark_status(hot_load: &Value, thresholds: &Value) -> &'static str {
@@ -3169,10 +2978,6 @@ fn human_elapsed_ms(value_ms: u64) -> String {
     }
 }
 
-fn bytes_to_gib(bytes: u64) -> f64 {
-    bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3238,7 +3043,7 @@ mod tests {
             card["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("последние сохранённые результаты")
+                .contains("последний сохранённый срез")
         );
         let empty_rows = Vec::new();
         let labels = card["rows"]

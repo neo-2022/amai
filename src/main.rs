@@ -14,6 +14,7 @@ mod deployment;
 mod edge_cache;
 mod external_benchmark;
 mod external_benchmark_conversion;
+mod hardware_telemetry;
 mod indexer;
 mod language;
 mod mcp;
