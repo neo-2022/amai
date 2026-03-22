@@ -158,14 +158,14 @@ pub fn render_html(refresh_ms: u64) -> String {
     a { color: var(--accent); }
 
     .shell {
-      max-width: 1280px;
+      max-width: 1660px;
       margin: 0 auto;
       padding: 18px 20px 40px;
     }
 
     .hero {
       display: grid;
-      grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+      grid-template-columns: minmax(0, 1.74fr) minmax(300px, 0.46fr);
       gap: 14px;
       align-items: start;
       margin-bottom: 14px;

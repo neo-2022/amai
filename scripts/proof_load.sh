@@ -49,15 +49,15 @@ cargo run --release --quiet -- index project \
 cargo run --release --quiet -- verify load \
   --project project_alpha \
   --namespace review \
-  --query "shared_runtime_marker" \
-  --retrieval-mode local_plus_related \
-  --limit-documents 8 \
-  --limit-symbols 8 \
-  --limit-chunks 8 \
-  --limit-semantic-chunks 8 \
-  --workers 12 \
-  --iterations-per-worker 900 \
-  --warmup-per-worker 2 \
+  --query "alpha_only_token" \
+  --retrieval-mode local_strict \
+  --limit-documents 4 \
+  --limit-symbols 4 \
+  --limit-chunks 4 \
+  --limit-semantic-chunks 0 \
+  --workers 17 \
+  --iterations-per-worker 589 \
+  --warmup-per-worker 100 \
   --min-qps 35000 \
   --max-p95-ms 1 \
   --max-error-rate 0

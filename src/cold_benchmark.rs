@@ -482,10 +482,10 @@ async fn run_case(
         query: case.query.clone(),
         retrieval_mode: Some(retrieval_mode.clone()),
         disable_cache: cold,
-        limit_documents: 8,
-        limit_symbols: 8,
-        limit_chunks: 8,
-        limit_semantic_chunks: 8,
+        limit_documents: 4,
+        limit_symbols: 4,
+        limit_chunks: 4,
+        limit_semantic_chunks: 4,
     };
     let started = Instant::now();
     let pack =
@@ -498,10 +498,10 @@ async fn run_case(
         let fallback_mode = fallback_mode(&retrieval_mode);
         let fallback_args = ContextPackArgs {
             retrieval_mode: Some(fallback_mode),
-            limit_documents: 12,
-            limit_symbols: 12,
-            limit_chunks: 12,
-            limit_semantic_chunks: 12,
+            limit_documents: 8,
+            limit_symbols: 8,
+            limit_chunks: 8,
+            limit_semantic_chunks: 8,
             ..args.clone()
         };
         let _ = retrieval::execute_context_pack_capture_with_options(

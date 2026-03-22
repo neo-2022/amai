@@ -267,7 +267,11 @@ async fn prepare_context_pack(
     let resolve_scope_ms = resolve_started.elapsed().as_millis();
     let scope_signature = scope_signature(&visible_scopes);
     let cache_key = cache_key(cfg, args, &effective_mode);
-    let edge_cache_path = edge_cache::ensure(&cfg.edge_cache_path)?;
+    let edge_cache_path = if args.disable_cache {
+        None
+    } else {
+        Some(edge_cache::ensure(&cfg.edge_cache_path)?)
+    };
 
     let cache_lookup_started = Instant::now();
     if !args.disable_cache {
@@ -286,11 +290,13 @@ async fn prepare_context_pack(
                 cached,
             );
         }
-        if let Some(cached) = edge_cache::get_context_pack_cache_entry(
-            &edge_cache_path,
-            &cache_key,
-            &scope_signature,
-        )? {
+        if let Some(edge_cache_path) = edge_cache_path.as_ref()
+            && let Some(cached) = edge_cache::get_context_pack_cache_entry(
+                edge_cache_path,
+                &cache_key,
+                &scope_signature,
+            )?
+        {
             let local_cached = local_entry_from_edge(cached)?;
             local_context_pack_cache_put(&cache_key, &scope_signature, &local_cached)?;
             let cache_lookup_ms = cache_lookup_started.elapsed().as_millis();
@@ -574,6 +580,9 @@ fn cache_context_pack_entry(
     prepared: &PreparedContextPack,
     durably_persisted: bool,
 ) -> Result<()> {
+    if args.disable_cache {
+        return Ok(());
+    }
     let edge_cache_path = edge_cache::ensure(&cfg.edge_cache_path)?;
     edge_cache::cache_context_pack(
         &edge_cache_path,

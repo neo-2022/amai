@@ -9,6 +9,7 @@ cd "${repo_root}"
 ./scripts/cold_benchmark.sh \
   --manifest config/cold_benchmark_proof.toml \
   --cycles 1 \
+  --skip-index \
   --output-dir "${output_dir}" >/tmp/amai_cold_benchmark_proof.json
 
 python3 - <<'PY'

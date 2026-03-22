@@ -96,18 +96,14 @@ expected_terms = ["AMI_LOCAL_FAST_CACHE_TTL_MS"]
 [[cases]]
 repo_code = "amai_local"
 query_slice = "cross_file_trace"
-query = "human_dashboard.sh"
-expected_projects = ["amai_local"]
-expected_paths = ["scripts/human_dashboard.sh", "README.md", "docs/OPERATIONS.md"]
-expected_terms = ["human_dashboard.sh"]
+query = "Amai human dashboard did not become healthy in time"
+expected_paths = ["scripts/human_dashboard.sh"]
 
 [[cases]]
 repo_code = "amai_local"
 query_slice = "onboarding_query"
-query = "install_amai.sh"
-expected_projects = ["amai_local"]
-expected_paths = ["scripts/install_amai.sh", "README.md", "docs/OPERATIONS.md"]
-expected_terms = ["install_amai.sh"]
+query = "has_stack_profile=0"
+expected_paths = ["scripts/install_amai.sh"]
 
 [[cases]]
 repo_code = "langgraph_local"

@@ -20,6 +20,7 @@ dashboard_url="http://${browser_host}:${port}/"
 health_url="http://${browser_host}:${port}/healthz"
 pid_file="./state/human_dashboard.pid"
 log_file="./tmp/human_dashboard.log"
+binary="./target/release/amai"
 
 mkdir -p ./state ./tmp
 
@@ -32,7 +33,9 @@ if curl -fsS "$health_url" >/dev/null 2>&1; then
   exit 0
 fi
 
-nohup cargo run --release --quiet -- observe serve --bind "${bind}" >"$log_file" 2>&1 &
+cargo build --release --quiet
+
+nohup "$binary" observe serve --bind "${bind}" </dev/null >"$log_file" 2>&1 &
 dashboard_pid=$!
 echo "$dashboard_pid" >"$pid_file"
 
