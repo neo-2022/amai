@@ -72,10 +72,12 @@ pub fn render_html(refresh_ms: u64) -> String {
       --critical-soft: rgba(182, 56, 43, 0.12);
       --unknown: #61717a;
       --unknown-soft: rgba(97, 113, 122, 0.12);
-      --shadow:
-        0 0 0 1px rgba(26, 39, 45, 0.10),
-        0 14px 30px -22px rgba(17, 28, 33, 0.42),
-        0 34px 78px -42px rgba(17, 28, 33, 0.30);
+      --panel-outer-shadow:
+        0 0 1px rgba(26, 39, 45, 0.24),
+        0 0 9px rgba(26, 39, 45, 0.12),
+        0 0 22px rgba(17, 28, 33, 0.09),
+        0 18px 34px -24px rgba(17, 28, 33, 0.34),
+        0 34px 78px -42px rgba(17, 28, 33, 0.22);
       --border: rgba(30, 42, 47, 0.10);
       --surface: rgba(255, 255, 255, 0.72);
       --surface-raised: rgba(255, 255, 255, 0.78);
@@ -84,14 +86,13 @@ pub fn render_html(refresh_ms: u64) -> String {
       --hero-glow: rgba(13, 107, 111, 0.11);
       --error-border: rgba(182, 56, 43, 0.18);
       --panel-inner-contour:
-        inset 0 0 0 1px rgba(255, 255, 255, 0.16),
-        inset 0 0 18px -8px rgba(255, 255, 255, 0.08),
-        inset 0 0 34px -18px rgba(17, 28, 33, 0.22);
+        inset 0 0 1px rgba(255, 255, 255, 0.07),
+        inset 0 0 10px rgba(17, 28, 33, 0.08),
+        inset 0 0 28px rgba(17, 28, 33, 0.12);
       --card-inner-shadow:
-        inset 0 0 0 1px rgba(255, 255, 255, 0.06),
-        inset 0 0 12px -4px rgba(255, 255, 255, 0.04),
-        inset 0 0 28px -12px rgba(18, 28, 33, 0.26),
-        0 10px 22px -18px rgba(15, 25, 31, 0.18);
+        inset 0 0 1px rgba(255, 255, 255, 0.05),
+        inset 0 0 8px rgba(18, 28, 33, 0.12),
+        inset 0 0 22px rgba(18, 28, 33, 0.18);
     }
 
     * { box-sizing: border-box; }
@@ -121,9 +122,9 @@ pub fn render_html(refresh_ms: u64) -> String {
 
     .panel {
       background: var(--paper);
-      border: 1px solid var(--border);
+      border: none;
       border-radius: 24px;
-      box-shadow: var(--shadow);
+      box-shadow: var(--panel-outer-shadow);
       position: relative;
       backdrop-filter: blur(14px);
     }
@@ -257,7 +258,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       padding: 12px 14px;
       border-radius: 18px;
       background: var(--surface);
-      border: 1px solid var(--surface-border);
+      border: none;
       box-shadow: var(--card-inner-shadow);
     }
 
@@ -326,7 +327,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     .link-card {
       padding: 18px;
       border-radius: 20px;
-      border: 1px solid var(--surface-border);
+      border: none;
       background: var(--surface-raised);
       box-shadow: var(--card-inner-shadow);
     }
@@ -454,7 +455,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     .compare-card {
       padding: 20px;
       border-radius: 20px;
-      border: 1px solid var(--surface-border);
+      border: none;
       background: var(--surface-raised);
       display: grid;
       gap: 16px;
@@ -479,7 +480,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .compare-metric {
-      border: 1px solid var(--surface-border);
+      border: none;
       border-radius: 18px;
       background: var(--surface);
       padding: 16px;
@@ -605,7 +606,12 @@ pub fn render_html(refresh_ms: u64) -> String {
         --critical-soft: rgba(182, 56, 43, 0.24);
         --unknown: #b2bfca;
         --unknown-soft: rgba(97, 113, 122, 0.24);
-        --shadow: 0 22px 56px rgba(0, 0, 0, 0.34);
+        --panel-outer-shadow:
+          0 0 1px rgba(121, 210, 197, 0.18),
+          0 0 10px rgba(4, 9, 12, 0.34),
+          0 0 24px rgba(4, 9, 12, 0.28),
+          0 18px 38px -24px rgba(0, 0, 0, 0.58),
+          0 34px 86px -44px rgba(0, 0, 0, 0.42);
         --border: rgba(238, 244, 247, 0.08);
         --surface: rgba(17, 25, 30, 0.78);
         --surface-raised: rgba(17, 25, 30, 0.88);
@@ -613,6 +619,14 @@ pub fn render_html(refresh_ms: u64) -> String {
         --surface-border: rgba(238, 244, 247, 0.08);
         --hero-glow: rgba(121, 210, 197, 0.18);
         --error-border: rgba(255, 143, 130, 0.30);
+        --panel-inner-contour:
+          inset 0 0 1px rgba(255, 255, 255, 0.06),
+          inset 0 0 10px rgba(0, 0, 0, 0.20),
+          inset 0 0 26px rgba(255, 255, 255, 0.05);
+        --card-inner-shadow:
+          inset 0 0 1px rgba(255, 255, 255, 0.06),
+          inset 0 0 8px rgba(0, 0, 0, 0.24),
+          inset 0 0 22px rgba(255, 255, 255, 0.04);
       }
     }
 
