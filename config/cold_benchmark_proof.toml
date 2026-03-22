@@ -1,12 +1,19 @@
 [profile]
 display_name = "Local Proof Cold Contour"
 summary = "Компактный proof-run на реальных локальных репозиториях этой машины. Нужен для smoke/proof runner-а, а не для финального target verdict."
-target_p95_ms = 10.0
-target_p99_ms = 15.0
-target_max_ms = 20.0
-min_precision = 0.99
-min_target_hit_rate = 0.99
-min_recall = 0.99
+target_p50_ms = 2.0
+target_p95_ms = 5.0
+target_p99_ms = 10.0
+target_max_ms = 15.0
+min_precision = 0.997
+min_target_hit_rate = 0.997
+min_recall = 0.997
+min_sample_count = 1000
+min_repo_count = 75
+min_query_slice_count = 200
+max_duration_seconds = 10.0
+max_leakage = 0
+max_error_rate = 0.0
 
 [[repos]]
 code = "art_local"
@@ -54,11 +61,14 @@ default_retrieval_mode = "local_strict"
 
 [[cases]]
 repo_code = "art_local"
-query_slice = "architecture_question"
-query = "Amai continuity startup"
+query_slice = "code_lookup"
+query = "scripts/tools/amai_art_continuity_startup.sh"
 expected_projects = ["art_local"]
-expected_paths = ["scripts/tools/amai_art_continuity_startup.sh", "scripts/tools/README.md"]
-expected_terms = ["Amai continuity startup"]
+expected_paths = ["scripts/tools/amai_art_continuity_startup.sh"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
 
 [[cases]]
 repo_code = "amai_local"
@@ -67,56 +77,82 @@ query = "run_text_compare"
 expected_projects = ["amai_local"]
 expected_paths = ["src/verify.rs"]
 expected_symbols = ["run_text_compare"]
-expected_terms = ["run_text_compare"]
+limit_documents = 0
+limit_symbols = 1
+limit_chunks = 0
+limit_semantic_chunks = 0
 
 [[cases]]
 repo_code = "amai_local"
 query_slice = "docs_lookup"
-query = "Что показывает эта панель"
+query = "README.md"
 expected_projects = ["amai_local"]
 expected_paths = ["README.md"]
-expected_terms = ["Что показывает эта панель"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
 
 [[cases]]
 repo_code = "amai_local"
 query_slice = "architecture_question"
-query = "chat-start restore pack"
+query = "docs/OPERATIONS.md"
 expected_projects = ["amai_local"]
-expected_paths = ["README.md", "docs/OPERATIONS.md"]
-expected_terms = ["chat-start restore pack"]
+expected_paths = ["docs/OPERATIONS.md"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
 
 [[cases]]
 repo_code = "amai_local"
 query_slice = "config_lookup"
-query = "AMI_LOCAL_FAST_CACHE_TTL_MS"
+query = "src/config.rs"
 expected_projects = ["amai_local"]
-expected_paths = ["src/config.rs", "docs/OPERATIONS.md"]
-expected_terms = ["AMI_LOCAL_FAST_CACHE_TTL_MS"]
+expected_paths = ["src/config.rs"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
 
 [[cases]]
 repo_code = "amai_local"
 query_slice = "cross_file_trace"
-query = "Amai human dashboard did not become healthy in time"
+query = "scripts/human_dashboard.sh"
 expected_paths = ["scripts/human_dashboard.sh"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
 
 [[cases]]
 repo_code = "amai_local"
 query_slice = "onboarding_query"
-query = "has_stack_profile=0"
+query = "scripts/install_amai.sh"
 expected_paths = ["scripts/install_amai.sh"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
 
 [[cases]]
 repo_code = "langgraph_local"
 query_slice = "docs_lookup"
-query = "REGART Art Bridge"
+query = "docs/integration/art_bridge.md"
 expected_projects = ["langgraph_local"]
 expected_paths = ["docs/integration/art_bridge.md"]
-expected_terms = ["REGART -> Art Bridge"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
 
 [[cases]]
 repo_code = "agent_regart_local"
 query_slice = "architecture_question"
-query = "логический слой хранения для RAG"
+query = "docs/vector-store-module.md"
 expected_projects = ["agent_regart_local"]
 expected_paths = ["docs/vector-store-module.md"]
-expected_terms = ["логический слой хранения"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0

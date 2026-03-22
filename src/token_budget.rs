@@ -311,6 +311,19 @@ pub async fn record_live_context_pack_event(db: &Client, payload: &Value) -> Res
     Ok(())
 }
 
+pub async fn record_verify_context_pack_event(db: &Client, payload: &Value) -> Result<()> {
+    let repo_root = config::discover_repo_root(None)?;
+    let config = load_config(&repo_root)?;
+    let event = build_event_payload(
+        payload,
+        &config.measurement,
+        "verify_context_pack",
+        "verify_context_pack",
+    )?;
+    let _ = postgres::insert_observability_snapshot(db, "token_budget_event", &event).await?;
+    Ok(())
+}
+
 pub async fn record_verify_benchmark_event(db: &Client, benchmark_payload: &Value) -> Result<()> {
     let benchmark = benchmark_payload
         .get("token_benchmark")
@@ -1462,6 +1475,34 @@ fn summarize_events(
         .iter()
         .map(|event| event.naive_tokens)
         .sum::<u64>();
+    let verified_delivered_tokens = verified_events
+        .iter()
+        .map(|event| event.context_tokens)
+        .sum::<u64>();
+    let verified_recovery_tokens = verified_events
+        .iter()
+        .map(|event| event.recovery_tokens)
+        .sum::<u64>();
+    let excluded_events = events
+        .iter()
+        .filter(|event| !(event.traffic_class == "live" && event.quality_ok))
+        .collect::<Vec<_>>();
+    let excluded_effective_saved_tokens = excluded_events
+        .iter()
+        .map(|event| event.effective_saved_tokens)
+        .sum::<i64>();
+    let excluded_baseline_tokens = excluded_events
+        .iter()
+        .map(|event| event.naive_tokens)
+        .sum::<u64>();
+    let excluded_delivered_tokens = excluded_events
+        .iter()
+        .map(|event| event.context_tokens)
+        .sum::<u64>();
+    let excluded_recovery_tokens = excluded_events
+        .iter()
+        .map(|event| event.recovery_tokens)
+        .sum::<u64>();
     let task_like_events = verified_events
         .iter()
         .copied()
@@ -1600,8 +1641,16 @@ fn summarize_events(
         "total_saved_tokens": total_saved_tokens,
         "total_effective_saved_tokens": total_effective_saved_tokens,
         "verified_effective_saved_tokens": verified_effective_saved_tokens,
+        "verified_baseline_tokens": verified_baseline_tokens,
+        "verified_delivered_tokens": verified_delivered_tokens,
+        "verified_recovery_tokens": verified_recovery_tokens,
         "verified_task_like_saved_tokens": verified_task_like_saved_tokens,
         "verified_answer_like_saved_tokens": verified_answer_like_saved_tokens,
+        "excluded_events_count": excluded_events.len(),
+        "excluded_effective_saved_tokens": excluded_effective_saved_tokens,
+        "excluded_baseline_tokens": excluded_baseline_tokens,
+        "excluded_delivered_tokens": excluded_delivered_tokens,
+        "excluded_recovery_tokens": excluded_recovery_tokens,
         "total_naive_tokens": total_naive_tokens,
         "total_context_tokens": total_context_tokens,
         "total_recovery_tokens": total_recovery_tokens,
@@ -2164,16 +2213,15 @@ fn build_event_payload(
     let sources_count = count_sources(payload) as u64;
     let chunks_count = count_chunks(payload) as u64;
     let traffic_class = derive_traffic_class(source_kind);
-    let event_id = payload["context_pack_id"]
-        .as_str()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let context_pack_id = payload["context_pack_id"].as_str().map(ToOwned::to_owned);
+    let event_id = Uuid::new_v4().to_string();
     let timestamp_utc = current_epoch_ms()?;
     let latency_ms = total_latency_ms(payload);
 
     Ok(json!({
         "token_budget_event": {
             "event_id": event_id,
+            "context_pack_id": context_pack_id,
             "timestamp_utc": timestamp_utc,
             "source_kind": source_kind,
             "traffic_class": traffic_class,
@@ -3194,11 +3242,11 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
 mod tests {
     use super::{
         MeasurementConfig, NaiveScope, TokenBudgetEvent, apply_reverification_metadata,
-        build_product_headline, derive_baseline_strategy, derive_quality_verdict,
-        derive_query_type, derive_traffic_class, event_to_json, followup_queries_related,
-        include_traffic_class_in_report, latency_slice_breakdown, needs_live_reverification,
-        parse_snapshot_event, reconcile_followup_recovery, repair_legacy_token_event_payload,
-        summarize_events,
+        build_event_payload, build_product_headline, derive_baseline_strategy,
+        derive_quality_verdict, derive_query_type, derive_traffic_class, event_to_json,
+        followup_queries_related, include_traffic_class_in_report, latency_slice_breakdown,
+        needs_live_reverification, parse_snapshot_event, reconcile_followup_recovery,
+        repair_legacy_token_event_payload, summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -3207,6 +3255,7 @@ mod tests {
     #[test]
     fn traffic_class_comes_from_source_kind_prefix() {
         assert_eq!(derive_traffic_class("live_context_pack"), "live");
+        assert_eq!(derive_traffic_class("verify_context_pack"), "verify");
         assert_eq!(derive_traffic_class("verify_token_benchmark"), "verify");
         assert_eq!(derive_traffic_class("proof_hostile"), "proof");
         assert_eq!(derive_traffic_class("benchmark_hot_path"), "benchmark");
@@ -3312,6 +3361,75 @@ mod tests {
         assert_eq!(verdict.quality_method, "hybrid_answer_proxy");
         assert_eq!(verdict.quality_tier, "answer_proxy");
         assert!(verdict.head_hit_target);
+    }
+
+    #[test]
+    fn build_event_payload_uses_unique_event_id_but_keeps_context_pack_reference() {
+        let measurement = MeasurementConfig {
+            tokenizer: "o200k_base".to_string(),
+            naive_limit_files: 1,
+            naive_max_bytes_per_file: 2048,
+            include_verify_events_by_default: false,
+            preliminary_min_events: 50,
+            preliminary_min_baseline_tokens: 100_000,
+        };
+        let payload = json!({
+            "context_pack_id": "ctx-pack-1",
+            "project": { "code": "amai" },
+            "namespace": { "code": "default" },
+            "query": "src/postgres.rs observability snapshot",
+            "effective_retrieval_mode": "local_strict",
+            "visible_projects": [
+                {
+                    "project_code": "amai",
+                    "repo_root": "/home/art/agent-memory-index"
+                }
+            ],
+            "retrieval_runtime": { "cache_hit": true },
+            "quality": {
+                "semantic_guard": {
+                    "abstained": false
+                }
+            },
+            "retrieval": {
+                "exact_documents": [
+                    {
+                        "project_code": "amai",
+                        "repo_root": "/home/art/agent-memory-index",
+                        "relative_path": "src/postgres.rs",
+                        "snippet": "observability snapshot"
+                    }
+                ],
+                "symbol_hits": [],
+                "lexical_chunks": [],
+                "semantic_chunks": []
+            }
+        });
+
+        let first = build_event_payload(
+            &payload,
+            &measurement,
+            "live_context_pack",
+            "context_pack_token_budget",
+        )
+        .expect("first payload");
+        let second = build_event_payload(
+            &payload,
+            &measurement,
+            "live_context_pack",
+            "context_pack_token_budget",
+        )
+        .expect("second payload");
+
+        assert_eq!(first["token_budget_event"]["context_pack_id"], "ctx-pack-1");
+        assert_eq!(
+            second["token_budget_event"]["context_pack_id"],
+            "ctx-pack-1"
+        );
+        assert_ne!(
+            first["token_budget_event"]["event_id"],
+            second["token_budget_event"]["event_id"]
+        );
     }
 
     #[test]

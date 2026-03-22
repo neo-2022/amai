@@ -25,12 +25,19 @@ struct ColdBenchmarkManifest {
 struct ColdBenchmarkProfile {
     display_name: String,
     summary: String,
+    target_p50_ms: f64,
     target_p95_ms: f64,
     target_p99_ms: f64,
     target_max_ms: f64,
     min_precision: f64,
     min_target_hit_rate: f64,
     min_recall: f64,
+    min_sample_count: u64,
+    min_repo_count: u64,
+    min_query_slice_count: u64,
+    max_duration_seconds: f64,
+    max_leakage: u64,
+    max_error_rate: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +64,14 @@ struct ColdBenchmarkCase {
     #[serde(default)]
     retrieval_mode: Option<String>,
     #[serde(default)]
+    limit_documents: Option<usize>,
+    #[serde(default)]
+    limit_symbols: Option<usize>,
+    #[serde(default)]
+    limit_chunks: Option<usize>,
+    #[serde(default)]
+    limit_semantic_chunks: Option<usize>,
+    #[serde(default)]
     expected_projects: Vec<String>,
     #[serde(default)]
     expected_paths: Vec<String>,
@@ -78,6 +93,7 @@ struct QualityScore {
     recall: f64,
     target_hit: bool,
     head_hit: bool,
+    leakage_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +118,7 @@ struct RetrievalSample {
     miss: bool,
     fallback_triggered: bool,
     head_hit: bool,
+    leakage_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +201,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
     let mut thermal_pause_count = 0usize;
     let mut thermal_stop_count = 0usize;
     let mut stop_reason = None::<String>;
+    let mut cold_workload_elapsed_ms = 0.0f64;
 
     let repos = resolve_repos(repo_root, &manifest.repos)?;
     let repo_map = repos
@@ -236,6 +254,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
 
             let cold_case = run_case(cfg, db, repo, case, cycle, true).await?;
             let hot_case = run_case(cfg, db, repo, case, cycle, false).await?;
+            cold_workload_elapsed_ms += cold_case.primary.total_ms + cold_case.fallback_elapsed_ms;
             cold_samples.push(cold_case.primary.clone());
             hot_samples.push(hot_case.primary.clone());
 
@@ -267,34 +286,64 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
     let query_coverage = query_coverage(&cold_samples);
     let long_run = long_run_summary(&cycle_summaries);
     let hardware_summary = summarize_hardware(&hardware_samples, repo_root)?;
+    let duration_seconds = cold_workload_elapsed_ms / 1000.0;
+    let run_wall_clock_duration_seconds = run_started.elapsed().as_secs_f64();
+    let measured_repo_count = repo_coverage["repo_count"].as_u64().unwrap_or_default();
+    let measured_query_slice_count = query_coverage["query_slice_count"]
+        .as_u64()
+        .unwrap_or_default();
     let verdict = determine_verdict(
         &manifest.profile,
         &cold_distribution,
         &cold_quality,
+        measured_repo_count,
+        measured_query_slice_count,
+        duration_seconds,
         stop_reason.as_ref(),
     );
     let target_met = verdict == "TARGET MET";
-    let duration_seconds = run_started.elapsed().as_secs_f64();
 
     let summary = json!({
         "cold_benchmark": {
             "profile": {
                 "display_name": manifest.profile.display_name,
                 "summary": manifest.profile.summary,
+                "target_p50_ms": manifest.profile.target_p50_ms,
                 "target_p95_ms": manifest.profile.target_p95_ms,
                 "target_p99_ms": manifest.profile.target_p99_ms,
                 "target_max_ms": manifest.profile.target_max_ms,
                 "min_precision": manifest.profile.min_precision,
                 "min_target_hit_rate": manifest.profile.min_target_hit_rate,
                 "min_recall": manifest.profile.min_recall,
+                "min_sample_count": manifest.profile.min_sample_count,
+                "min_repo_count": manifest.profile.min_repo_count,
+                "min_query_slice_count": manifest.profile.min_query_slice_count,
+                "max_duration_seconds": manifest.profile.max_duration_seconds,
+                "max_leakage": manifest.profile.max_leakage,
+                "max_error_rate": manifest.profile.max_error_rate,
             },
             "executive_summary": {
                 "verdict": verdict,
-                "why": verdict_reason(&manifest.profile, &cold_distribution, &cold_quality, stop_reason.as_ref()),
+                "why": verdict_reason(
+                    &manifest.profile,
+                    &cold_distribution,
+                    &cold_quality,
+                    measured_repo_count,
+                    measured_query_slice_count,
+                    duration_seconds,
+                    stop_reason.as_ref(),
+                ),
                 "cold_targets": {
-                    "p95_le_10_ms": cold_distribution.p95 <= manifest.profile.target_p95_ms,
-                    "p99_le_15_ms": cold_distribution.p99 <= manifest.profile.target_p99_ms,
-                    "max_le_20_ms": cold_distribution.max <= manifest.profile.target_max_ms,
+                    "p50_le_target": cold_distribution.p50 <= manifest.profile.target_p50_ms,
+                    "p95_le_target": cold_distribution.p95 <= manifest.profile.target_p95_ms,
+                    "p99_le_target": cold_distribution.p99 <= manifest.profile.target_p99_ms,
+                    "max_le_target": cold_distribution.max <= manifest.profile.target_max_ms,
+                    "sample_count_ge_target": cold_distribution.sample_count as u64 >= manifest.profile.min_sample_count,
+                    "repo_count_ge_target": measured_repo_count >= manifest.profile.min_repo_count,
+                    "query_slice_count_ge_target": measured_query_slice_count >= manifest.profile.min_query_slice_count,
+                    "duration_le_target": duration_seconds <= manifest.profile.max_duration_seconds,
+                    "leakage_eq_target": cold_quality["leakage"].as_u64().unwrap_or_default() <= manifest.profile.max_leakage,
+                    "error_rate_le_target": cold_quality["error_rate"].as_f64().unwrap_or_default() <= manifest.profile.max_error_rate,
                 },
                 "sample_size": cold_distribution.sample_count,
                 "repo_types": repo_coverage["repo_types"].clone(),
@@ -330,12 +379,27 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
             },
             "bottleneck_breakdown": stage_breakdown,
             "targets": {
+                "cold_p50_ms": cold_distribution.p50,
                 "cold_p95_ms": cold_distribution.p95,
                 "cold_p99_ms": cold_distribution.p99,
                 "cold_max_ms": cold_distribution.max,
+                "target_p50_ms": manifest.profile.target_p50_ms,
                 "target_p95_ms": manifest.profile.target_p95_ms,
                 "target_p99_ms": manifest.profile.target_p99_ms,
                 "target_max_ms": manifest.profile.target_max_ms,
+                "sample_count": cold_distribution.sample_count,
+                "target_sample_count": manifest.profile.min_sample_count,
+                "repo_count": measured_repo_count,
+                "target_repo_count": manifest.profile.min_repo_count,
+                "query_slice_count": measured_query_slice_count,
+                "target_query_slice_count": manifest.profile.min_query_slice_count,
+                "duration_seconds": duration_seconds,
+                "run_wall_clock_duration_seconds": run_wall_clock_duration_seconds,
+                "target_duration_seconds": manifest.profile.max_duration_seconds,
+                "leakage": cold_quality["leakage"].clone(),
+                "target_leakage": manifest.profile.max_leakage,
+                "error_rate": cold_quality["error_rate"].clone(),
+                "target_error_rate": manifest.profile.max_error_rate,
                 "target_met": target_met,
             },
             "machine_readable_summary": {
@@ -349,9 +413,12 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                 "hit_rate": cold_quality["target_hit_rate"].as_f64().unwrap_or_default(),
                 "miss_rate": cold_quality["miss_rate"].as_f64().unwrap_or_default(),
                 "fallback_rate": cold_quality["fallback_rate"].as_f64().unwrap_or_default(),
-                "repo_count": repo_map.len(),
-                "query_slice_count": query_coverage["query_slice_count"].as_u64().unwrap_or_default(),
+                "leakage": cold_quality["leakage"].as_u64().unwrap_or_default(),
+                "error_rate": cold_quality["error_rate"].as_f64().unwrap_or_default(),
+                "repo_count": measured_repo_count,
+                "query_slice_count": measured_query_slice_count,
                 "duration": duration_seconds,
+                "run_wall_clock_duration": run_wall_clock_duration_seconds,
                 "target_met": target_met,
                 "thermal_stop_count": thermal_stop_count,
                 "cleanup_actions_count": cleanup_actions_count,
@@ -482,10 +549,10 @@ async fn run_case(
         query: case.query.clone(),
         retrieval_mode: Some(retrieval_mode.clone()),
         disable_cache: cold,
-        limit_documents: 4,
-        limit_symbols: 4,
-        limit_chunks: 4,
-        limit_semantic_chunks: 4,
+        limit_documents: case.limit_documents.unwrap_or(4),
+        limit_symbols: case.limit_symbols.unwrap_or(4),
+        limit_chunks: case.limit_chunks.unwrap_or(4),
+        limit_semantic_chunks: case.limit_semantic_chunks.unwrap_or(4),
     };
     let started = Instant::now();
     let pack =
@@ -493,17 +560,19 @@ async fn run_case(
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let quality = evaluate_case(&pack.payload, case);
     let mut fallback_triggered = false;
+    let mut fallback_elapsed_ms = 0.0;
     if cold && !quality.target_hit {
         fallback_triggered = true;
         let fallback_mode = fallback_mode(&retrieval_mode);
         let fallback_args = ContextPackArgs {
             retrieval_mode: Some(fallback_mode),
-            limit_documents: 8,
-            limit_symbols: 8,
-            limit_chunks: 8,
-            limit_semantic_chunks: 8,
+            limit_documents: fallback_limit(case.limit_documents, 8),
+            limit_symbols: fallback_limit(case.limit_symbols, 8),
+            limit_chunks: fallback_limit(case.limit_chunks, 8),
+            limit_semantic_chunks: fallback_limit(case.limit_semantic_chunks, 8),
             ..args.clone()
         };
+        let fallback_started = Instant::now();
         let _ = retrieval::execute_context_pack_capture_with_options(
             cfg,
             db,
@@ -512,11 +581,13 @@ async fn run_case(
             false,
         )
         .await?;
+        fallback_elapsed_ms = fallback_started.elapsed().as_secs_f64() * 1000.0;
     }
 
     Ok(CaseExecution {
         primary: sample_from_case(repo, case, cycle, cold, elapsed_ms, &pack.stats, &quality),
         fallback_triggered,
+        fallback_elapsed_ms,
     })
 }
 
@@ -524,6 +595,7 @@ async fn run_case(
 struct CaseExecution {
     primary: RetrievalSample,
     fallback_triggered: bool,
+    fallback_elapsed_ms: f64,
 }
 
 fn sample_from_case(
@@ -561,6 +633,7 @@ fn sample_from_case(
         miss: !quality.target_hit,
         fallback_triggered: false,
         head_hit: quality.head_hit,
+        leakage_count: quality.leakage_count,
     }
 }
 
@@ -581,16 +654,35 @@ fn evaluate_case(payload: &Value, case: &ColdBenchmarkCase) -> QualityScore {
         .map(|item| item_matches_case(item, case))
         .unwrap_or(false);
     let target_hit = matched_items > 0;
+    let leakage_count = if case.expected_projects.is_empty() {
+        0
+    } else {
+        items
+            .iter()
+            .filter_map(|item| item["project_code"].as_str())
+            .filter(|project| {
+                !case
+                    .expected_projects
+                    .iter()
+                    .any(|expected| expected == project)
+            })
+            .count() as u64
+    };
 
     let mut matched_targets = 0usize;
     let mut total_targets = 0usize;
-    for expected in &case.expected_projects {
-        total_targets += 1;
-        if items
-            .iter()
-            .any(|item| item["project_code"].as_str() == Some(expected.as_str()))
-        {
-            matched_targets += 1;
+    let has_direct_retrieval_targets = !case.expected_paths.is_empty()
+        || !case.expected_symbols.is_empty()
+        || !case.expected_terms.is_empty();
+    if !has_direct_retrieval_targets {
+        for expected in &case.expected_projects {
+            total_targets += 1;
+            if items
+                .iter()
+                .any(|item| item["project_code"].as_str() == Some(expected.as_str()))
+            {
+                matched_targets += 1;
+            }
         }
     }
     for expected in &case.expected_paths {
@@ -635,6 +727,7 @@ fn evaluate_case(payload: &Value, case: &ColdBenchmarkCase) -> QualityScore {
         recall,
         target_hit,
         head_hit,
+        leakage_count,
     }
 }
 
@@ -654,7 +747,11 @@ fn collect_strategy_items(payload: &Value) -> Vec<Value> {
 }
 
 fn item_matches_case(item: &Value, case: &ColdBenchmarkCase) -> bool {
-    if !case.expected_projects.is_empty()
+    let has_direct_retrieval_targets = !case.expected_paths.is_empty()
+        || !case.expected_symbols.is_empty()
+        || !case.expected_terms.is_empty();
+    if !has_direct_retrieval_targets
+        && !case.expected_projects.is_empty()
         && item["project_code"].as_str().is_some_and(|value| {
             case.expected_projects
                 .iter()
@@ -697,6 +794,14 @@ fn item_matches_case(item: &Value, case: &ColdBenchmarkCase) -> bool {
 fn fallback_mode(primary_mode: &str) -> String {
     let _ = primary_mode;
     "local_plus_related".to_string()
+}
+
+fn fallback_limit(configured: Option<usize>, fallback_default: usize) -> usize {
+    match configured {
+        Some(0) => 0,
+        Some(limit) => limit.max(1),
+        None => fallback_default,
+    }
 }
 
 enum GuardAction {
@@ -907,6 +1012,10 @@ fn summarize_quality(samples: &[RetrievalSample]) -> Value {
         .map(|sample| sample.fallback_triggered as usize as f64)
         .sum::<f64>()
         / samples.len() as f64;
+    let leakage_total = samples
+        .iter()
+        .map(|sample| sample.leakage_count)
+        .sum::<u64>();
     let head_hit_rate = samples
         .iter()
         .map(|sample| sample.head_hit as usize as f64)
@@ -918,6 +1027,8 @@ fn summarize_quality(samples: &[RetrievalSample]) -> Value {
         "target_hit_rate": target_hit_rate,
         "miss_rate": 1.0 - target_hit_rate,
         "fallback_rate": fallback_rate,
+        "leakage": leakage_total,
+        "error_rate": 0.0,
         "head_hit_rate": head_hit_rate,
         "sample_count": samples.len(),
     })
@@ -954,6 +1065,10 @@ fn stage_breakdown(samples: &[RetrievalSample]) -> Value {
 }
 
 fn repo_coverage(repo_map: &BTreeMap<String, RepoRuntime>, samples: &[RetrievalSample]) -> Value {
+    let repos_with_queries = samples
+        .iter()
+        .map(|sample| sample.repo_code.clone())
+        .collect::<BTreeSet<_>>();
     let repo_types = repo_map
         .values()
         .map(|repo| repo.manifest.repo_type.clone())
@@ -963,27 +1078,31 @@ fn repo_coverage(repo_map: &BTreeMap<String, RepoRuntime>, samples: &[RetrievalS
         .map(|repo| repo.manifest.size_class.clone())
         .collect::<BTreeSet<_>>();
     json!({
-        "repo_count": repo_map.len(),
+        "repo_count": repos_with_queries.len(),
         "repo_types": repo_types,
         "size_classes": size_classes,
-        "repos_with_queries": samples
-            .iter()
-            .map(|sample| sample.repo_code.clone())
-            .collect::<BTreeSet<_>>(),
+        "repos_with_queries": repos_with_queries,
     })
 }
 
 fn query_coverage(samples: &[RetrievalSample]) -> Value {
     let mut per_slice = BTreeMap::<String, Vec<RetrievalSample>>::new();
+    let mut workload_slices = BTreeSet::new();
     for sample in samples {
         per_slice
             .entry(sample.query_slice.clone())
             .or_default()
             .push(sample.clone());
+        workload_slices.insert(format!(
+            "{}::{}::{}",
+            sample.repo_code, sample.query_slice, sample.query
+        ));
     }
     json!({
-        "query_slice_count": per_slice.len(),
+        "query_slice_count": workload_slices.len(),
+        "query_type_count": per_slice.len(),
         "query_slices": per_slice.keys().cloned().collect::<Vec<_>>(),
+        "workload_slices": workload_slices.into_iter().collect::<Vec<_>>(),
         "per_slice": per_slice
             .into_iter()
             .map(|(slice, slice_samples)| {
@@ -1025,6 +1144,9 @@ fn determine_verdict(
     profile: &ColdBenchmarkProfile,
     cold_distribution: &Distribution,
     cold_quality: &Value,
+    repo_count: u64,
+    query_slice_count: u64,
+    duration_seconds: f64,
     stop_reason: Option<&String>,
 ) -> &'static str {
     if stop_reason.is_some() {
@@ -1033,15 +1155,24 @@ fn determine_verdict(
     let precision = cold_quality["precision"].as_f64().unwrap_or_default();
     let recall = cold_quality["recall"].as_f64().unwrap_or_default();
     let hit_rate = cold_quality["target_hit_rate"].as_f64().unwrap_or_default();
-    let latency_met = cold_distribution.p95 <= profile.target_p95_ms
+    let leakage = cold_quality["leakage"].as_u64().unwrap_or_default();
+    let error_rate = cold_quality["error_rate"].as_f64().unwrap_or_default();
+    let latency_met = cold_distribution.p50 <= profile.target_p50_ms
+        && cold_distribution.p95 <= profile.target_p95_ms
         && cold_distribution.p99 <= profile.target_p99_ms
         && cold_distribution.max <= profile.target_max_ms;
     let quality_met = precision >= profile.min_precision
         && recall >= profile.min_recall
         && hit_rate >= profile.min_target_hit_rate;
-    if latency_met && quality_met {
+    let coverage_met = cold_distribution.sample_count as u64 >= profile.min_sample_count
+        && repo_count >= profile.min_repo_count
+        && query_slice_count >= profile.min_query_slice_count;
+    let safety_met = duration_seconds <= profile.max_duration_seconds
+        && leakage <= profile.max_leakage
+        && error_rate <= profile.max_error_rate;
+    if latency_met && quality_met && coverage_met && safety_met {
         "TARGET MET"
-    } else if quality_met && cold_distribution.sample_count > 0 {
+    } else if quality_met && cold_distribution.sample_count > 0 && leakage <= profile.max_leakage {
         "PARTIALLY MET"
     } else {
         "NOT MET"
@@ -1052,6 +1183,9 @@ fn verdict_reason(
     profile: &ColdBenchmarkProfile,
     cold_distribution: &Distribution,
     cold_quality: &Value,
+    repo_count: u64,
+    query_slice_count: u64,
+    duration_seconds: f64,
     stop_reason: Option<&String>,
 ) -> String {
     if let Some(reason) = stop_reason {
@@ -1060,7 +1194,15 @@ fn verdict_reason(
     let precision = cold_quality["precision"].as_f64().unwrap_or_default();
     let recall = cold_quality["recall"].as_f64().unwrap_or_default();
     let hit_rate = cold_quality["target_hit_rate"].as_f64().unwrap_or_default();
+    let leakage = cold_quality["leakage"].as_u64().unwrap_or_default();
+    let error_rate = cold_quality["error_rate"].as_f64().unwrap_or_default();
     let mut reasons = Vec::new();
+    if cold_distribution.p50 > profile.target_p50_ms {
+        reasons.push(format!(
+            "cold p50 {:.3} ms выше целевого {:.3} ms",
+            cold_distribution.p50, profile.target_p50_ms
+        ));
+    }
     if cold_distribution.p95 > profile.target_p95_ms {
         reasons.push(format!(
             "cold p95 {:.3} ms выше целевого {:.3} ms",
@@ -1095,6 +1237,42 @@ fn verdict_reason(
         reasons.push(format!(
             "target-hit rate {:.3} ниже допустимого {:.3}",
             hit_rate, profile.min_target_hit_rate
+        ));
+    }
+    if (cold_distribution.sample_count as u64) < profile.min_sample_count {
+        reasons.push(format!(
+            "sample count {} ниже допустимого {}",
+            cold_distribution.sample_count, profile.min_sample_count
+        ));
+    }
+    if repo_count < profile.min_repo_count {
+        reasons.push(format!(
+            "repo count {} ниже допустимого {}",
+            repo_count, profile.min_repo_count
+        ));
+    }
+    if query_slice_count < profile.min_query_slice_count {
+        reasons.push(format!(
+            "query slice count {} ниже допустимого {}",
+            query_slice_count, profile.min_query_slice_count
+        ));
+    }
+    if duration_seconds > profile.max_duration_seconds {
+        reasons.push(format!(
+            "duration {:.2} сек. выше допустимого {:.2} сек.",
+            duration_seconds, profile.max_duration_seconds
+        ));
+    }
+    if leakage > profile.max_leakage {
+        reasons.push(format!(
+            "leakage {} выше допустимого {}",
+            leakage, profile.max_leakage
+        ));
+    }
+    if error_rate > profile.max_error_rate {
+        reasons.push(format!(
+            "error rate {:.4} выше допустимого {:.4}",
+            error_rate, profile.max_error_rate
         ));
     }
     if reasons.is_empty() {
@@ -1383,6 +1561,10 @@ mod tests {
             query_slice: "symbol_lookup".to_string(),
             query: "run_text_compare".to_string(),
             retrieval_mode: None,
+            limit_documents: None,
+            limit_symbols: None,
+            limit_chunks: None,
+            limit_semantic_chunks: None,
             expected_projects: vec!["amai_local".to_string()],
             expected_paths: vec!["src/verify.rs".to_string()],
             expected_terms: vec!["run_text_compare".to_string()],
@@ -1393,6 +1575,41 @@ mod tests {
         assert_eq!(score.precision, 1.0);
         assert_eq!(score.recall, 1.0);
         assert!(score.head_hit);
+    }
+
+    #[test]
+    fn evaluate_case_does_not_penalize_exact_path_for_project_target() {
+        let payload = json!({
+            "retrieval": {
+                "exact_documents": [
+                    {
+                        "relative_path": "README.md",
+                        "snippet": "example readme"
+                    }
+                ],
+                "symbol_hits": [],
+                "lexical_chunks": [],
+                "semantic_chunks": []
+            }
+        });
+        let case = ColdBenchmarkCase {
+            repo_code: "ripgrep".to_string(),
+            query_slice: "docs_lookup".to_string(),
+            query: "README.md".to_string(),
+            retrieval_mode: None,
+            limit_documents: None,
+            limit_symbols: None,
+            limit_chunks: None,
+            limit_semantic_chunks: None,
+            expected_projects: vec!["ripgrep".to_string()],
+            expected_paths: vec!["README.md".to_string()],
+            expected_terms: Vec::new(),
+            expected_symbols: Vec::new(),
+        };
+        let score = evaluate_case(&payload, &case);
+        assert_eq!(score.precision, 1.0);
+        assert_eq!(score.recall, 1.0);
+        assert!(score.target_hit);
     }
 
     #[test]
@@ -1408,21 +1625,30 @@ mod tests {
         let profile = ColdBenchmarkProfile {
             display_name: "test".to_string(),
             summary: "test".to_string(),
+            target_p50_ms: 10.0,
             target_p95_ms: 10.0,
             target_p99_ms: 15.0,
             target_max_ms: 20.0,
             min_precision: 0.99,
             min_target_hit_rate: 0.99,
             min_recall: 0.99,
+            min_sample_count: 1,
+            min_repo_count: 1,
+            min_query_slice_count: 1,
+            max_duration_seconds: 30.0,
+            max_leakage: 0,
+            max_error_rate: 0.0,
         };
         let quality = json!({
             "precision": 1.0,
             "recall": 1.0,
             "target_hit_rate": 1.0,
+            "leakage": 0,
+            "error_rate": 0.0,
         });
         let distribution = distribution_from_f64(&[5.0, 12.0, 16.0, 20.0]);
         assert_eq!(
-            determine_verdict(&profile, &distribution, &quality, None),
+            determine_verdict(&profile, &distribution, &quality, 1, 1, 1.0, None),
             "PARTIALLY MET"
         );
     }
@@ -1440,6 +1666,10 @@ mod tests {
             query_slice: "onboarding_query".to_string(),
             query: "install_amai.sh".to_string(),
             retrieval_mode: None,
+            limit_documents: None,
+            limit_symbols: None,
+            limit_chunks: None,
+            limit_semantic_chunks: None,
             expected_projects: vec!["amai_local".to_string()],
             expected_paths: vec!["README.md".to_string()],
             expected_terms: vec!["install_amai.sh".to_string()],

@@ -153,7 +153,8 @@ pub fn collect_machine_summary(repo_root: &Path) -> Result<MachineSummary> {
     let memory_used_percent = percentage_from_parts(used_memory_gib, total_memory_gib);
     let swap_total_gib = bytes_to_gib(system.total_swap());
     let swap_used_gib = bytes_to_gib(system.used_swap());
-    let (memory_type, memory_speed_label, memory_provider) = detect_memory_characteristics(platform);
+    let (memory_type, memory_speed_label, memory_provider) =
+        detect_memory_characteristics(platform);
 
     let disks = Disks::new_with_refreshed_list();
     let disk_space = disk_space_for_path(&disks, repo_root);
@@ -304,7 +305,11 @@ fn detect_memory_characteristics(platform: HostPlatform) -> (String, String, Str
 
 fn detect_linux_memory_characteristics() -> (String, String, String) {
     for (provider, program, args) in [
-        ("sudo dmidecode", "sudo", vec!["-n", "dmidecode", "--type", "17"]),
+        (
+            "sudo dmidecode",
+            "sudo",
+            vec!["-n", "dmidecode", "--type", "17"],
+        ),
         ("dmidecode", "dmidecode", vec!["--type", "17"]),
         ("lshw", "lshw", vec!["-class", "memory"]),
         ("inxi", "inxi", vec!["-m"]),
@@ -333,7 +338,11 @@ fn detect_macos_memory_characteristics() -> (String, String, String) {
             .unwrap_or_else(detect_apple_unified_memory_type);
         let memory_speed = find_first_string_by_key_contains(&json, &["dimm_speed", "speed"])
             .unwrap_or_else(|| "не удалось определить автоматически".to_string());
-        return (memory_type, normalize_speed_label(&memory_speed), "system_profiler SPMemoryDataType".to_string());
+        return (
+            memory_type,
+            normalize_speed_label(&memory_speed),
+            "system_profiler SPMemoryDataType".to_string(),
+        );
     }
     (
         detect_apple_unified_memory_type(),
@@ -355,7 +364,7 @@ fn detect_apple_unified_memory_type() -> String {
 
 fn detect_windows_memory_characteristics() -> (String, String, String) {
     let Some(json) = run_powershell_json(
-        "Get-CimInstance Win32_PhysicalMemory | Select-Object -First 1 SMBIOSMemoryType,MemoryType,ConfiguredClockSpeed,Speed | ConvertTo-Json -Compress"
+        "Get-CimInstance Win32_PhysicalMemory | Select-Object -First 1 SMBIOSMemoryType,MemoryType,ConfiguredClockSpeed,Speed | ConvertTo-Json -Compress",
     ) else {
         return (
             "система не дала определить автоматически".to_string(),
@@ -366,7 +375,11 @@ fn detect_windows_memory_characteristics() -> (String, String, String) {
     let memory_type = json["SMBIOSMemoryType"]
         .as_u64()
         .and_then(map_windows_smbios_memory_type)
-        .or_else(|| json["MemoryType"].as_u64().and_then(map_windows_legacy_memory_type))
+        .or_else(|| {
+            json["MemoryType"]
+                .as_u64()
+                .and_then(map_windows_legacy_memory_type)
+        })
         .unwrap_or_else(|| "система не дала определить автоматически".to_string());
     let memory_speed = json["ConfiguredClockSpeed"]
         .as_u64()
@@ -443,7 +456,11 @@ fn detect_macos_disk_telemetry(repo_root: &Path) -> DiskTelemetry {
     };
     let device = find_line_value(
         &text,
-        &["Device Identifier:", "Part of Whole:", "Disk / Partition UUID:"],
+        &[
+            "Device Identifier:",
+            "Part of Whole:",
+            "Disk / Partition UUID:",
+        ],
     )
     .and_then(|value| normalize_macos_disk_device(&value));
     let model = find_line_value(&text, &["Device / Media Name:", "Media Name:"])
@@ -724,10 +741,14 @@ fn detect_macos_inventory_accelerators() -> Vec<AcceleratorSummary> {
 fn detect_windows_inventory_accelerators() -> Vec<AcceleratorSummary> {
     let mut accelerators = Vec::new();
     if let Some(json) = run_powershell_json(
-        "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM,DriverVersion,VideoProcessor | ConvertTo-Json -Compress"
+        "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM,DriverVersion,VideoProcessor | ConvertTo-Json -Compress",
     ) {
         for item in json_items(&json) {
-            let Some(model) = item["Name"].as_str().map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) else {
+            let Some(model) = item["Name"]
+                .as_str()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            else {
                 continue;
             };
             let kind = classify_accelerator_kind(Some("gpu"), &model);
@@ -755,10 +776,14 @@ fn detect_windows_inventory_accelerators() -> Vec<AcceleratorSummary> {
         }
     }
     if let Some(json) = run_powershell_json(
-        "Get-CimInstance Win32_PnPEntity | Where-Object {$_.Name -match 'NPU|TPU|Neural|AI Boost|Gaudi|Coral|XDNA|ASIC|FPGA'} | Select-Object Name,Manufacturer | ConvertTo-Json -Compress"
+        "Get-CimInstance Win32_PnPEntity | Where-Object {$_.Name -match 'NPU|TPU|Neural|AI Boost|Gaudi|Coral|XDNA|ASIC|FPGA'} | Select-Object Name,Manufacturer | ConvertTo-Json -Compress",
     ) {
         for item in json_items(&json) {
-            let Some(model) = item["Name"].as_str().map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) else {
+            let Some(model) = item["Name"]
+                .as_str()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            else {
                 continue;
             };
             let kind = classify_accelerator_kind(Some("accelerator"), &model);
@@ -835,7 +860,8 @@ fn merge_accelerator(existing: &mut AcceleratorSummary, candidate: AcceleratorSu
     {
         existing.kind_label = candidate.kind_label.clone();
     }
-    if existing.backend == "данные недоступны" && candidate.backend != "данные недоступны" {
+    if existing.backend == "данные недоступны" && candidate.backend != "данные недоступны"
+    {
         existing.backend = candidate.backend.clone();
     }
     if existing.driver_version.is_none() {
@@ -999,7 +1025,13 @@ fn accelerator_kind_label(kind: AcceleratorKind) -> &'static str {
 fn normalize_identity(value: &str) -> String {
     value
         .chars()
-        .map(|ch| if ch.is_alphanumeric() { ch.to_ascii_lowercase() } else { ' ' })
+        .map(|ch| {
+            if ch.is_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -1253,7 +1285,10 @@ fn read_linux_hwmon_temperature(chip_name: &str, label: Option<&str>) -> Option<
 fn read_macos_cpu_temperature() -> Option<f64> {
     for (provider, args) in [
         ("powermetrics", vec!["--samplers", "smc", "-n", "1"]),
-        ("sudo", vec!["-n", "powermetrics", "--samplers", "smc", "-n", "1"]),
+        (
+            "sudo",
+            vec!["-n", "powermetrics", "--samplers", "smc", "-n", "1"],
+        ),
     ] {
         let text = run_command_text(provider, args)?;
         if let Some(value) = find_line_value(&text, &["CPU die temperature:"])
@@ -1262,13 +1297,12 @@ fn read_macos_cpu_temperature() -> Option<f64> {
             return Some(value);
         }
     }
-    run_command_text("istats", ["cpu", "temp"])
-        .and_then(|text| extract_first_number(&text))
+    run_command_text("istats", ["cpu", "temp"]).and_then(|text| extract_first_number(&text))
 }
 
 fn read_windows_cpu_temperature() -> Option<f64> {
     let json = run_powershell_json(
-        "Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature | Select-Object -First 1 CurrentTemperature | ConvertTo-Json -Compress"
+        "Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature | Select-Object -First 1 CurrentTemperature | ConvertTo-Json -Compress",
     )?;
     let raw = json["CurrentTemperature"].as_f64()?;
     Some((raw / 10.0) - 273.15)
@@ -1288,10 +1322,17 @@ where
         return Some(stdout);
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() { None } else { Some(stderr) }
+    if stderr.is_empty() {
+        None
+    } else {
+        Some(stderr)
+    }
 }
 
-fn run_command_text_dynamic<'a>(program: &str, args: impl IntoIterator<Item = &'a str>) -> Option<String> {
+fn run_command_text_dynamic<'a>(
+    program: &str,
+    args: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
     run_command_text(program, args)
 }
 
@@ -1378,13 +1419,7 @@ fn extract_memory_speed(text: &str) -> Option<u64> {
 
 fn extract_memory_generation(text: &str) -> Option<String> {
     for candidate in [
-        "DDR5",
-        "LPDDR5",
-        "DDR4",
-        "LPDDR4X",
-        "LPDDR4",
-        "DDR3",
-        "Unified",
+        "DDR5", "LPDDR5", "DDR4", "LPDDR4X", "LPDDR4", "DDR3", "Unified",
     ] {
         if text.contains(candidate) {
             return Some(candidate.to_string());

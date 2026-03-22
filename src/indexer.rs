@@ -21,8 +21,10 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct IndexingStats {
     pub files_indexed: usize,
+    pub ast_eligible_files: usize,
     pub files_with_ast: usize,
     pub files_with_lexical_fallback: usize,
+    pub files_without_ast_support: usize,
     pub symbols_written: usize,
     pub chunks_written: usize,
     pub vector_points_written: usize,
@@ -39,6 +41,7 @@ struct AnalyzedFile {
     relative_path: String,
     language: Option<String>,
     source_kind: String,
+    ast_eligible: bool,
     file_sha256: String,
     line_count: i32,
     byte_count: i64,
@@ -92,6 +95,7 @@ pub async fn index_project(
         &cfg.default_retrieval_mode,
     )
     .await?;
+    postgres::delete_namespace_documents(db, namespace.namespace_id).await?;
 
     let git_commit_sha = resolve_git_commit(&project.repo_root).await.ok();
     let files = collect_files(&args.path, args.limit_files)?;
@@ -107,8 +111,11 @@ pub async fn index_project(
     };
 
     let edge_cache_path = edge_cache::ensure(&cfg.edge_cache_path)?;
+    let mut files_indexed = 0usize;
+    let mut ast_eligible_files = 0usize;
     let mut files_with_ast = 0usize;
     let mut files_with_lexical_fallback = 0usize;
+    let mut files_without_ast_support = 0usize;
     let mut symbols_written = 0usize;
     let mut chunks_written = 0usize;
     let mut vector_points_written = 0usize;
@@ -118,6 +125,7 @@ pub async fn index_project(
     for file in files {
         let analyzed = analyze_file(cfg, &project, &file, git_commit_sha.as_deref())?;
         let document_id = Uuid::new_v4();
+        files_indexed += 1;
         total_bytes += analyzed.byte_count;
         *language_breakdown
             .entry(
@@ -127,10 +135,15 @@ pub async fn index_project(
                     .unwrap_or_else(|| "unknown".to_string()),
             )
             .or_default() += 1;
-        if analyzed.analysis_mode == "ast" {
-            files_with_ast += 1;
+        if analyzed.ast_eligible {
+            ast_eligible_files += 1;
+            if analyzed.analysis_mode == "ast" {
+                files_with_ast += 1;
+            } else {
+                files_with_lexical_fallback += 1;
+            }
         } else {
-            files_with_lexical_fallback += 1;
+            files_without_ast_support += 1;
         }
 
         let chunk_records = if let (Some(qdrant_client), Some(embedder)) =
@@ -193,22 +206,20 @@ pub async fn index_project(
     postgres::touch_project_updated_at(db, project.project_id).await?;
 
     let elapsed_ms = started.elapsed().as_millis();
-    let files_indexed = files_with_ast + files_with_lexical_fallback;
     let files_per_min = if elapsed_ms == 0 {
         files_indexed as f64 * 60_000.0
     } else {
         files_indexed as f64 * 60_000.0 / elapsed_ms as f64
     };
-    let parser_coverage_ratio = if files_indexed == 0 {
-        0.0
-    } else {
-        files_with_ast as f64 / files_indexed as f64
-    };
+    let parser_coverage_ratio =
+        compute_parser_coverage_ratio(files_with_ast, files_with_lexical_fallback);
 
     Ok(IndexingStats {
         files_indexed,
+        ast_eligible_files,
         files_with_ast,
         files_with_lexical_fallback,
+        files_without_ast_support,
         symbols_written,
         chunks_written,
         vector_points_written,
@@ -248,10 +259,43 @@ fn collect_files(root: &Path, limit: Option<usize>) -> Result<Vec<PathBuf>> {
                 .unwrap_or(false)
         })
         .map(|entry| entry.into_path())
+        .filter(|path| should_index_path(root, path))
         .filter(|path| detect(path).is_some())
         .take(limit.unwrap_or(usize::MAX))
         .collect::<Vec<_>>();
     Ok(files)
+}
+
+fn should_index_path(root: &Path, path: &Path) -> bool {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    !relative.components().any(|component| {
+        let segment = component.as_os_str().to_string_lossy();
+        matches!(
+            segment.as_ref(),
+            ".git"
+                | "target"
+                | "state"
+                | "tmp"
+                | ".fastembed_cache"
+                | ".venv"
+                | "node_modules"
+                | ".next"
+                | "dist"
+                | "build"
+                | "coverage"
+                | "venv"
+                | "site-packages"
+                | "__pycache__"
+        )
+    })
+}
+
+fn compute_parser_coverage_ratio(files_with_ast: usize, files_with_lexical_fallback: usize) -> f64 {
+    let ast_eligible_files = files_with_ast + files_with_lexical_fallback;
+    if ast_eligible_files == 0 {
+        return 1.0;
+    }
+    files_with_ast as f64 / ast_eligible_files as f64
 }
 
 fn analyze_file(
@@ -273,6 +317,10 @@ fn analyze_file(
     let line_count = content.lines().count() as i32;
     let byte_count = bytes.len() as i64;
 
+    let ast_eligible = descriptor
+        .parser_language
+        .map(syntax::supports)
+        .unwrap_or(false);
     let (
         structure,
         imports,
@@ -283,7 +331,7 @@ fn analyze_file(
         metrics,
         analysis_mode,
     ) = if let Some(language) = descriptor.parser_language {
-        if syntax::supports(language) {
+        if ast_eligible {
             match parse_with_tree_sitter(cfg, language, &content) {
                 Ok(parsed) => parsed,
                 Err(error) => {
@@ -308,6 +356,7 @@ fn analyze_file(
         relative_path,
         language: descriptor.parser_language.map(ToOwned::to_owned),
         source_kind: descriptor.source_kind.to_string(),
+        ast_eligible,
         file_sha256,
         line_count,
         byte_count,
@@ -322,6 +371,7 @@ fn analyze_file(
             "git_commit_sha": git_commit_sha,
             "source_kind": descriptor.source_kind,
             "parser_language": descriptor.parser_language,
+            "ast_eligible": ast_eligible,
             "analysis_mode": analysis_mode
         }),
         symbols,
@@ -571,4 +621,57 @@ fn hex_sha256(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_parser_coverage_ratio, should_index_path};
+    use std::path::Path;
+
+    #[test]
+    fn skips_runtime_and_generated_directories() {
+        let root = Path::new("/repo");
+        assert!(!should_index_path(
+            root,
+            Path::new("/repo/state/external-benchmarks/upstream/file.py")
+        ));
+        assert!(!should_index_path(
+            root,
+            Path::new("/repo/target/debug/app")
+        ));
+        assert!(!should_index_path(root, Path::new("/repo/tmp/cache.txt")));
+        assert!(!should_index_path(
+            root,
+            Path::new("/repo/.venv/lib/python3.12/site-packages/pydantic/__init__.py")
+        ));
+        assert!(!should_index_path(
+            root,
+            Path::new("/repo/venv/lib/python3.12/site-packages/pydantic/__init__.py")
+        ));
+        assert!(!should_index_path(
+            root,
+            Path::new("/repo/src/__pycache__/module.cpython-312.pyc")
+        ));
+    }
+
+    #[test]
+    fn keeps_canonical_repo_sources() {
+        let root = Path::new("/repo");
+        assert!(should_index_path(root, Path::new("/repo/src/postgres.rs")));
+        assert!(should_index_path(root, Path::new("/repo/README.md")));
+        assert!(should_index_path(
+            root,
+            Path::new("/repo/fixtures/project_alpha/src/lib.rs")
+        ));
+    }
+
+    #[test]
+    fn parser_coverage_ignores_non_ast_capable_files() {
+        assert_eq!(compute_parser_coverage_ratio(55, 0), 1.0);
+    }
+
+    #[test]
+    fn parser_coverage_penalizes_real_ast_fallbacks() {
+        assert!((compute_parser_coverage_ratio(3, 2) - 0.6).abs() < f64::EPSILON);
+    }
 }

@@ -219,6 +219,249 @@ CREATE TABLE IF NOT EXISTS ami.observability_snapshots (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE ami.observability_snapshots
+    ADD COLUMN IF NOT EXISTS event_key TEXT,
+    ADD COLUMN IF NOT EXISTS source_event_id TEXT,
+    ADD COLUMN IF NOT EXISTS source_kind TEXT,
+    ADD COLUMN IF NOT EXISTS source_class TEXT,
+    ADD COLUMN IF NOT EXISTS scope_project_code TEXT,
+    ADD COLUMN IF NOT EXISTS scope_namespace_code TEXT,
+    ADD COLUMN IF NOT EXISTS captured_at_epoch_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS payload_sha256 TEXT,
+    ADD COLUMN IF NOT EXISTS replay_count BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+UPDATE ami.observability_snapshots
+SET event_key = CONCAT('legacy:', snapshot_id::text)
+WHERE event_key IS NULL;
+
+UPDATE ami.observability_snapshots
+SET payload_sha256 = encode(digest(payload::text, 'sha256'), 'hex')
+WHERE payload_sha256 IS NULL OR payload_sha256 = '';
+
+UPDATE ami.observability_snapshots
+SET source_kind = snapshot_kind
+WHERE source_kind IS NULL;
+
+UPDATE ami.observability_snapshots
+SET source_class = CASE
+    WHEN payload->'load_verification'->>'record_live_context' = 'true'
+        OR payload->'load_verification'->>'publish_benchmark_snapshot' = 'false'
+    THEN 'live_context'
+    WHEN snapshot_kind IN (
+        'retrieval_benchmark_hot',
+        'retrieval_benchmark_cold',
+        'retrieval_load_hot',
+        'retrieval_load_cold',
+        'retrieval_accuracy',
+        'cold_path_benchmark',
+        'token_benchmark',
+        'token_benchmark_suite',
+        'text_compare',
+        'mcp_task_matrix',
+        'memory_task_matrix'
+    ) THEN 'benchmark'
+    WHEN snapshot_kind = 'system_snapshot' THEN 'live_system'
+    ELSE 'operational'
+END
+WHERE source_class IS NULL;
+
+UPDATE ami.observability_snapshots
+SET last_seen_at = created_at
+WHERE last_seen_at IS NULL;
+
+ALTER TABLE ami.observability_snapshots
+    ALTER COLUMN event_key SET NOT NULL,
+    ALTER COLUMN payload_sha256 SET NOT NULL;
+
+CREATE OR REPLACE FUNCTION ami.observability_snapshot_source_class(
+    in_snapshot_kind TEXT,
+    in_payload JSONB
+) RETURNS TEXT
+LANGUAGE SQL
+IMMUTABLE
+AS $$
+    SELECT CASE
+        WHEN in_payload->'load_verification'->>'record_live_context' = 'true'
+            OR in_payload->'load_verification'->>'publish_benchmark_snapshot' = 'false'
+        THEN 'live_context'
+        WHEN in_snapshot_kind IN (
+            'retrieval_benchmark_hot',
+            'retrieval_benchmark_cold',
+            'retrieval_load_hot',
+            'retrieval_load_cold',
+            'retrieval_accuracy',
+            'cold_path_benchmark',
+            'token_benchmark',
+            'token_benchmark_suite',
+            'text_compare',
+            'mcp_task_matrix',
+            'memory_task_matrix'
+        ) THEN 'benchmark'
+        WHEN in_snapshot_kind = 'system_snapshot' THEN 'live_system'
+        ELSE 'operational'
+    END;
+$$;
+
+CREATE OR REPLACE FUNCTION ami.fill_observability_snapshot_defaults()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    computed_payload_sha256 TEXT;
+    captured_text TEXT;
+BEGIN
+    computed_payload_sha256 := COALESCE(
+        NULLIF(NEW.payload_sha256, ''),
+        encode(digest(NEW.payload::text, 'sha256'), 'hex')
+    );
+
+    NEW.source_event_id := COALESCE(
+        NULLIF(NEW.source_event_id, ''),
+        NULLIF(NEW.payload #>> '{_observability,source_event_id}', ''),
+        NULLIF(NEW.payload #>> '{token_budget_event,event_id}', ''),
+        NULLIF(NEW.payload #>> '{working_state_event,context_pack_id}', ''),
+        NULLIF(NEW.payload #>> '{context_pack_id}', '')
+    );
+    NEW.source_kind := COALESCE(
+        NULLIF(NEW.source_kind, ''),
+        NULLIF(NEW.payload #>> '{_observability,source_kind}', ''),
+        NULLIF(NEW.payload #>> '{token_budget_event,source_kind}', ''),
+        NULLIF(NEW.payload #>> '{working_state_event,source_kind}', ''),
+        NULLIF(NEW.payload #>> '{continuity_handoff,source_kind}', ''),
+        NEW.snapshot_kind
+    );
+    NEW.source_class := COALESCE(
+        NULLIF(NEW.source_class, ''),
+        NULLIF(NEW.payload #>> '{_observability,source_class}', ''),
+        ami.observability_snapshot_source_class(NEW.snapshot_kind, NEW.payload)
+    );
+    NEW.scope_project_code := COALESCE(
+        NULLIF(NEW.scope_project_code, ''),
+        NULLIF(NEW.payload #>> '{_observability,scope_project_code}', ''),
+        NULLIF(NEW.payload #>> '{project,code}', ''),
+        NULLIF(NEW.payload #>> '{working_state_event,project,code}', ''),
+        NULLIF(NEW.payload #>> '{continuity_import,project,code}', ''),
+        NULLIF(NEW.payload #>> '{continuity_handoff,project,code}', ''),
+        NULLIF(NEW.payload #>> '{token_budget_event,project_code}', ''),
+        NULLIF(NEW.payload #>> '{token_budget_event,project}', ''),
+        NULLIF(NEW.payload #>> '{benchmark,project}', ''),
+        NULLIF(NEW.payload #>> '{accuracy_verification,project}', ''),
+        NULLIF(NEW.payload #>> '{load_verification,project}', ''),
+        NULLIF(NEW.payload #>> '{cold_benchmark,project}', '')
+    );
+    NEW.scope_namespace_code := COALESCE(
+        NULLIF(NEW.scope_namespace_code, ''),
+        NULLIF(NEW.payload #>> '{_observability,scope_namespace_code}', ''),
+        NULLIF(NEW.payload #>> '{namespace,code}', ''),
+        NULLIF(NEW.payload #>> '{working_state_event,namespace,code}', ''),
+        NULLIF(NEW.payload #>> '{continuity_import,namespace,code}', ''),
+        NULLIF(NEW.payload #>> '{continuity_handoff,namespace,code}', ''),
+        NULLIF(NEW.payload #>> '{token_budget_event,namespace_code}', ''),
+        NULLIF(NEW.payload #>> '{token_budget_event,namespace}', ''),
+        NULLIF(NEW.payload #>> '{benchmark,namespace}', ''),
+        NULLIF(NEW.payload #>> '{accuracy_verification,namespace}', ''),
+        NULLIF(NEW.payload #>> '{load_verification,namespace}', '')
+    );
+
+    captured_text := COALESCE(
+        NULLIF(NEW.payload #>> '{_observability,captured_at_epoch_ms}', ''),
+        NULLIF(NEW.payload #>> '{captured_at_epoch_ms}', ''),
+        NULLIF(NEW.payload #>> '{working_state_event,recorded_at_epoch_ms}', ''),
+        NULLIF(NEW.payload #>> '{token_budget_event,created_at_epoch_ms}', ''),
+        NULLIF(NEW.payload #>> '{continuity_import,imported_at_epoch_ms}', ''),
+        NULLIF(NEW.payload #>> '{continuity_thread_index,captured_at_epoch_ms}', ''),
+        NULLIF(NEW.payload #>> '{continuity_handoff,captured_at_epoch_ms}', ''),
+        NULLIF(NEW.payload #>> '{benchmark,captured_at_epoch_ms}', ''),
+        NULLIF(NEW.payload #>> '{accuracy_verification,captured_at_epoch_ms}', ''),
+        NULLIF(NEW.payload #>> '{load_verification,captured_at_epoch_ms}', ''),
+        NULLIF(NEW.payload #>> '{cold_benchmark,captured_at_epoch_ms}', '')
+    );
+    IF NEW.captured_at_epoch_ms IS NULL AND captured_text ~ '^-?[0-9]+$' THEN
+        NEW.captured_at_epoch_ms := captured_text::BIGINT;
+    END IF;
+
+    NEW.payload_sha256 := computed_payload_sha256;
+    NEW.event_key := COALESCE(
+        NULLIF(NEW.event_key, ''),
+        NULLIF(NEW.payload #>> '{_observability,event_key}', ''),
+        NEW.source_event_id,
+        'sha256:' || computed_payload_sha256
+    );
+    NEW.replay_count := COALESCE(NEW.replay_count, 0);
+    NEW.last_seen_at := COALESCE(NEW.last_seen_at, NEW.created_at, now());
+
+    IF NEW.snapshot_kind IN (
+        'retrieval_benchmark_hot',
+        'retrieval_benchmark_cold',
+        'retrieval_load_hot',
+        'retrieval_load_cold',
+        'retrieval_accuracy',
+        'cold_path_benchmark',
+        'token_benchmark',
+        'token_benchmark_suite',
+        'text_compare',
+        'mcp_task_matrix',
+        'memory_task_matrix'
+    ) AND NEW.source_class <> 'benchmark' THEN
+        RAISE EXCEPTION
+            'benchmark lane contamination blocked for snapshot_kind=% source_class=%',
+            NEW.snapshot_kind,
+            NEW.source_class
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF jsonb_typeof(NEW.payload) = 'object' THEN
+        NEW.payload := jsonb_set(
+            NEW.payload,
+            '{_observability}',
+            COALESCE(NEW.payload -> '_observability', '{}'::jsonb) || jsonb_build_object(
+                'snapshot_kind', NEW.snapshot_kind,
+                'event_key', NEW.event_key,
+                'source_event_id', NEW.source_event_id,
+                'source_kind', NEW.source_kind,
+                'source_class', NEW.source_class,
+                'scope_project_code', NEW.scope_project_code,
+                'scope_namespace_code', NEW.scope_namespace_code,
+                'captured_at_epoch_ms', NEW.captured_at_epoch_ms,
+                'payload_sha256', NEW.payload_sha256,
+                'replay_protected', NEW.source_event_id IS NOT NULL
+            ),
+            true
+        );
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+UPDATE ami.observability_snapshots
+SET
+    snapshot_kind = snapshot_kind || '_quarantine',
+    source_class = 'live_context'
+WHERE snapshot_kind IN (
+    'retrieval_benchmark_hot',
+    'retrieval_benchmark_cold',
+    'retrieval_load_hot',
+    'retrieval_load_cold',
+    'retrieval_accuracy',
+    'cold_path_benchmark',
+    'token_benchmark',
+    'token_benchmark_suite',
+    'text_compare',
+    'mcp_task_matrix',
+    'memory_task_matrix'
+)
+AND ami.observability_snapshot_source_class(snapshot_kind, payload) <> 'benchmark';
+
+DROP TRIGGER IF EXISTS trg_ami_observability_snapshots_fill_defaults
+    ON ami.observability_snapshots;
+
+CREATE TRIGGER trg_ami_observability_snapshots_fill_defaults
+BEFORE INSERT OR UPDATE ON ami.observability_snapshots
+FOR EACH ROW
+EXECUTE FUNCTION ami.fill_observability_snapshot_defaults();
+
 CREATE INDEX IF NOT EXISTS idx_ami_namespaces_project ON ami.namespaces(project_id);
 CREATE INDEX IF NOT EXISTS idx_ami_relations_source_target ON ami.project_relations(source_project_id, target_project_id);
 CREATE INDEX IF NOT EXISTS idx_ami_documents_project_namespace ON ami.code_documents(project_id, namespace_id);
@@ -233,3 +476,7 @@ CREATE INDEX IF NOT EXISTS idx_ami_memory_search ON ami.memory_cards USING GIN (
 CREATE INDEX IF NOT EXISTS idx_ami_context_packs_project_namespace ON ami.context_packs(project_id, namespace_id);
 CREATE INDEX IF NOT EXISTS idx_ami_observability_snapshots_kind_created
     ON ami.observability_snapshots(snapshot_kind, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ami_observability_snapshots_kind_event_key
+    ON ami.observability_snapshots(snapshot_kind, event_key);
+CREATE INDEX IF NOT EXISTS idx_ami_observability_snapshots_kind_source_class
+    ON ami.observability_snapshots(snapshot_kind, source_class, created_at DESC);

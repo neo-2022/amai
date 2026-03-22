@@ -98,10 +98,33 @@ pub fn detect(path: &Path) -> Option<LanguageDescriptor> {
             parser_language: None,
             source_kind: "docs",
         },
+        _ if file_name == "readme" || file_name == "contributing" || file_name == "changelog" => {
+            LanguageDescriptor {
+                parser_language: None,
+                source_kind: "docs",
+            }
+        }
         _ if file_name == "dockerfile" => LanguageDescriptor {
             parser_language: Some("dockerfile"),
             source_kind: "config",
         },
+        _ if file_name == "makefile"
+            || file_name == "justfile"
+            || file_name == "go.mod"
+            || file_name == "pom.xml"
+            || file_name == "module.bazel"
+            || file_name == "workspace"
+            || file_name == "workspace.bazel"
+            || file_name == "build"
+            || file_name == "build.bazel"
+            || file_name == "build.gradle"
+            || file_name == "build.gradle.kts" =>
+        {
+            LanguageDescriptor {
+                parser_language: None,
+                source_kind: "config",
+            }
+        }
         _ if file_name.ends_with(".env") => LanguageDescriptor {
             parser_language: None,
             source_kind: "config",
@@ -128,5 +151,26 @@ mod tests {
         let desc = detect(Path::new("/tmp/README.md")).unwrap();
         assert_eq!(desc.parser_language, Some("markdown"));
         assert_eq!(desc.source_kind, "docs");
+    }
+
+    #[test]
+    fn detects_readme_without_extension() {
+        let desc = detect(Path::new("/tmp/README")).unwrap();
+        assert_eq!(desc.parser_language, None);
+        assert_eq!(desc.source_kind, "docs");
+    }
+
+    #[test]
+    fn detects_makefile_as_config() {
+        let desc = detect(Path::new("/tmp/Makefile")).unwrap();
+        assert_eq!(desc.parser_language, None);
+        assert_eq!(desc.source_kind, "config");
+    }
+
+    #[test]
+    fn detects_gradle_as_config() {
+        let desc = detect(Path::new("/tmp/build.gradle")).unwrap();
+        assert_eq!(desc.parser_language, None);
+        assert_eq!(desc.source_kind, "config");
     }
 }

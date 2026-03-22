@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_postgres::Client;
+use uuid::Uuid;
 
 const WORKING_STATE_EVENT_KIND: &str = "working_state_event";
 const WORKING_STATE_RESTORE_KIND: &str = "working_state_restore";
@@ -41,6 +42,7 @@ pub async fn record_handoff_event(
     let active_files = extract_paths_from_text(details);
     let payload = json!({
         "working_state_event": {
+            "event_id": Uuid::new_v4().to_string(),
             "project": project_json(project),
             "namespace": namespace_json(namespace),
             "recorded_at_epoch_ms": recorded_at_epoch_ms,
@@ -145,6 +147,7 @@ pub async fn record_context_pack_event(db: &Client, payload: &Value) -> Result<(
     );
     let payload = json!({
         "working_state_event": {
+            "event_id": Uuid::new_v4().to_string(),
             "project": project,
             "namespace": namespace,
             "recorded_at_epoch_ms": recorded_at_epoch_ms,

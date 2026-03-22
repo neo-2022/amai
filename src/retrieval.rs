@@ -14,7 +14,7 @@ use qdrant_client::qdrant::point_id::PointIdOptions;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio_postgres::Client;
 use uuid::Uuid;
@@ -51,6 +51,14 @@ pub struct ContextPackStats {
 #[derive(Debug, Clone)]
 pub struct ContextPackResult {
     pub payload: Value,
+    pub stats: ContextPackStats,
+}
+
+#[derive(Debug, Clone)]
+pub struct FastContextPackProbe {
+    fast_cache_key: FastCacheKey,
+    ttl_ms: u128,
+    require_persist: bool,
     pub stats: ContextPackStats,
 }
 
@@ -103,6 +111,8 @@ struct LocalContextPackEntry {
     cached_at_epoch_ms: u128,
 }
 
+type FastCacheKey = u128;
+
 #[derive(Debug, Default, Clone)]
 struct SemanticTimings {
     query_embed_ms: u128,
@@ -122,10 +132,11 @@ struct CacheHydrationContext<'a> {
 }
 
 static QUERY_EMBEDDER: OnceLock<Mutex<Option<CachedQueryEmbedder>>> = OnceLock::new();
-static LOCAL_CONTEXT_PACK_CACHE: OnceLock<Mutex<HashMap<String, LocalContextPackEntry>>> =
+static LOCAL_CONTEXT_PACK_CACHE: OnceLock<RwLock<HashMap<String, LocalContextPackEntry>>> =
     OnceLock::new();
-static LOCAL_FAST_CONTEXT_PACK_CACHE: OnceLock<Mutex<HashMap<String, LocalContextPackEntry>>> =
-    OnceLock::new();
+static LOCAL_FAST_CONTEXT_PACK_CACHE: OnceLock<
+    RwLock<HashMap<FastCacheKey, LocalContextPackEntry>>,
+> = OnceLock::new();
 
 pub async fn build_context_pack(
     cfg: &AppConfig,
@@ -184,6 +195,11 @@ pub async fn execute_context_pack_with_options(
     persist: bool,
     track_token_usage: bool,
 ) -> Result<ContextPackStats> {
+    if !track_token_usage
+        && let Some(stats) = try_execute_context_pack_stats_cached(cfg, db, args, persist).await?
+    {
+        return Ok(stats);
+    }
     Ok(
         execute_context_pack_capture_with_options(cfg, db, args, persist, track_token_usage)
             .await?
@@ -238,8 +254,9 @@ pub fn try_execute_context_pack_fast_cached(
     let Some(effective_mode) = args.retrieval_mode.as_deref() else {
         return Ok(None);
     };
-    let cache_key = cache_key(cfg, args, effective_mode);
-    let Some(cached) = local_fast_context_pack_cache_get(&cache_key, cfg.local_fast_cache_ttl_ms)?
+    let fast_cache_key = fast_cache_key(cfg, args, effective_mode);
+    let Some(cached) =
+        local_fast_context_pack_cache_get(fast_cache_key, cfg.local_fast_cache_ttl_ms)?
     else {
         return Ok(None);
     };
@@ -247,6 +264,42 @@ pub fn try_execute_context_pack_fast_cached(
         return Ok(None);
     }
     Ok(Some(context_pack_result_from_local_entry(cached)))
+}
+
+pub fn prepare_fast_context_pack_probe(
+    cfg: &AppConfig,
+    args: &ContextPackArgs,
+    persist: bool,
+) -> Result<Option<FastContextPackProbe>> {
+    if args.disable_cache {
+        return Ok(None);
+    }
+    let Some(effective_mode) = args.retrieval_mode.as_deref() else {
+        return Ok(None);
+    };
+    let fast_cache_key = fast_cache_key(cfg, args, effective_mode);
+    let Some(cached) =
+        local_fast_context_pack_cache_get(fast_cache_key, cfg.local_fast_cache_ttl_ms)?
+    else {
+        return Ok(None);
+    };
+    if persist && !cached.durably_persisted {
+        return Ok(None);
+    }
+    Ok(Some(FastContextPackProbe {
+        fast_cache_key,
+        ttl_ms: cfg.local_fast_cache_ttl_ms,
+        require_persist: persist,
+        stats: cached_fast_context_pack_stats(&cached),
+    }))
+}
+
+pub fn fast_context_pack_probe_hit(probe: &FastContextPackProbe) -> Result<bool> {
+    local_fast_context_pack_cache_contains(
+        probe.fast_cache_key,
+        probe.ttl_ms,
+        probe.require_persist,
+    )
 }
 
 async fn prepare_context_pack(
@@ -263,7 +316,8 @@ async fn prepare_context_pack(
         .clone()
         .unwrap_or_else(|| namespace.retrieval_mode.clone());
     let visible_projects = resolve_visible_projects(db, &project, &effective_mode).await?;
-    let visible_scopes = resolve_visible_scopes(db, &visible_projects, &namespace.code).await?;
+    let visible_scopes =
+        resolve_visible_scopes(db, &visible_projects, project.project_id, &namespace).await?;
     let resolve_scope_ms = resolve_started.elapsed().as_millis();
     let scope_signature = scope_signature(&visible_scopes);
     let cache_key = cache_key(cfg, args, &effective_mode);
@@ -316,51 +370,85 @@ async fn prepare_context_pack(
     }
     let cache_lookup_ms = cache_lookup_started.elapsed().as_millis();
 
-    let exact_started = Instant::now();
     let mut documents = Vec::new();
-    for scope in &visible_scopes {
-        documents.extend(
-            postgres::search_documents_for_namespace(
-                db,
-                scope.visible.project.project_id,
-                scope.namespace.namespace_id,
-                &args.query,
-                args.limit_documents as i64,
-            )
-            .await?,
-        );
+    let exact_started = Instant::now();
+    if args.limit_documents > 0 {
+        let should_try_exact = should_try_exact_document_lookup(&args.query);
+        for scope in &visible_scopes {
+            let mut scope_hits = if should_try_exact {
+                postgres::search_documents_exact_for_namespace(
+                    db,
+                    scope.visible.project.project_id,
+                    scope.namespace.namespace_id,
+                    &args.query,
+                    args.limit_documents as i64,
+                )
+                .await?
+            } else {
+                Vec::new()
+            };
+            if scope_hits.is_empty() {
+                scope_hits = postgres::search_documents_for_namespace(
+                    db,
+                    scope.visible.project.project_id,
+                    scope.namespace.namespace_id,
+                    &args.query,
+                    args.limit_documents as i64,
+                )
+                .await?;
+            }
+            documents.extend(scope_hits);
+        }
     }
     let exact_lookup_ms = exact_started.elapsed().as_millis();
 
-    let symbol_started = Instant::now();
     let mut symbols = Vec::new();
-    for scope in &visible_scopes {
-        symbols.extend(
-            postgres::search_symbols_for_namespace(
-                db,
-                scope.visible.project.project_id,
-                scope.namespace.namespace_id,
-                &args.query,
-                args.limit_symbols as i64,
-            )
-            .await?,
-        );
+    let symbol_started = Instant::now();
+    if args.limit_symbols > 0 {
+        let should_try_exact = should_try_exact_symbol_lookup(&args.query);
+        for scope in &visible_scopes {
+            let mut scope_hits = if should_try_exact {
+                postgres::search_symbols_exact_for_namespace(
+                    db,
+                    scope.visible.project.project_id,
+                    scope.namespace.namespace_id,
+                    &args.query,
+                    args.limit_symbols as i64,
+                )
+                .await?
+            } else {
+                Vec::new()
+            };
+            if scope_hits.is_empty() {
+                scope_hits = postgres::search_symbols_for_namespace(
+                    db,
+                    scope.visible.project.project_id,
+                    scope.namespace.namespace_id,
+                    &args.query,
+                    args.limit_symbols as i64,
+                )
+                .await?;
+            }
+            symbols.extend(scope_hits);
+        }
     }
     let symbol_lookup_ms = symbol_started.elapsed().as_millis();
 
-    let lexical_started = Instant::now();
     let mut chunks = Vec::new();
-    for scope in &visible_scopes {
-        chunks.extend(
-            postgres::search_chunks_for_namespace(
-                db,
-                scope.visible.project.project_id,
-                scope.namespace.namespace_id,
-                &args.query,
-                args.limit_chunks as i64,
-            )
-            .await?,
-        );
+    let lexical_started = Instant::now();
+    if args.limit_chunks > 0 {
+        for scope in &visible_scopes {
+            chunks.extend(
+                postgres::search_chunks_for_namespace(
+                    db,
+                    scope.visible.project.project_id,
+                    scope.namespace.namespace_id,
+                    &args.query,
+                    args.limit_chunks as i64,
+                )
+                .await?,
+            );
+        }
     }
     let lexical_lookup_ms = lexical_started.elapsed().as_millis();
 
@@ -609,8 +697,9 @@ fn cache_context_pack_entry(
         &prepared.scope_signature,
         &local_entry_from_prepared(prepared, durably_persisted),
     )?;
+    let fast_cache_key = fast_cache_key(cfg, args, &prepared.effective_mode);
     local_fast_context_pack_cache_put(
-        &prepared.cache_key,
+        fast_cache_key,
         &local_entry_from_prepared(prepared, durably_persisted),
     )?;
     Ok(())
@@ -649,6 +738,9 @@ async fn resolve_visible_projects(
         shared_contour: "self".to_string(),
         access_mode: "local_strict".to_string(),
     }];
+    if effective_mode == "local_strict" {
+        return Ok(visible);
+    }
     let allowed_rank = mode_rank(effective_mode)?;
     let related = postgres::list_related_projects(db, project.project_id).await?;
     for relation in related {
@@ -662,15 +754,24 @@ async fn resolve_visible_projects(
 async fn resolve_visible_scopes(
     db: &Client,
     visible_projects: &[VisibleProjectRecord],
-    namespace_code: &str,
+    local_project_id: Uuid,
+    local_namespace: &postgres::NamespaceRecord,
 ) -> Result<Vec<ResolvedVisibleScope>> {
     let mut scopes = Vec::new();
     for visible in visible_projects {
-        let Some(namespace) =
-            postgres::find_namespace_by_code(db, visible.project.project_id, namespace_code)
-                .await?
-        else {
-            continue;
+        let namespace = if visible.project.project_id == local_project_id {
+            local_namespace.clone()
+        } else {
+            let Some(namespace) = postgres::find_namespace_by_code(
+                db,
+                visible.project.project_id,
+                &local_namespace.code,
+            )
+            .await?
+            else {
+                continue;
+            };
+            namespace
         };
         scopes.push(ResolvedVisibleScope {
             visible: visible.clone(),
@@ -678,6 +779,21 @@ async fn resolve_visible_scopes(
         });
     }
     Ok(scopes)
+}
+
+fn should_try_exact_document_lookup(query: &str) -> bool {
+    let trimmed = query.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 256
+        && (trimmed.contains('/')
+            || trimmed.contains('.')
+            || trimmed.contains('_')
+            || trimmed.contains('-'))
+}
+
+fn should_try_exact_symbol_lookup(query: &str) -> bool {
+    let trimmed = query.trim();
+    !trimmed.is_empty() && trimmed.len() <= 128 && !trimmed.chars().any(char::is_whitespace)
 }
 
 async fn semantic_chunks(
@@ -1076,34 +1192,37 @@ fn cache_key(cfg: &AppConfig, args: &ContextPackArgs, effective_mode: &str) -> S
     )
 }
 
+fn fast_cache_key(cfg: &AppConfig, args: &ContextPackArgs, effective_mode: &str) -> FastCacheKey {
+    let mut hasher = Sha256::new();
+    hasher.update(cfg.stack_name.as_bytes());
+    hasher.update([0]);
+    hasher.update(args.project.as_bytes());
+    hasher.update([0]);
+    hasher.update(args.namespace.as_bytes());
+    hasher.update([0]);
+    hasher.update(effective_mode.as_bytes());
+    hasher.update([0]);
+    hasher.update(args.limit_documents.to_le_bytes());
+    hasher.update(args.limit_symbols.to_le_bytes());
+    hasher.update(args.limit_chunks.to_le_bytes());
+    hasher.update(args.limit_semantic_chunks.to_le_bytes());
+    hasher.update(args.query.as_bytes());
+    let digest = hasher.finalize();
+    let mut key = [0_u8; 16];
+    key.copy_from_slice(&digest[..16]);
+    u128::from_be_bytes(key)
+}
+
 fn prepared_from_cached_payload(
     context: CacheHydrationContext<'_>,
     cached: LocalContextPackEntry,
 ) -> Result<PreparedContextPack> {
-    let stats = ContextPackStats {
-        context_pack_id: cached.context_pack_id,
-        exact_documents: cached.exact_documents,
-        symbol_hits: cached.symbol_hits,
-        lexical_chunks: cached.lexical_chunks,
-        semantic_chunks: cached.semantic_chunks,
-        cache_hit: true,
-        scope_signature: context.scope_signature.clone(),
-        timings: ContextPackTimings {
-            resolve_scope_ms: context.resolve_scope_ms,
-            cache_lookup_ms: context.cache_lookup_ms,
-            exact_lookup_ms: 0,
-            symbol_lookup_ms: 0,
-            lexical_lookup_ms: 0,
-            query_embed_ms: 0,
-            semantic_search_ms: 0,
-            semantic_hydrate_ms: 0,
-            ranking_ms: 0,
-            provenance_ms: 0,
-            pack_assembly_ms: 0,
-            serialize_ms: 0,
-            persist_ms: 0,
-        },
-    };
+    let stats = cached_context_pack_stats(
+        &cached,
+        context.scope_signature.clone(),
+        context.resolve_scope_ms,
+        context.cache_lookup_ms,
+    );
     let mut payload = cached.payload.as_ref().clone();
     payload["retrieval_runtime"] = runtime_json(&stats);
     let payload_json: Arc<str> = Arc::from(serde_json::to_string(&payload)?);
@@ -1124,13 +1243,99 @@ fn prepared_from_cached_payload(
     })
 }
 
+async fn try_execute_context_pack_stats_cached(
+    cfg: &AppConfig,
+    db: &mut Client,
+    args: &ContextPackArgs,
+    persist: bool,
+) -> Result<Option<ContextPackStats>> {
+    if let Some(stats) = try_context_pack_stats_from_local_fast_cache(cfg, args, persist)? {
+        return Ok(Some(stats));
+    }
+    if args.disable_cache {
+        return Ok(None);
+    }
+
+    let resolve_started = Instant::now();
+    let project = postgres::get_project_by_code(db, &args.project).await?;
+    let namespace =
+        postgres::get_namespace_by_code(db, project.project_id, &args.namespace).await?;
+    let effective_mode = args
+        .retrieval_mode
+        .clone()
+        .unwrap_or_else(|| namespace.retrieval_mode.clone());
+    let visible_projects = resolve_visible_projects(db, &project, &effective_mode).await?;
+    let visible_scopes =
+        resolve_visible_scopes(db, &visible_projects, project.project_id, &namespace).await?;
+    let resolve_scope_ms = resolve_started.elapsed().as_millis();
+    let scope_signature = scope_signature(&visible_scopes);
+    let cache_key = cache_key(cfg, args, &effective_mode);
+    let edge_cache_path = edge_cache::ensure(&cfg.edge_cache_path)?;
+
+    let cache_lookup_started = Instant::now();
+    if let Some(cached) = local_context_pack_cache_get(&cache_key, &scope_signature)? {
+        if persist && !cached.durably_persisted {
+            return Ok(None);
+        }
+        let cache_lookup_ms = cache_lookup_started.elapsed().as_millis();
+        return Ok(Some(cached_context_pack_stats(
+            &cached,
+            scope_signature,
+            resolve_scope_ms,
+            cache_lookup_ms,
+        )));
+    }
+
+    if let Some(cached) =
+        edge_cache::get_context_pack_cache_entry(&edge_cache_path, &cache_key, &scope_signature)?
+    {
+        let local_cached = local_entry_from_edge(cached)?;
+        if persist && !local_cached.durably_persisted {
+            return Ok(None);
+        }
+        local_context_pack_cache_put(&cache_key, &scope_signature, &local_cached)?;
+        let cache_lookup_ms = cache_lookup_started.elapsed().as_millis();
+        return Ok(Some(cached_context_pack_stats(
+            &local_cached,
+            scope_signature,
+            resolve_scope_ms,
+            cache_lookup_ms,
+        )));
+    }
+
+    Ok(None)
+}
+
+fn try_context_pack_stats_from_local_fast_cache(
+    cfg: &AppConfig,
+    args: &ContextPackArgs,
+    persist: bool,
+) -> Result<Option<ContextPackStats>> {
+    if args.disable_cache {
+        return Ok(None);
+    }
+    let Some(effective_mode) = args.retrieval_mode.as_deref() else {
+        return Ok(None);
+    };
+    let fast_cache_key = fast_cache_key(cfg, args, effective_mode);
+    let Some(cached) =
+        local_fast_context_pack_cache_get(fast_cache_key, cfg.local_fast_cache_ttl_ms)?
+    else {
+        return Ok(None);
+    };
+    if persist && !cached.durably_persisted {
+        return Ok(None);
+    }
+    Ok(Some(cached_fast_context_pack_stats(&cached)))
+}
+
 fn local_context_pack_cache_get(
     cache_key: &str,
     scope_signature: &str,
 ) -> Result<Option<LocalContextPackEntry>> {
-    let cache = LOCAL_CONTEXT_PACK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = LOCAL_CONTEXT_PACK_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
     let guard = cache
-        .lock()
+        .read()
         .map_err(|_| anyhow!("local context-pack cache lock poisoned"))?;
     let key = format!("{cache_key}::{scope_signature}");
     Ok(guard.get(&key).cloned())
@@ -1141,9 +1346,9 @@ fn local_context_pack_cache_put(
     scope_signature: &str,
     entry: &LocalContextPackEntry,
 ) -> Result<()> {
-    let cache = LOCAL_CONTEXT_PACK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = LOCAL_CONTEXT_PACK_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
     let mut guard = cache
-        .lock()
+        .write()
         .map_err(|_| anyhow!("local context-pack cache lock poisoned"))?;
     let key = format!("{cache_key}::{scope_signature}");
     guard.insert(key, entry.clone());
@@ -1193,18 +1398,23 @@ fn local_entry_from_edge(
     })
 }
 
-fn context_pack_result_from_local_entry(cached: LocalContextPackEntry) -> ContextPackResult {
-    let stats = ContextPackStats {
+fn cached_context_pack_stats(
+    cached: &LocalContextPackEntry,
+    scope_signature: String,
+    resolve_scope_ms: u128,
+    cache_lookup_ms: u128,
+) -> ContextPackStats {
+    ContextPackStats {
         context_pack_id: cached.context_pack_id,
         exact_documents: cached.exact_documents,
         symbol_hits: cached.symbol_hits,
         lexical_chunks: cached.lexical_chunks,
         semantic_chunks: cached.semantic_chunks,
         cache_hit: true,
-        scope_signature: "local_fast_cache".to_string(),
+        scope_signature,
         timings: ContextPackTimings {
-            resolve_scope_ms: 0,
-            cache_lookup_ms: 0,
+            resolve_scope_ms,
+            cache_lookup_ms,
             exact_lookup_ms: 0,
             symbol_lookup_ms: 0,
             lexical_lookup_ms: 0,
@@ -1217,7 +1427,15 @@ fn context_pack_result_from_local_entry(cached: LocalContextPackEntry) -> Contex
             serialize_ms: 0,
             persist_ms: 0,
         },
-    };
+    }
+}
+
+fn cached_fast_context_pack_stats(cached: &LocalContextPackEntry) -> ContextPackStats {
+    cached_context_pack_stats(cached, "local_fast_cache".to_string(), 0, 0)
+}
+
+fn context_pack_result_from_local_entry(cached: LocalContextPackEntry) -> ContextPackResult {
+    let stats = cached_fast_context_pack_stats(&cached);
     let mut payload = cached.payload.as_ref().clone();
     payload["retrieval_runtime"] = runtime_json(&stats);
     ContextPackResult { payload, stats }
@@ -1273,29 +1491,68 @@ fn runtime_json(stats: &ContextPackStats) -> Value {
 }
 
 fn local_fast_context_pack_cache_get(
-    cache_key: &str,
+    fast_cache_key: FastCacheKey,
     ttl_ms: u128,
 ) -> Result<Option<LocalContextPackEntry>> {
-    let cache = LOCAL_FAST_CONTEXT_PACK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = cache
-        .lock()
-        .map_err(|_| anyhow!("local fast context-pack cache lock poisoned"))?;
-    let Some(entry) = guard.get(cache_key).cloned() else {
+    let cache = LOCAL_FAST_CONTEXT_PACK_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    let entry = {
+        let guard = cache
+            .read()
+            .map_err(|_| anyhow!("local fast context-pack cache lock poisoned"))?;
+        guard.get(&fast_cache_key).cloned()
+    };
+    let Some(entry) = entry else {
         return Ok(None);
     };
     if now_epoch_ms().saturating_sub(entry.cached_at_epoch_ms) > ttl_ms {
-        guard.remove(cache_key);
+        let mut guard = cache
+            .write()
+            .map_err(|_| anyhow!("local fast context-pack cache lock poisoned"))?;
+        guard.remove(&fast_cache_key);
         return Ok(None);
     }
     Ok(Some(entry))
 }
 
-fn local_fast_context_pack_cache_put(cache_key: &str, entry: &LocalContextPackEntry) -> Result<()> {
-    let cache = LOCAL_FAST_CONTEXT_PACK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+fn local_fast_context_pack_cache_contains(
+    fast_cache_key: FastCacheKey,
+    ttl_ms: u128,
+    require_persist: bool,
+) -> Result<bool> {
+    let cache = LOCAL_FAST_CONTEXT_PACK_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    let status = {
+        let guard = cache
+            .read()
+            .map_err(|_| anyhow!("local fast context-pack cache lock poisoned"))?;
+        let Some(entry) = guard.get(&fast_cache_key) else {
+            return Ok(false);
+        };
+        let expired = now_epoch_ms().saturating_sub(entry.cached_at_epoch_ms) > ttl_ms;
+        let persisted_ok = !require_persist || entry.durably_persisted;
+        (expired, persisted_ok)
+    };
+    if status.0 {
+        let mut guard = cache
+            .write()
+            .map_err(|_| anyhow!("local fast context-pack cache lock poisoned"))?;
+        guard.remove(&fast_cache_key);
+        return Ok(false);
+    }
+    if !status.1 {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn local_fast_context_pack_cache_put(
+    fast_cache_key: FastCacheKey,
+    entry: &LocalContextPackEntry,
+) -> Result<()> {
+    let cache = LOCAL_FAST_CONTEXT_PACK_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
     let mut guard = cache
-        .lock()
+        .write()
         .map_err(|_| anyhow!("local fast context-pack cache lock poisoned"))?;
-    guard.insert(cache_key.to_string(), entry.clone());
+    guard.insert(fast_cache_key, entry.clone());
     Ok(())
 }
 

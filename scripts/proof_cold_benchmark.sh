@@ -28,6 +28,8 @@ assert "precision" in summary
 assert "recall" in summary
 assert "hit_rate" in summary
 assert "fallback_rate" in summary
+assert "leakage" in summary
+assert "error_rate" in summary
 assert node["dataset_coverage"]["repo_count"] >= 1
 PY
 

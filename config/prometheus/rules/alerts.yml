@@ -55,6 +55,15 @@ groups:
           summary: "Обнаружено cross-project leakage"
           description: "accuracy.cross_project_leakage должен быть строго равен 0."
 
+      - alert: AmaiBenchmarkContaminationDetected
+        expr: amai_observability_benchmark_contamination > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Обнаружено contamination benchmark observability lane"
+          description: "verify/live payload попал в benchmark-facing observability snapshots; требуется quarantine и разбор source_class/source_kind."
+
       - alert: AmaiPostgresDeadlocksDetected
         expr: amai_postgres_deadlocks_total > 0
         for: 0m

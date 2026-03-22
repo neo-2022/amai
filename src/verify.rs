@@ -16,11 +16,21 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiktoken_rs::{CoreBPE, cl100k_base, o200k_base};
 use tokio::process::Command as ProcessCommand;
 use tokio::time::sleep;
 use tokio_postgres::Client;
+use uuid::Uuid;
+
+#[derive(Debug)]
+struct LoadWorkerOutcome {
+    worker_index: usize,
+    samples_ns: Vec<u128>,
+    error_count: usize,
+    cache_probe_miss_count: usize,
+    last_stats: Option<retrieval::ContextPackStats>,
+}
 
 pub async fn run_benchmark(
     cfg: &AppConfig,
@@ -36,7 +46,7 @@ pub async fn run_benchmark(
             .await?;
     }
 
-    let mut samples_us = Vec::with_capacity(args.iterations);
+    let mut samples_ns = Vec::with_capacity(args.iterations);
     let mut resolve_scope_samples = Vec::with_capacity(args.iterations);
     let mut cache_lookup_samples = Vec::with_capacity(args.iterations);
     let mut exact_lookup_samples = Vec::with_capacity(args.iterations);
@@ -58,7 +68,7 @@ pub async fn run_benchmark(
             false,
         )
         .await?;
-        samples_us.push(started.elapsed().as_micros());
+        samples_ns.push(started.elapsed().as_nanos());
         resolve_scope_samples.push(stats.timings.resolve_scope_ms);
         cache_lookup_samples.push(stats.timings.cache_lookup_ms);
         exact_lookup_samples.push(stats.timings.exact_lookup_ms);
@@ -73,7 +83,7 @@ pub async fn run_benchmark(
     }
 
     let last_stats = last_stats.ok_or_else(|| anyhow!("benchmark produced no samples"))?;
-    let mut sorted = samples_us.clone();
+    let mut sorted = samples_ns.clone();
     sorted.sort_unstable();
     let resolve_scope_p95_ms = sort_and_percentile(resolve_scope_samples, 95);
     let cache_lookup_p95_ms = sort_and_percentile(cache_lookup_samples, 95);
@@ -86,25 +96,37 @@ pub async fn run_benchmark(
     let serialize_p95_ms = sort_and_percentile(serialize_samples, 95);
     let persist_p95_ms = sort_and_percentile(persist_samples, 95);
 
-    let total_elapsed_us = samples_us.iter().sum::<u128>();
-    let mean_ms = sample_us_to_ms(total_elapsed_us) / samples_us.len() as f64;
-    let p50_ms = sample_us_to_ms(percentile_sample(&sorted, 50));
-    let p95_ms = sample_us_to_ms(percentile_sample(&sorted, 95));
-    let p99_ms = sample_us_to_ms(percentile_sample(&sorted, 99));
-    let max_ms = sample_us_to_ms(
+    let total_elapsed_ns = samples_ns.iter().sum::<u128>();
+    let mean_ms = sample_ns_to_ms(total_elapsed_ns) / samples_ns.len() as f64;
+    let p50_ms = sample_ns_to_ms(percentile_sample(&sorted, 50));
+    let p95_ms = sample_ns_to_ms(percentile_sample(&sorted, 95));
+    let p99_ms = sample_ns_to_ms(percentile_sample(&sorted, 99));
+    let max_ms = sample_ns_to_ms(
         *sorted
             .last()
             .ok_or_else(|| anyhow!("benchmark sample set is unexpectedly empty"))?,
     );
-    let qps = if total_elapsed_us == 0 {
-        args.iterations as f64 * 1_000_000.0
+    let qps = if total_elapsed_ns == 0 {
+        args.iterations as f64 * 1_000_000_000.0
     } else {
-        args.iterations as f64 * 1_000_000.0 / total_elapsed_us as f64
+        args.iterations as f64 * 1_000_000_000.0 / total_elapsed_ns as f64
     };
+    let benchmark_run_id = Uuid::new_v4();
+    let captured_at_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as u64;
 
     enforce_benchmark_thresholds(args, mean_ms, p95_ms, p99_ms, max_ms)?;
 
     let payload = json!({
+        "_observability": {
+            "source_event_id": benchmark_run_id,
+            "source_kind": "benchmark_run",
+            "scope_project_code": args.context.project,
+            "scope_namespace_code": args.context.namespace,
+            "captured_at_epoch_ms": captured_at_epoch_ms
+        },
         "benchmark": {
             "project": args.context.project,
             "namespace": args.context.namespace,
@@ -114,13 +136,20 @@ pub async fn run_benchmark(
             "persist": args.persist,
             "warmup": args.warmup,
             "iterations": args.iterations,
-            "samples_us": samples_us,
+            "sample_resolution": "ns",
+            "samples_ns": samples_ns,
+            "samples_us": samples_ns
+                .iter()
+                .map(|sample_ns| sample_ns / 1000)
+                .collect::<Vec<_>>(),
             "mean_ms": mean_ms,
             "p50_ms": p50_ms,
             "p95_ms": p95_ms,
             "p99_ms": p99_ms,
             "max_ms": max_ms,
             "qps": qps,
+            "benchmark_run_id": benchmark_run_id,
+            "captured_at_epoch_ms": captured_at_epoch_ms,
         },
         "retrieval_counts": {
             "exact_documents": last_stats.exact_documents,
@@ -256,7 +285,13 @@ pub async fn run_accuracy(
     let strict_hit_leaks = count_foreign_hits(&strict_pack.payload, &args.project);
     let cross_project_leakage = strict_visible_unexpected + strict_hit_leaks;
     let namespace_visible = collect_visible_namespaces(&namespace_strict_pack.payload);
-    let cross_namespace_leakage = count_hits(&namespace_strict_pack.payload);
+    let namespace_visible_unexpected = namespace_visible
+        .iter()
+        .filter(|namespace| namespace.as_str() != "default")
+        .count();
+    let namespace_hit_leaks =
+        count_foreign_namespace_hits(&namespace_strict_pack.payload, "default");
+    let cross_namespace_leakage = namespace_visible_unexpected + namespace_hit_leaks;
 
     let exact_precision = precision_ratio(
         &related_pack.payload["retrieval"]["exact_documents"],
@@ -333,8 +368,22 @@ pub async fn run_accuracy(
         ));
     }
 
+    let accuracy_run_id = Uuid::new_v4();
+    let captured_at_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as u64;
     let payload = json!({
+        "_observability": {
+            "source_event_id": accuracy_run_id,
+            "source_kind": "accuracy_verification_run",
+            "scope_project_code": args.project,
+            "scope_namespace_code": args.namespace,
+            "captured_at_epoch_ms": captured_at_epoch_ms
+        },
         "accuracy_verification": {
+            "accuracy_run_id": accuracy_run_id,
+            "captured_at_epoch_ms": captured_at_epoch_ms,
             "project": args.project,
             "related_project": args.related_project,
             "namespace": args.namespace,
@@ -345,6 +394,8 @@ pub async fn run_accuracy(
             "cross_namespace_leakage": cross_namespace_leakage,
             "namespace_strict_visible_projects": collect_visible_projects(&namespace_strict_pack.payload),
             "namespace_strict_visible_namespaces": namespace_visible,
+            "namespace_strict_visible_namespaces_unexpected": namespace_visible_unexpected,
+            "namespace_strict_hit_leaks": namespace_hit_leaks,
             "exact_precision": exact_precision,
             "lexical_precision": lexical_precision,
             "semantic_precision": semantic_precision,
@@ -376,45 +427,81 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
         .await?;
     }
 
-    let hot_cache_only =
-        retrieval::try_execute_context_pack_fast_cached(cfg, &args.context, args.persist)?
-            .is_some();
+    let fast_probe = retrieval::prepare_fast_context_pack_probe(cfg, &args.context, args.persist)?;
+    let hot_cache_only = fast_probe.is_some();
+    let record_live_context = args.record_live_context;
+    let publish_benchmark_snapshot = !record_live_context;
 
     let started = Instant::now();
     let mut handles = Vec::with_capacity(args.workers);
-    for _ in 0..args.workers {
+    for worker_index in 0..args.workers {
         let cfg = cfg.clone();
         let context = args.context.clone();
         let iterations = args.iterations_per_worker;
         let persist = args.persist;
+        let fast_probe = fast_probe.clone();
         handles.push(tokio::spawn(async move {
-            let mut samples_us = Vec::with_capacity(iterations);
+            let mut samples_ns = Vec::with_capacity(iterations);
             let mut error_count = 0_usize;
+            let mut cache_probe_miss_count = 0_usize;
             let mut last_stats = None;
-            if hot_cache_only {
-                for _ in 0..iterations {
-                    let op_started = Instant::now();
-                    match retrieval::try_execute_context_pack_fast_cached(&cfg, &context, persist) {
-                        Ok(Some(result)) => {
-                            samples_us.push(op_started.elapsed().as_micros());
-                            last_stats = Some(result.stats);
+            let needs_db = record_live_context || !hot_cache_only;
+            let mut db = if needs_db {
+                Some(postgres::connect_admin(&cfg).await?)
+            } else {
+                None
+            };
+            for _ in 0..iterations {
+                let op_started = Instant::now();
+                if hot_cache_only && !record_live_context {
+                    let probe = fast_probe
+                        .as_ref()
+                        .expect("hot cache probe must exist for hot_cache_only mode");
+                    match retrieval::fast_context_pack_probe_hit(probe) {
+                        Ok(true) => {
+                            samples_ns.push(op_started.elapsed().as_nanos());
+                            if last_stats.is_none() {
+                                last_stats = Some(probe.stats.clone());
+                            }
                         }
-                        Ok(None) | Err(_) => {
+                        Ok(false) => {
+                            cache_probe_miss_count += 1;
+                            error_count += 1;
+                        }
+                        Err(_) => {
                             error_count += 1;
                         }
                     }
-                }
-            } else {
-                let mut db = postgres::connect_admin(&cfg).await?;
-                for _ in 0..iterations {
-                    let op_started = Instant::now();
+                } else if record_live_context {
+                    let db = db
+                        .as_mut()
+                        .expect("load verification db must exist when live tracking is enabled");
+                    match retrieval::execute_context_pack_capture_with_options(
+                        &cfg, db, &context, persist, false,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            token_budget::record_verify_context_pack_event(db, &result.payload)
+                                .await?;
+                            samples_ns.push(op_started.elapsed().as_nanos());
+                            last_stats = Some(result.stats);
+                        }
+                        Err(_) => {
+                            error_count += 1;
+                        }
+                    }
+                } else {
+                    let db = db
+                        .as_mut()
+                        .expect("load verification db must exist when live tracking is enabled");
                     match retrieval::execute_context_pack_with_options(
-                        &cfg, &mut db, &context, persist, false,
+                        &cfg, db, &context, persist, false,
                     )
                     .await
                     {
                         Ok(stats) => {
-                            samples_us.push(op_started.elapsed().as_micros());
+                            samples_ns.push(op_started.elapsed().as_nanos());
                             last_stats = Some(stats);
                         }
                         Err(_) => {
@@ -423,22 +510,83 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
                     }
                 }
             }
-            Result::<_, anyhow::Error>::Ok((samples_us, error_count, last_stats))
+            Result::<_, anyhow::Error>::Ok(LoadWorkerOutcome {
+                worker_index,
+                samples_ns,
+                error_count,
+                cache_probe_miss_count,
+                last_stats,
+            })
         }));
     }
 
     let mut all_samples = Vec::with_capacity(args.workers * args.iterations_per_worker);
+    let mut all_samples_with_workers =
+        Vec::with_capacity(args.workers * args.iterations_per_worker);
     let mut total_errors = 0_usize;
+    let mut total_cache_probe_misses = 0_usize;
     let mut last_stats = None;
+    let mut worker_summaries = Vec::with_capacity(args.workers);
+    let mut worker_p95_ms = Vec::with_capacity(args.workers);
     for handle in handles {
-        let (samples, errors, worker_last_stats) = handle.await??;
-        all_samples.extend(samples);
-        total_errors += errors;
-        if let Some(stats) = worker_last_stats {
+        let outcome = handle.await??;
+        total_errors += outcome.error_count;
+        total_cache_probe_misses += outcome.cache_probe_miss_count;
+        for sample in &outcome.samples_ns {
+            all_samples.push(*sample);
+            all_samples_with_workers.push((*sample, outcome.worker_index));
+        }
+        if let Some(stats) = outcome.last_stats {
             last_stats = Some(stats);
         }
+        let mut worker_sorted = outcome.samples_ns.clone();
+        worker_sorted.sort_unstable();
+        let success_count = worker_sorted.len();
+        let worker_mean_ms = if success_count == 0 {
+            0.0
+        } else {
+            sample_ns_to_ms(worker_sorted.iter().sum::<u128>()) / success_count as f64
+        };
+        let worker_p50_ms = if success_count == 0 {
+            0.0
+        } else {
+            sample_ns_to_ms(percentile_sample(&worker_sorted, 50))
+        };
+        let worker_p95_ms_value = if success_count == 0 {
+            0.0
+        } else {
+            sample_ns_to_ms(percentile_sample(&worker_sorted, 95))
+        };
+        let worker_p99_ms = if success_count == 0 {
+            0.0
+        } else {
+            sample_ns_to_ms(percentile_sample(&worker_sorted, 99))
+        };
+        let worker_max_ms = worker_sorted
+            .last()
+            .copied()
+            .map(sample_ns_to_ms)
+            .unwrap_or(0.0);
+        worker_p95_ms.push((outcome.worker_index, worker_p95_ms_value));
+        worker_summaries.push(json!({
+            "worker_index": outcome.worker_index,
+            "success_count": success_count,
+            "error_count": outcome.error_count,
+            "cache_probe_miss_count": outcome.cache_probe_miss_count,
+            "mean_ms": worker_mean_ms,
+            "p50_ms": worker_p50_ms,
+            "p95_ms": worker_p95_ms_value,
+            "p99_ms": worker_p99_ms,
+            "max_ms": worker_max_ms,
+            "slowest_samples_ms": worker_sorted
+                .iter()
+                .rev()
+                .take(5)
+                .map(|sample| sample_ns_to_ms(*sample))
+                .collect::<Vec<_>>(),
+        }));
     }
-    let wall_clock_us = started.elapsed().as_micros();
+    let wall_clock_ns = started.elapsed().as_nanos();
     let success_count = all_samples.len();
     let total_attempts = args.workers * args.iterations_per_worker;
     let error_rate = total_errors as f64 / total_attempts as f64;
@@ -448,28 +596,80 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
     }
     let mut sorted = all_samples.clone();
     sorted.sort_unstable();
-    let total_elapsed_us = all_samples.iter().sum::<u128>();
-    let mean_ms = sample_us_to_ms(total_elapsed_us) / all_samples.len() as f64;
-    let p50_ms = sample_us_to_ms(percentile_sample(&sorted, 50));
-    let p95_ms = sample_us_to_ms(percentile_sample(&sorted, 95));
-    let p99_ms = sample_us_to_ms(percentile_sample(&sorted, 99));
-    let max_ms = sample_us_to_ms(
+    let total_elapsed_ns = all_samples.iter().sum::<u128>();
+    let mean_ms = sample_ns_to_ms(total_elapsed_ns) / all_samples.len() as f64;
+    let p50_ms = sample_ns_to_ms(percentile_sample(&sorted, 50));
+    let p95_ms = sample_ns_to_ms(percentile_sample(&sorted, 95));
+    let p99_ms = sample_ns_to_ms(percentile_sample(&sorted, 99));
+    let max_ms = sample_ns_to_ms(
         *sorted
             .last()
             .ok_or_else(|| anyhow!("load sample set is unexpectedly empty"))?,
     );
-    let qps = if wall_clock_us == 0 {
-        success_count as f64 * 1_000_000.0
+    let slowest_samples = {
+        all_samples_with_workers.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+        all_samples_with_workers
+            .iter()
+            .take(16)
+            .map(|(sample_ns, worker_index)| {
+                json!({
+                    "worker_index": worker_index,
+                    "sample_ms": sample_ns_to_ms(*sample_ns)
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let worker_skew = if worker_p95_ms.is_empty() {
+        json!({
+            "fastest_worker_p95_ms": 0.0,
+            "slowest_worker_p95_ms": 0.0,
+            "p95_skew_ratio": 0.0
+        })
     } else {
-        success_count as f64 * 1_000_000.0 / wall_clock_us as f64
+        let fastest = worker_p95_ms
+            .iter()
+            .min_by(|left, right| left.1.total_cmp(&right.1))
+            .copied()
+            .expect("worker_p95_ms is not empty");
+        let slowest = worker_p95_ms
+            .iter()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .copied()
+            .expect("worker_p95_ms is not empty");
+        json!({
+            "fastest_worker_index": fastest.0,
+            "fastest_worker_p95_ms": fastest.1,
+            "slowest_worker_index": slowest.0,
+            "slowest_worker_p95_ms": slowest.1,
+            "p95_skew_ratio": if fastest.1 == 0.0 { 0.0 } else { slowest.1 / fastest.1 }
+        })
+    };
+    let qps = if wall_clock_ns == 0 {
+        success_count as f64 * 1_000_000_000.0
+    } else {
+        success_count as f64 * 1_000_000_000.0 / wall_clock_ns as f64
     };
 
     enforce_load_thresholds(args, p95_ms, qps, error_rate)?;
 
     let last_stats =
         last_stats.ok_or_else(|| anyhow!("load verification produced no final stats"))?;
+    let load_run_id = Uuid::new_v4();
+    let captured_at_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as u64;
     let payload = json!({
+        "_observability": {
+            "source_event_id": load_run_id,
+            "source_kind": "load_verification_run",
+            "scope_project_code": args.context.project,
+            "scope_namespace_code": args.context.namespace,
+            "captured_at_epoch_ms": captured_at_epoch_ms
+        },
         "load_verification": {
+            "load_run_id": load_run_id,
+            "captured_at_epoch_ms": captured_at_epoch_ms,
             "project": args.context.project,
             "namespace": args.context.namespace,
             "query": args.context.query,
@@ -480,11 +680,19 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
             "iterations_per_worker": args.iterations_per_worker,
             "warmup_per_worker": args.warmup_per_worker,
             "execution_mode": if hot_cache_only { "hot_cache_only" } else { "db_backed" },
+            "record_live_context": record_live_context,
+            "publish_benchmark_snapshot": publish_benchmark_snapshot,
             "success_count": success_count,
             "error_count": total_errors,
             "error_rate": error_rate,
-            "wall_clock_ms": sample_us_to_ms(wall_clock_us),
-            "samples_us": all_samples,
+            "wall_clock_ms": sample_ns_to_ms(wall_clock_ns),
+            "wall_clock_ns": wall_clock_ns,
+            "sample_resolution": "ns",
+            "samples_ns": all_samples,
+            "samples_us": all_samples
+                .iter()
+                .map(|sample_ns| sample_ns / 1000)
+                .collect::<Vec<_>>(),
             "mean_ms": mean_ms,
             "p50_ms": p50_ms,
             "p95_ms": p95_ms,
@@ -501,15 +709,28 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
         "retrieval_runtime": {
             "cache_hit": last_stats.cache_hit,
             "scope_signature": last_stats.scope_signature
+        },
+        "load_diagnostics": {
+            "worker_skew": worker_skew,
+            "per_worker": worker_summaries,
+            "slowest_samples": slowest_samples,
+            "path_uniformity": {
+                "hot_cache_only": hot_cache_only,
+                "record_live_context": record_live_context,
+                "cache_probe_miss_count": total_cache_probe_misses,
+                "db_fallback_count": 0
+            }
         }
     });
-    let snapshot_kind = if args.context.disable_cache {
-        "retrieval_load_cold"
-    } else {
-        "retrieval_load_hot"
-    };
-    let db = postgres::connect_admin(cfg).await?;
-    let _ = postgres::insert_observability_snapshot(&db, snapshot_kind, &payload).await?;
+    if publish_benchmark_snapshot {
+        let snapshot_kind = if args.context.disable_cache {
+            "retrieval_load_cold"
+        } else {
+            "retrieval_load_hot"
+        };
+        let db = postgres::connect_admin(cfg).await?;
+        let _ = postgres::insert_observability_snapshot(&db, snapshot_kind, &payload).await?;
+    }
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
@@ -1079,8 +1300,8 @@ fn sort_and_percentile(mut samples: Vec<u128>, percentile: usize) -> u128 {
     percentile_sample(&samples, percentile)
 }
 
-fn sample_us_to_ms(sample_us: u128) -> f64 {
-    sample_us as f64 / 1000.0
+fn sample_ns_to_ms(sample_ns: u128) -> f64 {
+    sample_ns as f64 / 1_000_000.0
 }
 
 fn enforce_benchmark_thresholds(
@@ -1691,18 +1912,6 @@ fn collect_visible_namespaces(payload: &Value) -> Vec<String> {
         .collect()
 }
 
-fn count_hits(payload: &Value) -> usize {
-    [
-        &payload["retrieval"]["exact_documents"],
-        &payload["retrieval"]["symbol_hits"],
-        &payload["retrieval"]["lexical_chunks"],
-        &payload["retrieval"]["semantic_chunks"],
-    ]
-    .into_iter()
-    .map(|items| items.as_array().map_or(0, Vec::len))
-    .sum()
-}
-
 fn count_foreign_hits(payload: &Value, local_project: &str) -> usize {
     [
         &payload["retrieval"]["exact_documents"],
@@ -1722,9 +1931,33 @@ fn count_foreign_hits(payload: &Value, local_project: &str) -> usize {
     .sum()
 }
 
+fn count_foreign_namespace_hits(payload: &Value, local_namespace: &str) -> usize {
+    [
+        &payload["retrieval"]["exact_documents"],
+        &payload["retrieval"]["symbol_hits"],
+        &payload["retrieval"]["lexical_chunks"],
+        &payload["retrieval"]["semantic_chunks"],
+    ]
+    .into_iter()
+    .map(|items| {
+        items
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| !item_belongs_to_namespace(item, local_namespace))
+            .count()
+    })
+    .sum()
+}
+
 fn item_belongs_to_project(item: &Value, project: &str) -> bool {
     item["project_code"].as_str() == Some(project)
         || item["provenance"]["source_project"].as_str() == Some(project)
+}
+
+fn item_belongs_to_namespace(item: &Value, namespace: &str) -> bool {
+    item["namespace_code"].as_str() == Some(namespace)
+        || item["provenance"]["namespace_code"].as_str() == Some(namespace)
 }
 
 fn expected_project(item: &Value, expected_projects: &HashSet<&str>) -> bool {
@@ -1748,9 +1981,10 @@ fn precision_ratio(items: &Value, predicate: impl Fn(&Value) -> bool) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        TextCompareCase, collect_visible_namespaces, count_hits, item_belongs_to_project,
-        item_matches_text_compare_case, percentile_sample, precision_ratio,
-        render_context_pack_prompt, render_filtered_context_prompt, safe_lossy_prefix,
+        TextCompareCase, collect_visible_namespaces, count_foreign_namespace_hits,
+        item_belongs_to_namespace, item_belongs_to_project, item_matches_text_compare_case,
+        percentile_sample, precision_ratio, render_context_pack_prompt,
+        render_filtered_context_prompt, safe_lossy_prefix,
     };
     use serde_json::json;
 
@@ -1795,6 +2029,18 @@ mod tests {
     }
 
     #[test]
+    fn item_belongs_to_namespace_checks_item_namespace() {
+        assert!(item_belongs_to_namespace(
+            &json!({"namespace_code":"default"}),
+            "default"
+        ));
+        assert!(!item_belongs_to_namespace(
+            &json!({"namespace_code":"review"}),
+            "default"
+        ));
+    }
+
+    #[test]
     fn safe_lossy_prefix_truncates_bytes() {
         let content = safe_lossy_prefix("abcdef".as_bytes(), 3);
         assert_eq!(content, "abc");
@@ -1828,17 +2074,17 @@ mod tests {
                 {"project_code":"beta","namespace_code":"review"}
             ],
             "retrieval": {
-                "exact_documents": [{"project_code":"alpha"}],
+                "exact_documents": [{"project_code":"alpha","namespace_code":"default"}],
                 "symbol_hits": [],
-                "lexical_chunks": [{"project_code":"alpha"}],
-                "semantic_chunks": [{"project_code":"beta"}]
+                "lexical_chunks": [{"project_code":"alpha","namespace_code":"default"}],
+                "semantic_chunks": [{"project_code":"beta","namespace_code":"review"}]
             }
         });
         assert_eq!(
             collect_visible_namespaces(&payload),
             vec!["default".to_string(), "review".to_string()]
         );
-        assert_eq!(count_hits(&payload), 3);
+        assert_eq!(count_foreign_namespace_hits(&payload, "default"), 1);
     }
 
     #[test]
