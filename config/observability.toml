@@ -1,5 +1,15 @@
-modified_at = "2026-03-21 23:45 MSK"
-"Ручная сверка guide/docs" = "2026-03-21 23:45 MSK"
+modified_at = "2026-03-23 01:35 MSK"
+"Ручная сверка guide/docs" = "2026-03-23 01:35 MSK"
+
+[observability]
+schema_version = 2
+classification_rules_version = "observability-source-class-v2"
+retention_profile = "observability-retention-v1"
+retention_live_system_hours = 168
+retention_live_context_hours = 72
+retention_benchmark_hours = 2160
+retention_verify_event_hours = 720
+retention_working_state_restore_hours = 720
 
 [snapshot]
 postgres_query_probe_iterations = 20
@@ -7,6 +17,72 @@ nats_publish_probe_iterations = 20
 
 [dashboard]
 refresh_ms = 1000
+
+[dashboard.timing_format]
+switch_to_nanoseconds_below_ms = 0.001
+switch_to_microseconds_below_ms = 1.0
+switch_to_seconds_at_or_above_ms = 1000.0
+non_positive_floor_label = "0 ns"
+seconds_suffix = "s"
+milliseconds_suffix = "ms"
+microseconds_suffix = "µs"
+nanoseconds_suffix = "ns"
+seconds_decimals = 3
+milliseconds_decimals = 3
+microseconds_decimals = 3
+nanoseconds_decimals = 0
+
+[artifact_cleanup]
+sweep_interval_seconds = 3600
+
+[[artifact_cleanup.targets]]
+path = "target/debug"
+description = "stale debug build outputs"
+ttl_hours = 168
+keep_latest = 3
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = "target/release"
+description = "stale release build outputs"
+ttl_hours = 336
+keep_latest = 3
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = ".fastembed_cache"
+description = "stale local embedding model cache"
+ttl_hours = 336
+keep_latest = 1
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = "state/external-benchmarks/datasets"
+description = "stale external benchmark raw datasets"
+ttl_hours = 336
+keep_latest = 1
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = "state/external-benchmarks/converted"
+description = "stale converted external benchmark datasets"
+ttl_hours = 336
+keep_latest = 1
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = "state/external-benchmarks/upstream"
+description = "stale upstream benchmark mirrors"
+ttl_hours = 336
+keep_latest = 1
+auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = "state/external-benchmarks/runs"
+description = "stale external benchmark run outputs"
+ttl_hours = 168
+keep_latest = 2
+auto_apply = true
 
 [postgres]
 target_connection_usage_ratio = 0.80
@@ -52,6 +128,8 @@ target_hot_p95_ms = 1.0
 target_hot_p99_ms = 2.0
 target_hot_max_ms = 5.0
 target_hot_sample_count = 100000
+target_hot_benchmark_iterations = 20
+target_hot_benchmark_warmup = 3
 alert_p95_ms = 6.0
 critical_p95_ms = 10.0
 stretch_hot_p95_ms = 1.0
@@ -62,15 +140,15 @@ alert_coverage_ratio = 0.80
 critical_coverage_ratio = 0.50
 
 [accuracy]
-target_symbol_precision = 0.98
+target_symbol_precision = 0.99
 alert_symbol_precision = 0.95
 critical_symbol_precision = 0.90
-target_semantic_precision = 0.95
+target_semantic_precision = 0.98
 alert_semantic_precision = 0.90
 critical_semantic_precision = 0.85
 
 [load]
-target_hot_qps = 35000.0
+target_hot_qps = 1200000.0
 target_hot_p50_ms = 0.012
 target_hot_p95_ms = 0.015
 target_hot_p99_ms = 0.020

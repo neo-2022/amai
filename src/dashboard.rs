@@ -158,44 +158,55 @@ pub fn render_html(refresh_ms: u64) -> String {
     a { color: var(--accent); }
 
     .shell {
-      max-width: 1660px;
+      max-width: 1900px;
       margin: 0 auto;
       padding: 18px 20px 40px;
     }
 
     .hero {
       display: grid;
-      grid-template-columns: minmax(0, 1.74fr) minmax(300px, 0.46fr);
-      gap: 14px;
-      align-items: start;
-      margin-bottom: 14px;
+      grid-template-columns: minmax(0, 2.34fr) minmax(320px, 0.28fr);
+      gap: 8px;
+      align-items: stretch;
+      margin-bottom: 8px;
     }
 
     .panel {
       background: var(--paper);
       border: none;
-      border-radius: 24px;
+      border-radius: 12px;
       box-shadow: var(--panel-outer-shadow);
       position: relative;
       backdrop-filter: blur(14px);
     }
 
     .hero-main {
-      padding: 8px 16px 10px;
+      padding: 14px 16px 14px;
       position: relative;
       overflow: visible;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      gap: 10px;
+      min-height: 0;
+    }
+
+    .hero-top {
       display: grid;
-      gap: 4px;
+      grid-template-columns: minmax(0, 1.54fr) minmax(360px, 430px);
+      gap: 8px;
+      align-items: start;
     }
 
     .brand-line {
       display: flex;
       align-items: flex-start;
-      margin: -24px 0 -36px -8px;
+      width: 100%;
+      margin: -8px 0 0 -8px;
     }
 
     .brand-lockup {
-      width: min(100%, 440px);
+      width: min(100%, 1120px);
       height: auto;
       display: block;
       filter: drop-shadow(0 14px 28px rgba(11, 16, 32, 0.10));
@@ -204,13 +215,14 @@ pub fn render_html(refresh_ms: u64) -> String {
     .hero-cards {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-      margin-top: -10px;
+      gap: 8px;
+      margin-top: 2px;
+      align-items: stretch;
     }
 
     .hero-metric-card {
-      padding: 14px 16px;
-      border-radius: 18px;
+      padding: 14px 14px;
+      border-radius: 10px;
     }
 
     .hero-metric-card .card-top {
@@ -223,21 +235,22 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .hero-metric-card .card-value {
-      margin: 8px 0 6px;
-      font-size: clamp(22px, 3vw, 32px);
-      line-height: 0.98;
+      margin: 6px 0 4px;
     }
 
     .hero-metric-card .card-note {
-      font-size: 13px;
-      line-height: 1.4;
+      font-size: 12px;
+      line-height: 1.34;
     }
 
     .hero-side {
-      padding: 16px;
+      padding: 10px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 8px;
+      min-height: 0;
+      align-self: stretch;
+      height: 100%;
     }
 
     .status-pill {
@@ -249,6 +262,8 @@ pub fn render_html(refresh_ms: u64) -> String {
       font-size: 13px;
       font-weight: 700;
       width: fit-content;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
 
     .status-pill.pass { background: var(--pass-soft); color: var(--pass); }
@@ -257,14 +272,44 @@ pub fn render_html(refresh_ms: u64) -> String {
     .status-pill.unknown { background: var(--unknown-soft); color: var(--unknown); }
 
     .side-block {
-      padding: 12px 14px;
-      border-radius: 18px;
+      padding: 10px 12px;
+      border-radius: 10px;
       background: var(--surface);
       border: none;
       box-shadow: none;
       position: relative;
       overflow: visible;
       isolation: isolate;
+    }
+
+    .hero-summary-block #summary-status {
+      margin-bottom: 8px;
+    }
+
+    .summary-head-row {
+      display: grid;
+      grid-template-columns: auto auto 1fr auto;
+      align-items: center;
+      column-gap: 16px;
+    }
+
+    .summary-version-label,
+    .summary-version-inline {
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 800;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .summary-version-label {
+      color: var(--muted);
+    }
+
+    .summary-version-inline {
+      justify-self: end;
+      text-align: right;
+      padding-left: 20px;
     }
 
     .side-block h2,
@@ -295,27 +340,42 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .section {
-      padding: 18px;
-      margin-bottom: 14px;
+      padding: 14px;
+      margin-bottom: 8px;
     }
 
     .cards {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 14px;
+      gap: 8px;
+    }
+
+    .benchmark-cards-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      align-items: stretch;
+    }
+
+    .benchmark-cards-grid > .compare-card {
+      height: 100%;
+    }
+
+    .benchmark-cards-grid > .compare-card:not(.benchmark-span-full) .compare-table-wrap {
+      margin-top: auto;
     }
 
     .machine-grid {
       grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-auto-flow: dense;
+      grid-auto-rows: 6px;
       align-items: start;
     }
 
     .machine-grid .machine-compact {
-      padding: 14px 16px;
+      padding: 12px 14px;
     }
 
     .machine-grid .machine-compact .card-value {
-      font-size: clamp(20px, 2.8vw, 28px);
+      margin: 6px 0 4px;
     }
 
     .machine-grid .machine-compact .card-note {
@@ -330,14 +390,18 @@ pub fn render_html(refresh_ms: u64) -> String {
     .service-card,
     .glossary-card,
     .link-card {
-      padding: 18px;
-      border-radius: 20px;
+      padding: 14px;
+      border-radius: 10px;
       border: none;
       background: var(--surface-raised);
       box-shadow: none;
       position: relative;
       overflow: visible;
       isolation: isolate;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      gap: 0;
     }
 
     .metric-card.pass,
@@ -353,8 +417,8 @@ pub fn render_html(refresh_ms: u64) -> String {
       display: flex;
       justify-content: space-between;
       align-items: start;
-      gap: 12px;
-      margin-bottom: 8px;
+      gap: 8px;
+      margin-bottom: 6px;
     }
 
     .card-title {
@@ -365,11 +429,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .card-value {
-      margin: 10px 0 8px;
-      font-size: clamp(24px, 4vw, 36px);
-      letter-spacing: -0.04em;
-      font-weight: 800;
-      line-height: 0.95;
+      margin: 6px 0 6px;
     }
 
     .card-note {
@@ -380,7 +440,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .card-source {
-      margin-top: 8px;
+      margin-top: 6px;
       color: var(--accent);
       font-size: 12px;
       font-weight: 700;
@@ -388,19 +448,19 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .metric-rows {
-      margin: 14px 0 0;
+      margin: 10px 0 0;
       padding: 0;
       list-style: none;
       display: grid;
-      gap: 8px;
+      gap: 6px;
     }
 
     .metric-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
-      gap: 12px;
+      gap: 8px;
       align-items: start;
-      padding-top: 8px;
+      padding-top: 6px;
       border-top: 1px solid var(--surface-border);
     }
 
@@ -424,21 +484,25 @@ pub fn render_html(refresh_ms: u64) -> String {
 
     .has-tooltip {
       position: relative;
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
       cursor: help;
       text-decoration: underline dotted rgba(13, 107, 111, 0.45);
       text-underline-offset: 3px;
       z-index: 2;
     }
 
-    .has-tooltip::after {
-      content: attr(data-tip);
-      position: absolute;
-      left: 50%;
-      bottom: calc(100% + 10px);
-      transform: translateX(-50%) translateY(4px);
+    .has-tooltip:hover,
+    .has-tooltip:focus-visible {
+      z-index: 30;
+    }
+
+    .tooltip-layer {
+      position: fixed;
+      top: 0;
+      left: 0;
       min-width: 220px;
-      max-width: 320px;
+      max-width: min(360px, calc(100vw - 24px));
       padding: 10px 12px;
       border-radius: 12px;
       background: rgba(8, 13, 17, 0.96);
@@ -448,31 +512,28 @@ pub fn render_html(refresh_ms: u64) -> String {
       text-transform: none;
       letter-spacing: normal;
       white-space: normal;
-      opacity: 0;
-      pointer-events: none;
       box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(4px);
       transition: opacity 0.14s ease, transform 0.14s ease;
-      z-index: 20;
+      z-index: 10000;
     }
 
-    .has-tooltip:hover::after,
-    .has-tooltip:focus-visible::after {
+    .tooltip-layer.visible {
       opacity: 1;
-      transform: translateX(-50%) translateY(0);
-    }
-
-    .has-tooltip:hover,
-    .has-tooltip:focus-visible {
-      z-index: 30;
+      transform: translateY(0);
     }
 
     .compare-card {
-      padding: 20px;
-      border-radius: 20px;
+      padding: 14px;
+      border-radius: 10px;
       border: none;
       background: var(--surface-raised);
-      display: grid;
-      gap: 16px;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      gap: 0;
       box-shadow: none;
       position: relative;
       overflow: visible;
@@ -484,24 +545,34 @@ pub fn render_html(refresh_ms: u64) -> String {
     .compare-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.04), var(--surface-solid)); }
     .compare-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.04), var(--surface-solid)); }
 
+    .benchmark-span-full {
+      grid-column: 1 / -1;
+    }
+
     .compare-head {
       display: flex;
       justify-content: space-between;
       align-items: start;
-      gap: 12px;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .compare-headline {
+      margin: 0 0 8px;
     }
 
     .compare-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 14px;
+      gap: 8px;
+      margin-top: 4px;
     }
 
     .compare-metric {
       border: none;
-      border-radius: 18px;
+      border-radius: 10px;
       background: var(--surface);
-      padding: 16px;
+      padding: 12px;
       display: grid;
       gap: 6px;
       box-shadow: none;
@@ -551,10 +622,6 @@ pub fn render_html(refresh_ms: u64) -> String {
 
     .compare-metric-value {
       margin: 0;
-      font-size: clamp(24px, 4vw, 34px);
-      line-height: 0.95;
-      font-weight: 800;
-      letter-spacing: -0.04em;
     }
 
     .compare-metric-note {
@@ -565,6 +632,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .compare-table-wrap {
+      margin-top: 8px;
       overflow-x: auto;
       scrollbar-gutter: stable both-edges;
       scrollbar-width: thin;
@@ -644,11 +712,56 @@ pub fn render_html(refresh_ms: u64) -> String {
       font-weight: 700;
     }
 
-    .service-headline {
-      margin: 0 0 10px;
-      font-size: 22px;
+    .compare-value-stack {
+      display: inline-grid;
+      justify-items: end;
+      gap: 2px;
       line-height: 1.1;
+    }
+
+    .compare-value-stack-primary {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .compare-value-stack-secondary {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: none;
+    }
+
+    .compare-card.table-transposed .compare-table {
+      table-layout: fixed;
+    }
+
+    .compare-card.table-transposed .compare-table th,
+    .compare-card.table-transposed .compare-table td {
+      white-space: normal;
+      text-align: center;
+    }
+
+    .compare-card.table-transposed .compare-table th:first-child,
+    .compare-card.table-transposed .compare-table td:first-child {
+      text-align: left;
+      min-width: 160px;
+      width: 20%;
+    }
+
+    .service-headline {
+      margin: 0 0 6px;
+    }
+
+    .card-value,
+    .service-headline,
+    .compare-headline,
+    .compare-metric-value,
+    .machine-grid .machine-compact .card-value {
+      font-size: clamp(20px, 2.2vw, 22px);
+      line-height: 1.04;
       letter-spacing: -0.03em;
+      font-weight: 800;
     }
 
     .detail-list,
@@ -672,11 +785,11 @@ pub fn render_html(refresh_ms: u64) -> String {
     .error-banner {
       display: none;
       padding: 16px 18px;
-      border-radius: 18px;
+      border-radius: 10px;
       background: var(--critical-soft);
       color: var(--critical);
       font-weight: 700;
-      margin-bottom: 18px;
+      margin-bottom: 10px;
       border: 1px solid var(--error-border);
     }
 
@@ -687,6 +800,107 @@ pub fn render_html(refresh_ms: u64) -> String {
       cursor: default;
     }
 
+    .hero-links-block {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 100%;
+    }
+
+    .hero-links-block .link-list {
+      flex: 1;
+      align-content: start;
+      padding-left: 0;
+      list-style: none;
+      gap: 10px;
+    }
+
+    .hero-links-block .link-list li {
+      display: block;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .link-item-main {
+      min-width: 0;
+      display: grid;
+      gap: 6px;
+    }
+
+    .link-item-main a,
+    .link-item-main .link-disabled {
+      font-weight: 700;
+      font-size: 14px;
+      line-height: 1.3;
+      text-decoration-thickness: 1px;
+    }
+
+    .link-item-note {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .link-inline {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      position: relative;
+    }
+
+    .copy-link-btn {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(121, 210, 197, 0.10);
+      color: var(--accent);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+      cursor: pointer;
+      white-space: nowrap;
+      opacity: 0;
+      transform: translateY(1px);
+      transition: opacity 0.14s ease, background 0.14s ease, transform 0.14s ease;
+    }
+
+    .hero-links-block .link-list li:hover .copy-link-btn,
+    .hero-links-block .link-list li:focus-within .copy-link-btn,
+    .link-inline:hover .copy-link-btn,
+    .link-inline:focus-within .copy-link-btn {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .copy-link-btn:hover,
+    .copy-link-btn:focus-visible {
+      background: rgba(121, 210, 197, 0.20);
+      outline: none;
+    }
+
+    .inline-path,
+    .inline-copyable {
+      color: var(--accent);
+      font-weight: 700;
+      text-decoration: underline;
+      text-decoration-color: rgba(121, 210, 197, 0.42);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+
+    .inline-path {
+      white-space: nowrap;
+    }
+
     code {
       font-family: "IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", monospace;
       font-size: 0.92em;
@@ -695,7 +909,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     @media (prefers-color-scheme: dark) {
       :root {
         color-scheme: dark;
-        --bg: radial-gradient(circle at top, #163338 0%, #10191f 36%, #0a0f13 100%);
+        --bg: radial-gradient(circle at top, #1b454b 0%, #14262d 38%, #0e181d 100%);
         --paper: rgba(14, 20, 24, 0.92);
         --ink: #eef4f7;
         --muted: #a5b7bf;
@@ -744,6 +958,10 @@ pub fn render_html(refresh_ms: u64) -> String {
         grid-template-columns: 1fr;
       }
 
+      .hero-top {
+        grid-template-columns: 1fr;
+      }
+
       .hero-cards {
         grid-template-columns: 1fr;
       }
@@ -757,7 +975,17 @@ pub fn render_html(refresh_ms: u64) -> String {
       }
     }
 
+    @media (max-width: 1200px) {
+      .benchmark-cards-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
     @media (max-width: 640px) {
+      .benchmark-cards-grid {
+        grid-template-columns: 1fr;
+      }
+
       .machine-grid {
         grid-template-columns: 1fr;
       }
@@ -769,17 +997,19 @@ pub fn render_html(refresh_ms: u64) -> String {
     <div id="error-banner" class="error-banner"></div>
     <section class="hero">
       <div class="panel hero-main">
-        <div class="brand-line">
-          <img class="brand-lockup" src="/brand/amai_lockup.svg" alt="Amai">
+        <div class="hero-top">
+          <div class="brand-line">
+            <img class="brand-lockup" src="/brand/amai_lockup.svg" alt="Amai">
+          </div>
+          <div class="side-block hero-summary-block">
+            <div id="summary-status"></div>
+            <div class="kv" id="headline-kv"></div>
+          </div>
         </div>
         <div class="hero-cards" id="hero-cards"></div>
       </div>
       <aside class="panel hero-side">
-        <div id="summary-status"></div>
-        <div class="side-block">
-          <div class="kv" id="headline-kv"></div>
-        </div>
-        <div class="side-block">
+        <div class="side-block hero-links-block">
           <ul class="link-list" id="quick-links"></ul>
         </div>
       </aside>
@@ -801,7 +1031,7 @@ pub fn render_html(refresh_ms: u64) -> String {
         нагрузка быстрого пути, полный холодный прогон и проверка точности с изоляцией.
         Они нужны, чтобы сравнивать систему с её целями на повторяемых измерениях.
       </p>
-      <div class="cards" id="benchmark-cards"></div>
+      <div class="cards benchmark-cards-grid" id="benchmark-cards"></div>
     </section>
 
     <section class="panel section">
@@ -832,10 +1062,12 @@ pub fn render_html(refresh_ms: u64) -> String {
       <div class="cards" id="glossary-cards"></div>
     </section>
   </div>
+  <div id="tooltip-layer" class="tooltip-layer" hidden></div>
 
   <script>
     const REFRESH_MS = __REFRESH_MS__;
     const errorBanner = document.getElementById("error-banner");
+    const tooltipLayer = document.getElementById("tooltip-layer");
     const INTERACTION_HOLD_SELECTOR = [
       ".has-tooltip:hover",
       ".side-block:hover",
@@ -850,6 +1082,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     ].join(", ");
     let refreshInFlight = false;
     let interactionHoldUntil = 0;
+    let activeTooltipTarget = null;
 
     function statusClass(status) {
       return ["pass", "alert", "critical", "unknown"].includes(status) ? status : "unknown";
@@ -870,6 +1103,92 @@ pub fn render_html(refresh_ms: u64) -> String {
       return element;
     }
 
+    function createCopyButton(valueToCopy) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "copy-link-btn";
+      button.textContent = "⧉";
+      button.setAttribute("aria-label", "Скопировать");
+      button.title = "Скопировать";
+      button.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(valueToCopy);
+          button.textContent = "✓";
+          button.title = "Скопировано";
+          setTimeout(() => {
+            button.textContent = "⧉";
+            button.title = "Скопировать";
+          }, 1200);
+        } catch (_) {
+          button.textContent = "!";
+          button.title = "Не удалось скопировать";
+          setTimeout(() => {
+            button.textContent = "⧉";
+            button.title = "Скопировать";
+          }, 1200);
+        }
+      });
+      return button;
+    }
+
+    function createInlineCopyableText(label, copyValue, href = null) {
+      const wrap = document.createElement("span");
+      wrap.className = "link-inline";
+      if (href) {
+        const link = document.createElement("a");
+        link.href = href;
+        link.textContent = label;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        wrap.appendChild(link);
+      } else {
+        wrap.appendChild(textNode("span", "inline-copyable", label));
+      }
+      wrap.appendChild(createCopyButton(copyValue));
+      return wrap;
+    }
+
+    function appendInlineNoteFragment(container, fragment) {
+      const urlMatch = fragment.match(/https?:\/\/[^\s]+/);
+      if (urlMatch) {
+        const [matched] = urlMatch;
+        const index = fragment.indexOf(matched);
+        if (index > 0) {
+          container.appendChild(document.createTextNode(fragment.slice(0, index)));
+        }
+        container.appendChild(createInlineCopyableText(matched, matched, matched));
+        const tail = fragment.slice(index + matched.length);
+        if (tail) {
+          appendInlineNoteFragment(container, tail);
+        }
+        return;
+      }
+
+      const pathMatch = fragment.match(/(?:\.\.?\/[A-Za-z0-9_./-]+|\/[A-Za-z0-9_./-]+)/);
+      if (pathMatch) {
+        const [matched] = pathMatch;
+        const index = fragment.indexOf(matched);
+        if (index > 0) {
+          container.appendChild(document.createTextNode(fragment.slice(0, index)));
+        }
+        const pathWrap = createInlineCopyableText(matched, matched);
+        const inlinePath = pathWrap.querySelector(".inline-copyable");
+        if (inlinePath) {
+          inlinePath.classList.add("inline-path");
+        }
+        container.appendChild(pathWrap);
+        const tail = fragment.slice(index + matched.length);
+        if (tail) {
+          appendInlineNoteFragment(container, tail);
+        }
+        return;
+      }
+
+      container.appendChild(document.createTextNode(fragment));
+    }
+
     function labelWithTooltip(text, tooltip, className = "metric-label") {
       const wrap = document.createElement("span");
       wrap.className = tooltip ? `${className} has-tooltip` : className;
@@ -877,8 +1196,72 @@ pub fn render_html(refresh_ms: u64) -> String {
         wrap.tabIndex = 0;
         wrap.setAttribute("data-tip", tooltip);
       }
+      if (text.includes("\n")) {
+        wrap.style.whiteSpace = "pre-line";
+        wrap.style.lineHeight = "1.08";
+      }
       wrap.textContent = text;
       return wrap;
+    }
+
+    function showTooltip(target) {
+      if (!tooltipLayer || !target) {
+        return;
+      }
+      const tip = target.getAttribute("data-tip");
+      if (!tip) {
+        hideTooltip();
+        return;
+      }
+      activeTooltipTarget = target;
+      tooltipLayer.textContent = tip;
+      tooltipLayer.hidden = false;
+      tooltipLayer.classList.add("visible");
+      target.setAttribute("aria-describedby", "tooltip-layer");
+      positionTooltip(target);
+    }
+
+    function hideTooltip(target = null) {
+      if (!tooltipLayer) {
+        return;
+      }
+      if (target && activeTooltipTarget && target !== activeTooltipTarget) {
+        return;
+      }
+      if (activeTooltipTarget) {
+        activeTooltipTarget.removeAttribute("aria-describedby");
+      }
+      activeTooltipTarget = null;
+      tooltipLayer.classList.remove("visible");
+      tooltipLayer.hidden = true;
+      tooltipLayer.textContent = "";
+    }
+
+    function positionTooltip(target = activeTooltipTarget) {
+      if (!tooltipLayer || !target || tooltipLayer.hidden) {
+        return;
+      }
+
+      const margin = 12;
+      const targetRect = target.getBoundingClientRect();
+      tooltipLayer.style.left = "0px";
+      tooltipLayer.style.top = "0px";
+      tooltipLayer.style.maxWidth = `${Math.max(220, Math.min(360, window.innerWidth - margin * 2))}px`;
+      const tooltipRect = tooltipLayer.getBoundingClientRect();
+
+      let left = targetRect.left + targetRect.width / 2 - tooltipRect.width / 2;
+      left = Math.max(margin, Math.min(left, window.innerWidth - tooltipRect.width - margin));
+
+      let top = targetRect.top - tooltipRect.height - 12;
+      if (top < margin) {
+        top = Math.min(
+          window.innerHeight - tooltipRect.height - margin,
+          targetRect.bottom + 12
+        );
+      }
+
+      tooltipLayer.style.left = `${left}px`;
+      tooltipLayer.style.top = `${Math.max(margin, top)}px`;
     }
 
     function extendInteractionHold(multiplier = 4) {
@@ -918,6 +1301,10 @@ pub fn render_html(refresh_ms: u64) -> String {
     function renderCompareCard(container, card) {
       const element = document.createElement("article");
       element.className = `compare-card ${statusClass(card.status)}`;
+      addExtraClasses(element, card.extra_class);
+      if (card.table_orientation === "transposed") {
+        element.classList.add("table-transposed");
+      }
 
       const head = document.createElement("div");
       head.className = "compare-head";
@@ -926,7 +1313,10 @@ pub fn render_html(refresh_ms: u64) -> String {
       element.appendChild(head);
 
       if (card.headline_value) {
-        element.appendChild(textNode("p", "card-value", card.headline_value));
+        const headline = document.createElement("p");
+        headline.className = "service-headline compare-headline";
+        appendCompareCellValue(headline, card.headline_value);
+        element.appendChild(headline);
       }
 
       if (card.source_label) {
@@ -952,10 +1342,26 @@ pub fn render_html(refresh_ms: u64) -> String {
       tableWrap.className = "compare-table-wrap";
       const table = document.createElement("table");
       table.className = "compare-table";
+      renderCompareTable(table, card.table, card.table_orientation);
+      tableWrap.appendChild(table);
+      element.appendChild(tableWrap);
 
+      container.appendChild(element);
+    }
+
+    function renderCompareTable(table, tableData, orientation) {
+      if (orientation === "transposed") {
+        renderTransposedCompareTable(table, tableData);
+        return;
+      }
+
+      renderStandardCompareTable(table, tableData);
+    }
+
+    function renderStandardCompareTable(table, tableData) {
       const thead = document.createElement("thead");
       const headRow = document.createElement("tr");
-      card.table.columns.forEach((column) => {
+      tableData.columns.forEach((column) => {
         const th = document.createElement("th");
         th.appendChild(labelWithTooltip(column.label, column.tooltip, ""));
         headRow.appendChild(th);
@@ -964,39 +1370,100 @@ pub fn render_html(refresh_ms: u64) -> String {
       table.appendChild(thead);
 
       const tbody = document.createElement("tbody");
-      card.table.rows.forEach((row) => {
+      tableData.rows.forEach((row) => {
         const tr = document.createElement("tr");
         const labelCell = document.createElement("td");
         labelCell.appendChild(labelWithTooltip(row.label, row.tooltip, ""));
         tr.appendChild(labelCell);
         row.values.forEach((value) => {
-          tr.appendChild(textNode("td", "", value));
+          const valueCell = document.createElement("td");
+          appendCompareCellValue(valueCell, value);
+          tr.appendChild(valueCell);
         });
         tbody.appendChild(tr);
       });
       table.appendChild(tbody);
-      tableWrap.appendChild(table);
-      element.appendChild(tableWrap);
+    }
 
-      container.appendChild(element);
+    function renderTransposedCompareTable(table, tableData) {
+      const valueColumns = tableData.columns.slice(1);
+      const metrics = tableData.rows;
+
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      const scopeHeader = document.createElement("th");
+      scopeHeader.appendChild(labelWithTooltip("Срез", "Какой слой сравнения показан в строке: эталон или тестовые данные.", ""));
+      headRow.appendChild(scopeHeader);
+      metrics.forEach((metric) => {
+        const th = document.createElement("th");
+        th.appendChild(labelWithTooltip(metric.label, metric.tooltip, ""));
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+      valueColumns.forEach((column, columnIndex) => {
+        const tr = document.createElement("tr");
+        const labelCell = document.createElement("td");
+        labelCell.appendChild(labelWithTooltip(column.label, column.tooltip, ""));
+        tr.appendChild(labelCell);
+
+        metrics.forEach((metric) => {
+          const valueCell = document.createElement("td");
+          appendCompareCellValue(valueCell, metric.values[columnIndex] || "ещё нет данных");
+          tr.appendChild(valueCell);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+    }
+
+    function appendCompareCellValue(cell, value) {
+      if (typeof value === "string" && value.includes("\n")) {
+        const [primary, ...secondaryParts] = value.split("\n");
+        const stack = document.createElement("span");
+        stack.className = "compare-value-stack";
+        stack.appendChild(textNode("span", "compare-value-stack-primary", primary));
+        stack.appendChild(
+          textNode(
+            "span",
+            "compare-value-stack-secondary",
+            secondaryParts.join(" ").trim() || ""
+          )
+        );
+        cell.appendChild(stack);
+        return;
+      }
+      cell.textContent = value;
+    }
+
+    function addExtraClasses(element, extraClass) {
+      if (!extraClass) {
+        return;
+      }
+      extraClass
+        .split(/\s+/)
+        .filter(Boolean)
+        .forEach((className) => element.classList.add(className));
     }
 
     function renderSummary(meta, headline) {
       const summary = document.getElementById("summary-status");
       clearNode(summary);
       const pill = textNode("div", `status-pill ${statusClass(headline.status)}`, headline.status_label);
-      summary.appendChild(pill);
+      const headRow = document.createElement("div");
+      headRow.className = "summary-head-row";
+      headRow.appendChild(pill);
+      headRow.appendChild(textNode("div", "summary-version-label", "Версия"));
+      headRow.appendChild(textNode("div", "summary-version-inline", meta.package_version || "ещё нет данных"));
+      summary.appendChild(headRow);
 
       const kv = document.getElementById("headline-kv");
       clearNode(kv);
       const rows = [
-        ["Stack", meta.stack_name],
-        ["Версия", meta.package_version],
-        ["Главный KPI", headline.token_title],
         ["Почему такой статус", headline.status_reason],
         ["Сейчас", `${headline.token_value} (${headline.token_scope})`],
-        ["Обновление", headline.captured_at],
-        ["Автообновление", `${meta.refresh_seconds} сек. / пауза при чтении`],
       ];
       rows.forEach(([label, value]) => {
         const row = document.createElement("div");
@@ -1011,19 +1478,20 @@ pub fn render_html(refresh_ms: u64) -> String {
       clearNode(list);
       links.forEach((entry) => {
         const li = document.createElement("li");
+        const main = document.createElement("div");
+        main.className = "link-item-main";
         if (entry.url) {
-          const link = document.createElement("a");
-          link.href = entry.url;
-          link.textContent = entry.label;
-          link.target = "_blank";
-          link.rel = "noreferrer";
-          li.appendChild(link);
+          main.appendChild(createInlineCopyableText(entry.label, entry.url, entry.url));
         } else {
-          li.appendChild(textNode("span", "link-disabled", entry.label));
+          main.appendChild(textNode("span", "link-disabled", entry.label));
         }
         if (entry.note) {
-          li.appendChild(textNode("span", "muted", ` — ${entry.note}`));
+          const note = document.createElement("span");
+          note.className = "link-item-note";
+          appendInlineNoteFragment(note, entry.note);
+          main.appendChild(note);
         }
+        li.appendChild(main);
         list.appendChild(li);
       });
     }
@@ -1038,9 +1506,7 @@ pub fn render_html(refresh_ms: u64) -> String {
         }
         const element = document.createElement("article");
         element.className = `${kind} ${statusClass(card.status)}`;
-        if (card.extra_class) {
-          element.classList.add(card.extra_class);
-        }
+        addExtraClasses(element, card.extra_class);
 
         const top = document.createElement("div");
         top.className = "card-top";
@@ -1078,6 +1544,36 @@ pub fn render_html(refresh_ms: u64) -> String {
         }
 
         container.appendChild(element);
+      });
+
+      if (containerId === "machine-cards") {
+        applyMasonryGrid(container);
+      }
+    }
+
+    function applyMasonryGrid(container) {
+      if (!container || !container.classList.contains("machine-grid")) {
+        return;
+      }
+
+      const styles = window.getComputedStyle(container);
+      const rowGap = Number.parseFloat(styles.rowGap || "0");
+      const rowHeight = Number.parseFloat(styles.gridAutoRows || "0");
+      if (!rowHeight || Number.isNaN(rowHeight)) {
+        return;
+      }
+
+      const children = Array.from(container.children);
+      children.forEach((child) => {
+        child.style.gridRowEnd = "span 1";
+      });
+
+      requestAnimationFrame(() => {
+        children.forEach((child) => {
+          const height = child.getBoundingClientRect().height;
+          const span = Math.max(1, Math.ceil((height + rowGap) / (rowHeight + rowGap)));
+          child.style.gridRowEnd = `span ${span}`;
+        });
       });
     }
 
@@ -1135,6 +1631,7 @@ pub fn render_html(refresh_ms: u64) -> String {
         }
         const payload = await response.json();
         hideError();
+        hideTooltip();
         renderSummary(payload.meta, payload.headline);
         renderLinks(payload.links);
         renderCards("hero-cards", payload.hero_cards, "metric-card hero-metric-card");
@@ -1158,11 +1655,28 @@ pub fn render_html(refresh_ms: u64) -> String {
       }
     });
     document.addEventListener("focusin", (event) => {
+      const tooltipTarget =
+        event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
+      if (tooltipTarget) {
+        showTooltip(tooltipTarget);
+      }
       if (event.target && event.target.closest && event.target.closest(".shell")) {
         extendInteractionHold(8);
       }
     }, true);
+    document.addEventListener("focusout", (event) => {
+      const tooltipTarget =
+        event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
+      if (tooltipTarget) {
+        hideTooltip(tooltipTarget);
+      }
+    }, true);
     document.addEventListener("mouseover", (event) => {
+      const tooltipTarget =
+        event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
+      if (tooltipTarget) {
+        showTooltip(tooltipTarget);
+      }
       if (
         event.target &&
         event.target.closest &&
@@ -1173,6 +1687,26 @@ pub fn render_html(refresh_ms: u64) -> String {
         extendInteractionHold(5);
       }
     }, true);
+    document.addEventListener("mouseout", (event) => {
+      const tooltipTarget =
+        event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
+      const relatedTooltip =
+        event.relatedTarget && event.relatedTarget.closest
+          ? event.relatedTarget.closest(".has-tooltip")
+          : null;
+      if (tooltipTarget && relatedTooltip !== tooltipTarget) {
+        hideTooltip(tooltipTarget);
+      }
+    }, true);
+    document.addEventListener("scroll", () => positionTooltip(), true);
+
+    window.addEventListener("resize", () => {
+      positionTooltip();
+      const machineCards = document.getElementById("machine-cards");
+      if (machineCards && machineCards.children.length > 0) {
+        applyMasonryGrid(machineCards);
+      }
+    });
 
     loadDashboard(true);
     setInterval(() => loadDashboard(false), REFRESH_MS);
@@ -1229,7 +1763,7 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
     let critical = snapshot["sla"]["summary"]["critical"].as_u64().unwrap_or(0);
     let unknown = snapshot["sla"]["summary"]["unknown"].as_u64().unwrap_or(0);
     let token_headline = &snapshot["token_budget_report"]["token_budget_report"]["headline"];
-    let status = if critical > 0 {
+    let sla_status = if critical > 0 {
         "critical"
     } else if alert > 0 {
         "alert"
@@ -1238,10 +1772,12 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
     } else {
         "pass"
     };
+    let live_status = live_latency_compare_status(snapshot);
+    let status = combine_headline_statuses(sla_status, live_status);
     json!({
         "status": status,
         "status_label": headline_status_label(status),
-        "status_reason": headline_status_reason(pass, alert, critical, unknown),
+        "status_reason": headline_status_reason(pass, alert, critical, unknown, live_status),
         "captured_at": human_timestamp(captured_at_epoch_ms),
         "summary": format!("SLA сейчас: pass={pass}, alert={alert}, critical={critical}, unknown={unknown}"),
         "token_title": token_headline["title"].as_str().unwrap_or("ещё нет данных"),
@@ -1256,6 +1792,7 @@ fn build_top_cards(snapshot: &Value) -> Vec<Value> {
 
 fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
     let hot_load = &snapshot["latest_retrieval_load_hot"]["load_verification"];
+    let hot_retrieval = &snapshot["latest_retrieval_hot"]["benchmark"];
     let cold_contour = &snapshot["latest_cold_path_benchmark"]["cold_benchmark"];
     let accuracy = &snapshot["latest_retrieval_accuracy"]["accuracy_verification"];
     let thresholds = &snapshot["thresholds"];
@@ -1263,92 +1800,105 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
         .as_u64()
         .zip(hot_load["error_count"].as_u64())
         .map(|(success, errors)| success + errors);
+    let hot_load_scope = format!(
+        "project={} / namespace={} / query={} / execution_mode={}",
+        hot_load["project"].as_str().unwrap_or("ещё нет данных"),
+        hot_load["namespace"].as_str().unwrap_or("ещё нет данных"),
+        hot_load["query"].as_str().unwrap_or("ещё нет данных"),
+        hot_load["execution_mode"]
+            .as_str()
+            .unwrap_or("ещё нет данных"),
+    );
+    let hot_retrieval_scope = format!(
+        "project={} / namespace={} / query={} / disable_cache={}",
+        hot_retrieval["project"]
+            .as_str()
+            .unwrap_or("ещё нет данных"),
+        hot_retrieval["namespace"]
+            .as_str()
+            .unwrap_or("ещё нет данных"),
+        hot_retrieval["query"].as_str().unwrap_or("ещё нет данных"),
+        hot_retrieval["disable_cache"]
+            .as_bool()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "ещё нет данных".to_string()),
+    );
 
     vec![
         compare_table_card(
-            "Быстрый путь под нагрузкой",
-            "Это benchmark-карточка. Здесь нет живой телеметрии текущей сессии: показан только последний сохранённый hot-load прогон по прогретому быстрому пути."
-                .to_string(),
+            "Hot Load Benchmark / latest_retrieval_load_hot",
+            format!(
+                "Контур данных: latest_retrieval_load_hot.load_verification. Scope snapshot: {hot_load_scope}. Это отдельный hot-load прогон по прогретому быстрому пути. Он не равен retrieval.hot_p95_ms и не является живой телеметрией текущей сессии. Burst QPS здесь считается как success_count / wall_clock, а не как целый счётчик за полную секунду. В последнем прогоне это {} запросов за {}.",
+                format_u64(hot_load_sample_count),
+                format_ms(snapshot, hot_load["wall_clock_ms"].as_f64()),
+            ),
             hot_load_benchmark_status(hot_load, thresholds),
             Some(source_label(
-                "Источник: benchmark. Последний сохранённый hot-load verification snapshot; live-данные страницы сюда не подмешиваются",
+                &format!(
+                    "Источник: benchmark snapshot latest_retrieval_load_hot.load_verification. Scope: {hot_load_scope}. Live-данные страницы сюда не подмешиваются"
+                ),
                 hot_load["captured_at_epoch_ms"].as_u64(),
             )),
-            Some("Это отдельный проверочный прогон прогретого пути. Он показывает, какую нагрузку выдержал Amai в benchmark-режиме, а не то, что происходит прямо сейчас в чате.".to_string()),
-            Some(format_optional(hot_load["qps"].as_f64(), |v| format!("{v:.2} qps"))),
+            Some("Это отдельный параллельный load-contour. Он нужен для Burst QPS, worker-ов и error-rate под нагрузкой. Его нельзя один к одному сравнивать с retrieval hot benchmark, который питает SLA `retrieval.hot_p95_ms`.".to_string()),
+            Some(format_burst_qps_table(hot_load["qps"].as_f64())),
             vec![
                 compare_table_row(
-                    "QPS",
-                    "Сколько запросов в секунду выдержал быстрый прогретый путь в отдельном benchmark-прогоне.",
+                    "Burst QPS",
+                    "Средняя скорость внутри короткого benchmark-окна hot-load прогона. Это burst-rate, а не обещание стабильной обычной пропускной способности.",
                     compare_pair(
-                        format_threshold_at_least(
+                        format_burst_qps_threshold(
                             thresholds["load"]["hot_qps"].get("target").and_then(Value::as_f64),
-                            "qps",
-                            0,
+                            ">",
                         ),
-                        format_optional(hot_load["qps"].as_f64(), |v| format!("{v:.2} qps")),
+                        format_burst_qps_table(hot_load["qps"].as_f64()),
                     ),
                 ),
                 compare_table_row(
                     "P50",
                     "Медиана hot benchmark. Обычный уровень задержки в отдельном нагрузочном прогоне.",
-                    compare_pair(
-                        format_threshold_at_most(
-                            thresholds["load"]["hot_benchmark_table"]["target_p50_ms"]
-                                .as_f64(),
-                            "ms",
-                            3,
-                        ),
-                        format_ms(hot_load["p50_ms"].as_f64()),
+                    format_time_compare_pair(
+                        snapshot,
+                        thresholds["load"]["hot_benchmark_table"]["target_p50_ms"].as_f64(),
+                        hot_load["p50_ms"].as_f64(),
+                        "<",
                     ),
                 ),
                 compare_table_row(
                     "P95",
                     "Тяжёлый хвост hot benchmark. Почти все прогретые ответы должны укладываться в эту границу.",
-                    compare_pair(
-                        format_threshold_at_most(
-                            thresholds["load"]["hot_benchmark_table"]["target_p95_ms"]
-                                .as_f64(),
-                            "ms",
-                            3,
-                        ),
-                        format_ms(hot_load["p95_ms"].as_f64()),
+                    format_time_compare_pair(
+                        snapshot,
+                        thresholds["load"]["hot_benchmark_table"]["target_p95_ms"].as_f64(),
+                        hot_load["p95_ms"].as_f64(),
+                        "<",
                     ),
                 ),
                 compare_table_row(
                     "P99",
                     "Редкие тяжёлые выбросы в отдельном hot-load benchmark.",
-                    compare_pair(
-                        format_threshold_at_most(
-                            thresholds["load"]["hot_benchmark_table"]["target_p99_ms"]
-                                .as_f64(),
-                            "ms",
-                            3,
-                        ),
-                        format_ms(hot_load["p99_ms"].as_f64()),
+                    format_time_compare_pair(
+                        snapshot,
+                        thresholds["load"]["hot_benchmark_table"]["target_p99_ms"].as_f64(),
+                        hot_load["p99_ms"].as_f64(),
+                        "<",
                     ),
                 ),
                 compare_table_row(
                     "Max",
                     "Самый тяжёлый одиночный запрос в последнем hot-load benchmark.",
-                    compare_pair(
-                        format_threshold_at_most(
-                            thresholds["load"]["hot_benchmark_table"]["target_max_ms"]
-                                .as_f64(),
-                            "ms",
-                            3,
-                        ),
-                        format_ms(hot_load["max_ms"].as_f64()),
+                    format_time_compare_pair(
+                        snapshot,
+                        thresholds["load"]["hot_benchmark_table"]["target_max_ms"].as_f64(),
+                        hot_load["max_ms"].as_f64(),
+                        "<",
                     ),
                 ),
                 compare_table_row(
                     "Error rate",
                     "Доля ошибок в отдельном hot-load benchmark. Здесь целевой уровень должен быть нулевым.",
                     compare_pair(
-                        format_threshold_at_most(
+                        format_zero_or_at_most_percent(
                             thresholds["load"]["hot_error_rate"].get("target").and_then(Value::as_f64),
-                            "%",
-                            2,
                         ),
                         format_percent(hot_load["error_rate"].as_f64()),
                     ),
@@ -1382,45 +1932,162 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
             ],
         ),
         compare_table_card(
-            "Полный холодный прогон",
-            "Это последний честный end-to-end cold benchmark по реальным репозиториям и query slices.".to_string(),
+            "Hot Retrieval Benchmark / latest_retrieval_hot",
+            format!(
+                "Контур данных: latest_retrieval_hot.benchmark. Scope snapshot: {hot_retrieval_scope}. Это именно источник SLA-метрики retrieval.hot_p95_ms. Это не hot-load benchmark и не живая телеметрия текущей сессии."
+            ),
+            hot_retrieval_benchmark_status(hot_retrieval, thresholds),
+            Some(source_label(
+                &format!(
+                    "Источник: benchmark snapshot latest_retrieval_hot.benchmark. Этот snapshot напрямую кормит SLA retrieval.hot_p95_ms. Scope: {hot_retrieval_scope}"
+                ),
+                hot_retrieval["captured_at_epoch_ms"].as_u64(),
+            )),
+            Some("Это короткий retrieval-бенчмарк одиночного повторного запроса. Он показывает latency самого retrieval-контура и именно его значения идут в SLA `retrieval.hot_p95_ms`.".to_string()),
+            Some(format_ms(snapshot, hot_retrieval["p95_ms"].as_f64())),
+            vec![
+                compare_table_row(
+                    "Burst QPS",
+                    "Средняя скорость внутри короткого retrieval benchmark-окна. Это burst-rate этого контура, а не нагрузочный QPS из hot-load и не SLA-порог.",
+                    compare_pair(
+                        "нет SLA-порога".to_string(),
+                        format_burst_qps_table(hot_retrieval["qps"].as_f64()),
+                    ),
+                ),
+                compare_table_row(
+                    "P50",
+                    "Медиана одиночного повторного retrieval-запроса в benchmark-контуре, который кормит SLA retrieval.hot_p95_ms.",
+                    format_time_compare_pair(
+                        snapshot,
+                        thresholds["retrieval"]["hot_live_table"]["target_p50_ms"].as_f64(),
+                        hot_retrieval["p50_ms"].as_f64(),
+                        "<",
+                    ),
+                ),
+                compare_table_row(
+                    "P95",
+                    "Тяжёлый хвост retrieval hot benchmark. Именно этот показатель используется в SLA retrieval.hot_p95_ms.",
+                    format_time_compare_pair(
+                        snapshot,
+                        thresholds["retrieval"]["hot_live_table"]["target_p95_ms"].as_f64(),
+                        hot_retrieval["p95_ms"].as_f64(),
+                        "<",
+                    ),
+                ),
+                compare_table_row(
+                    "P99",
+                    "Редкие тяжёлые выбросы в retrieval hot benchmark.",
+                    format_time_compare_pair(
+                        snapshot,
+                        thresholds["retrieval"]["hot_live_table"]["target_p99_ms"].as_f64(),
+                        hot_retrieval["p99_ms"].as_f64(),
+                        "<",
+                    ),
+                ),
+                compare_table_row(
+                    "Max",
+                    "Самый тяжёлый одиночный запрос в retrieval hot benchmark.",
+                    format_time_compare_pair(
+                        snapshot,
+                        thresholds["retrieval"]["hot_live_table"]["target_max_ms"].as_f64(),
+                        hot_retrieval["max_ms"].as_f64(),
+                        "<",
+                    ),
+                ),
+                compare_table_row(
+                    "Итерации",
+                    "Сколько измерений вошло в последний retrieval hot benchmark snapshot.",
+                    compare_pair(
+                        format_threshold_at_least_or_equal(
+                            thresholds["retrieval"]["hot_benchmark_table"]["target_iterations"]
+                                .as_f64(),
+                            "",
+                            0,
+                        ),
+                        format_u64(hot_retrieval["iterations"].as_u64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Warmup",
+                    "Сколько прогревочных запросов было выполнено перед измерением retrieval hot benchmark.",
+                    compare_pair(
+                        format_threshold_at_least_or_equal(
+                            thresholds["retrieval"]["hot_benchmark_table"]["target_warmup"]
+                                .as_f64(),
+                            "",
+                            0,
+                        ),
+                        format_u64(hot_retrieval["warmup"].as_u64()),
+                    ),
+                ),
+            ],
+        ),
+        compare_table_card(
+            "Cold End-to-End Benchmark / latest_cold_path_benchmark",
+            "Контур данных: latest_cold_path_benchmark.cold_benchmark. Это последний честный end-to-end cold benchmark по реальным репозиториям и query slices.".to_string(),
             cold_contour_status(snapshot),
             Some(source_label(
-                "Источник: benchmark. Последний сохранённый end-to-end cold benchmark; live-данные страницы сюда не подмешиваются",
+                "Источник: benchmark snapshot latest_cold_path_benchmark.cold_benchmark. Live-данные страницы сюда не подмешиваются",
                 cold_contour["captured_at_epoch_ms"].as_u64(),
             )),
             Some("Это проверка первого запроса без прогрева. Она меряет весь путь ответа целиком: от выбора нужного маршрута до сборки готового контекста для ответа.".to_string()),
-            Some(format_ms(cold_contour["machine_readable_summary"]["p95"].as_f64())),
+            Some(format_ms(
+                snapshot,
+                cold_contour["machine_readable_summary"]["p95"].as_f64(),
+            )),
             vec![
+                compare_table_row(
+                    "Cold P50",
+                    "Цель и факт по обычному уровню задержки в полном cold end-to-end пути.",
+                    format_time_compare_pair(
+                        snapshot,
+                        cold_contour["profile"]["target_p50_ms"].as_f64(),
+                        cold_contour["machine_readable_summary"]["p50"].as_f64(),
+                        "<",
+                    ),
+                ),
                 compare_table_row(
                     "Cold P95",
                     "Цель и факт по p95 в полном cold end-to-end пути.",
-                    compare_pair(
-                        format_ms(cold_contour["profile"]["target_p95_ms"].as_f64()),
-                        format_ms(cold_contour["machine_readable_summary"]["p95"].as_f64()),
+                    format_time_compare_pair(
+                        snapshot,
+                        cold_contour["profile"]["target_p95_ms"].as_f64(),
+                        cold_contour["machine_readable_summary"]["p95"].as_f64(),
+                        "<",
                     ),
                 ),
                 compare_table_row(
                     "Cold P99",
                     "Цель и факт по p99 в полном cold end-to-end пути.",
-                    compare_pair(
-                        format_ms(cold_contour["profile"]["target_p99_ms"].as_f64()),
-                        format_ms(cold_contour["machine_readable_summary"]["p99"].as_f64()),
+                    format_time_compare_pair(
+                        snapshot,
+                        cold_contour["profile"]["target_p99_ms"].as_f64(),
+                        cold_contour["machine_readable_summary"]["p99"].as_f64(),
+                        "<",
                     ),
                 ),
                 compare_table_row(
                     "Cold Max",
                     "Цель и факт по самому тяжёлому выбросу в cold benchmark.",
-                    compare_pair(
-                        format_ms(cold_contour["profile"]["target_max_ms"].as_f64()),
-                        format_ms(cold_contour["machine_readable_summary"]["max"].as_f64()),
+                    format_time_compare_pair(
+                        snapshot,
+                        cold_contour["profile"]["target_max_ms"].as_f64(),
+                        cold_contour["machine_readable_summary"]["max"].as_f64(),
+                        "<",
                     ),
                 ),
                 compare_table_row(
                     "Precision",
                     "Точность: насколько чисто найденный контекст оказался релевантным.",
                     compare_pair(
-                        format_ratio_percent(cold_contour["profile"]["min_precision"].as_f64()),
+                        format_threshold_value(
+                            cold_contour["profile"]["min_precision"]
+                                .as_f64()
+                                .map(|value| value * 100.0),
+                            ">=",
+                            "%",
+                            2,
+                        ),
                         format_ratio_percent(cold_contour["machine_readable_summary"]["precision"].as_f64()),
                     ),
                 ),
@@ -1428,7 +2095,14 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     "Recall",
                     "Полнота: насколько полно система нашла нужные целевые данные.",
                     compare_pair(
-                        format_ratio_percent(cold_contour["profile"]["min_recall"].as_f64()),
+                        format_threshold_value(
+                            cold_contour["profile"]["min_recall"]
+                                .as_f64()
+                                .map(|value| value * 100.0),
+                            ">=",
+                            "%",
+                            2,
+                        ),
                         format_ratio_percent(cold_contour["machine_readable_summary"]["recall"].as_f64()),
                     ),
                 ),
@@ -1436,7 +2110,14 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     "Hit rate",
                     "Доля запросов, где система действительно попала в нужную цель.",
                     compare_pair(
-                        format_ratio_percent(cold_contour["profile"]["min_target_hit_rate"].as_f64()),
+                        format_threshold_value(
+                            cold_contour["profile"]["min_target_hit_rate"]
+                                .as_f64()
+                                .map(|value| value * 100.0),
+                            ">=",
+                            "%",
+                            2,
+                        ),
                         format_ratio_percent(cold_contour["machine_readable_summary"]["hit_rate"].as_f64()),
                     ),
                 ),
@@ -1444,7 +2125,11 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     "Выборка",
                     "Сколько cold-запросов вошло в итоговый benchmark.",
                     compare_pair(
-                        "эталон не задан".to_string(),
+                        format_threshold_at_least_or_equal(
+                            cold_contour["profile"]["min_sample_count"].as_f64(),
+                            "",
+                            0,
+                        ),
                         format_u64(cold_contour["machine_readable_summary"]["sample_count"].as_u64()),
                     ),
                 ),
@@ -1452,7 +2137,11 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     "Repo count",
                     "Сколько разных репозиториев вошло в последний cold benchmark.",
                     compare_pair(
-                        "эталон не задан".to_string(),
+                        format_threshold_at_least_or_equal(
+                            cold_contour["profile"]["min_repo_count"].as_f64(),
+                            "",
+                            0,
+                        ),
                         format_u64(cold_contour["machine_readable_summary"]["repo_count"].as_u64()),
                     ),
                 ),
@@ -1460,67 +2149,135 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     "Query slices",
                     "Сколько разных типов запросов покрывает последний cold benchmark.",
                     compare_pair(
-                        "эталон не задан".to_string(),
+                        format_threshold_at_least_or_equal(
+                            cold_contour["profile"]["min_query_slice_count"].as_f64(),
+                            "",
+                            0,
+                        ),
                         format_u64(cold_contour["machine_readable_summary"]["query_slice_count"].as_u64()),
                     ),
                 ),
                 compare_table_row(
                     "Duration",
                     "Сколько длился полный последний cold benchmark.",
-                    compare_pair(
-                        "эталон не задан".to_string(),
-                        format_optional(
-                            cold_contour["machine_readable_summary"]["duration"].as_f64(),
-                            |value| format!("{value:.2} сек."),
-                        ),
+                    format_seconds_compare_pair(
+                        snapshot,
+                        cold_contour["profile"]["max_duration_seconds"].as_f64(),
+                        cold_contour["machine_readable_summary"]["duration"].as_f64(),
+                        "<",
                     ),
                 ),
-            ],
-        ),
-        compare_table_card(
-            "Точность и изоляция",
-            "Этот блок не потоковый: он показывает последний сохранённый accuracy/isolation verification contour.".to_string(),
-            worst_status(
-                status_for_metric_prefix(snapshot, "accuracy.cross_project_leakage"),
-                worst_status(
-                    status_for_metric_prefix(snapshot, "accuracy.symbol_precision"),
-                    status_for_metric_prefix(snapshot, "accuracy.semantic_precision"),
-                ),
-            ),
-            Some(source_label(
-                "Источник: benchmark. Последний сохранённый retrieval accuracy verification; live-данные страницы сюда не подмешиваются",
-                accuracy["captured_at_epoch_ms"].as_u64(),
-            )),
-            Some("Проверка точности и изоляции показывает, не течёт ли один проект в другой и насколько точно Amai попадает в нужные символы и семантику.".to_string()),
-            Some(format_f64_count(accuracy["cross_project_leakage"].as_f64())),
-            vec![
                 compare_table_row(
                     "Leakage",
-                    "Для строгой проектной изоляции утечки между проектами должны быть равны нулю.",
+                    "Сколько cross-project утечек поймал cold benchmark. Для строгой изоляции здесь должно оставаться ровно 0.",
                     compare_pair(
-                        "0".to_string(),
-                        format_f64_count(accuracy["cross_project_leakage"].as_f64()),
+                        format_threshold_value(
+                            cold_contour["profile"]["max_leakage"].as_f64(),
+                            "=",
+                            "",
+                            0,
+                        ),
+                        format_u64(cold_contour["machine_readable_summary"]["leakage"].as_u64()),
                     ),
                 ),
                 compare_table_row(
-                    "Symbol precision",
-                    "Насколько точно retrieval попадает в нужные символы, функции и сущности.",
+                    "Error rate",
+                    "Доля ошибок в последнем полном cold benchmark.",
                     compare_pair(
-                        format_ratio_percent(thresholds["accuracy"]["symbol_precision"]["target"].as_f64()),
-                        format_ratio_percent(accuracy["symbol_precision"].as_f64()),
-                    ),
-                ),
-                compare_table_row(
-                    "Semantic precision",
-                    "Насколько точно семантический слой попадает в правильный контекст.",
-                    compare_pair(
-                        format_ratio_percent(thresholds["accuracy"]["semantic_precision"]["target"].as_f64()),
-                        format_ratio_percent(accuracy["semantic_precision"].as_f64()),
+                        format_zero_or_at_most_percent(
+                            cold_contour["profile"]["max_error_rate"]
+                                .as_f64()
+                                .map(|value| value * 100.0),
+                        ),
+                        format_percent(cold_contour["machine_readable_summary"]["error_rate"].as_f64()),
                     ),
                 ),
             ],
         ),
+        with_table_orientation(
+            with_extra_class(
+                compare_table_card(
+                    "Accuracy / Isolation Verification / latest_retrieval_accuracy",
+                    "Контур данных: latest_retrieval_accuracy.accuracy_verification. Этот блок не потоковый: он показывает последний сохранённый accuracy/isolation verification contour. Карточка развернута по ширине, чтобы accuracy и isolation читались рядом и не сжимали остальные benchmark-блоки."
+                        .to_string(),
+                    worst_status(
+                        status_for_metric_prefix(snapshot, "accuracy.cross_project_leakage"),
+                        worst_status(
+                            status_for_metric_prefix(snapshot, "accuracy.symbol_precision"),
+                            status_for_metric_prefix(snapshot, "accuracy.semantic_precision"),
+                        ),
+                    ),
+                    Some(source_label(
+                        "Источник: benchmark snapshot latest_retrieval_accuracy.accuracy_verification. Live-данные страницы сюда не подмешиваются",
+                        accuracy["captured_at_epoch_ms"].as_u64(),
+                    )),
+                    Some("Проверка точности и изоляции показывает, не течёт ли один проект в другой и насколько точно Amai попадает в нужные символы и семантику.".to_string()),
+                    Some(format_f64_count(accuracy["cross_project_leakage"].as_f64())),
+                    vec![
+                        compare_table_row(
+                            "Leakage",
+                            "Для строгой проектной изоляции утечки между проектами должны быть равны нулю.",
+                            compare_pair(
+                                "0".to_string(),
+                                format_f64_count(accuracy["cross_project_leakage"].as_f64()),
+                            ),
+                        ),
+                        compare_table_row(
+                            "Symbol precision",
+                            "Насколько точно retrieval попадает в нужные символы, функции и сущности.",
+                            compare_pair(
+                                format_ratio_percent(
+                                    thresholds["accuracy"]["symbol_precision"]["target"].as_f64(),
+                                ),
+                                format_ratio_percent(accuracy["symbol_precision"].as_f64()),
+                            ),
+                        ),
+                        compare_table_row(
+                            "Semantic precision",
+                            "Насколько точно семантический слой попадает в правильный контекст.",
+                            compare_pair(
+                                format_ratio_percent(
+                                    thresholds["accuracy"]["semantic_precision"]["target"].as_f64(),
+                                ),
+                                format_ratio_percent(accuracy["semantic_precision"].as_f64()),
+                            ),
+                        ),
+                    ],
+                ),
+                "benchmark-span-full",
+            ),
+            "transposed",
+        ),
     ]
+}
+
+fn hot_retrieval_benchmark_status(hot_retrieval: &Value, thresholds: &Value) -> &'static str {
+    combine_statuses(&[
+        status_strict_less_than(
+            hot_retrieval["p50_ms"].as_f64(),
+            thresholds["retrieval"]["hot_live_table"]["target_p50_ms"].as_f64(),
+        ),
+        status_strict_less_than(
+            hot_retrieval["p95_ms"].as_f64(),
+            thresholds["retrieval"]["hot_live_table"]["target_p95_ms"].as_f64(),
+        ),
+        status_strict_less_than(
+            hot_retrieval["p99_ms"].as_f64(),
+            thresholds["retrieval"]["hot_live_table"]["target_p99_ms"].as_f64(),
+        ),
+        status_strict_less_than(
+            hot_retrieval["max_ms"].as_f64(),
+            thresholds["retrieval"]["hot_live_table"]["target_max_ms"].as_f64(),
+        ),
+        status_at_least_or_equal(
+            hot_retrieval["iterations"].as_f64(),
+            thresholds["retrieval"]["hot_benchmark_table"]["target_iterations"].as_f64(),
+        ),
+        status_at_least_or_equal(
+            hot_retrieval["warmup"].as_f64(),
+            thresholds["retrieval"]["hot_benchmark_table"]["target_warmup"].as_f64(),
+        ),
+    ])
 }
 
 fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
@@ -1534,6 +2291,13 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let session_percent = current_session["verified_effective_savings_pct"].as_f64();
     let session_started = current_session["started_at_epoch_ms"].as_u64();
     let session_ended = current_session["ended_at_epoch_ms"].as_u64();
+    let session_raw_baseline = current_session["total_naive_tokens"]
+        .as_u64()
+        .or_else(|| current_session["baseline_tokens"].as_u64());
+    let session_raw_delivered = current_session["total_context_tokens"]
+        .as_u64()
+        .or_else(|| current_session["delivered_tokens"].as_u64());
+    let session_raw_percent = current_session["effective_savings_pct"].as_f64();
     let lifetime_events_total = lifetime["events_total"].as_u64().unwrap_or(0);
     let lifetime_events = lifetime["counted_events"].as_u64().unwrap_or(0);
     let lifetime_saved = lifetime["verified_effective_saved_tokens"].as_i64();
@@ -1582,11 +2346,28 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                     format_u64(Some(session_answer_count)),
                     format_percent(session_answer_rate),
                     format_percent(session_answer_percent)
-                )
+                ) + &format!(" {}", verified_vs_excluded_sentence(current_session))
+                    + &format!(
+                        " {} {}",
+                        raw_savings_sentence(
+                            session_raw_baseline,
+                            session_raw_delivered,
+                            session_raw_percent
+                        ),
+                        client_budget_disclaimer()
+                    )
             } else if session_events_total > 0 {
                 format!(
                     "В этой сессии уже есть Amai-запросы: {}. Но они ещё не дали проверенную выборку, поэтому главный KPI по сессии пока не накоплен.",
                     format_u64(Some(session_events_total))
+                ) + &format!(
+                    " {} {}",
+                    raw_savings_sentence(
+                        session_raw_baseline,
+                        session_raw_delivered,
+                        session_raw_percent
+                    ),
+                    client_budget_disclaimer()
                 )
             } else {
                 "В текущей непрерывной сессии Amai ещё не накопил ни одного учтённого запроса, поэтому реальную экономию пока рано показывать.".to_string()
@@ -1899,7 +2680,9 @@ fn build_accelerator_cards(accelerators: &[AcceleratorSummary]) -> Vec<Value> {
         metric_row(
             "Память",
             format_optional(primary.total_vram_gib, |value| format!("{value:.2} GiB")),
-            Some("Полный объём видеопамяти или локальной памяти ускорителя, если provider дал это поле."),
+            Some(
+                "Полный объём видеопамяти или локальной памяти ускорителя, если provider дал это поле.",
+            ),
         ),
         metric_row(
             "Использовано памяти",
@@ -1919,7 +2702,9 @@ fn build_accelerator_cards(accelerators: &[AcceleratorSummary]) -> Vec<Value> {
         metric_row(
             "Мощность",
             format_optional(primary.power_watts, |value| format!("{value:.2} W")),
-            Some("Текущее энергопотребление основного ускорителя, если provider умеет его отдавать."),
+            Some(
+                "Текущее энергопотребление основного ускорителя, если provider умеет его отдавать.",
+            ),
         ),
     ];
     if additional_count > 0 {
@@ -1987,7 +2772,7 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
     vec![
         card_with_rows(
             "PostgreSQL",
-            format_ms(snapshot["postgres"]["query_probe_p95_ms"].as_f64()),
+            format_ms(snapshot, snapshot["postgres"]["query_probe_p95_ms"].as_f64()),
             "Живой probe базы метаданных, policy, проектов и continuity-снимков.".to_string(),
             combine_statuses(&[
                 status_for_metric_name(snapshot, "postgres.query_probe_p95_ms"),
@@ -2000,12 +2785,16 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
             vec![
                 metric_row(
                     "Эталон probe P95",
-                    format_ms(snapshot["thresholds"]["postgres"]["query_probe_p95_ms"]["target"].as_f64()),
+                    format_ms(
+                        snapshot,
+                        snapshot["thresholds"]["postgres"]["query_probe_p95_ms"]["target"]
+                            .as_f64(),
+                    ),
                     Some("Целевой p95 для короткого живого PostgreSQL probe."),
                 ),
                 metric_row(
                     "Измерено probe P95",
-                    format_ms(snapshot["postgres"]["query_probe_p95_ms"].as_f64()),
+                    format_ms(snapshot, snapshot["postgres"]["query_probe_p95_ms"].as_f64()),
                     Some("Фактический p95 живого PostgreSQL probe на этом refresh."),
                 ),
                 metric_row(
@@ -2081,7 +2870,7 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
         benchmark_qdrant_live_card(snapshot),
         card_with_rows(
             "NATS / JetStream",
-            format_ms(snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
+            format_ms(snapshot, snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
             "Живой probe очереди событий и фонового work plane.".to_string(),
             combine_statuses(&[
                 status_for_metric_name(snapshot, "nats.publish_probe_p95_ms"),
@@ -2093,12 +2882,15 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
             vec![
                 metric_row(
                     "Эталон publish P95",
-                    format_ms(snapshot["thresholds"]["nats"]["publish_probe_p95_ms"]["target"].as_f64()),
+                    format_ms(
+                        snapshot,
+                        snapshot["thresholds"]["nats"]["publish_probe_p95_ms"]["target"].as_f64(),
+                    ),
                     Some("Целевой p95 для живого publish probe."),
                 ),
                 metric_row(
                     "Измерено publish P95",
-                    format_ms(snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
+                    format_ms(snapshot, snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
                     Some("Фактический p95 для живого publish probe на этом refresh."),
                 ),
                 metric_row(
@@ -2156,7 +2948,11 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
         "не настроено".to_string()
     };
     let snapshot_mode = !active;
-    let live_or_snapshot_label = if snapshot_mode { "Последний срез" } else { "" };
+    let live_or_snapshot_label = if snapshot_mode {
+        "Последний срез"
+    } else {
+        ""
+    };
     let note = if active && available {
         "Живые системные показатели отдельного Qdrant, который сейчас занят внешним benchmark-прогоном. Эти числа не смешиваются с Amai live.".to_string()
     } else if !active && available {
@@ -2273,7 +3069,7 @@ fn build_warnings(snapshot: &Value) -> Vec<String> {
         .flatten()
         .filter(|check| check["status"].as_str().unwrap_or("unknown") != "pass")
     {
-        warnings.push(humanize_check(check));
+        warnings.push(humanize_check(snapshot, check));
     }
     warnings
 }
@@ -2293,8 +3089,8 @@ fn build_glossary() -> Vec<Value> {
             "meaning": "P50 — середина выборки. P95 — почти все запросы, кроме тяжёлого хвоста. P99 — ещё более строгий хвост. Max — самый тяжёлый одиночный выброс."
         }),
         json!({
-            "term": "QPS",
-            "meaning": "Сколько запросов в секунду выдержала система в отдельном нагрузочном прогоне. Это не live поток страницы, а результат последнего benchmark."
+            "term": "Burst QPS",
+            "meaning": "Средняя скорость внутри конкретного benchmark-окна. Это не live поток страницы и не обещание стабильной обычной пропускной способности."
         }),
         json!({
             "term": "Recall",
@@ -2448,6 +3244,16 @@ fn with_extra_class(mut card: Value, extra_class: &str) -> Value {
     card
 }
 
+fn with_table_orientation(mut card: Value, table_orientation: &str) -> Value {
+    if let Some(object) = card.as_object_mut() {
+        object.insert(
+            "table_orientation".to_string(),
+            Value::from(table_orientation),
+        );
+    }
+    card
+}
+
 fn live_latency_compare_card(snapshot: &Value) -> Value {
     let hot = latency_slice(snapshot, "hot");
     let cold = latency_slice(snapshot, "cold");
@@ -2459,37 +3265,19 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
         .unwrap_or_default();
     let hot_has_data = hot_sample_count > 0;
     let cold_has_data = cold_sample_count > 0;
-    let hot_thresholds = live_latency_thresholds(snapshot, "hot");
-    let cold_thresholds = live_latency_thresholds(snapshot, "cold");
-    let hot_status = if hot_has_data {
-        status_from_threshold(
-            hot.and_then(|slice| slice["p95_latency_ms"].as_f64()),
-            hot_thresholds.0,
-            hot_thresholds.1,
-            hot_thresholds.2,
-        )
-    } else {
-        "unknown"
-    };
-    let cold_status = if cold_has_data {
-        status_from_threshold(
-            cold.and_then(|slice| slice["p95_latency_ms"].as_f64()),
-            cold_thresholds.0,
-            cold_thresholds.1,
-            cold_thresholds.2,
-        )
-    } else {
-        "unknown"
-    };
     let hot_targets = live_latency_table_targets(snapshot, "hot");
     let cold_targets = live_latency_table_targets(snapshot, "cold");
+    let hot_assessment = assess_live_latency_slice(hot, &hot_targets);
+    let cold_assessment = assess_live_latency_slice(cold, &cold_targets);
+    let overall_status =
+        combine_live_compare_status(&[hot_assessment.status, cold_assessment.status]);
 
     json!({
         "kind": "live_compare",
         "title": "Как Amai отвечает сейчас",
         "title_tooltip": "Это живое сравнение двух пользовательских режимов: повторный запрос по уже прогретому кэшу и первый запрос без прогрева. Здесь нет benchmark-снимков — только текущая сессия.",
-        "status": combine_statuses(&[hot_status, cold_status]),
-        "status_label": status_label(combine_statuses(&[hot_status, cold_status])),
+        "status": overall_status,
+        "status_label": status_label(overall_status),
         "source_label": "Источник: живая выборка текущей сессии, обновляется при новых запросах. Benchmark-данные сюда не подмешиваются.",
         "note": "Сверху показана медиана, то есть обычный уровень ответа в каждом режиме. Ниже — одна общая таблица, чтобы сравнить повторный и первый запрос без дублирования отдельных карточек.",
         "metrics": [
@@ -2497,37 +3285,21 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
                 "label": "Повторный запрос",
                 "tooltip": "Это уже прогретый путь: пользователь повторяет похожий запрос, а Amai не стартует с пустого места.",
                 "value": if hot_has_data {
-                    format_ms(hot.and_then(|slice| slice["p50_latency_ms"].as_f64()))
+                    format_ms(snapshot, hot.and_then(|slice| slice["p50_latency_ms"].as_f64()))
                 } else {
                     "ещё нет данных".to_string()
                 },
-                "note": if hot_has_data {
-                    format!(
-                        "Статус: {}. Живая выборка: {}.",
-                        status_label(hot_status),
-                        format_u64(Some(hot_sample_count))
-                    )
-                } else {
-                    "В этой сессии ещё не накопилась живая hot-выборка.".to_string()
-                }
+                "note": hot_assessment.note
             },
             {
                 "label": "Первый запрос",
                 "tooltip": "Это первый запрос без fast-cache и без прогрева. Он всегда тяжелее и лучше показывает реальную цену холодного старта.",
                 "value": if cold_has_data {
-                    format_ms(cold.and_then(|slice| slice["p50_latency_ms"].as_f64()))
+                    format_ms(snapshot, cold.and_then(|slice| slice["p50_latency_ms"].as_f64()))
                 } else {
                     "ещё нет данных".to_string()
                 },
-                "note": if cold_has_data {
-                    format!(
-                        "Статус: {}. Живая выборка: {}.",
-                        status_label(cold_status),
-                        format_u64(Some(cold_sample_count))
-                    )
-                } else {
-                    "В этой сессии ещё не накопилась живая cold-выборка.".to_string()
-                }
+                "note": cold_assessment.note
             }
         ],
         "table": {
@@ -2543,22 +3315,22 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
                 {
                     "label": "Повторный запрос — эталон",
                     "tooltip": "Это фиксированные цели для прогретого повторного запроса. Они не зависят от текущей сессии и всегда должны быть заполнены.",
-                    "values": target_values(&hot_targets)
+                    "values": target_values(snapshot, &hot_targets)
                 },
                 {
                     "label": "Повторный запрос — сейчас",
                     "tooltip": "Текущая живая hot-выборка этой сессии.",
-                    "values": compare_values(hot, hot_sample_count)
+                    "values": compare_values(snapshot, hot, hot_sample_count)
                 },
                 {
                     "label": "Первый запрос — эталон",
                     "tooltip": "Это фиксированные цели для первого запроса без прогрева. Они не зависят от текущей сессии и всегда должны быть заполнены.",
-                    "values": target_values(&cold_targets)
+                    "values": target_values(snapshot, &cold_targets)
                 },
                 {
                     "label": "Первый запрос — сейчас",
                     "tooltip": "Текущая живая cold-выборка этой сессии.",
-                    "values": compare_values(cold, cold_sample_count)
+                    "values": compare_values(snapshot, cold, cold_sample_count)
                 }
             ]
         }
@@ -2588,7 +3360,7 @@ fn compare_table_card(
             "columns": [
                 { "label": "Метрика", "tooltip": "Что именно измерялось в этом проверочном прогоне." },
                 { "label": "Эталон", "tooltip": "Фиксированная целевая планка. Она не зависит от текущей сессии и не меняется от запроса к запросу." },
-                { "label": "Тестовые данные", "tooltip": "Фактический результат последнего сохранённого benchmark-прогона." }
+                { "label": "Тестовые\nданные", "tooltip": "Фактический результат последнего сохранённого benchmark-прогона." }
             ],
             "rows": rows,
         }
@@ -2717,7 +3489,15 @@ fn status_at_most_or_equal(current: Option<f64>, target: Option<f64>) -> &'stati
     }
 }
 
-fn compare_values(slice: Option<&Value>, sample_count: u64) -> Vec<String> {
+fn status_at_least_or_equal(current: Option<f64>, target: Option<f64>) -> &'static str {
+    match (current, target) {
+        (Some(current), Some(target)) if current >= target => "pass",
+        (Some(_), Some(_)) => "critical",
+        _ => "unknown",
+    }
+}
+
+fn compare_values(snapshot: &Value, slice: Option<&Value>, sample_count: u64) -> Vec<String> {
     if sample_count == 0 {
         return vec![
             "ещё нет данных".to_string(),
@@ -2728,10 +3508,22 @@ fn compare_values(slice: Option<&Value>, sample_count: u64) -> Vec<String> {
         ];
     }
     vec![
-        format_ms(slice.and_then(|value| value["p50_latency_ms"].as_f64())),
-        format_ms(slice.and_then(|value| value["p95_latency_ms"].as_f64())),
-        format_ms(slice.and_then(|value| value["p99_latency_ms"].as_f64())),
-        format_ms(slice.and_then(|value| value["max_latency_ms"].as_f64())),
+        format_ms(
+            snapshot,
+            slice.and_then(|value| value["p50_latency_ms"].as_f64()),
+        ),
+        format_ms(
+            snapshot,
+            slice.and_then(|value| value["p95_latency_ms"].as_f64()),
+        ),
+        format_ms(
+            snapshot,
+            slice.and_then(|value| value["p99_latency_ms"].as_f64()),
+        ),
+        format_ms(
+            snapshot,
+            slice.and_then(|value| value["max_latency_ms"].as_f64()),
+        ),
         format_u64(Some(sample_count)),
     ]
 }
@@ -2743,6 +3535,11 @@ struct LiveLatencyTableTargets {
     p99_ms: f64,
     max_ms: f64,
     sample_count: u64,
+}
+
+struct LiveLatencySliceAssessment {
+    status: &'static str,
+    note: String,
 }
 
 fn live_latency_table_targets(snapshot: &Value, state: &str) -> LiveLatencyTableTargets {
@@ -2760,12 +3557,12 @@ fn live_latency_table_targets(snapshot: &Value, state: &str) -> LiveLatencyTable
     }
 }
 
-fn target_values(targets: &LiveLatencyTableTargets) -> Vec<String> {
+fn target_values(snapshot: &Value, targets: &LiveLatencyTableTargets) -> Vec<String> {
     vec![
-        format_target_ms("<", targets.p50_ms),
-        format_target_ms("<", targets.p95_ms),
-        format_target_ms("<", targets.p99_ms),
-        format_target_ms("<", targets.max_ms),
+        format_time_threshold(snapshot, Some(targets.p50_ms), "<"),
+        format_time_threshold(snapshot, Some(targets.p95_ms), "<"),
+        format_time_threshold(snapshot, Some(targets.p99_ms), "<"),
+        format_time_threshold(snapshot, Some(targets.max_ms), "<"),
         format_target_u64(">", targets.sample_count),
     ]
 }
@@ -2788,47 +3585,165 @@ fn headline_status_label(status: &str) -> &'static str {
     }
 }
 
-fn headline_status_reason(pass: u64, alert: u64, critical: u64, unknown: u64) -> String {
-    if critical > 0 {
-        format!("Критичных проверок: {critical}. Предупреждений: {alert}.")
+fn headline_status_reason(
+    pass: u64,
+    alert: u64,
+    critical: u64,
+    unknown: u64,
+    live_status: &str,
+) -> String {
+    let mut base = if critical > 0 {
+        format!("Критичных SLA-проверок: {critical}. Предупреждений: {alert}.")
     } else if alert > 0 {
-        format!("Предупреждений: {alert}. Критичных проверок нет.")
+        format!("SLA-предупреждений: {alert}. Критичных SLA-проверок нет.")
     } else if unknown > 0 {
-        format!("Неопределённых проверок: {unknown}. Остальные зелёные: {pass}.")
+        format!("Неопределённых SLA-проверок: {unknown}. Остальные зелёные: {pass}.")
     } else {
-        format!("Все проверки зелёные: {pass}.")
+        format!("Все SLA-проверки зелёные: {pass}.")
+    };
+
+    match live_status {
+        "critical" => {
+            base.push_str(" Живой пользовательский поток сейчас в критичном состоянии.");
+        }
+        "alert" => {
+            base.push_str(" Живой пользовательский поток сейчас требует внимания.");
+        }
+        "unknown" => {
+            base.push_str(" По живому пользовательскому потоку пока недостаточно данных.");
+        }
+        _ => {}
+    }
+
+    base
+}
+
+fn assess_live_latency_slice(
+    slice: Option<&Value>,
+    targets: &LiveLatencyTableTargets,
+) -> LiveLatencySliceAssessment {
+    let Some(slice) = slice else {
+        return LiveLatencySliceAssessment {
+            status: "unknown",
+            note: "В этой сессии ещё не накопилась живая выборка для этого режима.".to_string(),
+        };
+    };
+
+    let sample_count = slice["sample_count"].as_u64().unwrap_or_default();
+    if sample_count == 0 {
+        return LiveLatencySliceAssessment {
+            status: "unknown",
+            note: "В этой сессии ещё не накопилась живая выборка для этого режима.".to_string(),
+        };
+    }
+
+    let metrics = [
+        ("P50", slice["p50_latency_ms"].as_f64(), targets.p50_ms),
+        ("P95", slice["p95_latency_ms"].as_f64(), targets.p95_ms),
+        ("P99", slice["p99_latency_ms"].as_f64(), targets.p99_ms),
+        ("Max", slice["max_latency_ms"].as_f64(), targets.max_ms),
+    ];
+
+    let missing_metrics = metrics
+        .iter()
+        .filter_map(|(label, value, _)| value.is_none().then_some(*label))
+        .collect::<Vec<_>>();
+    if !missing_metrics.is_empty() {
+        return LiveLatencySliceAssessment {
+            status: "unknown",
+            note: format!(
+                "Часть живых значений ещё не собрана: {}.",
+                missing_metrics.join(", ")
+            ),
+        };
+    }
+
+    let failed_metrics = metrics
+        .iter()
+        .filter_map(|(label, value, target)| {
+            (!value.is_some_and(|value| value < *target)).then_some(*label)
+        })
+        .collect::<Vec<_>>();
+    let sample_ok = sample_count > targets.sample_count;
+
+    if !sample_ok {
+        return LiveLatencySliceAssessment {
+            status: "alert",
+            note: if failed_metrics.is_empty() {
+                format!(
+                    "По задержке всё хорошо, но выборка ещё мала: {} из > {}.",
+                    format_u64(Some(sample_count)),
+                    format_u64(Some(targets.sample_count))
+                )
+            } else {
+                format!(
+                    "Пока рано считать режим зелёным: выборка ещё мала ({} из > {}), а текущие значения ещё не лучше эталона по {}.",
+                    format_u64(Some(sample_count)),
+                    format_u64(Some(targets.sample_count)),
+                    failed_metrics.join(", ")
+                )
+            },
+        };
+    }
+
+    if !failed_metrics.is_empty() {
+        return LiveLatencySliceAssessment {
+            status: "critical",
+            note: format!(
+                "Эталон уже честно не выполняется по {}. Живая выборка: {}.",
+                failed_metrics.join(", "),
+                format_u64(Some(sample_count))
+            ),
+        };
+    }
+
+    LiveLatencySliceAssessment {
+        status: "pass",
+        note: format!(
+            "Эталон выдержан. Живая выборка: {}.",
+            format_u64(Some(sample_count))
+        ),
     }
 }
 
-fn live_latency_thresholds(snapshot: &Value, state: &str) -> (f64, f64, f64) {
-    let key = if state == "hot" {
-        "hot_live_p95_ms"
-    } else {
-        "cold_live_p95_ms"
-    };
-    let thresholds = &snapshot["thresholds"]["retrieval"][key];
-    (
-        thresholds["target"].as_f64().unwrap_or(0.0),
-        thresholds["alert"].as_f64().unwrap_or(f64::INFINITY),
-        thresholds["critical"].as_f64().unwrap_or(f64::INFINITY),
-    )
+fn live_latency_compare_status(snapshot: &Value) -> &'static str {
+    let hot_targets = live_latency_table_targets(snapshot, "hot");
+    let cold_targets = live_latency_table_targets(snapshot, "cold");
+    let hot_status = assess_live_latency_slice(latency_slice(snapshot, "hot"), &hot_targets).status;
+    let cold_status =
+        assess_live_latency_slice(latency_slice(snapshot, "cold"), &cold_targets).status;
+    combine_live_compare_status(&[hot_status, cold_status])
 }
 
-fn status_from_threshold(
-    value: Option<f64>,
-    target: f64,
-    alert: f64,
-    _critical: f64,
-) -> &'static str {
-    let Some(value) = value else {
-        return "unknown";
-    };
-    if value <= target {
-        "pass"
-    } else if value <= alert {
-        "alert"
-    } else {
-        "critical"
+fn combine_live_compare_status(statuses: &[&str]) -> &'static str {
+    if statuses.contains(&"critical") {
+        return "critical";
+    }
+    if statuses.contains(&"alert") {
+        return "alert";
+    }
+    if statuses.iter().all(|status| *status == "pass") {
+        return "pass";
+    }
+    "unknown"
+}
+
+fn combine_headline_statuses(sla_status: &str, live_status: &str) -> &'static str {
+    match live_status {
+        "critical" => "critical",
+        "alert" => {
+            if sla_status == "critical" {
+                "critical"
+            } else {
+                "alert"
+            }
+        }
+        _ => match sla_status {
+            "pass" => "pass",
+            "alert" => "alert",
+            "critical" => "critical",
+            _ => "unknown",
+        },
     }
 }
 
@@ -2880,6 +3795,77 @@ fn recovery_sentence(median_recovery_tokens: Option<f64>) -> String {
         Some(_) => "Доуточнения пока не отъедали токены назад.".to_string(),
         None => "Штраф на доуточнение пока ещё не накоплен.".to_string(),
     }
+}
+
+fn raw_savings_sentence(
+    baseline_tokens: Option<u64>,
+    delivered_tokens: Option<u64>,
+    savings_percent: Option<f64>,
+) -> String {
+    match (baseline_tokens, delivered_tokens) {
+        (Some(baseline), Some(delivered)) => format!(
+            "Сырой live contour пока показывает baseline {} токенов против реально доставленных {}{}.",
+            format_u64(Some(baseline)),
+            format_u64(Some(delivered)),
+            savings_percent
+                .map(|value| format!(", preliminary delta {}", format_percent(Some(value))))
+                .unwrap_or_default()
+        ),
+        _ => {
+            "Сырой live contour для этой сессии ещё не накопил понятную пару baseline vs delivered."
+                .to_string()
+        }
+    }
+}
+
+fn verified_vs_excluded_sentence(summary: &Value) -> String {
+    let verified_events = summary["counted_events"].as_u64().unwrap_or(0);
+    let verified_baseline = summary["verified_baseline_tokens"].as_u64();
+    let verified_delivered = summary["verified_delivered_tokens"].as_u64();
+    let verified_recovery = summary["verified_recovery_tokens"].as_u64();
+    let verified_saved = summary["verified_effective_saved_tokens"].as_i64();
+    let excluded_events = summary["excluded_events_count"].as_u64().unwrap_or(0);
+    let excluded_baseline = summary["excluded_baseline_tokens"].as_u64();
+    let excluded_delivered = summary["excluded_delivered_tokens"].as_u64();
+    let excluded_recovery = summary["excluded_recovery_tokens"].as_u64();
+    let excluded_saved = summary["excluded_effective_saved_tokens"].as_i64();
+
+    let verified_lane = match (verified_baseline, verified_delivered, verified_recovery) {
+        (Some(baseline), Some(delivered), Some(recovery)) => format!(
+            "Главный verified KPI сейчас считает только {} quality-gated событий: baseline {}, delivered {}, recovery {}, честный delta {}.",
+            format_u64(Some(verified_events)),
+            format_u64(Some(baseline)),
+            format_u64(Some(delivered)),
+            format_u64(Some(recovery)),
+            format_signed_count(verified_saved)
+        ),
+        _ => format!(
+            "Главный verified KPI сейчас считает только {} quality-gated событий.",
+            format_u64(Some(verified_events))
+        ),
+    };
+    if excluded_events == 0 {
+        return verified_lane;
+    }
+    let excluded_lane = match (excluded_baseline, excluded_delivered, excluded_recovery) {
+        (Some(baseline), Some(delivered), Some(recovery)) => format!(
+            "Вне verified KPI пока остаются {} событий: baseline {}, delivered {}, recovery {}, delta {}.",
+            format_u64(Some(excluded_events)),
+            format_u64(Some(baseline)),
+            format_u64(Some(delivered)),
+            format_u64(Some(recovery)),
+            format_signed_count(excluded_saved)
+        ),
+        _ => format!(
+            "Вне verified KPI пока остаются {} событий.",
+            format_u64(Some(excluded_events))
+        ),
+    };
+    format!("{verified_lane} {excluded_lane}")
+}
+
+fn client_budget_disclaimer() -> &'static str {
+    "Это не процент от лимита клиента/чата: карточка считает только retrieval payload Amai против baseline, а не все токены thread-а."
 }
 
 fn status_for_metric_prefix(snapshot: &Value, prefix: &str) -> &'static str {
@@ -2961,12 +3947,13 @@ fn status_rank(status: &str) -> u8 {
     }
 }
 
-fn humanize_check(check: &Value) -> String {
+fn humanize_check(snapshot: &Value, check: &Value) -> String {
     let metric = check["metric"].as_str().unwrap_or("unknown.metric");
     let status = status_label(check["status"].as_str().unwrap_or("unknown"));
     let value = match check["value"].as_f64() {
         Some(number) if metric.ends_with("_ratio") => format!("{:.2}%", number * 100.0),
-        Some(number) if metric.ends_with("_ms") => format!("{number:.3} ms"),
+        Some(number) if metric.ends_with("_ms") => format_ms(snapshot, Some(number)),
+        Some(number) if metric.ends_with("_seconds") => format_seconds(snapshot, Some(number)),
         Some(number) => format!("{number:.3}"),
         None => "ещё нет данных".to_string(),
     };
@@ -2997,12 +3984,15 @@ fn humanize_check(check: &Value) -> String {
         "accuracy.semantic_precision" => {
             "Семантический поиск стал реже попадать в правильные ответы."
         }
-        "load.hot_qps" => "Горячий быстрый путь держит меньше QPS, чем обещано.",
+        "load.hot_qps" => "Горячий быстрый путь держит меньше Burst QPS, чем обещано.",
         "load.hot_p50_ms" => "Обычная hot-задержка в benchmark-прогоне стала выше целевой планки.",
         "load.hot_p95_ms" => "Тяжёлый хвост hot benchmark стал выше обещанной границы.",
         "load.hot_p99_ms" => "Редкие тяжёлые выбросы в hot benchmark стали слишком большими.",
         "load.hot_max_ms" => "Самый тяжёлый запрос в hot benchmark вышел за безопасную границу.",
         "load.hot_error_rate" => "Под нагрузкой появились ошибки на быстром пути.",
+        "observability.benchmark_contamination" => {
+            "В benchmark-витрину подмешался live-context или другой неподходящий source."
+        }
         "load.hot_workers" => "Последний hot benchmark был прогнан слишком слабой параллельностью.",
         "load.hot_sample_count" => {
             "Последний hot benchmark собран на слишком маленькой выборке, чтобы ему доверять."
@@ -3055,10 +4045,154 @@ fn client_display_name(key: &str) -> &str {
     }
 }
 
-fn format_ms(value: Option<f64>) -> String {
-    value
-        .map(|number| format!("{number:.3} ms"))
-        .unwrap_or_else(|| "ещё нет данных".to_string())
+#[derive(Debug, Clone, Copy)]
+struct DashboardTimingFormat<'a> {
+    switch_to_nanoseconds_below_ms: f64,
+    switch_to_microseconds_below_ms: f64,
+    switch_to_seconds_at_or_above_ms: f64,
+    non_positive_floor_label: &'a str,
+    seconds_suffix: &'a str,
+    milliseconds_suffix: &'a str,
+    microseconds_suffix: &'a str,
+    nanoseconds_suffix: &'a str,
+    seconds_decimals: usize,
+    milliseconds_decimals: usize,
+    microseconds_decimals: usize,
+    nanoseconds_decimals: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DurationDisplayUnit {
+    Seconds,
+    Milliseconds,
+    Microseconds,
+    Nanoseconds,
+}
+
+fn format_ms(snapshot: &Value, value: Option<f64>) -> String {
+    format_duration_ms(dashboard_timing_format(snapshot), value)
+}
+
+fn format_seconds(snapshot: &Value, value: Option<f64>) -> String {
+    format_duration_ms(
+        dashboard_timing_format(snapshot),
+        value.map(|number| number * 1000.0),
+    )
+}
+
+fn format_duration_ms(policy: DashboardTimingFormat<'_>, value: Option<f64>) -> String {
+    render_duration_ms_with_unit(policy, value, None)
+}
+
+fn render_duration_ms_with_unit(
+    policy: DashboardTimingFormat<'_>,
+    value: Option<f64>,
+    unit: Option<DurationDisplayUnit>,
+) -> String {
+    match value {
+        Some(number) if number <= 0.0 => policy.non_positive_floor_label.to_string(),
+        Some(number) => {
+            let display_unit = unit.unwrap_or_else(|| auto_duration_display_unit(policy, number));
+            let (scaled, decimals, suffix) = match display_unit {
+                DurationDisplayUnit::Seconds => (
+                    number / 1000.0,
+                    policy.seconds_decimals,
+                    policy.seconds_suffix,
+                ),
+                DurationDisplayUnit::Milliseconds => (
+                    number,
+                    policy.milliseconds_decimals,
+                    policy.milliseconds_suffix,
+                ),
+                DurationDisplayUnit::Microseconds => (
+                    number * 1000.0,
+                    policy.microseconds_decimals,
+                    policy.microseconds_suffix,
+                ),
+                DurationDisplayUnit::Nanoseconds => (
+                    number * 1_000_000.0,
+                    policy.nanoseconds_decimals,
+                    policy.nanoseconds_suffix,
+                ),
+            };
+            format!("{} {}", format_decimal_trimmed(scaled, decimals), suffix)
+        }
+        None => "ещё нет данных".to_string(),
+    }
+}
+
+fn auto_duration_display_unit(
+    policy: DashboardTimingFormat<'_>,
+    value_ms: f64,
+) -> DurationDisplayUnit {
+    if value_ms >= policy.switch_to_seconds_at_or_above_ms {
+        DurationDisplayUnit::Seconds
+    } else if value_ms < policy.switch_to_nanoseconds_below_ms {
+        DurationDisplayUnit::Nanoseconds
+    } else if value_ms < policy.switch_to_microseconds_below_ms {
+        DurationDisplayUnit::Microseconds
+    } else {
+        DurationDisplayUnit::Milliseconds
+    }
+}
+
+fn compare_duration_display_unit(
+    policy: DashboardTimingFormat<'_>,
+    left_ms: Option<f64>,
+    right_ms: Option<f64>,
+) -> Option<DurationDisplayUnit> {
+    [left_ms, right_ms]
+        .into_iter()
+        .flatten()
+        .filter(|value| *value > 0.0)
+        .reduce(f64::max)
+        .map(|value| auto_duration_display_unit(policy, value))
+}
+
+fn dashboard_timing_format(snapshot: &Value) -> DashboardTimingFormat<'_> {
+    let timing = &snapshot["thresholds"]["dashboard"]["timing_format"];
+    DashboardTimingFormat {
+        switch_to_nanoseconds_below_ms: timing["switch_to_nanoseconds_below_ms"]
+            .as_f64()
+            .expect("dashboard timing policy missing switch_to_nanoseconds_below_ms"),
+        switch_to_microseconds_below_ms: timing["switch_to_microseconds_below_ms"]
+            .as_f64()
+            .expect("dashboard timing policy missing switch_to_microseconds_below_ms"),
+        switch_to_seconds_at_or_above_ms: timing["switch_to_seconds_at_or_above_ms"]
+            .as_f64()
+            .expect("dashboard timing policy missing switch_to_seconds_at_or_above_ms"),
+        non_positive_floor_label: timing["non_positive_floor_label"]
+            .as_str()
+            .expect("dashboard timing policy missing non_positive_floor_label"),
+        seconds_suffix: timing["seconds_suffix"]
+            .as_str()
+            .expect("dashboard timing policy missing seconds_suffix"),
+        milliseconds_suffix: timing["milliseconds_suffix"]
+            .as_str()
+            .expect("dashboard timing policy missing milliseconds_suffix"),
+        microseconds_suffix: timing["microseconds_suffix"]
+            .as_str()
+            .expect("dashboard timing policy missing microseconds_suffix"),
+        nanoseconds_suffix: timing["nanoseconds_suffix"]
+            .as_str()
+            .expect("dashboard timing policy missing nanoseconds_suffix"),
+        seconds_decimals: timing["seconds_decimals"]
+            .as_u64()
+            .expect("dashboard timing policy missing seconds_decimals")
+            as usize,
+        milliseconds_decimals: timing["milliseconds_decimals"]
+            .as_u64()
+            .expect("dashboard timing policy missing milliseconds_decimals")
+            as usize,
+        microseconds_decimals: timing["microseconds_decimals"]
+            .as_u64()
+            .expect("dashboard timing policy missing microseconds_decimals")
+            as usize,
+        nanoseconds_decimals: timing["nanoseconds_decimals"]
+            .as_u64()
+            .expect("dashboard timing policy missing nanoseconds_decimals")
+            as usize,
+    }
 }
 
 fn format_ratio_percent(value: Option<f64>) -> String {
@@ -3073,12 +4207,22 @@ fn format_percent(value: Option<f64>) -> String {
         .unwrap_or_else(|| "ещё нет данных".to_string())
 }
 
-fn format_threshold_at_most(value: Option<f64>, unit: &str, decimals: usize) -> String {
-    format_threshold_value(value, "<", unit, decimals)
-}
-
 fn format_threshold_at_least(value: Option<f64>, unit: &str, decimals: usize) -> String {
     format_threshold_value(value, ">", unit, decimals)
+}
+
+fn format_threshold_at_least_or_equal(value: Option<f64>, unit: &str, decimals: usize) -> String {
+    format_threshold_value(value, ">=", unit, decimals)
+}
+
+fn format_zero_or_at_most_percent(value: Option<f64>) -> String {
+    match value {
+        Some(number) if number.abs() < f64::EPSILON => {
+            format_threshold_value(Some(number), "=", "%", 2)
+        }
+        Some(number) => format_threshold_value(Some(number), "<=", "%", 2),
+        None => "ещё нет данных".to_string(),
+    }
 }
 
 fn format_threshold_value(
@@ -3099,18 +4243,93 @@ fn format_threshold_value(
     }
 }
 
+fn format_time_threshold(snapshot: &Value, value: Option<f64>, operator: &str) -> String {
+    format_threshold_rendered(operator, format_ms(snapshot, value))
+}
+
+fn format_threshold_rendered(operator: &str, rendered: String) -> String {
+    if rendered == "ещё нет данных" {
+        rendered
+    } else {
+        format!("{operator} {rendered}")
+    }
+}
+
 fn format_decimal(value: f64, decimals: usize) -> String {
     format!("{value:.prec$}", prec = decimals)
+}
+
+fn format_decimal_trimmed(value: f64, decimals: usize) -> String {
+    let mut rendered = format_decimal(value, decimals);
+    while rendered.contains('.') && rendered.ends_with('0') {
+        rendered.pop();
+    }
+    if rendered.ends_with('.') {
+        rendered.pop();
+    }
+    rendered
+}
+
+fn format_time_compare_pair(
+    snapshot: &Value,
+    target_ms: Option<f64>,
+    current_ms: Option<f64>,
+    operator: &str,
+) -> Vec<String> {
+    let policy = dashboard_timing_format(snapshot);
+    let unit = compare_duration_display_unit(policy, target_ms, current_ms);
+    compare_pair(
+        format_threshold_rendered(
+            operator,
+            render_duration_ms_with_unit(policy, target_ms, unit),
+        ),
+        render_duration_ms_with_unit(policy, current_ms, unit),
+    )
+}
+
+fn format_seconds_compare_pair(
+    snapshot: &Value,
+    target_seconds: Option<f64>,
+    current_seconds: Option<f64>,
+    operator: &str,
+) -> Vec<String> {
+    format_time_compare_pair(
+        snapshot,
+        target_seconds.map(|value| value * 1000.0),
+        current_seconds.map(|value| value * 1000.0),
+        operator,
+    )
+}
+
+fn format_burst_qps_table(value: Option<f64>) -> String {
+    match value {
+        Some(number) => format!("{}\nBurst QPS", format_burst_qps_number(number)),
+        None => "ещё нет данных".to_string(),
+    }
+}
+
+fn format_burst_qps_threshold(value: Option<f64>, operator: &str) -> String {
+    match value {
+        Some(number) => format!("{operator} {}\nBurst QPS", format_burst_qps_number(number)),
+        None => "ещё нет данных".to_string(),
+    }
+}
+
+fn format_burst_qps_number(value: f64) -> String {
+    let mut rendered = format!("{value:.2}");
+    while rendered.contains('.') && rendered.ends_with('0') {
+        rendered.pop();
+    }
+    if rendered.ends_with('.') {
+        rendered.pop();
+    }
+    rendered
 }
 
 fn format_u64(value: Option<u64>) -> String {
     value
         .map(|number| number.to_string())
         .unwrap_or_else(|| "ещё нет данных".to_string())
-}
-
-fn format_target_ms(operator: &str, value: f64) -> String {
-    format!("{operator} {value:.3} ms")
 }
 
 fn format_target_u64(operator: &str, value: u64) -> String {
@@ -3202,8 +4421,9 @@ fn human_elapsed_ms(value_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        benchmark_qdrant_live_card, browser_base_url, human_elapsed_ms, monitoring_url,
-        worst_status,
+        benchmark_qdrant_live_card, browser_base_url, build_benchmark_cards, build_hero_cards,
+        format_ms, format_time_compare_pair, human_elapsed_ms, live_latency_compare_card,
+        monitoring_url, worst_status,
     };
     use serde_json::json;
 
@@ -3232,6 +4452,69 @@ mod tests {
         assert_eq!(human_elapsed_ms(30_000), "меньше минуты");
         assert_eq!(human_elapsed_ms(61_000), "1 мин.");
         assert_eq!(human_elapsed_ms(3_720_000), "1 ч. 2 мин.");
+    }
+
+    #[test]
+    fn format_ms_uses_dashboard_timing_policy_from_snapshot() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.0005,
+                        "switch_to_microseconds_below_ms": 2.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "below timer floor",
+                        "seconds_suffix": "secs",
+                        "milliseconds_suffix": "millis",
+                        "microseconds_suffix": "micros",
+                        "nanoseconds_suffix": "nanos",
+                        "seconds_decimals": 2,
+                        "milliseconds_decimals": 2,
+                        "microseconds_decimals": 1,
+                        "nanoseconds_decimals": 0
+                    }
+                }
+            }
+        });
+
+        assert_eq!(format_ms(&snapshot, Some(0.0)), "below timer floor");
+        assert_eq!(format_ms(&snapshot, Some(0.0004)), "400 nanos");
+        assert_eq!(format_ms(&snapshot, Some(0.0015)), "1.5 micros");
+        assert_eq!(format_ms(&snapshot, Some(2.3456)), "2.35 millis");
+        assert_eq!(format_ms(&snapshot, Some(2345.6)), "2.35 secs");
+    }
+
+    #[test]
+    fn compare_time_pair_uses_one_row_unit_for_target_and_current() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            format_time_compare_pair(&snapshot, Some(1.0), Some(0.674), "<"),
+            vec!["< 1 ms".to_string(), "0.674 ms".to_string()]
+        );
+        assert_eq!(
+            format_time_compare_pair(&snapshot, Some(0.015), Some(0.003226), "<"),
+            vec!["< 15 µs".to_string(), "3.226 µs".to_string()]
+        );
     }
 
     #[test]
@@ -3345,5 +4628,375 @@ mod tests {
                 .unwrap_or_default()
                 .contains("Тест сейчас не запущен")
         );
+    }
+
+    #[test]
+    fn live_compare_card_is_not_green_when_samples_are_missing_or_under_target() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 1.0,
+                        "target_p99_ms": 2.0,
+                        "target_max_ms": 5.0,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "target_sample_count": 10000
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "latency_slices": [
+                            {
+                                "state": "cold",
+                                "sample_count": 14,
+                                "p50_latency_ms": 2.0,
+                                "p95_latency_ms": 4.0,
+                                "p99_latency_ms": 4.0,
+                                "max_latency_ms": 4.0
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let card = live_latency_compare_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("alert"));
+        assert_eq!(card["status_label"].as_str(), Some("внимание"));
+        assert!(
+            card["metrics"][0]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ещё не накопилась живая выборка")
+        );
+        assert!(
+            card["metrics"][1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Пока рано считать режим зелёным")
+        );
+    }
+
+    #[test]
+    fn live_compare_card_is_green_only_when_both_modes_strictly_pass() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 1.0,
+                        "target_p99_ms": 2.0,
+                        "target_max_ms": 5.0,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "target_sample_count": 10000
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "latency_slices": [
+                            {
+                                "state": "hot",
+                                "sample_count": 100001,
+                                "p50_latency_ms": 0.4,
+                                "p95_latency_ms": 0.7,
+                                "p99_latency_ms": 1.2,
+                                "max_latency_ms": 2.5
+                            },
+                            {
+                                "state": "cold",
+                                "sample_count": 10001,
+                                "p50_latency_ms": 1.2,
+                                "p95_latency_ms": 2.1,
+                                "p99_latency_ms": 3.4,
+                                "max_latency_ms": 5.2
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let card = live_latency_compare_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("pass"));
+        assert_eq!(card["status_label"].as_str(), Some("в норме"));
+    }
+
+    #[test]
+    fn current_session_card_explains_raw_savings_vs_client_budget() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "events_total": 2,
+                        "counted_events": 0,
+                        "verified_effective_saved_tokens": 0,
+                        "verified_effective_savings_pct": 0.0,
+                        "total_naive_tokens": 920432,
+                        "total_context_tokens": 94,
+                        "effective_savings_pct": 99.98978740417543
+                    },
+                    "rolling_window": {},
+                    "lifetime": {},
+                    "profile": {
+                        "display_name": "Обычная рабочая машина"
+                    }
+                }
+            }
+        });
+
+        let cards = build_hero_cards(&snapshot);
+        let note = cards[0]["note"].as_str().unwrap_or_default();
+        assert!(note.contains("baseline"));
+        assert!(note.contains("реально доставленных"));
+        assert!(note.contains("Это не процент от лимита клиента/чата"));
+    }
+
+    #[test]
+    fn benchmark_cards_name_lanes_explicitly() {
+        let snapshot = json!({
+            "latest_retrieval_load_hot": {
+                "load_verification": {
+                    "captured_at_epoch_ms": 1,
+                    "project": "project_alpha",
+                    "namespace": "review",
+                    "query": "alpha_only_token",
+                    "execution_mode": "hot_cache_only",
+                    "qps": 1224682.0,
+                    "p50_ms": 0.007,
+                    "p95_ms": 0.010,
+                    "p99_ms": 0.015,
+                    "max_ms": 0.439,
+                    "error_rate": 0.0,
+                    "workers": 17,
+                    "success_count": 10013,
+                    "error_count": 0
+                }
+            },
+            "latest_retrieval_hot": {
+                "benchmark": {
+                    "captured_at_epoch_ms": 2,
+                    "project": "project_alpha",
+                    "namespace": "default",
+                    "query": "alpha_runtime_summary",
+                    "disable_cache": false,
+                    "qps": 1661.13,
+                    "p50_ms": 0.568,
+                    "p95_ms": 0.681,
+                    "p99_ms": 1.182,
+                    "max_ms": 1.182,
+                    "iterations": 20,
+                    "warmup": 3
+                }
+            },
+            "latest_cold_path_benchmark": {
+                "cold_benchmark": {
+                    "captured_at_epoch_ms": 3,
+                    "executive_summary": { "verdict": "TARGET MET" },
+                    "profile": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "min_precision": 0.9,
+                        "min_recall": 0.9,
+                        "min_target_hit_rate": 0.9,
+                        "min_sample_count": 100.0,
+                        "min_repo_count": 75.0,
+                        "min_query_slice_count": 200.0,
+                        "max_duration_seconds": 120.0,
+                        "max_leakage": 0.0,
+                        "max_error_rate": 0.0
+                    },
+                    "machine_readable_summary": {
+                        "p50": 1.0,
+                        "p95": 2.0,
+                        "p99": 3.0,
+                        "max": 4.0,
+                        "precision": 1.0,
+                        "recall": 1.0,
+                        "hit_rate": 1.0,
+                        "sample_count": 1000,
+                        "repo_count": 75,
+                        "query_slice_count": 200,
+                        "duration": 10.0,
+                        "leakage": 0,
+                        "error_rate": 0.0
+                    }
+                }
+            },
+            "latest_retrieval_accuracy": {
+                "accuracy_verification": {
+                    "captured_at_epoch_ms": 4,
+                    "cross_project_leakage": 0.0,
+                    "symbol_precision": 1.0,
+                    "semantic_precision": 1.0
+                }
+            },
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "load": {
+                    "hot_qps": { "target": 1200000.0 },
+                    "hot_error_rate": { "target": 0.0 },
+                    "hot_benchmark_table": {
+                        "target_p50_ms": 0.012,
+                        "target_p95_ms": 0.015,
+                        "target_p99_ms": 0.020,
+                        "target_max_ms": 0.500,
+                        "target_workers": 16.0,
+                        "target_sample_count": 10000.0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 1.0,
+                        "target_p99_ms": 2.0,
+                        "target_max_ms": 5.0
+                    },
+                    "hot_benchmark_table": {
+                        "target_iterations": 20.0,
+                        "target_warmup": 3.0
+                    }
+                },
+                "accuracy": {
+                    "symbol_precision": { "target": 0.99 },
+                    "semantic_precision": { "target": 0.98 }
+                }
+            },
+            "sla": {
+                "checks": [
+                    { "metric": "accuracy.cross_project_leakage", "status": "pass" },
+                    { "metric": "accuracy.symbol_precision", "status": "pass" },
+                    { "metric": "accuracy.semantic_precision", "status": "pass" }
+                ]
+            }
+        });
+
+        let cards = build_benchmark_cards(&snapshot);
+        assert_eq!(
+            cards[0]["title"].as_str(),
+            Some("Hot Load Benchmark / latest_retrieval_load_hot")
+        );
+        assert_eq!(
+            cards[1]["title"].as_str(),
+            Some("Hot Retrieval Benchmark / latest_retrieval_hot")
+        );
+        assert!(
+            cards[0]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Он не равен retrieval.hot_p95_ms")
+        );
+        assert!(
+            cards[1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("источник SLA-метрики retrieval.hot_p95_ms")
+        );
+        assert_eq!(
+            cards[0]["table"]["rows"][0]["values"][0].as_str(),
+            Some("> 1200000\nBurst QPS")
+        );
+        assert_eq!(
+            cards[0]["table"]["rows"][0]["values"][1].as_str(),
+            Some("1224682\nBurst QPS")
+        );
+        assert_eq!(
+            cards[0]["table"]["rows"][5]["values"][0].as_str(),
+            Some("= 0.00%")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][0]["values"][0].as_str(),
+            Some("нет SLA-порога")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][5]["values"][0].as_str(),
+            Some(">= 20")
+        );
+        assert_eq!(
+            cards[1]["table"]["rows"][6]["values"][0].as_str(),
+            Some(">= 3")
+        );
+        assert_eq!(
+            cards[2]["table"]["rows"][8]["values"][0].as_str(),
+            Some(">= 75")
+        );
+        assert_eq!(
+            cards[3]["table"]["rows"][1]["values"][0].as_str(),
+            Some("99.00%")
+        );
+        assert_eq!(
+            cards[3]["table"]["rows"][2]["values"][0].as_str(),
+            Some("98.00%")
+        );
+        assert_eq!(
+            cards[3]["extra_class"].as_str(),
+            Some("benchmark-span-full")
+        );
+        assert_eq!(cards[3]["table_orientation"].as_str(), Some("transposed"));
     }
 }

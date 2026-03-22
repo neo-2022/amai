@@ -162,6 +162,8 @@ pub enum ObserveCommand {
     Snapshot,
     SlaCheck,
     TokenReport(ObserveTokenReportArgs),
+    CleanupSnapshots(ObserveCleanupSnapshotsArgs),
+    CleanupArtifacts(ObserveCleanupArtifactsArgs),
     RepairTokenLedger(ObserveRepairTokenLedgerArgs),
     ReverifyTokenLedger(ObserveReverifyTokenLedgerArgs),
     Serve(ObserveServeArgs),
@@ -491,6 +493,8 @@ pub struct VerifyLoadArgs {
     pub min_qps: Option<f64>,
     #[arg(long)]
     pub max_error_rate: Option<f64>,
+    #[arg(long, default_value_t = false)]
+    pub record_live_context: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -643,6 +647,22 @@ pub struct ObserveTokenReportArgs {
     pub budget_profile: Option<String>,
     #[arg(long)]
     pub include_verify_events: Option<bool>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveCleanupSnapshotsArgs {
+    #[arg(long, default_value_t = false)]
+    pub apply: bool,
+    #[arg(long)]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveCleanupArtifactsArgs {
+    #[arg(long, default_value_t = false)]
+    pub apply: bool,
+    #[arg(long)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Args)]

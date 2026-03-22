@@ -1,5 +1,8 @@
 use crate::config::{AppConfig, discover_repo_root};
-use crate::{dashboard, external_benchmark, nats, postgres, s3, token_budget};
+use crate::{
+    artifact_cleanup, dashboard, external_benchmark, nats, observability_policy, postgres, s3,
+    token_budget,
+};
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Router,
@@ -23,6 +26,8 @@ struct ObserveState {
     dashboard_refresh_ms: u64,
 }
 
+const SNAPSHOT_RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
+
 #[derive(Debug, Clone, Deserialize)]
 struct ObservabilityProfile {
     snapshot: SnapshotProfile,
@@ -39,6 +44,23 @@ struct ObservabilityProfile {
 #[derive(Debug, Clone, Deserialize)]
 struct DashboardProfile {
     refresh_ms: u64,
+    timing_format: DashboardTimingFormatProfile,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DashboardTimingFormatProfile {
+    switch_to_nanoseconds_below_ms: f64,
+    switch_to_microseconds_below_ms: f64,
+    switch_to_seconds_at_or_above_ms: f64,
+    non_positive_floor_label: String,
+    seconds_suffix: String,
+    milliseconds_suffix: String,
+    microseconds_suffix: String,
+    nanoseconds_suffix: String,
+    seconds_decimals: u64,
+    milliseconds_decimals: u64,
+    microseconds_decimals: u64,
+    nanoseconds_decimals: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,6 +120,8 @@ struct RetrievalThresholds {
     target_hot_p99_ms: f64,
     target_hot_max_ms: f64,
     target_hot_sample_count: u64,
+    target_hot_benchmark_iterations: u64,
+    target_hot_benchmark_warmup: u64,
     alert_p95_ms: f64,
     critical_p95_ms: f64,
     stretch_hot_p95_ms: f64,
@@ -137,12 +161,14 @@ struct LoadThresholds {
 }
 
 pub async fn print_snapshot(cfg: &AppConfig) -> Result<()> {
+    maybe_cleanup_local_artifacts().await?;
     let snapshot = collect_snapshot(cfg).await?;
     println!("{}", serde_json::to_string_pretty(&snapshot)?);
     Ok(())
 }
 
 pub async fn run_sla_check(cfg: &AppConfig) -> Result<()> {
+    maybe_cleanup_local_artifacts().await?;
     let snapshot = collect_snapshot(cfg).await?;
     let summary = &snapshot["sla"]["summary"];
     let critical = summary["critical"].as_u64().unwrap_or(0);
@@ -156,8 +182,55 @@ pub async fn run_sla_check(cfg: &AppConfig) -> Result<()> {
     Ok(())
 }
 
+pub async fn print_retention_cleanup(
+    cfg: &AppConfig,
+    apply: bool,
+    limit: Option<i64>,
+) -> Result<()> {
+    let summary = run_retention_cleanup(cfg, apply, limit).await?;
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    Ok(())
+}
+
+pub async fn print_artifact_cleanup(
+    _cfg: &AppConfig,
+    apply: bool,
+    limit: Option<usize>,
+) -> Result<()> {
+    let repo_root = discover_repo_root(None)?;
+    let summary = artifact_cleanup::run_cleanup(&repo_root, apply, false, limit)?;
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    Ok(())
+}
+
 pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
     let profile = load_profile()?;
+    maybe_cleanup_observability_snapshots(cfg).await?;
+    maybe_cleanup_local_artifacts().await?;
+    let cleanup_cfg = cfg.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(SNAPSHOT_RETENTION_SWEEP_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = maybe_cleanup_observability_snapshots(&cleanup_cfg).await {
+                eprintln!("observability retention cleanup failed: {error:#}");
+            }
+        }
+    });
+    let artifact_cleanup_interval = artifact_cleanup::sweep_interval()?;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(artifact_cleanup_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = maybe_cleanup_local_artifacts().await {
+                eprintln!("artifact cleanup failed: {error:#}");
+            }
+        }
+    });
     let addr: SocketAddr = bind
         .parse()
         .with_context(|| format!("invalid observe bind address: {bind}"))?;
@@ -203,6 +276,9 @@ pub async fn collect_snapshot_preview(cfg: &AppConfig) -> Result<Value> {
 }
 
 async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value> {
+    if persist_snapshot {
+        maybe_cleanup_observability_snapshots(cfg).await?;
+    }
     let profile = load_profile()?;
     let db = postgres::connect_admin(cfg).await?;
     let previous = postgres::latest_observability_snapshot(&db, "system_snapshot").await?;
@@ -231,10 +307,10 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
     let latest_index = postgres::latest_observability_snapshot(&db, "index_project").await?;
     let latest_accuracy =
         postgres::latest_observability_snapshot(&db, "retrieval_accuracy").await?;
-    let latest_load_hot =
-        postgres::latest_observability_snapshot(&db, "retrieval_load_hot").await?;
-    let latest_load_cold =
-        postgres::latest_observability_snapshot(&db, "retrieval_load_cold").await?;
+    let (latest_load_hot, latest_load_hot_raw) =
+        latest_clean_benchmark_snapshot(&db, "retrieval_load_hot", "load_verification").await?;
+    let (latest_load_cold, latest_load_cold_raw) =
+        latest_clean_benchmark_snapshot(&db, "retrieval_load_cold", "load_verification").await?;
     let latest_token_benchmark =
         postgres::latest_observability_snapshot(&db, "token_benchmark").await?;
     let latest_cold_path_benchmark =
@@ -257,7 +333,9 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_retrieval_cold": latest_cold,
         "latest_retrieval_accuracy": latest_accuracy,
         "latest_retrieval_load_hot": latest_load_hot,
+        "latest_retrieval_load_hot_raw": latest_load_hot_raw,
         "latest_retrieval_load_cold": latest_load_cold,
+        "latest_retrieval_load_cold_raw": latest_load_cold_raw,
         "latest_token_benchmark": latest_token_benchmark,
         "latest_cold_path_benchmark": latest_cold_path_benchmark,
         "latest_working_state_restore": latest_working_state_restore,
@@ -278,7 +356,9 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_retrieval_cold": payload["latest_retrieval_cold"].clone(),
         "latest_retrieval_accuracy": payload["latest_retrieval_accuracy"].clone(),
         "latest_retrieval_load_hot": payload["latest_retrieval_load_hot"].clone(),
+        "latest_retrieval_load_hot_raw": payload["latest_retrieval_load_hot_raw"].clone(),
         "latest_retrieval_load_cold": payload["latest_retrieval_load_cold"].clone(),
+        "latest_retrieval_load_cold_raw": payload["latest_retrieval_load_cold_raw"].clone(),
         "latest_token_benchmark": payload["latest_token_benchmark"].clone(),
         "latest_cold_path_benchmark": payload["latest_cold_path_benchmark"].clone(),
         "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
@@ -291,7 +371,32 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
     Ok(snapshot)
 }
 
+async fn latest_clean_benchmark_snapshot(
+    db: &tokio_postgres::Client,
+    snapshot_kind: &str,
+    expected_root: &str,
+) -> Result<(Option<Value>, Option<Value>)> {
+    let rows =
+        postgres::list_observability_snapshots_by_kinds(db, &[snapshot_kind], Some(32)).await?;
+    let payloads: Vec<Value> = rows.into_iter().map(|row| row.payload).collect();
+    let latest_raw = payloads.first().cloned();
+    let latest_clean = select_latest_clean_benchmark_snapshot(&payloads, expected_root);
+    Ok((latest_clean, latest_raw))
+}
+
+fn select_latest_clean_benchmark_snapshot(
+    payloads: &[Value],
+    expected_root: &str,
+) -> Option<Value> {
+    payloads
+        .iter()
+        .find(|payload| benchmark_payload_contaminated(payload, expected_root) == Some(false))
+        .cloned()
+}
+
 fn profile_thresholds_json(profile: &ObservabilityProfile) -> Value {
+    let observability_policy = observability_policy::policy_json()
+        .unwrap_or_else(|error| json!({ "error": format!("{error:#}") }));
     json!({
         "postgres": {
             "query_probe_p95_ms": {
@@ -346,9 +451,10 @@ fn profile_thresholds_json(profile: &ObservabilityProfile) -> Value {
                 "critical": profile.retrieval.critical_p95_ms,
             },
             "hot_live_p95_ms": {
-                "target": profile.retrieval.stretch_hot_p95_ms,
-                "alert": profile.retrieval.target_p95_ms,
-                "critical": profile.retrieval.alert_p95_ms,
+                "target": profile.retrieval.target_hot_p95_ms,
+                "alert": profile.retrieval.alert_p95_ms,
+                "critical": profile.retrieval.critical_p95_ms,
+                "stretch": profile.retrieval.stretch_hot_p95_ms,
             },
             "cold_live_table": {
                 "target_p50_ms": profile.retrieval.target_cold_p50_ms,
@@ -363,6 +469,10 @@ fn profile_thresholds_json(profile: &ObservabilityProfile) -> Value {
                 "target_p99_ms": profile.retrieval.target_hot_p99_ms,
                 "target_max_ms": profile.retrieval.target_hot_max_ms,
                 "target_sample_count": profile.retrieval.target_hot_sample_count,
+            },
+            "hot_benchmark_table": {
+                "target_iterations": profile.retrieval.target_hot_benchmark_iterations,
+                "target_warmup": profile.retrieval.target_hot_benchmark_warmup,
             },
         },
         "accuracy": {
@@ -404,8 +514,130 @@ fn profile_thresholds_json(profile: &ObservabilityProfile) -> Value {
         },
         "dashboard": {
             "refresh_ms": profile.dashboard.refresh_ms,
+            "timing_format": {
+                "switch_to_nanoseconds_below_ms": profile.dashboard.timing_format.switch_to_nanoseconds_below_ms,
+                "switch_to_microseconds_below_ms": profile.dashboard.timing_format.switch_to_microseconds_below_ms,
+                "switch_to_seconds_at_or_above_ms": profile.dashboard.timing_format.switch_to_seconds_at_or_above_ms,
+                "non_positive_floor_label": profile.dashboard.timing_format.non_positive_floor_label,
+                "seconds_suffix": profile.dashboard.timing_format.seconds_suffix,
+                "milliseconds_suffix": profile.dashboard.timing_format.milliseconds_suffix,
+                "microseconds_suffix": profile.dashboard.timing_format.microseconds_suffix,
+                "nanoseconds_suffix": profile.dashboard.timing_format.nanoseconds_suffix,
+                "seconds_decimals": profile.dashboard.timing_format.seconds_decimals,
+                "milliseconds_decimals": profile.dashboard.timing_format.milliseconds_decimals,
+                "microseconds_decimals": profile.dashboard.timing_format.microseconds_decimals,
+                "nanoseconds_decimals": profile.dashboard.timing_format.nanoseconds_decimals,
+            },
         },
+        "observability": observability_policy,
     })
+}
+
+async fn maybe_cleanup_observability_snapshots(cfg: &AppConfig) -> Result<()> {
+    let summary = run_retention_cleanup(cfg, true, Some(2048)).await?;
+    let cleanup = &summary["observability_retention_cleanup"];
+    let deleted = cleanup["deleted"].as_u64().unwrap_or(0);
+    let expired = cleanup["expired"].as_u64().unwrap_or(0);
+    if deleted > 0 || expired > 0 {
+        println!(
+            "Amai observability retention cleanup: deleted={}, expired={}, scanned={}",
+            deleted,
+            expired,
+            cleanup["scanned"].as_u64().unwrap_or(0)
+        );
+    }
+    Ok(())
+}
+
+async fn maybe_cleanup_local_artifacts() -> Result<()> {
+    let repo_root = discover_repo_root(None)?;
+    let summary = artifact_cleanup::run_cleanup(&repo_root, true, true, None)?;
+    let cleanup = &summary["artifact_cleanup"];
+    let deleted = cleanup["deleted"].as_u64().unwrap_or(0);
+    let expired = cleanup["expired"].as_u64().unwrap_or(0);
+    if deleted > 0 || expired > 0 {
+        eprintln!(
+            "Amai artifact cleanup: deleted={}, expired={}, reclaimed_bytes={}",
+            deleted,
+            expired,
+            cleanup["reclaimed_bytes"].as_u64().unwrap_or(0)
+        );
+    }
+    Ok(())
+}
+
+async fn run_retention_cleanup(cfg: &AppConfig, apply: bool, limit: Option<i64>) -> Result<Value> {
+    let db = postgres::connect_admin(cfg).await?;
+    let now_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as u64;
+    let minimum_retention_hours = observability_policy::minimum_retention_hours()?.unwrap_or(24);
+    let cutoff_epoch_ms = now_epoch_ms.saturating_sub(minimum_retention_hours * 3_600_000) as i64;
+    let candidates =
+        postgres::list_observability_snapshots_older_than(&db, cutoff_epoch_ms, limit).await?;
+    let expired = expired_retention_candidates(&candidates, now_epoch_ms)?;
+    let expired_snapshot_ids: Vec<_> = expired
+        .iter()
+        .filter_map(|candidate| candidate["snapshot_id"].as_str())
+        .filter_map(|snapshot_id| uuid::Uuid::parse_str(snapshot_id).ok())
+        .collect();
+    let deleted = if apply {
+        postgres::delete_observability_snapshots_by_ids(&db, &expired_snapshot_ids).await?
+    } else {
+        0
+    };
+    Ok(json!({
+        "observability_retention_cleanup": {
+            "apply": apply,
+            "minimum_retention_hours": minimum_retention_hours,
+            "cutoff_epoch_ms": cutoff_epoch_ms,
+            "scanned": candidates.len(),
+            "expired": expired.len(),
+            "deleted": deleted,
+            "candidates": expired,
+        }
+    }))
+}
+
+fn expired_retention_candidates(
+    candidates: &[postgres::ObservabilityRetentionCandidate],
+    now_epoch_ms: u64,
+) -> Result<Vec<Value>> {
+    let mut expired = Vec::new();
+    for candidate in candidates {
+        let rule = observability_policy::retention_rule(
+            &candidate.snapshot_kind,
+            &candidate.payload,
+            &candidate.source_kind,
+            &candidate.source_class,
+        )?;
+        let Some(ttl_hours) = rule.ttl_hours else {
+            continue;
+        };
+        let basis_epoch_ms = candidate
+            .captured_at_epoch_ms
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or_else(|| candidate.created_at_epoch_ms.max(0) as u64);
+        let age_ms = now_epoch_ms.saturating_sub(basis_epoch_ms);
+        let ttl_ms = ttl_hours.saturating_mul(3_600_000);
+        if age_ms < ttl_ms {
+            continue;
+        }
+        expired.push(json!({
+            "snapshot_id": candidate.snapshot_id.to_string(),
+            "snapshot_kind": candidate.snapshot_kind,
+            "source_kind": candidate.source_kind,
+            "source_class": candidate.source_class,
+            "retention_class": rule.retention_class,
+            "retention_ttl_hours": ttl_hours,
+            "immutable_snapshot": rule.immutable_snapshot,
+            "age_hours": age_ms as f64 / 3_600_000.0,
+            "created_at_epoch_ms": candidate.created_at_epoch_ms,
+            "captured_at_epoch_ms": candidate.captured_at_epoch_ms,
+        }));
+    }
+    Ok(expired)
 }
 
 async fn metrics_handler(State(state): State<ObserveState>) -> impl IntoResponse {
@@ -965,9 +1197,9 @@ fn evaluate_sla(snapshot: &Value, profile: &ObservabilityProfile) -> Value {
         max_check(
             "retrieval.hot_p95_ms",
             snapshot["latest_retrieval_hot"]["benchmark"]["p95_ms"].as_f64(),
-            profile.retrieval.stretch_hot_p95_ms,
-            profile.retrieval.target_p95_ms,
+            profile.retrieval.target_hot_p95_ms,
             profile.retrieval.alert_p95_ms,
+            profile.retrieval.critical_p95_ms,
         ),
         min_check(
             "parser.coverage_ratio",
@@ -1022,6 +1254,12 @@ fn evaluate_sla(snapshot: &Value, profile: &ObservabilityProfile) -> Value {
     ) {
         checks.push(check);
     }
+    if let Some(check) = optional_zero_check(
+        "observability.benchmark_contamination",
+        benchmark_contamination_value(snapshot),
+    ) {
+        checks.push(check);
+    }
 
     let mut pass = 0_u64;
     let mut alert = 0_u64;
@@ -1045,6 +1283,70 @@ fn evaluate_sla(snapshot: &Value, profile: &ObservabilityProfile) -> Value {
             "unknown": unknown,
         }
     })
+}
+
+fn benchmark_contamination_value(snapshot: &Value) -> Option<f64> {
+    let checks = [
+        benchmark_payload_contaminated(
+            contamination_probe_payload(
+                snapshot,
+                "latest_retrieval_load_hot_raw",
+                "latest_retrieval_load_hot",
+            ),
+            "load_verification",
+        ),
+        benchmark_payload_contaminated(
+            contamination_probe_payload(
+                snapshot,
+                "latest_retrieval_load_cold_raw",
+                "latest_retrieval_load_cold",
+            ),
+            "load_verification",
+        ),
+        benchmark_payload_contaminated(&snapshot["latest_retrieval_hot"], "benchmark"),
+        benchmark_payload_contaminated(&snapshot["latest_retrieval_cold"], "benchmark"),
+        benchmark_payload_contaminated(&snapshot["latest_cold_path_benchmark"], "cold_benchmark"),
+    ];
+    let mut saw_payload = false;
+    for contaminated in checks.into_iter().flatten() {
+        saw_payload = true;
+        if contaminated {
+            return Some(1.0);
+        }
+    }
+    if saw_payload { Some(0.0) } else { None }
+}
+
+fn contamination_probe_payload<'a>(
+    snapshot: &'a Value,
+    raw_key: &str,
+    selected_key: &str,
+) -> &'a Value {
+    let raw = &snapshot[raw_key];
+    if raw.is_null() {
+        &snapshot[selected_key]
+    } else {
+        raw
+    }
+}
+
+fn benchmark_payload_contaminated(payload: &Value, expected_root: &str) -> Option<bool> {
+    if payload.is_null() {
+        return None;
+    }
+    let root = payload.get(expected_root)?;
+    if root.is_null() || !root.is_object() {
+        return Some(true);
+    }
+    if root["record_live_context"].as_bool() == Some(true)
+        || root["publish_benchmark_snapshot"].as_bool() == Some(false)
+    {
+        return Some(true);
+    }
+    if let Some(source_class) = payload["_observability"]["source_class"].as_str() {
+        return Some(source_class != "benchmark");
+    }
+    Some(false)
 }
 
 fn max_check(metric: &str, value: Option<f64>, target: f64, alert: f64, critical: f64) -> Value {
@@ -1516,6 +1818,12 @@ fn render_prometheus_metrics(snapshot: &Value) -> String {
     );
     push_metric(
         &mut output,
+        "amai_observability_benchmark_contamination",
+        "Whether benchmark-facing observability snapshots were contaminated by live-context payloads.",
+        benchmark_contamination_value(snapshot),
+    );
+    push_metric(
+        &mut output,
         "amai_load_hot_workers",
         "Parallel worker count from the latest hot load verification.",
         snapshot["latest_retrieval_load_hot"]["load_verification"]["workers"].as_f64(),
@@ -1782,8 +2090,13 @@ fn push_metric(output: &mut String, name: &str, help: &str, value: Option<f64>) 
 
 #[cfg(test)]
 mod tests {
-    use super::render_prometheus_metrics;
+    use super::{
+        benchmark_contamination_value, evaluate_sla, expired_retention_candidates, load_profile,
+        profile_thresholds_json, render_prometheus_metrics, select_latest_clean_benchmark_snapshot,
+    };
+    use crate::postgres::ObservabilityRetentionCandidate;
     use serde_json::json;
+    use uuid::Uuid;
 
     #[test]
     fn prometheus_token_rollups_export_verified_values_by_default() {
@@ -1846,5 +2159,197 @@ mod tests {
         assert!(output.contains("amai_tokens_raw_saved_session_total 90"));
         assert!(output.contains("amai_tokens_quality_ok_rate_lifetime 90"));
         assert!(output.contains("amai_tokens_answer_like_rate_window 40"));
+    }
+
+    #[test]
+    fn contamination_check_flags_live_context_payload_in_benchmark_lane() {
+        let snapshot = json!({
+            "latest_retrieval_load_hot": {
+                "_observability": {
+                    "source_class": "live_context"
+                },
+                "load_verification": {
+                    "record_live_context": true,
+                    "publish_benchmark_snapshot": false
+                }
+            },
+            "latest_retrieval_load_cold": null,
+            "latest_retrieval_hot": null,
+            "latest_retrieval_cold": null,
+            "latest_cold_path_benchmark": null
+        });
+        assert_eq!(benchmark_contamination_value(&snapshot), Some(1.0));
+    }
+
+    #[test]
+    fn contamination_check_stays_clean_for_benchmark_payload() {
+        let snapshot = json!({
+            "latest_retrieval_load_hot": {
+                "_observability": {
+                    "source_class": "benchmark"
+                },
+                "load_verification": {
+                    "record_live_context": false,
+                    "publish_benchmark_snapshot": true
+                }
+            },
+            "latest_retrieval_load_cold": null,
+            "latest_retrieval_hot": null,
+            "latest_retrieval_cold": null,
+            "latest_cold_path_benchmark": null
+        });
+        assert_eq!(benchmark_contamination_value(&snapshot), Some(0.0));
+    }
+
+    #[test]
+    fn contamination_check_prefers_raw_lane_when_dashboard_falls_back_to_clean_snapshot() {
+        let snapshot = json!({
+            "latest_retrieval_load_hot": {
+                "_observability": {
+                    "source_class": "benchmark"
+                },
+                "load_verification": {
+                    "record_live_context": false,
+                    "publish_benchmark_snapshot": true
+                }
+            },
+            "latest_retrieval_load_hot_raw": {
+                "_observability": {
+                    "source_class": "live_context"
+                },
+                "load_verification": {
+                    "record_live_context": true,
+                    "publish_benchmark_snapshot": false
+                }
+            },
+            "latest_retrieval_load_cold": null,
+            "latest_retrieval_load_cold_raw": null,
+            "latest_retrieval_hot": null,
+            "latest_retrieval_cold": null,
+            "latest_cold_path_benchmark": null
+        });
+        assert_eq!(benchmark_contamination_value(&snapshot), Some(1.0));
+    }
+
+    #[test]
+    fn select_latest_clean_benchmark_snapshot_skips_contaminated_latest_payload() {
+        let contaminated = json!({
+            "_observability": { "source_class": "live_context" },
+            "load_verification": {
+                "record_live_context": true,
+                "publish_benchmark_snapshot": false,
+                "qps": 2.0
+            }
+        });
+        let clean = json!({
+            "_observability": { "source_class": "benchmark" },
+            "load_verification": {
+                "record_live_context": false,
+                "publish_benchmark_snapshot": true,
+                "qps": 62000.0
+            }
+        });
+
+        let selected = select_latest_clean_benchmark_snapshot(
+            &[contaminated.clone(), clean.clone()],
+            "load_verification",
+        );
+        assert_eq!(selected, Some(clean));
+    }
+
+    #[test]
+    fn retrieval_hot_sla_uses_configured_critical_threshold() {
+        let profile = load_profile().expect("profile");
+        let snapshot = json!({
+            "postgres": {
+                "connection_usage_ratio": 0.1,
+                "query_probe_p95_ms": 1.0,
+                "replica_lag_seconds": 0.0,
+                "deadlocks_total": 0.0
+            },
+            "qdrant": {
+                "index_optimize_queue": 0.0,
+                "update_queue_length": 0.0
+            },
+            "nats": {
+                "publish_probe_p95_ms": 0.1,
+                "consumer_lag_msgs": 0.0,
+                "jetstream_disk_usage_ratio": 0.01
+            },
+            "latest_retrieval_cold": {
+                "benchmark": {
+                    "p95_ms": 2.0
+                },
+                "retrieval_runtime": {
+                    "stage_p95_ms": {
+                        "semantic_search_ms": 0.0
+                    }
+                }
+            },
+            "latest_retrieval_hot": {
+                "benchmark": {
+                    "p95_ms": 7.0
+                }
+            },
+            "latest_index_project": {
+                "index_project": {
+                    "parser_coverage_ratio": 1.0
+                }
+            }
+        });
+
+        let sla = evaluate_sla(&snapshot, &profile);
+        let hot_check = sla["checks"]
+            .as_array()
+            .and_then(|checks| {
+                checks
+                    .iter()
+                    .find(|check| check["metric"].as_str() == Some("retrieval.hot_p95_ms"))
+            })
+            .expect("hot retrieval SLA check");
+        assert_eq!(hot_check["target"].as_f64(), Some(1.0));
+        assert_eq!(hot_check["alert"].as_f64(), Some(6.0));
+        assert_eq!(hot_check["critical"].as_f64(), Some(10.0));
+        assert_eq!(hot_check["status"].as_str(), Some("alert"));
+    }
+
+    #[test]
+    fn retention_cleanup_marks_old_verify_token_events_as_expired() {
+        let snapshot_id = Uuid::parse_str("00000000-0000-0000-0000-000000000042").expect("uuid");
+        let candidates = vec![ObservabilityRetentionCandidate {
+            snapshot_id,
+            snapshot_kind: "token_budget_event".to_string(),
+            payload: json!({
+                "token_budget_event": {
+                    "traffic_class": "verify"
+                }
+            }),
+            source_kind: "verify_token_benchmark".to_string(),
+            source_class: "operational".to_string(),
+            created_at_epoch_ms: 0,
+            captured_at_epoch_ms: Some(0),
+        }];
+        let expired =
+            expired_retention_candidates(&candidates, 720_u64.saturating_mul(3_600_000) + 1)
+                .expect("expired candidates");
+        assert_eq!(expired.len(), 1);
+        assert_eq!(
+            expired[0]["retention_class"].as_str(),
+            Some("synthetic_token_event")
+        );
+    }
+
+    #[test]
+    fn thresholds_surface_observability_policy_versions() {
+        let profile = load_profile().expect("profile");
+        let thresholds = profile_thresholds_json(&profile);
+        assert_eq!(
+            thresholds["observability"]["classification_rules_version"].as_str(),
+            Some("observability-source-class-v2")
+        );
+        assert_eq!(
+            thresholds["observability"]["schema_version"].as_u64(),
+            Some(2)
+        );
     }
 }

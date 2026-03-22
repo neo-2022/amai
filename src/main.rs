@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+mod artifact_cleanup;
 mod benchmark_matrix;
 mod bootstrap;
 mod chat_question;
@@ -21,6 +22,7 @@ mod mcp;
 mod mcp_task_matrix;
 mod memory_task_matrix;
 mod nats;
+mod observability_policy;
 mod observe;
 mod onboarding;
 mod postgres;
@@ -268,8 +270,10 @@ async fn main() -> Result<()> {
                         "skip_embeddings": args.skip_embeddings,
                         "limit_files": args.limit_files,
                         "files_indexed": stats.files_indexed,
+                        "ast_eligible_files": stats.ast_eligible_files,
                         "files_with_ast": stats.files_with_ast,
                         "files_with_lexical_fallback": stats.files_with_lexical_fallback,
+                        "files_without_ast_support": stats.files_without_ast_support,
                         "symbols_written": stats.symbols_written,
                         "chunks_written": stats.chunks_written,
                         "vector_points_written": stats.vector_points_written,
@@ -363,6 +367,16 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 let db = postgres::connect_admin(&cfg).await?;
                 token_budget::print_report(&db, &args).await?;
+            }
+            ObserveCommand::CleanupSnapshots(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                observe::print_retention_cleanup(&cfg, args.apply, args.limit).await?;
+            }
+            ObserveCommand::CleanupArtifacts(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                observe::print_artifact_cleanup(&cfg, args.apply, args.limit).await?;
             }
             ObserveCommand::RepairTokenLedger(args) => {
                 let cfg = config::AppConfig::from_env()?;

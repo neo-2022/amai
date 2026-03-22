@@ -1,5 +1,5 @@
-modified_at: 2026-03-22 03:32 MSK
-Ручная сверка guide/docs: 2026-03-22 03:32 MSK
+modified_at: 2026-03-23 01:35 MSK
+Ручная сверка guide/docs: 2026-03-23 01:35 MSK
 
 # Operations
 
@@ -703,8 +703,21 @@ cargo run --release -- verify benchmark \
 Если нужен не component benchmark, а честный end-to-end cold retrieval contour:
 
 ```bash
-./scripts/cold_benchmark.sh --manifest config/cold_benchmark_manifest.toml
+./scripts/materialize_cold_repo_pool.sh \
+  --manifest state/cold-benchmark/generated_manifest.toml \
+  --target-repo-count 75 \
+  --target-query-slice-count 200
+
+./scripts/cold_benchmark.sh \
+  --manifest state/cold-benchmark/generated_manifest.toml \
+  --cycles 5 \
+  --output-dir state/cold-benchmark/latest
 ```
+
+Этот путь теперь канонический для большого cold contour:
+- сначала materialize-ится repo-pool в `state/cold-benchmark/repo-pool`;
+- затем generated manifest указывает только на реально существующие exact relative paths;
+- если manifest пытается сослаться на отсутствующий файл, `materialize_cold_repo_pool.sh` падает сразу, а не оставляет скрытый drift до benchmark-стадии.
 
 Для компактного proof-run на реальных локальных репозиториях:
 
@@ -725,6 +738,11 @@ cargo run --release -- verify benchmark \
 - отдельно `cold` и `hot shadow`;
 - `P50 / P95 / P99 / max / sample_count`;
 - `precision / recall / target-hit rate / miss rate / fallback rate`;
+- отдельные fixed targets для:
+  - `Cold P50 / P95 / P99 / Max`;
+  - `precision / recall / hit rate`;
+  - `sample_count / repo_count / query_slice_count`;
+  - `duration / leakage / error rate`;
 - stage breakdown по:
   - `policy`
   - `retrieval`
@@ -1256,6 +1274,37 @@ cargo run --release -- observe reverify-token-ledger --apply
   - если retrieval реально находит достаточный контекст, событие становится `quality_ok = true`;
   - после этого headline может перейти из `предварительно` в полноценную `Проверенную реальную экономию`.
 
+Для observability snapshot у временного synthetic/debug хвоста теперь есть канонический retention-cleanup:
+
+```bash
+cargo run --release -- observe cleanup-snapshots --limit 200
+cargo run --release -- observe cleanup-snapshots --apply --limit 2000
+```
+
+Это нужно для двух разных задач:
+- dry-run честно показывает, сколько aged snapshot уже подпадает под TTL;
+- apply-path удаляет только те записи, которые policy реально разрешает удалить;
+- benchmark history не переписывается in-place, потому что benchmark snapshot теперь stamped как `immutable_snapshot`;
+- версия правил и retention profile приходят из [config/observability.toml](/home/art/agent-memory-index/config/observability.toml) и materialize-ятся в `_observability`.
+
+Для rebuildable локального хвоста теперь есть отдельный policy-driven cleanup:
+
+```bash
+cargo run --release -- observe cleanup-artifacts --limit 20
+cargo run --release -- observe cleanup-artifacts --apply --limit 20
+```
+
+Смысл по-человечески:
+- чистится только rebuildable мусор, который можно честно восстановить:
+  - `target/debug`
+  - `target/release`
+  - `.fastembed_cache`
+  - `state/external-benchmarks/*`
+- live state (`state/postgres`, `state/qdrant`, `state/minio`, `state/nats`) сюда специально не входит;
+- список путей, TTL и `keep_latest` живут в [config/observability.toml](/home/art/agent-memory-index/config/observability.toml);
+- auto-path защищает текущий исполняемый бинарь от удаления;
+- `observe serve`, `observe snapshot` и `observe sla-check` сами запускают этот cleanup, поэтому локальный мусор должен уходить без ручного обхода.
+
 После `reverify` live event теперь должен нести richer fields:
 - `target_kind`
   - какой тип результата нужен запросу;
@@ -1399,6 +1448,7 @@ cargo run -- index project \
 ```bash
 cargo run --release -- observe snapshot
 cargo run --release -- observe sla-check
+cargo run --release -- observe cleanup-snapshots --limit 200
 ```
 
 Что это даёт:
@@ -1407,6 +1457,7 @@ cargo run --release -- observe sla-check
 - последние `retrieval_accuracy` и `retrieval_load_hot` snapshots;
 - последний `token_benchmark` snapshot;
 - SLA-оценку по [observability.toml](/home/art/agent-memory-index/config/observability.toml).
+- machine-readable `_observability` metadata со `schema_version`, `classification_rules_version`, `retention_profile`, `retention_class` и `immutable_snapshot`.
 - Prometheus-ready `/metrics` exporter без persistence на каждый scrape.
 
 Сейчас hot retrieval stretch-goal в SLA считается только по реальному measured `p95_ms`, а не по округлению до целых миллисекунд.
@@ -1501,12 +1552,18 @@ Grafana login берётся из `.env`:
 - `AmaiPostgresReplicaLagHigh`
 - `AmaiRetrievalHotBudgetMiss`
 - `AmaiCrossProjectLeakageDetected`
+- `AmaiBenchmarkContaminationDetected`
 - `AmaiPostgresDeadlocksDetected`
 
 Ключевой engineering law:
 - scrape path не должен менять operational truth;
 - поэтому `/metrics` собирает live snapshot read-only и не пишет `system_snapshot` в PostgreSQL на каждый Prometheus scrape;
 - persistence остаётся только у явных `observe snapshot` и `observe sla-check`.
+- `observe snapshot`, `observe sla-check` и `observe serve` теперь ещё запускают retention sweep для временных observability snapshot, чтобы synthetic/debug хвост не копился бесконечно;
+- те же entrypoint-ы теперь ещё запускают policy-driven cleanup для rebuildable локального мусора по TTL из `config/observability.toml`;
+- ручной `observe cleanup-snapshots --apply` остаётся явным операторским инструментом для отдельного dry-run/apply proof;
+- ручной `observe cleanup-artifacts --apply` остаётся отдельным операторским путём для dry-run/apply по локальным build/cache хвостам;
+- benchmark snapshot запрещено переписывать update-path-ом: для них действует `immutable_snapshot`, а lifecycle дальше управляется retention policy, а не тихим in-place drift.
 - human dashboard использует тот же read-only snapshot contour и тоже не пишет state на каждый refresh;
 - верхние hero-карты human dashboard теперь intentionally живут только на real live ledger:
   - текущая сессия;
