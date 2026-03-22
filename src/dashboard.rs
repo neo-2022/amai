@@ -675,11 +675,9 @@ pub fn render_html(refresh_ms: u64) -> String {
       <aside class="panel hero-side">
         <div id="summary-status"></div>
         <div class="side-block">
-          <h2>Коротко</h2>
           <div class="kv" id="headline-kv"></div>
         </div>
         <div class="side-block">
-          <h2>Быстрые ссылки</h2>
           <ul class="link-list" id="quick-links"></ul>
         </div>
       </aside>
@@ -736,6 +734,20 @@ pub fn render_html(refresh_ms: u64) -> String {
   <script>
     const REFRESH_MS = __REFRESH_MS__;
     const errorBanner = document.getElementById("error-banner");
+    const INTERACTION_HOLD_SELECTOR = [
+      ".has-tooltip:hover",
+      ".side-block:hover",
+      ".metric-card:hover",
+      ".service-card:hover",
+      ".glossary-card:hover",
+      ".link-card:hover",
+      ".compare-card:hover",
+      ".compare-metric:hover",
+      ".hero-main:hover",
+      ".hero-side:hover",
+    ].join(", ");
+    let refreshInFlight = false;
+    let interactionHoldUntil = 0;
 
     function statusClass(status) {
       return ["pass", "alert", "critical", "unknown"].includes(status) ? status : "unknown";
@@ -767,6 +779,40 @@ pub fn render_html(refresh_ms: u64) -> String {
       return wrap;
     }
 
+    function extendInteractionHold(multiplier = 4) {
+      interactionHoldUntil = Math.max(
+        interactionHoldUntil,
+        Date.now() + Math.max(REFRESH_MS * multiplier, 1500)
+      );
+    }
+
+    function hasActiveSelection() {
+      const selection = window.getSelection();
+      return Boolean(
+        selection &&
+        !selection.isCollapsed &&
+        selection.toString().trim().length > 0
+      );
+    }
+
+    function hasInteractiveFocus() {
+      const active = document.activeElement;
+      return Boolean(active && active !== document.body && active.closest(".shell"));
+    }
+
+    function isRefreshPaused() {
+      if (Date.now() < interactionHoldUntil) {
+        return true;
+      }
+      if (hasActiveSelection()) {
+        return true;
+      }
+      if (hasInteractiveFocus()) {
+        return true;
+      }
+      return Boolean(document.querySelector(INTERACTION_HOLD_SELECTOR));
+    }
+
     function renderCompareCard(container, card) {
       const element = document.createElement("article");
       element.className = `compare-card ${statusClass(card.status)}`;
@@ -776,6 +822,10 @@ pub fn render_html(refresh_ms: u64) -> String {
       head.appendChild(labelWithTooltip(card.title, card.title_tooltip, "card-title"));
       head.appendChild(textNode("div", `status-pill ${statusClass(card.status)}`, card.status_label));
       element.appendChild(head);
+
+      if (card.headline_value) {
+        element.appendChild(textNode("p", "card-value", card.headline_value));
+      }
 
       if (card.source_label) {
         element.appendChild(textNode("p", "card-source", card.source_label));
@@ -844,7 +894,7 @@ pub fn render_html(refresh_ms: u64) -> String {
         ["Почему такой статус", headline.status_reason],
         ["Сейчас", `${headline.token_value} (${headline.token_scope})`],
         ["Обновление", headline.captured_at],
-        ["Автообновление", `${meta.refresh_seconds} сек.`],
+        ["Автообновление", `${meta.refresh_seconds} сек. / пауза при чтении`],
       ];
       rows.forEach(([label, value]) => {
         const row = document.createElement("div");
@@ -968,7 +1018,14 @@ pub fn render_html(refresh_ms: u64) -> String {
       errorBanner.textContent = "";
     }
 
-    async function loadDashboard() {
+    async function loadDashboard(force = false) {
+      if (!force && isRefreshPaused()) {
+        return;
+      }
+      if (refreshInFlight) {
+        return;
+      }
+      refreshInFlight = true;
       try {
         const response = await fetch("/api/dashboard", { cache: "no-store" });
         if (!response.ok) {
@@ -987,11 +1044,36 @@ pub fn render_html(refresh_ms: u64) -> String {
         renderGlossary(payload.glossary);
       } catch (error) {
         showError(`Не удалось обновить панель Amai: ${error.message}`);
+      } finally {
+        refreshInFlight = false;
       }
     }
 
-    loadDashboard();
-    setInterval(loadDashboard, REFRESH_MS);
+    document.addEventListener("pointerdown", () => extendInteractionHold(6), true);
+    document.addEventListener("selectionchange", () => {
+      if (hasActiveSelection()) {
+        extendInteractionHold(8);
+      }
+    });
+    document.addEventListener("focusin", (event) => {
+      if (event.target && event.target.closest && event.target.closest(".shell")) {
+        extendInteractionHold(8);
+      }
+    }, true);
+    document.addEventListener("mouseover", (event) => {
+      if (
+        event.target &&
+        event.target.closest &&
+        event.target.closest(
+          ".has-tooltip, .side-block, .metric-card, .service-card, .glossary-card, .link-card, .compare-card, .compare-metric, .hero-main, .hero-side"
+        )
+      ) {
+        extendInteractionHold(5);
+      }
+    }, true);
+
+    loadDashboard(true);
+    setInterval(() => loadDashboard(false), REFRESH_MS);
   </script>
 </body>
 </html>
@@ -1091,6 +1173,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 hot_load["captured_at_epoch_ms"].as_u64(),
             )),
             Some("Это отдельный проверочный прогон прогретого пути. Он показывает, какую нагрузку выдержал Amai в benchmark-режиме, а не то, что происходит прямо сейчас в чате.".to_string()),
+            Some(format_optional(hot_load["qps"].as_f64(), |v| format!("{v:.2} qps"))),
             vec![
                 compare_table_row(
                     "QPS",
@@ -1196,9 +1279,8 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 ),
             ],
         ),
-        card_with_rows(
+        compare_table_card(
             "Полный холодный прогон",
-            format_ms(cold_contour["machine_readable_summary"]["p95"].as_f64()),
             "Это последний честный end-to-end cold benchmark по реальным репозиториям и query slices.".to_string(),
             cold_contour_status(snapshot),
             Some(source_label(
@@ -1206,95 +1288,95 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 cold_contour["captured_at_epoch_ms"].as_u64(),
             )),
             Some("Cold contour меряет полный путь policy -> retrieval -> ranking -> pack assembly -> provenance -> orchestration.".to_string()),
+            Some(format_ms(cold_contour["machine_readable_summary"]["p95"].as_f64())),
             vec![
-                metric_row(
-                    "Эталон cold P95",
-                    format_ms(cold_contour["profile"]["target_p95_ms"].as_f64()),
-                    Some("Цель для p95 в полном cold end-to-end пути."),
-                ),
-                metric_row(
-                    "Измерено cold P95",
-                    format_ms(cold_contour["machine_readable_summary"]["p95"].as_f64()),
-                    Some("Фактический p95 последнего end-to-end cold benchmark."),
-                ),
-                metric_row(
-                    "Эталон cold P99",
-                    format_ms(cold_contour["profile"]["target_p99_ms"].as_f64()),
-                    Some("Цель для p99 в полном cold end-to-end пути."),
-                ),
-                metric_row(
-                    "Измерено cold P99",
-                    format_ms(cold_contour["machine_readable_summary"]["p99"].as_f64()),
-                    Some("Фактический p99 последнего end-to-end cold benchmark."),
-                ),
-                metric_row(
-                    "Эталон cold Max",
-                    format_ms(cold_contour["profile"]["target_max_ms"].as_f64()),
-                    Some("Самый большой выброс в cold benchmark должен оставаться в этой границе."),
-                ),
-                metric_row(
-                    "Измерено cold Max",
-                    format_ms(cold_contour["machine_readable_summary"]["max"].as_f64()),
-                    Some("Самый большой выброс в последнем cold benchmark."),
-                ),
-                metric_row(
-                    "Эталон precision",
-                    format_ratio_percent(cold_contour["profile"]["min_precision"].as_f64()),
-                    Some("Доля выданного контекста, которая оказалась релевантной."),
-                ),
-                metric_row(
-                    "Измерено precision",
-                    format_ratio_percent(cold_contour["machine_readable_summary"]["precision"].as_f64()),
-                    Some("Фактическая точность последнего cold benchmark."),
-                ),
-                metric_row(
-                    "Эталон recall",
-                    format_ratio_percent(cold_contour["profile"]["min_recall"].as_f64()),
-                    Some("Насколько полно система нашла нужные целевые данные."),
-                ),
-                metric_row(
-                    "Измерено recall",
-                    format_ratio_percent(cold_contour["machine_readable_summary"]["recall"].as_f64()),
-                    Some("Фактическая полнота последнего cold benchmark."),
-                ),
-                metric_row(
-                    "Эталон hit rate",
-                    format_ratio_percent(cold_contour["profile"]["min_target_hit_rate"].as_f64()),
-                    Some("Доля запросов, где система действительно попала в нужную цель."),
-                ),
-                metric_row(
-                    "Измерено hit rate",
-                    format_ratio_percent(cold_contour["machine_readable_summary"]["hit_rate"].as_f64()),
-                    Some("Фактическая доля успешных попаданий в цели в последнем cold benchmark."),
-                ),
-                metric_row(
-                    "Измерено выборка",
-                    format_u64(cold_contour["machine_readable_summary"]["sample_count"].as_u64()),
-                    Some("Сколько cold-запросов вошло в итоговый benchmark."),
-                ),
-                metric_row(
-                    "Измерено repo count",
-                    format_u64(cold_contour["machine_readable_summary"]["repo_count"].as_u64()),
-                    Some("Сколько разных репозиториев вошло в последний cold benchmark."),
-                ),
-                metric_row(
-                    "Измерено query slices",
-                    format_u64(cold_contour["machine_readable_summary"]["query_slice_count"].as_u64()),
-                    Some("Сколько разных типов запросов покрывает последний cold benchmark."),
-                ),
-                metric_row(
-                    "Измерено duration",
-                    format_optional(
-                        cold_contour["machine_readable_summary"]["duration"].as_f64(),
-                        |value| format!("{value:.2} сек."),
+                compare_table_row(
+                    "Cold P95",
+                    "Цель и факт по p95 в полном cold end-to-end пути.",
+                    compare_pair(
+                        format_ms(cold_contour["profile"]["target_p95_ms"].as_f64()),
+                        format_ms(cold_contour["machine_readable_summary"]["p95"].as_f64()),
                     ),
-                    Some("Сколько длился полный последний cold benchmark."),
+                ),
+                compare_table_row(
+                    "Cold P99",
+                    "Цель и факт по p99 в полном cold end-to-end пути.",
+                    compare_pair(
+                        format_ms(cold_contour["profile"]["target_p99_ms"].as_f64()),
+                        format_ms(cold_contour["machine_readable_summary"]["p99"].as_f64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Cold Max",
+                    "Цель и факт по самому тяжёлому выбросу в cold benchmark.",
+                    compare_pair(
+                        format_ms(cold_contour["profile"]["target_max_ms"].as_f64()),
+                        format_ms(cold_contour["machine_readable_summary"]["max"].as_f64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Precision",
+                    "Точность: насколько чисто найденный контекст оказался релевантным.",
+                    compare_pair(
+                        format_ratio_percent(cold_contour["profile"]["min_precision"].as_f64()),
+                        format_ratio_percent(cold_contour["machine_readable_summary"]["precision"].as_f64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Recall",
+                    "Полнота: насколько полно система нашла нужные целевые данные.",
+                    compare_pair(
+                        format_ratio_percent(cold_contour["profile"]["min_recall"].as_f64()),
+                        format_ratio_percent(cold_contour["machine_readable_summary"]["recall"].as_f64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Hit rate",
+                    "Доля запросов, где система действительно попала в нужную цель.",
+                    compare_pair(
+                        format_ratio_percent(cold_contour["profile"]["min_target_hit_rate"].as_f64()),
+                        format_ratio_percent(cold_contour["machine_readable_summary"]["hit_rate"].as_f64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Выборка",
+                    "Сколько cold-запросов вошло в итоговый benchmark.",
+                    compare_pair(
+                        "фиксированного эталона нет".to_string(),
+                        format_u64(cold_contour["machine_readable_summary"]["sample_count"].as_u64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Repo count",
+                    "Сколько разных репозиториев вошло в последний cold benchmark.",
+                    compare_pair(
+                        "фиксированного эталона нет".to_string(),
+                        format_u64(cold_contour["machine_readable_summary"]["repo_count"].as_u64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Query slices",
+                    "Сколько разных типов запросов покрывает последний cold benchmark.",
+                    compare_pair(
+                        "фиксированного эталона нет".to_string(),
+                        format_u64(cold_contour["machine_readable_summary"]["query_slice_count"].as_u64()),
+                    ),
+                ),
+                compare_table_row(
+                    "Duration",
+                    "Сколько длился полный последний cold benchmark.",
+                    compare_pair(
+                        "фиксированного эталона нет".to_string(),
+                        format_optional(
+                            cold_contour["machine_readable_summary"]["duration"].as_f64(),
+                            |value| format!("{value:.2} сек."),
+                        ),
+                    ),
                 ),
             ],
         ),
-        card_with_rows(
+        compare_table_card(
             "Точность и изоляция",
-            format_f64_count(accuracy["cross_project_leakage"].as_f64()),
             "Этот блок не потоковый: он показывает последний сохранённый accuracy/isolation verification contour.".to_string(),
             worst_status(
                 status_for_metric_prefix(snapshot, "accuracy.cross_project_leakage"),
@@ -1308,36 +1390,31 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 accuracy["captured_at_epoch_ms"].as_u64(),
             )),
             Some("Проверка точности и изоляции показывает, не течёт ли один проект в другой и насколько точно Amai попадает в нужные символы и семантику.".to_string()),
+            Some(format_f64_count(accuracy["cross_project_leakage"].as_f64())),
             vec![
-                metric_row(
-                    "Эталон leakage",
-                    "0".to_string(),
-                    Some("Для строгой проектной изоляции утечки между проектами должны быть равны нулю."),
+                compare_table_row(
+                    "Leakage",
+                    "Для строгой проектной изоляции утечки между проектами должны быть равны нулю.",
+                    compare_pair(
+                        "0".to_string(),
+                        format_f64_count(accuracy["cross_project_leakage"].as_f64()),
+                    ),
                 ),
-                metric_row(
-                    "Измерено leakage",
-                    format_f64_count(accuracy["cross_project_leakage"].as_f64()),
-                    Some("Фактическое число утечек между проектами в последнем verification contour."),
+                compare_table_row(
+                    "Symbol precision",
+                    "Насколько точно retrieval попадает в нужные символы, функции и сущности.",
+                    compare_pair(
+                        format_ratio_percent(thresholds["accuracy"]["symbol_precision"]["target"].as_f64()),
+                        format_ratio_percent(accuracy["symbol_precision"].as_f64()),
+                    ),
                 ),
-                metric_row(
-                    "Эталон symbol precision",
-                    format_ratio_percent(thresholds["accuracy"]["symbol_precision"]["target"].as_f64()),
-                    Some("Насколько точно retrieval попадает в нужные символы, функции и сущности."),
-                ),
-                metric_row(
-                    "Измерено symbol precision",
-                    format_ratio_percent(accuracy["symbol_precision"].as_f64()),
-                    Some("Фактическая точность по символам в последнем verification contour."),
-                ),
-                metric_row(
-                    "Эталон semantic precision",
-                    format_ratio_percent(thresholds["accuracy"]["semantic_precision"]["target"].as_f64()),
-                    Some("Насколько точно семантический слой попадает в правильный контекст."),
-                ),
-                metric_row(
-                    "Измерено semantic precision",
-                    format_ratio_percent(accuracy["semantic_precision"].as_f64()),
-                    Some("Фактическая семантическая точность в последнем verification contour."),
+                compare_table_row(
+                    "Semantic precision",
+                    "Насколько точно семантический слой попадает в правильный контекст.",
+                    compare_pair(
+                        format_ratio_percent(thresholds["accuracy"]["semantic_precision"]["target"].as_f64()),
+                        format_ratio_percent(accuracy["semantic_precision"].as_f64()),
+                    ),
                 ),
             ],
         ),
@@ -2392,6 +2469,7 @@ fn compare_table_card(
     status: &str,
     source_label: Option<String>,
     title_tooltip: Option<String>,
+    headline_value: Option<String>,
     rows: Vec<Value>,
 ) -> Value {
     json!({
@@ -2402,6 +2480,7 @@ fn compare_table_card(
         "status_label": status_label(status),
         "source_label": source_label,
         "title_tooltip": title_tooltip,
+        "headline_value": headline_value,
         "metrics": [],
         "table": {
             "columns": [
