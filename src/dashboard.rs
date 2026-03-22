@@ -1749,7 +1749,7 @@ pub fn build_payload(
         "hero_cards": build_hero_cards(snapshot),
         "top_cards": build_top_cards(snapshot),
         "benchmark_cards": build_benchmark_cards(snapshot),
-        "machine_cards": build_machine_cards(machine.as_ref(), install_state.as_ref()),
+        "machine_cards": build_machine_cards(snapshot, machine.as_ref(), install_state.as_ref()),
         "service_cards": build_service_cards(snapshot),
         "warnings": build_warnings(snapshot),
         "glossary": build_glossary(),
@@ -2331,7 +2331,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let lifetime_answer_percent = lifetime["verified_answer_like_savings_pct"].as_f64();
 
     vec![
-        card(
+        card_with_rows(
             "Экономия токенов за текущую сессию",
             format_signed_count(session_saved),
             if session_events > 0 {
@@ -2373,6 +2373,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                 "В текущей непрерывной сессии Amai ещё не накопил ни одного учтённого запроса, поэтому реальную экономию пока рано показывать.".to_string()
             },
             savings_status(session_saved, session_events, session_events_total),
+            None,
+            Some("Главный KPI этой карточки считает только verified live-события без потери качества. Raw contour ниже нужен как отдельная explain-lane и не должен читаться как тот же самый KPI.".to_string()),
+            current_session_lane_rows(current_session),
         ),
         card(
             "Экономия токенов за рабочее окно",
@@ -2431,6 +2434,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
 }
 
 fn build_machine_cards(
+    snapshot: &Value,
     machine: Option<&MachineSummary>,
     install_state: Option<&InstallState>,
 ) -> Vec<Value> {
@@ -2616,7 +2620,129 @@ fn build_machine_cards(
             "machine-compact",
         ));
     }
+    cards.push(with_extra_class(
+        artifact_cleanup_card(snapshot),
+        "machine-compact",
+    ));
     cards
+}
+
+fn artifact_cleanup_card(snapshot: &Value) -> Value {
+    let cleanup = &snapshot["artifact_cleanup"];
+    if !cleanup.is_object() || cleanup["status"].as_str().is_some() {
+        return card_with_rows(
+            "Локальный мусор и retention",
+            "ещё нет данных".to_string(),
+            "Policy-driven cleanup для rebuildable хвоста ещё не успел записать последний summary.".to_string(),
+            "unknown",
+            Some("Источник: state/tooling/artifact_cleanup/latest.json".to_string()),
+            Some("Этот блок показывает только rebuildable локальный хвост Amai. Live state и исторические данные сервисов сюда не входят.".to_string()),
+            vec![],
+        );
+    }
+
+    let safe_reclaimable_bytes = cleanup["selected_reclaimable_bytes"].as_u64().unwrap_or(0);
+    let safe_selected = cleanup["selected"].as_u64().unwrap_or(0);
+    let safe_expired = cleanup["expired"].as_u64().unwrap_or(0);
+    let aggressive_reclaimable_bytes = cleanup["aggressive_preview_reclaimable_bytes"]
+        .as_u64()
+        .unwrap_or(safe_reclaimable_bytes);
+    let aggressive_selected = cleanup["aggressive_preview_selected"]
+        .as_u64()
+        .unwrap_or(safe_selected);
+    let captured_at_epoch_ms = cleanup["captured_at_epoch_ms"].as_u64();
+    let kept_latest = cleanup["kept_latest"].as_u64().unwrap_or(0);
+    let protected = cleanup["protected"].as_u64().unwrap_or(0);
+    let targets_scanned = cleanup["targets_scanned"].as_u64().unwrap_or(0);
+    let last_apply = &cleanup["last_apply"];
+    let last_reclaim_bytes = last_apply["reclaimed_bytes"].as_u64().unwrap_or(0);
+    let last_deleted = last_apply["deleted"].as_u64().unwrap_or(0);
+    let last_apply_mode = last_apply["mode"].as_str().unwrap_or("conservative");
+    let last_apply_at = last_apply["captured_at_epoch_ms"].as_u64();
+
+    let value = if aggressive_reclaimable_bytes > 0 {
+        format!(
+            "{} preview",
+            human_bytes(aggressive_reclaimable_bytes as f64)
+        )
+    } else if safe_reclaimable_bytes > 0 {
+        format!("{} safe", human_bytes(safe_reclaimable_bytes as f64))
+    } else {
+        "по policy чисто".to_string()
+    };
+    let mut note = format!(
+        "Safe policy чистит только то, что уже aged past TTL и не попадает под keep-latest. Aggressive preview показывает, сколько rebuildable хвоста можно убрать сразу, не трогая live state. Последний sweep: {}.",
+        captured_at_epoch_ms
+            .map(human_timestamp)
+            .unwrap_or_else(|| "ещё нет данных".to_string())
+    );
+    if last_reclaim_bytes > 0 {
+        let last_apply_label = last_apply_at
+            .map(human_timestamp)
+            .unwrap_or_else(|| "неизвестно когда".to_string());
+        note.push_str(&format!(
+            " Последний apply-run уже вернул {} ({last_deleted} entries, mode={last_apply_mode}) в {last_apply_label}.",
+            human_bytes(last_reclaim_bytes as f64)
+        ));
+    }
+
+    card_with_rows(
+        "Локальный мусор и retention",
+        value,
+        note,
+        artifact_cleanup_status(snapshot),
+        Some("Источник: state/tooling/artifact_cleanup/latest.json".to_string()),
+        Some("Это локальный hygiene contour для build/cache хвостов Amai. Он не удаляет state PostgreSQL, Qdrant, MinIO или NATS.".to_string()),
+        vec![
+            metric_row(
+                "Safe reclaim now",
+                human_bytes(safe_reclaimable_bytes as f64),
+                Some("Сколько места можно вернуть прямо сейчас, не нарушая TTL и keep-latest policy."),
+            ),
+            metric_row(
+                "Aggressive preview",
+                human_bytes(aggressive_reclaimable_bytes as f64),
+                Some("Сколько rebuildable хвоста можно убрать сразу explicit aggressive path-ом, не трогая live state."),
+            ),
+            metric_row(
+                "Last reclaim",
+                if last_reclaim_bytes > 0 {
+                    format!(
+                        "{} ({last_deleted}, {last_apply_mode})",
+                        human_bytes(last_reclaim_bytes as f64)
+                    )
+                } else {
+                    "ещё не было".to_string()
+                },
+                Some("Сколько места вернул последний apply-run cleanup policy и в каком режиме он был выполнен."),
+            ),
+            metric_row(
+                "Safe кандидаты",
+                safe_selected.to_string(),
+                Some("Сколько отдельных entries уже попали под текущую conservative policy."),
+            ),
+            metric_row(
+                "Aggressive кандидаты",
+                aggressive_selected.to_string(),
+                Some("Сколько отдельных entries можно было бы убрать explicit aggressive path-ом прямо сейчас."),
+            ),
+            metric_row(
+                "TTL already expired",
+                safe_expired.to_string(),
+                Some("Сколько entries уже aged past TTL, даже если limit сейчас не даёт выбрать их все."),
+            ),
+            metric_row(
+                "Keep latest / protected",
+                format!("{kept_latest} / {protected}"),
+                Some("Что policy сейчас удерживает: недавние entries по keep-latest и активные защищённые paths."),
+            ),
+            metric_row(
+                "Targets scanned",
+                targets_scanned.to_string(),
+                Some("Сколько cleanup-target directories сейчас участвует в policy-driven контуре."),
+            ),
+        ],
+    )
 }
 
 fn build_accelerator_cards(accelerators: &[AcceleratorSummary]) -> Vec<Value> {
@@ -3070,6 +3196,9 @@ fn build_warnings(snapshot: &Value) -> Vec<String> {
         .filter(|check| check["status"].as_str().unwrap_or("unknown") != "pass")
     {
         warnings.push(humanize_check(snapshot, check));
+    }
+    if let Some(warning) = artifact_cleanup_warning(snapshot) {
+        warnings.push(warning);
     }
     warnings
 }
@@ -3797,6 +3926,44 @@ fn recovery_sentence(median_recovery_tokens: Option<f64>) -> String {
     }
 }
 
+fn current_session_lane_rows(summary: &Value) -> Vec<Value> {
+    vec![
+        metric_row(
+            "Verified lane",
+            token_lane_summary(
+                summary["verified_baseline_tokens"].as_u64(),
+                summary["verified_delivered_tokens"].as_u64(),
+                summary["verified_recovery_tokens"].as_u64(),
+                summary["verified_effective_saved_tokens"].as_i64(),
+            ),
+            Some("Главный KPI этой карточки: только verified live-события без потери качества."),
+        ),
+        metric_row(
+            "Raw live lane",
+            token_lane_summary(
+                summary["total_naive_tokens"].as_u64(),
+                summary["total_context_tokens"].as_u64(),
+                summary["total_recovery_tokens"].as_u64(),
+                summary["total_effective_saved_tokens"].as_i64(),
+            ),
+            Some(
+                "Весь live contour без quality gate. Нужен как explain-lane, а не как главный KPI.",
+            ),
+        ),
+        metric_row(
+            "Outside verified",
+            format!(
+                "{} событий, delta {}",
+                summary["excluded_events_count"].as_u64().unwrap_or(0),
+                format_signed_count(summary["excluded_effective_saved_tokens"].as_i64())
+            ),
+            Some(
+                "События, которые пока не вошли в verified KPI: им ещё не хватило quality gate или они synthetic/debug.",
+            ),
+        ),
+    ]
+}
+
 fn raw_savings_sentence(
     baseline_tokens: Option<u64>,
     delivered_tokens: Option<u64>,
@@ -3866,6 +4033,62 @@ fn verified_vs_excluded_sentence(summary: &Value) -> String {
 
 fn client_budget_disclaimer() -> &'static str {
     "Это не процент от лимита клиента/чата: карточка считает только retrieval payload Amai против baseline, а не все токены thread-а."
+}
+
+fn token_lane_summary(
+    baseline_tokens: Option<u64>,
+    delivered_tokens: Option<u64>,
+    recovery_tokens: Option<u64>,
+    delta_tokens: Option<i64>,
+) -> String {
+    match (baseline_tokens, delivered_tokens, recovery_tokens) {
+        (Some(baseline), Some(delivered), Some(recovery)) => format!(
+            "{} -> {} -> {} => {}",
+            format_u64(Some(baseline)),
+            format_u64(Some(delivered)),
+            format_u64(Some(recovery)),
+            format_signed_count(delta_tokens)
+        ),
+        _ => "ещё нет данных".to_string(),
+    }
+}
+
+fn artifact_cleanup_status(snapshot: &Value) -> &'static str {
+    let cleanup = &snapshot["artifact_cleanup"];
+    if !cleanup.is_object() || cleanup["status"].as_str().is_some() {
+        return "unknown";
+    }
+    if cleanup["selected"].as_u64().unwrap_or(0) > 0 {
+        "alert"
+    } else if cleanup["aggressive_preview_selected"].as_u64().unwrap_or(0) > 0 {
+        "alert"
+    } else {
+        "pass"
+    }
+}
+
+fn artifact_cleanup_warning(snapshot: &Value) -> Option<String> {
+    let cleanup = &snapshot["artifact_cleanup"];
+    if !cleanup.is_object() || cleanup["status"].as_str().is_some() {
+        return None;
+    }
+    let safe_bytes = cleanup["selected_reclaimable_bytes"].as_u64().unwrap_or(0);
+    let aggressive_bytes = cleanup["aggressive_preview_reclaimable_bytes"]
+        .as_u64()
+        .unwrap_or(0);
+    if safe_bytes > 0 {
+        return Some(format!(
+            "Локальный rebuildable хвост уже aged past TTL: safe reclaim сейчас {}. Это не live state и его можно убрать policy-cleanup path-ом.",
+            human_bytes(safe_bytes as f64)
+        ));
+    }
+    if aggressive_bytes > 0 {
+        return Some(format!(
+            "Локальный rebuildable хвост ещё не дожил до TTL, но aggressive reclaim path уже мог бы вернуть {} без удаления live state. Safe policy сейчас специально ждёт возрастной запас.",
+            human_bytes(aggressive_bytes as f64)
+        ));
+    }
+    None
 }
 
 fn status_for_metric_prefix(snapshot: &Value, prefix: &str) -> &'static str {
@@ -4422,8 +4645,8 @@ fn human_elapsed_ms(value_ms: u64) -> String {
 mod tests {
     use super::{
         benchmark_qdrant_live_card, browser_base_url, build_benchmark_cards, build_hero_cards,
-        format_ms, format_time_compare_pair, human_elapsed_ms, live_latency_compare_card,
-        monitoring_url, worst_status,
+        build_machine_cards, format_ms, format_time_compare_pair, human_elapsed_ms,
+        live_latency_compare_card, monitoring_url, worst_status,
     };
     use serde_json::json;
 
@@ -4798,6 +5021,44 @@ mod tests {
         assert!(note.contains("baseline"));
         assert!(note.contains("реально доставленных"));
         assert!(note.contains("Это не процент от лимита клиента/чата"));
+        let rows = cards[0]["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["label"].as_str(), Some("Verified lane"));
+        assert_eq!(rows[1]["label"].as_str(), Some("Raw live lane"));
+    }
+
+    #[test]
+    fn machine_cards_include_artifact_cleanup_visibility() {
+        let snapshot = json!({
+            "artifact_cleanup": {
+                "captured_at_epoch_ms": 42,
+                "selected": 0,
+                "selected_reclaimable_bytes": 0,
+                "expired": 0,
+                "kept_latest": 3,
+                "protected": 1,
+                "targets_scanned": 7,
+                "aggressive_preview_selected": 4,
+                "aggressive_preview_reclaimable_bytes": 35_604_527_338u64,
+                "last_apply": {
+                    "captured_at_epoch_ms": 41,
+                    "mode": "aggressive",
+                    "deleted": 30,
+                    "reclaimed_bytes": 50_424_092_586u64
+                }
+            }
+        });
+        let cards = build_machine_cards(&snapshot, None, None);
+        let cleanup_card = cards
+            .iter()
+            .find(|card| card["title"].as_str() == Some("Локальный мусор и retention"))
+            .expect("cleanup card");
+        assert_eq!(cleanup_card["status"].as_str(), Some("alert"));
+        assert_eq!(cleanup_card["rows"][1]["value"].as_str(), Some("33.16 GiB"));
+        assert_eq!(
+            cleanup_card["rows"][2]["value"].as_str(),
+            Some("46.96 GiB (30, aggressive)")
+        );
     }
 
     #[test]

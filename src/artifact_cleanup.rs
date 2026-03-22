@@ -5,7 +5,9 @@ use std::cmp::Reverse;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const SUMMARY_RELATIVE_PATH: &str = "state/tooling/artifact_cleanup/latest.json";
 
 #[derive(Debug, Clone, Deserialize)]
 struct ArtifactCleanupDocument {
@@ -26,6 +28,25 @@ pub struct ArtifactCleanupTarget {
     pub keep_latest: usize,
     #[serde(default)]
     pub auto_apply: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanupMode {
+    Conservative,
+    Aggressive,
+}
+
+impl CleanupMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            CleanupMode::Conservative => "conservative",
+            CleanupMode::Aggressive => "aggressive",
+        }
+    }
+
+    fn enforce_ttl(self) -> bool {
+        matches!(self, CleanupMode::Conservative)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -70,19 +91,35 @@ pub fn run_cleanup(
     apply: bool,
     auto_only: bool,
     limit: Option<usize>,
+    aggressive: bool,
 ) -> Result<Value> {
     let profile = load_profile()?;
     let now = SystemTime::now();
+    let captured_at_epoch_ms = now
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as u64;
     let protected_paths = current_protected_paths();
+    let mode = if aggressive {
+        CleanupMode::Aggressive
+    } else {
+        CleanupMode::Conservative
+    };
     let mut remaining_limit = limit.unwrap_or(usize::MAX);
+    let mut preview_limit = usize::MAX;
 
     let mut targets_json = Vec::new();
     let mut selected_json = Vec::new();
     let mut targets_scanned = 0_u64;
     let mut expired_total = 0_u64;
     let mut selected_total = 0_u64;
+    let mut selected_reclaimable_bytes_total = 0_u64;
     let mut deleted_total = 0_u64;
     let mut reclaimed_bytes_total = 0_u64;
+    let mut kept_latest_total = 0_u64;
+    let mut protected_total = 0_u64;
+    let mut aggressive_preview_total = 0_u64;
+    let mut aggressive_preview_reclaimed_bytes = 0_u64;
 
     for target in profile
         .targets
@@ -102,30 +139,52 @@ pub fn run_cleanup(
                 "entries_scanned": 0,
                 "expired": 0,
                 "selected": 0,
+                "selected_reclaimable_bytes": 0,
                 "deleted": 0,
                 "reclaimed_bytes": 0,
                 "kept_latest": 0,
                 "protected": 0,
+                "aggressive_preview_selected": 0,
+                "aggressive_preview_reclaimable_bytes": 0,
             }));
             continue;
         }
 
         let entries = immediate_entries(&root)?;
-        let plan = plan_target_cleanup(
-            entries,
+        let active_plan = plan_target_cleanup(
+            entries.clone(),
             now,
             target.ttl_hours,
             target.keep_latest,
             &protected_paths,
             &mut remaining_limit,
+            mode,
         )?;
+        let aggressive_preview = if aggressive {
+            active_plan.clone()
+        } else {
+            plan_target_cleanup(
+                entries,
+                now,
+                target.ttl_hours,
+                target.keep_latest,
+                &protected_paths,
+                &mut preview_limit,
+                CleanupMode::Aggressive,
+            )?
+        };
 
-        expired_total += plan.expired;
-        selected_total += plan.selected;
+        expired_total += active_plan.expired;
+        selected_total += active_plan.selected;
+        selected_reclaimable_bytes_total += selected_reclaimable_bytes(&active_plan);
+        kept_latest_total += active_plan.kept_latest;
+        protected_total += active_plan.protected;
+        aggressive_preview_total += aggressive_preview.selected;
+        aggressive_preview_reclaimed_bytes += selected_reclaimable_bytes(&aggressive_preview);
 
         let mut deleted = 0_u64;
         let mut reclaimed_bytes = 0_u64;
-        for selected in &plan.selected_entries {
+        for selected in &active_plan.selected_entries {
             selected_json.push(json!({
                 "target_path": target.path,
                 "description": target.description,
@@ -150,30 +209,66 @@ pub fn run_cleanup(
             "keep_latest": target.keep_latest,
             "auto_apply": target.auto_apply,
             "missing": false,
-            "entries_scanned": plan.scanned,
-            "expired": plan.expired,
-            "selected": plan.selected,
+            "entries_scanned": active_plan.scanned,
+            "expired": active_plan.expired,
+            "selected": active_plan.selected,
+            "selected_reclaimable_bytes": selected_reclaimable_bytes(&active_plan),
             "deleted": deleted,
             "reclaimed_bytes": reclaimed_bytes,
-            "kept_latest": plan.kept_latest,
-            "protected": plan.protected,
+            "kept_latest": active_plan.kept_latest,
+            "protected": active_plan.protected,
+            "aggressive_preview_selected": aggressive_preview.selected,
+            "aggressive_preview_reclaimable_bytes": selected_reclaimable_bytes(&aggressive_preview),
         }));
     }
 
     Ok(json!({
         "artifact_cleanup": {
+            "captured_at_epoch_ms": captured_at_epoch_ms,
+            "mode": mode.as_str(),
             "apply": apply,
             "auto_only": auto_only,
             "targets_scanned": targets_scanned,
             "expired": expired_total,
             "selected": selected_total,
+            "selected_reclaimable_bytes": selected_reclaimable_bytes_total,
             "deleted": deleted_total,
             "reclaimed_bytes": reclaimed_bytes_total,
+            "kept_latest": kept_latest_total,
+            "protected": protected_total,
+            "aggressive_preview_selected": aggressive_preview_total,
+            "aggressive_preview_reclaimable_bytes": aggressive_preview_reclaimed_bytes,
             "protected_paths": protected_paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
             "targets": targets_json,
             "candidates": selected_json,
         }
     }))
+}
+
+pub fn write_latest_summary(repo_root: &Path, summary: &Value) -> Result<PathBuf> {
+    let path = summary_path(repo_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(summary).context("failed to serialize cleanup summary")?,
+    )
+    .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+pub fn read_latest_summary(repo_root: &Path) -> Result<Option<Value>> {
+    let path = summary_path(repo_root);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let value = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(Some(value))
 }
 
 fn plan_target_cleanup(
@@ -183,9 +278,15 @@ fn plan_target_cleanup(
     keep_latest: usize,
     protected_paths: &[PathBuf],
     remaining_limit: &mut usize,
+    mode: CleanupMode,
 ) -> Result<TargetCleanupPlan> {
     entries.sort_by_key(|entry| Reverse(entry.modified));
     let ttl = Duration::from_secs(ttl_hours.saturating_mul(3_600));
+    let keep_latest = if matches!(mode, CleanupMode::Aggressive) {
+        0
+    } else {
+        keep_latest
+    };
     let mut plan = TargetCleanupPlan {
         scanned: entries.len() as u64,
         ..TargetCleanupPlan::default()
@@ -209,7 +310,8 @@ fn plan_target_cleanup(
         let age = now
             .duration_since(entry.modified)
             .unwrap_or_else(|_| Duration::from_secs(0));
-        if age < ttl {
+        let expired = !mode.enforce_ttl() || age >= ttl;
+        if !expired {
             continue;
         }
 
@@ -288,6 +390,13 @@ fn delete_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn selected_reclaimable_bytes(plan: &TargetCleanupPlan) -> u64 {
+    plan.selected_entries
+        .iter()
+        .map(|entry| entry.size_bytes)
+        .sum::<u64>()
+}
+
 fn current_protected_paths() -> Vec<PathBuf> {
     env::current_exe()
         .ok()
@@ -307,9 +416,13 @@ fn profile_path() -> PathBuf {
     }
 }
 
+fn summary_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(SUMMARY_RELATIVE_PATH)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CleanupEntry, current_protected_paths, plan_target_cleanup};
+    use super::{CleanupEntry, CleanupMode, current_protected_paths, plan_target_cleanup};
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
@@ -334,7 +447,16 @@ mod tests {
             },
         ];
         let mut limit = usize::MAX;
-        let plan = plan_target_cleanup(entries, now, 24, 1, &[], &mut limit).expect("plan");
+        let plan = plan_target_cleanup(
+            entries,
+            now,
+            24,
+            1,
+            &[],
+            &mut limit,
+            CleanupMode::Conservative,
+        )
+        .expect("plan");
         assert_eq!(plan.scanned, 3);
         assert_eq!(plan.kept_latest, 1);
         assert_eq!(plan.expired, 2);
@@ -366,12 +488,57 @@ mod tests {
             },
         ];
         let mut limit = 1;
-        let plan = plan_target_cleanup(entries, now, 24, 0, &protected, &mut limit).expect("plan");
+        let plan = plan_target_cleanup(
+            entries,
+            now,
+            24,
+            0,
+            &protected,
+            &mut limit,
+            CleanupMode::Conservative,
+        )
+        .expect("plan");
         assert_eq!(plan.protected, 1);
         assert_eq!(plan.expired, 2);
         assert_eq!(plan.selected, 1);
         assert_eq!(plan.selected_entries[0].path, PathBuf::from("/tmp/old_b"));
         assert_eq!(limit, 0);
         assert!(!current_protected_paths().contains(&PathBuf::from("/tmp/protected")));
+    }
+
+    #[test]
+    fn aggressive_cleanup_ignores_ttl_and_keep_latest() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(48 * 3600);
+        let entries = vec![
+            CleanupEntry {
+                path: PathBuf::from("/tmp/newest"),
+                modified: now - Duration::from_secs(60),
+                size_bytes: 10,
+            },
+            CleanupEntry {
+                path: PathBuf::from("/tmp/not_old_enough"),
+                modified: now - Duration::from_secs(2 * 3600),
+                size_bytes: 20,
+            },
+        ];
+        let mut limit = usize::MAX;
+        let plan = plan_target_cleanup(
+            entries,
+            now,
+            24,
+            1,
+            &[],
+            &mut limit,
+            CleanupMode::Aggressive,
+        )
+        .expect("plan");
+        assert_eq!(plan.kept_latest, 0);
+        assert_eq!(plan.expired, 2);
+        assert_eq!(plan.selected, 2);
+        assert_eq!(plan.selected_entries[0].path, PathBuf::from("/tmp/newest"));
+        assert_eq!(
+            plan.selected_entries[1].path,
+            PathBuf::from("/tmp/not_old_enough")
+        );
     }
 }

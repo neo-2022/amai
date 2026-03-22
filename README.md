@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 01:35 MSK
-Ручная сверка guide/docs: 2026-03-23 01:35 MSK
+modified_at: 2026-03-23 02:05 MSK
+Ручная сверка guide/docs: 2026-03-23 02:05 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -889,6 +889,8 @@ cargo run --release -- observe cleanup-snapshots --apply --limit 2000
 ```bash
 cargo run --release -- observe cleanup-artifacts --limit 20
 cargo run --release -- observe cleanup-artifacts --apply --limit 20
+cargo run --release -- observe cleanup-artifacts --aggressive --limit 20
+cargo run --release -- observe cleanup-artifacts --aggressive --apply
 ```
 
 Что это значит:
@@ -901,6 +903,15 @@ cargo run --release -- observe cleanup-artifacts --apply --limit 20
 - live state вроде `state/postgres`, `state/qdrant`, `state/minio`, `state/nats` этот контур не удаляет;
 - `observe serve`, `observe snapshot` и `observe sla-check` теперь сами запускают auto-cleanup по TTL, поэтому старый локальный мусор не должен копиться бесконечно;
 - текущий запущенный бинарь защищён от удаления, даже если его директория уже попала под TTL.
+- `--aggressive` выключает возрастной запас и `keep_latest` только для rebuildable хвоста, поэтому это уже explicit reclaim path, а не обычный auto-retention;
+- в human dashboard теперь есть отдельная карточка `Локальный мусор и retention`, где явно видны:
+  - сколько можно убрать безопасно прямо сейчас;
+  - сколько можно убрать explicit aggressive path-ом;
+  - сколько вернул последний apply-run;
+  - почему safe policy может пока держать хвост, даже если aggressive preview уже большой;
+- после apply-run карточка больше не должна врать старым preview:
+  - summary сразу пересчитывается повторным dry-run;
+  - dashboard показывает текущий reclaim contour отдельно от `Last reclaim`, а не смешивает уже удалённый хвост с тем, что ещё реально лежит на диске.
 
 После этого в live-отчёте у события появляются уже более сильные поля:
 - `target_kind`

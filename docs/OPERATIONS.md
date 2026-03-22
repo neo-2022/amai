@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 01:35 MSK
-Ручная сверка guide/docs: 2026-03-23 01:35 MSK
+modified_at: 2026-03-23 02:05 MSK
+Ручная сверка guide/docs: 2026-03-23 02:05 MSK
 
 # Operations
 
@@ -1292,6 +1292,8 @@ cargo run --release -- observe cleanup-snapshots --apply --limit 2000
 ```bash
 cargo run --release -- observe cleanup-artifacts --limit 20
 cargo run --release -- observe cleanup-artifacts --apply --limit 20
+cargo run --release -- observe cleanup-artifacts --aggressive --limit 20
+cargo run --release -- observe cleanup-artifacts --aggressive --apply
 ```
 
 Смысл по-человечески:
@@ -1304,6 +1306,13 @@ cargo run --release -- observe cleanup-artifacts --apply --limit 20
 - список путей, TTL и `keep_latest` живут в [config/observability.toml](/home/art/agent-memory-index/config/observability.toml);
 - auto-path защищает текущий исполняемый бинарь от удаления;
 - `observe serve`, `observe snapshot` и `observe sla-check` сами запускают этот cleanup, поэтому локальный мусор должен уходить без ручного обхода.
+- `--aggressive` — это уже explicit reclaim path: он не ждёт TTL и не держит `keep_latest`, но всё равно не лезет в live state и защищает текущий исполняемый бинарь.
+- human dashboard теперь показывает отдельную карточку `Локальный мусор и retention`, чтобы оператор видел:
+  - safe reclaim now;
+  - aggressive preview;
+  - last reclaim;
+  - почему объём проекта может ещё не уменьшаться, даже если aggressive preview уже большой.
+- после любого `--apply` summary сразу пересчитывается повторным dry-run, поэтому карточка и warning не должны продолжать показывать уже удалённый хвост как будто он всё ещё лежит на диске.
 
 После `reverify` live event теперь должен нести richer fields:
 - `target_kind`
@@ -1563,6 +1572,7 @@ Grafana login берётся из `.env`:
 - те же entrypoint-ы теперь ещё запускают policy-driven cleanup для rebuildable локального мусора по TTL из `config/observability.toml`;
 - ручной `observe cleanup-snapshots --apply` остаётся явным операторским инструментом для отдельного dry-run/apply proof;
 - ручной `observe cleanup-artifacts --apply` остаётся отдельным операторским путём для dry-run/apply по локальным build/cache хвостам;
+- ручной `observe cleanup-artifacts --aggressive --apply` остаётся отдельным operator-only reclaim path, когда нужно быстро вернуть место без затрагивания live state;
 - benchmark snapshot запрещено переписывать update-path-ом: для них действует `immutable_snapshot`, а lifecycle дальше управляется retention policy, а не тихим in-place drift.
 - human dashboard использует тот же read-only snapshot contour и тоже не пишет state на каждый refresh;
 - верхние hero-карты human dashboard теперь intentionally живут только на real live ledger:

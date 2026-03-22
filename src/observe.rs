@@ -196,9 +196,11 @@ pub async fn print_artifact_cleanup(
     _cfg: &AppConfig,
     apply: bool,
     limit: Option<usize>,
+    aggressive: bool,
 ) -> Result<()> {
     let repo_root = discover_repo_root(None)?;
-    let summary = artifact_cleanup::run_cleanup(&repo_root, apply, false, limit)?;
+    let summary = collect_artifact_cleanup_summary(&repo_root, apply, false, limit, aggressive)?;
+    let _ = artifact_cleanup::write_latest_summary(&repo_root, &summary)?;
     println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
 }
@@ -318,6 +320,15 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
     let latest_working_state_restore =
         postgres::latest_observability_snapshot(&db, "working_state_restore").await?;
     let token_budget_report = token_budget::collect_default_report(&db).await?;
+    let repo_root = discover_repo_root(None)?;
+    let artifact_cleanup_summary = artifact_cleanup::read_latest_summary(&repo_root)?
+        .unwrap_or_else(|| {
+            json!({
+                "artifact_cleanup": {
+                    "status": "ещё нет данных"
+                }
+            })
+        });
 
     let payload = json!({
         "captured_at_epoch_ms": captured_at_epoch_ms,
@@ -340,6 +351,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_cold_path_benchmark": latest_cold_path_benchmark,
         "latest_working_state_restore": latest_working_state_restore,
         "token_budget_report": token_budget_report,
+        "artifact_cleanup": artifact_cleanup_summary["artifact_cleanup"].clone(),
     });
     let sla = evaluate_sla(&payload, &profile);
     let snapshot = json!({
@@ -363,6 +375,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_cold_path_benchmark": payload["latest_cold_path_benchmark"].clone(),
         "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
         "token_budget_report": payload["token_budget_report"].clone(),
+        "artifact_cleanup": payload["artifact_cleanup"].clone(),
         "sla": sla,
     });
     if persist_snapshot {
@@ -551,7 +564,8 @@ async fn maybe_cleanup_observability_snapshots(cfg: &AppConfig) -> Result<()> {
 
 async fn maybe_cleanup_local_artifacts() -> Result<()> {
     let repo_root = discover_repo_root(None)?;
-    let summary = artifact_cleanup::run_cleanup(&repo_root, true, true, None)?;
+    let summary = collect_artifact_cleanup_summary(&repo_root, true, true, None, false)?;
+    let _ = artifact_cleanup::write_latest_summary(&repo_root, &summary)?;
     let cleanup = &summary["artifact_cleanup"];
     let deleted = cleanup["deleted"].as_u64().unwrap_or(0);
     let expired = cleanup["expired"].as_u64().unwrap_or(0);
@@ -564,6 +578,77 @@ async fn maybe_cleanup_local_artifacts() -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn collect_artifact_cleanup_summary(
+    repo_root: &Path,
+    apply: bool,
+    auto_only: bool,
+    limit: Option<usize>,
+    aggressive: bool,
+) -> Result<Value> {
+    let existing_last_apply = artifact_cleanup::read_latest_summary(repo_root)?
+        .and_then(|summary| extract_last_artifact_cleanup_apply(&summary));
+    if !apply {
+        let mut current =
+            artifact_cleanup::run_cleanup(repo_root, false, auto_only, limit, aggressive)?;
+        if let Some(last_apply) = existing_last_apply {
+            if let Some(object) = current["artifact_cleanup"].as_object_mut() {
+                object.insert("last_apply".to_string(), last_apply);
+            }
+        }
+        return Ok(current);
+    }
+
+    let applied = artifact_cleanup::run_cleanup(repo_root, true, auto_only, limit, aggressive)?;
+    let mut current = artifact_cleanup::run_cleanup(repo_root, false, auto_only, None, false)?;
+    let applied_cleanup = &applied["artifact_cleanup"];
+    let last_apply = if applied_cleanup["reclaimed_bytes"].as_u64().unwrap_or(0) > 0
+        || applied_cleanup["deleted"].as_u64().unwrap_or(0) > 0
+    {
+        json!({
+            "captured_at_epoch_ms": applied_cleanup["captured_at_epoch_ms"].clone(),
+            "mode": applied_cleanup["mode"].clone(),
+            "auto_only": applied_cleanup["auto_only"].clone(),
+            "deleted": applied_cleanup["deleted"].clone(),
+            "reclaimed_bytes": applied_cleanup["reclaimed_bytes"].clone(),
+            "selected": applied_cleanup["selected"].clone(),
+        })
+    } else {
+        existing_last_apply.unwrap_or(Value::Null)
+    };
+    if let Some(object) = current["artifact_cleanup"].as_object_mut() {
+        if !last_apply.is_null() {
+            object.insert("last_apply".to_string(), last_apply);
+        }
+    }
+    Ok(current)
+}
+
+fn extract_last_artifact_cleanup_apply(summary: &Value) -> Option<Value> {
+    let cleanup = summary.get("artifact_cleanup")?;
+    if let Some(last_apply) = cleanup.get("last_apply").filter(|value| value.is_object()) {
+        return Some(last_apply.clone());
+    }
+    if cleanup.get("apply").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let reclaimed_bytes = cleanup
+        .get("reclaimed_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let deleted = cleanup.get("deleted").and_then(Value::as_u64).unwrap_or(0);
+    if reclaimed_bytes == 0 && deleted == 0 {
+        return None;
+    }
+    Some(json!({
+        "captured_at_epoch_ms": cleanup["captured_at_epoch_ms"].clone(),
+        "mode": cleanup["mode"].clone(),
+        "auto_only": cleanup["auto_only"].clone(),
+        "deleted": cleanup["deleted"].clone(),
+        "reclaimed_bytes": cleanup["reclaimed_bytes"].clone(),
+        "selected": cleanup["selected"].clone(),
+    }))
 }
 
 async fn run_retention_cleanup(cfg: &AppConfig, apply: bool, limit: Option<i64>) -> Result<Value> {
