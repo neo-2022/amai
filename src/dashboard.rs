@@ -73,9 +73,9 @@ pub fn render_html(refresh_ms: u64) -> String {
       --unknown: #61717a;
       --unknown-soft: rgba(97, 113, 122, 0.12);
       --shadow:
-        0 2px 0 rgba(31, 45, 51, 0.14),
-        0 18px 30px -20px rgba(20, 31, 36, 0.34),
-        0 42px 96px -44px rgba(20, 31, 36, 0.24);
+        0 0 0 1px rgba(26, 39, 45, 0.10),
+        0 14px 30px -22px rgba(17, 28, 33, 0.42),
+        0 34px 78px -42px rgba(17, 28, 33, 0.30);
       --border: rgba(30, 42, 47, 0.10);
       --surface: rgba(255, 255, 255, 0.72);
       --surface-raised: rgba(255, 255, 255, 0.78);
@@ -83,12 +83,15 @@ pub fn render_html(refresh_ms: u64) -> String {
       --surface-border: rgba(30, 42, 47, 0.08);
       --hero-glow: rgba(13, 107, 111, 0.11);
       --error-border: rgba(182, 56, 43, 0.18);
-      --panel-edge-glow: inset 0 1px 0 rgba(255, 255, 255, 0.62);
+      --panel-inner-contour:
+        inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+        inset 0 0 18px -8px rgba(255, 255, 255, 0.08),
+        inset 0 0 34px -18px rgba(17, 28, 33, 0.22);
       --card-inner-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.52),
-        inset 0 0 0 1px rgba(255, 255, 255, 0.04),
-        inset 0 20px 38px -30px rgba(19, 31, 36, 0.34),
-        0 12px 22px -18px rgba(15, 25, 31, 0.16);
+        inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+        inset 0 0 12px -4px rgba(255, 255, 255, 0.04),
+        inset 0 0 28px -12px rgba(18, 28, 33, 0.26),
+        0 10px 22px -18px rgba(15, 25, 31, 0.18);
     }
 
     * { box-sizing: border-box; }
@@ -131,7 +134,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       inset: 0;
       border-radius: inherit;
       pointer-events: none;
-      box-shadow: var(--panel-edge-glow);
+      box-shadow: var(--panel-inner-contour);
     }
 
     .hero-main {
@@ -824,6 +827,7 @@ pub fn render_html(refresh_ms: u64) -> String {
         ["Stack", meta.stack_name],
         ["Версия", meta.package_version],
         ["Главный KPI", headline.token_title],
+        ["Почему такой статус", headline.status_reason],
         ["Сейчас", `${headline.token_value} (${headline.token_scope})`],
         ["Обновление", headline.captured_at],
         ["Автообновление", `${meta.refresh_seconds} сек.`],
@@ -1038,7 +1042,8 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
     };
     json!({
         "status": status,
-        "status_label": status_label(status),
+        "status_label": headline_status_label(status),
+        "status_reason": headline_status_reason(pass, alert, critical, unknown),
         "captured_at": human_timestamp(captured_at_epoch_ms),
         "summary": format!("SLA сейчас: pass={pass}, alert={alert}, critical={critical}, unknown={unknown}"),
         "token_title": token_headline["title"].as_str().unwrap_or("ещё нет данных"),
@@ -2576,6 +2581,27 @@ fn status_label(status: &str) -> &'static str {
         "alert" => "внимание",
         "critical" => "критично",
         _ => "нет данных",
+    }
+}
+
+fn headline_status_label(status: &str) -> &'static str {
+    match status {
+        "pass" => "система в норме",
+        "alert" => "нужно внимание",
+        "critical" => "есть критичные сигналы",
+        _ => "данных пока мало",
+    }
+}
+
+fn headline_status_reason(pass: u64, alert: u64, critical: u64, unknown: u64) -> String {
+    if critical > 0 {
+        format!("Критичных проверок: {critical}. Предупреждений: {alert}.")
+    } else if alert > 0 {
+        format!("Предупреждений: {alert}. Критичных проверок нет.")
+    } else if unknown > 0 {
+        format!("Неопределённых проверок: {unknown}. Остальные зелёные: {pass}.")
+    } else {
+        format!("Все проверки зелёные: {pass}.")
     }
 }
 
