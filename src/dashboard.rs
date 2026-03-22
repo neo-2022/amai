@@ -73,11 +73,10 @@ pub fn render_html(refresh_ms: u64) -> String {
       --unknown: #61717a;
       --unknown-soft: rgba(97, 113, 122, 0.12);
       --panel-outer-shadow:
-        0 0 1px rgba(26, 39, 45, 0.24),
-        0 0 9px rgba(26, 39, 45, 0.12),
-        0 0 22px rgba(17, 28, 33, 0.09),
-        0 18px 34px -24px rgba(17, 28, 33, 0.34),
-        0 34px 78px -42px rgba(17, 28, 33, 0.22);
+        0 0 2px rgba(17, 28, 33, 0.30),
+        0 0 12px rgba(17, 28, 33, 0.16),
+        0 0 28px rgba(17, 28, 33, 0.10),
+        0 22px 44px -30px rgba(17, 28, 33, 0.18);
       --border: rgba(30, 42, 47, 0.10);
       --surface: rgba(255, 255, 255, 0.72);
       --surface-raised: rgba(255, 255, 255, 0.78);
@@ -85,14 +84,18 @@ pub fn render_html(refresh_ms: u64) -> String {
       --surface-border: rgba(30, 42, 47, 0.08);
       --hero-glow: rgba(13, 107, 111, 0.11);
       --error-border: rgba(182, 56, 43, 0.18);
-      --panel-inner-contour:
-        inset 0 0 1px rgba(255, 255, 255, 0.07),
-        inset 0 0 10px rgba(17, 28, 33, 0.08),
-        inset 0 0 28px rgba(17, 28, 33, 0.12);
+      --card-outer-shadow:
+        0 0 1px rgba(18, 28, 33, 0.24),
+        0 0 8px rgba(18, 28, 33, 0.12),
+        0 0 18px rgba(18, 28, 33, 0.08),
+        0 16px 28px -24px rgba(18, 28, 33, 0.16);
       --card-inner-shadow:
-        inset 0 0 1px rgba(255, 255, 255, 0.05),
-        inset 0 0 8px rgba(18, 28, 33, 0.12),
-        inset 0 0 22px rgba(18, 28, 33, 0.18);
+        inset 0 0 0 1px rgba(8, 70, 61, 0.52),
+        inset 0 1px 0 rgba(255, 255, 255, 0.028),
+        inset 0 12px 16px -14px rgba(8, 63, 55, 0.20),
+        inset 0 -12px 16px -14px rgba(7, 52, 46, 0.16),
+        inset 12px 0 16px -14px rgba(8, 58, 51, 0.16),
+        inset -12px 0 16px -14px rgba(8, 58, 51, 0.16);
     }
 
     * { box-sizing: border-box; }
@@ -129,75 +132,24 @@ pub fn render_html(refresh_ms: u64) -> String {
       backdrop-filter: blur(14px);
     }
 
-    .panel::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      border-radius: inherit;
-      pointer-events: none;
-      box-shadow: var(--panel-inner-contour);
-    }
-
     .hero-main {
       padding: 18px 20px;
       position: relative;
-      overflow: hidden;
+      overflow: visible;
       display: grid;
       gap: 14px;
     }
 
     .brand-line {
       display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
+      align-items: flex-start;
     }
 
-    .brand-mark {
-      width: 34px;
-      height: 34px;
-      border-radius: 10px;
-      flex: 0 0 auto;
-      box-shadow: 0 10px 26px rgba(11, 16, 32, 0.12);
-    }
-
-    .hero-main::after {
-      content: "";
-      position: absolute;
-      inset: auto -80px -120px auto;
-      width: 180px;
-      height: 180px;
-      background: radial-gradient(circle, var(--hero-glow) 0%, rgba(13, 107, 111, 0) 70%);
-      pointer-events: none;
-    }
-
-    .eyebrow {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      padding: 8px 14px;
-      border-radius: 999px;
-      background: var(--accent-soft);
-      color: var(--accent);
-      font-size: 13px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-    }
-
-    h1 {
-      margin: 12px 0 8px;
-      font-size: clamp(24px, 3vw, 34px);
-      line-height: 1.02;
-      letter-spacing: -0.04em;
-    }
-
-    .lead {
-      margin: 0;
-      max-width: 60ch;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.4;
+    .brand-lockup {
+      width: min(100%, 440px);
+      height: auto;
+      display: block;
+      filter: drop-shadow(0 14px 28px rgba(11, 16, 32, 0.10));
     }
 
     .hero-cards {
@@ -259,7 +211,10 @@ pub fn render_html(refresh_ms: u64) -> String {
       border-radius: 18px;
       background: var(--surface);
       border: none;
-      box-shadow: var(--card-inner-shadow);
+      box-shadow: none;
+      position: relative;
+      overflow: visible;
+      isolation: isolate;
     }
 
     .side-block h2,
@@ -329,17 +284,20 @@ pub fn render_html(refresh_ms: u64) -> String {
       border-radius: 20px;
       border: none;
       background: var(--surface-raised);
-      box-shadow: var(--card-inner-shadow);
+      box-shadow: none;
+      position: relative;
+      overflow: visible;
+      isolation: isolate;
     }
 
     .metric-card.pass,
-    .service-card.pass { background: linear-gradient(180deg, rgba(29, 124, 91, 0.10), var(--surface-solid)); }
+    .service-card.pass { background: linear-gradient(180deg, rgba(29, 124, 91, 0.04), var(--surface-solid)); }
     .metric-card.alert,
-    .service-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.10), var(--surface-solid)); }
+    .service-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.04), var(--surface-solid)); }
     .metric-card.critical,
-    .service-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.10), var(--surface-solid)); }
+    .service-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.04), var(--surface-solid)); }
     .metric-card.unknown,
-    .service-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.10), var(--surface-solid)); }
+    .service-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.04), var(--surface-solid)); }
 
     .card-top {
       display: flex;
@@ -420,6 +378,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       cursor: help;
       text-decoration: underline dotted rgba(13, 107, 111, 0.45);
       text-underline-offset: 3px;
+      z-index: 2;
     }
 
     .has-tooltip::after {
@@ -452,6 +411,11 @@ pub fn render_html(refresh_ms: u64) -> String {
       transform: translateX(-50%) translateY(0);
     }
 
+    .has-tooltip:hover,
+    .has-tooltip:focus-visible {
+      z-index: 30;
+    }
+
     .compare-card {
       padding: 20px;
       border-radius: 20px;
@@ -459,12 +423,16 @@ pub fn render_html(refresh_ms: u64) -> String {
       background: var(--surface-raised);
       display: grid;
       gap: 16px;
+      box-shadow: none;
+      position: relative;
+      overflow: visible;
+      isolation: isolate;
     }
 
-    .compare-card.pass { background: linear-gradient(180deg, rgba(29, 124, 91, 0.10), var(--surface-solid)); }
-    .compare-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.10), var(--surface-solid)); }
-    .compare-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.10), var(--surface-solid)); }
-    .compare-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.10), var(--surface-solid)); }
+    .compare-card.pass { background: linear-gradient(180deg, rgba(29, 124, 91, 0.04), var(--surface-solid)); }
+    .compare-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.04), var(--surface-solid)); }
+    .compare-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.04), var(--surface-solid)); }
+    .compare-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.04), var(--surface-solid)); }
 
     .compare-head {
       display: flex;
@@ -486,6 +454,42 @@ pub fn render_html(refresh_ms: u64) -> String {
       padding: 16px;
       display: grid;
       gap: 6px;
+      box-shadow: none;
+      position: relative;
+      overflow: visible;
+      isolation: isolate;
+    }
+
+    .side-block:hover,
+    .side-block:focus-within,
+    .metric-card:hover,
+    .metric-card:focus-within,
+    .service-card:hover,
+    .service-card:focus-within,
+    .glossary-card:hover,
+    .glossary-card:focus-within,
+    .link-card:hover,
+    .link-card:focus-within,
+    .compare-card:hover,
+    .compare-card:focus-within,
+    .compare-metric:hover,
+    .compare-metric:focus-within {
+      z-index: 12;
+    }
+
+    .side-block::before,
+    .metric-card::before,
+    .service-card::before,
+    .glossary-card::before,
+    .link-card::before,
+    .compare-card::before,
+    .compare-metric::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      box-shadow: var(--card-inner-shadow);
     }
 
     .compare-metric-label {
@@ -607,11 +611,10 @@ pub fn render_html(refresh_ms: u64) -> String {
         --unknown: #b2bfca;
         --unknown-soft: rgba(97, 113, 122, 0.24);
         --panel-outer-shadow:
-          0 0 1px rgba(121, 210, 197, 0.18),
-          0 0 10px rgba(4, 9, 12, 0.34),
-          0 0 24px rgba(4, 9, 12, 0.28),
-          0 18px 38px -24px rgba(0, 0, 0, 0.58),
-          0 34px 86px -44px rgba(0, 0, 0, 0.42);
+          0 0 2px rgba(0, 0, 0, 0.82),
+          0 0 16px rgba(0, 0, 0, 0.44),
+          0 0 40px rgba(0, 0, 0, 0.28),
+          0 24px 48px -32px rgba(0, 0, 0, 0.34);
         --border: rgba(238, 244, 247, 0.08);
         --surface: rgba(17, 25, 30, 0.78);
         --surface-raised: rgba(17, 25, 30, 0.88);
@@ -619,14 +622,18 @@ pub fn render_html(refresh_ms: u64) -> String {
         --surface-border: rgba(238, 244, 247, 0.08);
         --hero-glow: rgba(121, 210, 197, 0.18);
         --error-border: rgba(255, 143, 130, 0.30);
-        --panel-inner-contour:
-          inset 0 0 1px rgba(255, 255, 255, 0.06),
-          inset 0 0 10px rgba(0, 0, 0, 0.20),
-          inset 0 0 26px rgba(255, 255, 255, 0.05);
+        --card-outer-shadow:
+          0 0 1px rgba(0, 0, 0, 0.60),
+          0 0 10px rgba(0, 0, 0, 0.28),
+          0 0 22px rgba(0, 0, 0, 0.16),
+          0 18px 34px -26px rgba(0, 0, 0, 0.28);
         --card-inner-shadow:
-          inset 0 0 1px rgba(255, 255, 255, 0.06),
-          inset 0 0 8px rgba(0, 0, 0, 0.24),
-          inset 0 0 22px rgba(255, 255, 255, 0.04);
+          inset 0 0 0 1px rgba(10, 104, 88, 0.58),
+          inset 0 1px 0 rgba(255, 255, 255, 0.030),
+          inset 0 12px 18px -15px rgba(7, 82, 69, 0.26),
+          inset 0 -12px 18px -15px rgba(6, 63, 54, 0.20),
+          inset 12px 0 18px -15px rgba(7, 71, 61, 0.20),
+          inset -12px 0 18px -15px rgba(7, 71, 61, 0.20);
       }
     }
 
@@ -661,15 +668,8 @@ pub fn render_html(refresh_ms: u64) -> String {
     <section class="hero">
       <div class="panel hero-main">
         <div class="brand-line">
-          <img class="brand-mark" src="/brand/amai_mark.svg" alt="Amai">
-          <div class="eyebrow">Amai Human Dashboard</div>
+          <img class="brand-lockup" src="/brand/amai_lockup.svg" alt="Amai">
         </div>
-        <h1>Amai: понятная картина без гадания.</h1>
-        <p class="lead">
-          Здесь каждая цифра подписана честно: это живой поток прямо сейчас, последний проверочный
-          прогон или текущий системный probe. Для каждой метрики есть <code>Эталон</code>,
-          <code>Сейчас</code> и объяснение, что именно она означает.
-        </p>
         <div class="hero-cards" id="hero-cards"></div>
       </div>
       <aside class="panel hero-side">
