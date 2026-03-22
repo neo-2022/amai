@@ -82,6 +82,9 @@ pub fn render_html(refresh_ms: u64) -> String {
       --surface-raised: rgba(255, 255, 255, 0.78);
       --surface-solid: rgba(255, 255, 255, 0.82);
       --surface-border: rgba(30, 42, 47, 0.08);
+      --table-scroll-track: rgba(20, 40, 43, 0.62);
+      --table-scroll-thumb: rgba(20, 93, 84, 0.92);
+      --table-scroll-thumb-strong: rgba(13, 107, 99, 0.98);
       --hero-glow: rgba(13, 107, 111, 0.11);
       --error-border: rgba(182, 56, 43, 0.18);
       --card-outer-shadow:
@@ -133,16 +136,17 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .hero-main {
-      padding: 18px 20px;
+      padding: 12px 18px 14px;
       position: relative;
       overflow: visible;
       display: grid;
-      gap: 14px;
+      gap: 8px;
     }
 
     .brand-line {
       display: flex;
       align-items: flex-start;
+      margin: -18px 0 -26px -6px;
     }
 
     .brand-lockup {
@@ -156,6 +160,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px;
+      margin-top: -4px;
     }
 
     .hero-metric-card {
@@ -516,6 +521,27 @@ pub fn render_html(refresh_ms: u64) -> String {
 
     .compare-table-wrap {
       overflow-x: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--table-scroll-thumb) var(--table-scroll-track);
+    }
+
+    .compare-table-wrap::-webkit-scrollbar {
+      height: 12px;
+    }
+
+    .compare-table-wrap::-webkit-scrollbar-track {
+      background: var(--table-scroll-track);
+      border-radius: 999px;
+    }
+
+    .compare-table-wrap::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, var(--table-scroll-thumb), var(--table-scroll-thumb-strong));
+      border-radius: 999px;
+      border: 2px solid var(--table-scroll-track);
+    }
+
+    .compare-table-wrap::-webkit-scrollbar-corner {
+      background: transparent;
     }
 
     .compare-table {
@@ -620,6 +646,9 @@ pub fn render_html(refresh_ms: u64) -> String {
         --surface-raised: rgba(17, 25, 30, 0.88);
         --surface-solid: rgba(20, 30, 36, 0.94);
         --surface-border: rgba(238, 244, 247, 0.08);
+        --table-scroll-track: rgba(10, 19, 24, 0.92);
+        --table-scroll-thumb: rgba(18, 102, 92, 0.96);
+        --table-scroll-thumb-strong: rgba(31, 138, 122, 0.98);
         --hero-glow: rgba(121, 210, 197, 0.18);
         --error-border: rgba(255, 143, 130, 0.30);
         --card-outer-shadow:
@@ -1342,7 +1371,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     "Выборка",
                     "Сколько cold-запросов вошло в итоговый benchmark.",
                     compare_pair(
-                        "фиксированного эталона нет".to_string(),
+                        "эталон не задан".to_string(),
                         format_u64(cold_contour["machine_readable_summary"]["sample_count"].as_u64()),
                     ),
                 ),
@@ -1350,7 +1379,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     "Repo count",
                     "Сколько разных репозиториев вошло в последний cold benchmark.",
                     compare_pair(
-                        "фиксированного эталона нет".to_string(),
+                        "эталон не задан".to_string(),
                         format_u64(cold_contour["machine_readable_summary"]["repo_count"].as_u64()),
                     ),
                 ),
@@ -1358,7 +1387,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     "Query slices",
                     "Сколько разных типов запросов покрывает последний cold benchmark.",
                     compare_pair(
-                        "фиксированного эталона нет".to_string(),
+                        "эталон не задан".to_string(),
                         format_u64(cold_contour["machine_readable_summary"]["query_slice_count"].as_u64()),
                     ),
                 ),
@@ -1366,7 +1395,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     "Duration",
                     "Сколько длился полный последний cold benchmark.",
                     compare_pair(
-                        "фиксированного эталона нет".to_string(),
+                        "эталон не задан".to_string(),
                         format_optional(
                             cold_contour["machine_readable_summary"]["duration"].as_f64(),
                             |value| format!("{value:.2} сек."),
