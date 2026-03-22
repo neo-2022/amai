@@ -82,9 +82,9 @@ pub fn render_html(refresh_ms: u64) -> String {
       --surface-raised: rgba(255, 255, 255, 0.78);
       --surface-solid: rgba(255, 255, 255, 0.82);
       --surface-border: rgba(30, 42, 47, 0.08);
-      --table-scroll-track: rgba(20, 40, 43, 0.62);
-      --table-scroll-thumb: rgba(20, 93, 84, 0.92);
-      --table-scroll-thumb-strong: rgba(13, 107, 99, 0.98);
+      --table-scroll-track: rgba(23, 34, 39, 0.86);
+      --table-scroll-thumb: rgba(24, 108, 98, 0.82);
+      --table-scroll-thumb-strong: rgba(39, 146, 132, 0.92);
       --hero-glow: rgba(13, 107, 111, 0.11);
       --error-border: rgba(182, 56, 43, 0.18);
       --card-outer-shadow:
@@ -102,6 +102,51 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     * { box-sizing: border-box; }
+    html {
+      scrollbar-gutter: stable both-edges;
+      scrollbar-width: thin;
+      scrollbar-color: transparent transparent;
+    }
+
+    html::-webkit-scrollbar {
+      width: 12px;
+      height: 12px;
+    }
+
+    html::-webkit-scrollbar-track {
+      background: transparent;
+      border-radius: 999px;
+    }
+
+    html::-webkit-scrollbar-thumb {
+      background: transparent;
+      border-radius: 999px;
+      border: 2px solid transparent;
+      transition: background 0.14s ease, border-width 0.14s ease, box-shadow 0.14s ease;
+    }
+
+    html:hover,
+    html:focus-within {
+      scrollbar-color: var(--table-scroll-thumb) var(--table-scroll-track);
+    }
+
+    html:hover::-webkit-scrollbar-track,
+    html:focus-within::-webkit-scrollbar-track {
+      background: var(--table-scroll-track);
+    }
+
+    html:hover::-webkit-scrollbar-thumb,
+    html:focus-within::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, var(--table-scroll-thumb), var(--table-scroll-thumb-strong));
+      border: 2px solid var(--table-scroll-track);
+    }
+
+    html:hover::-webkit-scrollbar-thumb:hover,
+    html:focus-within::-webkit-scrollbar-thumb:hover {
+      border-width: 0;
+      box-shadow: 0 0 0 1px rgba(78, 189, 171, 0.28);
+    }
+
     body {
       margin: 0;
       min-height: 100vh;
@@ -136,17 +181,17 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .hero-main {
-      padding: 12px 18px 14px;
+      padding: 8px 16px 10px;
       position: relative;
       overflow: visible;
       display: grid;
-      gap: 8px;
+      gap: 4px;
     }
 
     .brand-line {
       display: flex;
       align-items: flex-start;
-      margin: -18px 0 -26px -6px;
+      margin: -24px 0 -36px -8px;
     }
 
     .brand-lockup {
@@ -160,7 +205,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px;
-      margin-top: -4px;
+      margin-top: -10px;
     }
 
     .hero-metric-card {
@@ -521,8 +566,9 @@ pub fn render_html(refresh_ms: u64) -> String {
 
     .compare-table-wrap {
       overflow-x: auto;
+      scrollbar-gutter: stable both-edges;
       scrollbar-width: thin;
-      scrollbar-color: var(--table-scroll-thumb) var(--table-scroll-track);
+      scrollbar-color: transparent transparent;
     }
 
     .compare-table-wrap::-webkit-scrollbar {
@@ -530,18 +576,45 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .compare-table-wrap::-webkit-scrollbar-track {
-      background: var(--table-scroll-track);
+      background: transparent;
       border-radius: 999px;
     }
 
     .compare-table-wrap::-webkit-scrollbar-thumb {
-      background: linear-gradient(180deg, var(--table-scroll-thumb), var(--table-scroll-thumb-strong));
+      background: transparent;
       border-radius: 999px;
-      border: 2px solid var(--table-scroll-track);
+      border: 2px solid transparent;
+      transition: background 0.14s ease, border-width 0.14s ease, box-shadow 0.14s ease;
     }
 
     .compare-table-wrap::-webkit-scrollbar-corner {
       background: transparent;
+    }
+
+    .compare-card:hover .compare-table-wrap,
+    .compare-table-wrap:hover,
+    .compare-table-wrap:focus-within {
+      scrollbar-color: var(--table-scroll-thumb) var(--table-scroll-track);
+    }
+
+    .compare-card:hover .compare-table-wrap::-webkit-scrollbar-track,
+    .compare-table-wrap:hover::-webkit-scrollbar-track,
+    .compare-table-wrap:focus-within::-webkit-scrollbar-track {
+      background: var(--table-scroll-track);
+    }
+
+    .compare-card:hover .compare-table-wrap::-webkit-scrollbar-thumb,
+    .compare-table-wrap:hover::-webkit-scrollbar-thumb,
+    .compare-table-wrap:focus-within::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, var(--table-scroll-thumb), var(--table-scroll-thumb-strong));
+      border: 2px solid var(--table-scroll-track);
+    }
+
+    .compare-card:hover .compare-table-wrap::-webkit-scrollbar-thumb:hover,
+    .compare-table-wrap:hover::-webkit-scrollbar-thumb:hover,
+    .compare-table-wrap:focus-within::-webkit-scrollbar-thumb:hover {
+      border-width: 0;
+      box-shadow: 0 0 0 1px rgba(78, 189, 171, 0.28);
     }
 
     .compare-table {
@@ -646,9 +719,9 @@ pub fn render_html(refresh_ms: u64) -> String {
         --surface-raised: rgba(17, 25, 30, 0.88);
         --surface-solid: rgba(20, 30, 36, 0.94);
         --surface-border: rgba(238, 244, 247, 0.08);
-        --table-scroll-track: rgba(10, 19, 24, 0.92);
-        --table-scroll-thumb: rgba(18, 102, 92, 0.96);
-        --table-scroll-thumb-strong: rgba(31, 138, 122, 0.98);
+        --table-scroll-track: rgba(14, 22, 27, 0.96);
+        --table-scroll-thumb: rgba(18, 104, 93, 0.88);
+        --table-scroll-thumb-strong: rgba(37, 147, 131, 0.96);
         --hero-glow: rgba(121, 210, 197, 0.18);
         --error-border: rgba(255, 143, 130, 0.30);
         --card-outer-shadow:
@@ -1316,7 +1389,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 "Источник: benchmark. Последний сохранённый end-to-end cold benchmark; live-данные страницы сюда не подмешиваются",
                 cold_contour["captured_at_epoch_ms"].as_u64(),
             )),
-            Some("Cold contour меряет полный путь policy -> retrieval -> ranking -> pack assembly -> provenance -> orchestration.".to_string()),
+            Some("Это проверка первого запроса без прогрева. Она меряет весь путь ответа целиком: от выбора нужного маршрута до сборки готового контекста для ответа.".to_string()),
             Some(format_ms(cold_contour["machine_readable_summary"]["p95"].as_f64())),
             vec![
                 compare_table_row(
@@ -2249,7 +2322,7 @@ fn build_glossary() -> Vec<Value> {
         }),
         json!({
             "term": "Cold contour",
-            "meaning": "Честный end-to-end cold benchmark: policy, retrieval, ranking, pack assembly, provenance и orchestration вместе, а не по отдельности."
+            "meaning": "Это проверка первого запроса без прогрева. Она показывает, сколько занимает весь путь ответа целиком, пока у системы ещё нет готового быстрого кэша."
         }),
         json!({
             "term": "Resident memory",
