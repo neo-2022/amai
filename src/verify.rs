@@ -7,6 +7,7 @@ use crate::cli::{
 use crate::compatibility;
 use crate::config::AppConfig;
 use crate::degradation_proof;
+use crate::eval_verdict::{self, EvalPattern, EvalSignals};
 use crate::language;
 use crate::postgres;
 use crate::retrieval;
@@ -55,6 +56,13 @@ struct AccuracySuiteManifest {
     related_path: String,
     related_term: String,
     symbol_name: String,
+}
+
+struct AccuracyEvalProbe {
+    name: &'static str,
+    verdict_class: String,
+    verdict_reason: String,
+    details: Value,
 }
 
 pub async fn run_benchmark(
@@ -518,6 +526,22 @@ pub async fn run_accuracy(
             "pass": (semantic_precision - 1.0).abs() < f64::EPSILON,
         }),
     ];
+    let eval_probes = build_accuracy_eval_probes(
+        args,
+        &suite,
+        &symbol_pack,
+        &namespace_strict_pack,
+        exact_precision,
+        lexical_precision,
+        semantic_precision,
+        cross_project_leakage,
+        strict_cross_namespace_leakage,
+        hostile_cross_project_leakage,
+        hostile_cross_namespace_leakage,
+        cross_namespace_leakage,
+        namespace_visible_projects_unexpected,
+    )?;
+    let canonical_eval = build_accuracy_canonical_eval(&eval_probes)?;
 
     if cross_project_leakage != 0 {
         return Err(anyhow!(
@@ -602,7 +626,8 @@ pub async fn run_accuracy(
             "semantic_precision": semantic_precision,
             "symbol_precision": symbol_precision,
             "overall_precision": overall_precision,
-            "formal_invariants": formal_invariants
+            "formal_invariants": formal_invariants,
+            "canonical_eval": canonical_eval
         },
         "retrieval_science": retrieval_science::suite_metadata("retrieval_accuracy")?,
         "degradation_policy": retrieval_science::degradation_policy_json()?
@@ -2254,6 +2279,228 @@ fn expected_project(item: &Value, expected_projects: &HashSet<&str>) -> bool {
         .is_some_and(|project| expected_projects.contains(project))
 }
 
+fn build_accuracy_eval_probes(
+    args: &VerifyAccuracyArgs,
+    suite: &AccuracySuiteManifest,
+    symbol_pack: &retrieval::ContextPackResult,
+    namespace_strict_pack: &retrieval::ContextPackResult,
+    exact_precision: f64,
+    lexical_precision: f64,
+    semantic_precision: f64,
+    cross_project_leakage: usize,
+    strict_cross_namespace_leakage: usize,
+    hostile_cross_project_leakage: usize,
+    hostile_cross_namespace_leakage: usize,
+    cross_namespace_leakage: usize,
+    namespace_visible_projects_unexpected: usize,
+) -> Result<Vec<AccuracyEvalProbe>> {
+    let strict_boundary_clean = cross_project_leakage == 0 && strict_cross_namespace_leakage == 0;
+
+    let related_expected_present =
+        exact_precision > 0.0 || lexical_precision > 0.0 || semantic_precision > 0.0;
+    let related_unexpected_present = (exact_precision > 0.0 && exact_precision < 1.0)
+        || (lexical_precision > 0.0 && lexical_precision < 1.0)
+        || (semantic_precision > 0.0 && semantic_precision < 1.0);
+
+    let symbol_expected_present =
+        any_matching_item(&symbol_pack.payload["retrieval"]["symbol_hits"], |item| {
+            item["project_code"].as_str() == Some(args.project.as_str())
+                && item["namespace_code"].as_str() == Some(args.namespace.as_str())
+                && item["name"].as_str() == Some(suite.symbol_name.as_str())
+        });
+    let symbol_unexpected_present =
+        any_non_matching_item(&symbol_pack.payload["retrieval"]["symbol_hits"], |item| {
+            item["project_code"].as_str() == Some(args.project.as_str())
+                && item["namespace_code"].as_str() == Some(args.namespace.as_str())
+                && item["name"].as_str() == Some(suite.symbol_name.as_str())
+        });
+
+    let namespace_expected_present = payload_contains_text_hit(
+        &namespace_strict_pack.payload,
+        args.project.as_str(),
+        suite.strict_namespace.as_str(),
+        suite.namespace_query.as_str(),
+    );
+    let namespace_boundary_clean =
+        cross_namespace_leakage == 0 && namespace_visible_projects_unexpected == 0;
+
+    let hostile_boundary_clean =
+        hostile_cross_project_leakage == 0 && hostile_cross_namespace_leakage == 0;
+
+    Ok(vec![
+        accuracy_eval_probe(
+            "strict_local_fail_closed",
+            EvalPattern::IsolationBoundary,
+            EvalSignals {
+                expected_present: Some(false),
+                unexpected_present: !strict_boundary_clean,
+                boundary_clean: Some(strict_boundary_clean),
+                fail_closed_ok: Some(strict_boundary_clean),
+                has_expected_target: false,
+            },
+            json!({
+                "query": suite.strict_query,
+                "project": args.project,
+                "namespace": args.namespace,
+                "boundary_clean": strict_boundary_clean,
+                "cross_project_leakage": cross_project_leakage,
+                "strict_cross_namespace_leakage": strict_cross_namespace_leakage,
+            }),
+        )?,
+        accuracy_eval_probe(
+            "related_retrieval_target",
+            EvalPattern::RetrievalTarget,
+            EvalSignals {
+                expected_present: Some(related_expected_present),
+                unexpected_present: related_unexpected_present,
+                has_expected_target: true,
+                ..EvalSignals::default()
+            },
+            json!({
+                "query": suite.related_query,
+                "related_path": suite.related_path,
+                "related_term": suite.related_term,
+                "expected_present": related_expected_present,
+                "unexpected_present": related_unexpected_present,
+            }),
+        )?,
+        accuracy_eval_probe(
+            "symbol_target",
+            EvalPattern::RetrievalTarget,
+            EvalSignals {
+                expected_present: Some(symbol_expected_present),
+                unexpected_present: symbol_unexpected_present,
+                has_expected_target: true,
+                ..EvalSignals::default()
+            },
+            json!({
+                "query": suite.namespace_query,
+                "symbol_name": suite.symbol_name,
+                "expected_present": symbol_expected_present,
+                "unexpected_present": symbol_unexpected_present,
+            }),
+        )?,
+        accuracy_eval_probe(
+            "namespace_boundary",
+            EvalPattern::IsolationBoundary,
+            EvalSignals {
+                expected_present: Some(namespace_expected_present),
+                unexpected_present: !namespace_boundary_clean,
+                boundary_clean: Some(namespace_boundary_clean),
+                fail_closed_ok: Some(namespace_boundary_clean),
+                has_expected_target: true,
+            },
+            json!({
+                "query": suite.namespace_query,
+                "namespace": suite.strict_namespace,
+                "expected_present": namespace_expected_present,
+                "boundary_clean": namespace_boundary_clean,
+                "cross_namespace_leakage": cross_namespace_leakage,
+            }),
+        )?,
+        accuracy_eval_probe(
+            "hostile_fail_closed",
+            EvalPattern::IsolationBoundary,
+            EvalSignals {
+                expected_present: Some(false),
+                unexpected_present: !hostile_boundary_clean,
+                boundary_clean: Some(hostile_boundary_clean),
+                fail_closed_ok: Some(hostile_boundary_clean),
+                has_expected_target: false,
+            },
+            json!({
+                "query": suite.hostile_mixed_query,
+                "boundary_clean": hostile_boundary_clean,
+                "hostile_cross_project_leakage": hostile_cross_project_leakage,
+                "hostile_cross_namespace_leakage": hostile_cross_namespace_leakage,
+            }),
+        )?,
+    ])
+}
+
+fn accuracy_eval_probe(
+    name: &'static str,
+    pattern: EvalPattern,
+    signals: EvalSignals,
+    details: Value,
+) -> Result<AccuracyEvalProbe> {
+    let verdict = eval_verdict::derive_eval_verdict(pattern, &signals)?;
+    Ok(AccuracyEvalProbe {
+        name,
+        verdict_class: verdict.class_key,
+        verdict_reason: verdict.reason,
+        details,
+    })
+}
+
+fn build_accuracy_canonical_eval(probes: &[AccuracyEvalProbe]) -> Result<Value> {
+    let mut summary = eval_verdict::summarize_eval_layer(
+        probes.iter().map(|probe| probe.verdict_class.as_str()),
+    )?;
+    summary["probes"] = json!(
+        probes
+            .iter()
+            .map(|probe| {
+                json!({
+                    "name": probe.name,
+                    "eval_verdict_class": probe.verdict_class,
+                    "eval_reason": probe.verdict_reason,
+                    "details": probe.details,
+                })
+            })
+            .collect::<Vec<_>>()
+    );
+    Ok(summary)
+}
+
+fn payload_contains_text_hit(
+    payload: &Value,
+    project: &str,
+    namespace: &str,
+    needle: &str,
+) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    any_matching_item(&payload["retrieval"]["exact_documents"], |item| {
+        item_belongs_to_project(item, project)
+            && item_belongs_to_namespace(item, namespace)
+            && item["snippet"]
+                .as_str()
+                .is_some_and(|snippet| snippet.contains(needle))
+    }) || any_matching_item(&payload["retrieval"]["lexical_chunks"], |item| {
+        item_belongs_to_project(item, project)
+            && item_belongs_to_namespace(item, namespace)
+            && item["content"]
+                .as_str()
+                .is_some_and(|content| content.contains(needle))
+    }) || any_matching_item(&payload["retrieval"]["semantic_chunks"], |item| {
+        item_belongs_to_project(item, project)
+            && item_belongs_to_namespace(item, namespace)
+            && item["content"]
+                .as_str()
+                .is_some_and(|content| content.contains(needle))
+    }) || any_matching_item(&payload["retrieval"]["symbol_hits"], |item| {
+        item["project_code"].as_str() == Some(project)
+            && item["namespace_code"].as_str() == Some(namespace)
+            && item["name"]
+                .as_str()
+                .is_some_and(|name| name.contains(needle))
+    })
+}
+
+fn any_matching_item(items: &Value, predicate: impl Fn(&Value) -> bool) -> bool {
+    items.as_array().into_iter().flatten().any(predicate)
+}
+
+fn any_non_matching_item(items: &Value, predicate: impl Fn(&Value) -> bool) -> bool {
+    items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|item| !predicate(item))
+}
+
 fn precision_ratio(items: &Value, predicate: impl Fn(&Value) -> bool) -> f64 {
     let Some(items) = items.as_array() else {
         return 0.0;
@@ -2268,10 +2515,11 @@ fn precision_ratio(items: &Value, predicate: impl Fn(&Value) -> bool) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        TextCompareCase, collect_visible_namespaces, count_foreign_hits,
-        count_foreign_namespace_hits, item_belongs_to_namespace, item_belongs_to_project,
-        item_matches_text_compare_case, percentile_sample, precision_ratio,
-        render_context_pack_prompt, render_filtered_context_prompt, safe_lossy_prefix,
+        AccuracyEvalProbe, TextCompareCase, build_accuracy_canonical_eval,
+        collect_visible_namespaces, count_foreign_hits, count_foreign_namespace_hits,
+        item_belongs_to_namespace, item_belongs_to_project, item_matches_text_compare_case,
+        payload_contains_text_hit, percentile_sample, precision_ratio, render_context_pack_prompt,
+        render_filtered_context_prompt, safe_lossy_prefix,
     };
     use proptest::prelude::*;
     use serde_json::json;
@@ -2298,6 +2546,64 @@ mod tests {
             item["relative_path"].as_str() == Some("src/lib.rs")
         });
         assert!((ratio - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn payload_contains_text_hit_checks_project_namespace_and_content() {
+        let payload = json!({
+            "retrieval": {
+                "exact_documents": [
+                    {
+                        "project_code": "alpha",
+                        "namespace_code": "review",
+                        "snippet": "needle token"
+                    }
+                ],
+                "lexical_chunks": [],
+                "semantic_chunks": [],
+                "symbol_hits": []
+            }
+        });
+        assert!(payload_contains_text_hit(
+            &payload, "alpha", "review", "needle"
+        ));
+        assert!(!payload_contains_text_hit(
+            &payload, "beta", "review", "needle"
+        ));
+    }
+
+    #[test]
+    fn canonical_eval_summary_keeps_probe_level_verdicts() {
+        let summary = build_accuracy_canonical_eval(&[
+            AccuracyEvalProbe {
+                name: "strict_local_target",
+                verdict_class: "hit_correct_target".to_string(),
+                verdict_reason: "ok".to_string(),
+                details: json!({"expected_present": true}),
+            },
+            AccuracyEvalProbe {
+                name: "hostile_fail_closed",
+                verdict_class: "hit_correct_target".to_string(),
+                verdict_reason: "ok".to_string(),
+                details: json!({"boundary_clean": true}),
+            },
+            AccuracyEvalProbe {
+                name: "related_retrieval_target",
+                verdict_class: "over_included".to_string(),
+                verdict_reason: "noise".to_string(),
+                details: json!({"unexpected_present": true}),
+            },
+        ])
+        .expect("summary");
+        assert_eq!(
+            summary["verdict_counts"]["hit_correct_target"].as_u64(),
+            Some(2)
+        );
+        assert_eq!(summary["verdict_counts"]["over_included"].as_u64(), Some(1));
+        assert_eq!(
+            summary["probes"][2]["name"],
+            json!("related_retrieval_target")
+        );
     }
 
     #[test]

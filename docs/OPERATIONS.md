@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 18:46 MSK
-Ручная сверка guide/docs: 2026-03-23 18:46 MSK
+modified_at: 2026-03-23 18:59 MSK
+Ручная сверка guide/docs: 2026-03-23 18:59 MSK
 
 # Operations
 
@@ -834,10 +834,18 @@ cargo run --release -- verify accuracy \
 - сохраняет snapshot `retrieval_accuracy`;
 - теперь пишет в snapshot:
   - `formal_invariants`;
+  - `canonical_eval`;
   - `retrieval_science`;
   - `degradation_policy`;
   - versioned suite metadata из `config/red_team_retrieval_isolation.toml`;
   - отдельные hostile visible/hit invariants по проекту и namespace.
+- `canonical_eval` здесь уже не memory-only:
+  - `strict_local_fail_closed`
+  - `related_retrieval_target`
+  - `symbol_target`
+  - `namespace_boundary`
+  - `hostile_fail_closed`
+  все они используют тот же общий verdict vocabulary `hit_correct_target / hit_wrong_target / stale_target / under_retrieved / over_included / recovered_useful / not_useful`.
 
 Эти данные теперь используются ещё и как живое evidence для `degradation_model`:
 - `cross_project_scope` считается подтверждённым только если zero leakage и проходят все нужные `formal_invariants`;

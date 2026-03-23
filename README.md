@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 18:46 MSK
-Ручная сверка guide/docs: 2026-03-23 18:46 MSK
+modified_at: 2026-03-23 18:59 MSK
+Ручная сверка guide/docs: 2026-03-23 18:59 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1316,7 +1316,8 @@ cargo run --release -- observe guardrails
   - фиксированный red-team retrieval isolation contour для `project_alpha/project_beta`;
   - hostile mixed query;
   - отдельные hostile visible/hit invariants по проекту и namespace;
-  - versioned query suite и scoring rules для `verify accuracy`.
+  - versioned query suite и scoring rules для `verify accuracy`;
+  - тот же `verify accuracy` теперь тоже пишет `canonical_eval` через тот же общий verdict layer, а не только raw precision/invariant числа.
 
 В human dashboard это теперь видно отдельной service-card `Поведение при сбоях`.
 

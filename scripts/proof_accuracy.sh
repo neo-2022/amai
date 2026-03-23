@@ -46,7 +46,15 @@ cargo run --release --quiet -- index project \
   --namespace review \
   --limit-files 20
 
-cargo run --release --quiet -- verify accuracy \
+output="$(cargo run --release --quiet -- verify accuracy \
   --project project_alpha \
   --related-project project_beta \
-  --namespace review
+  --namespace review)"
+
+printf '%s\n' "$output" | rg '"accuracy_verification"' >/dev/null
+printf '%s\n' "$output" | rg '"canonical_eval"' >/dev/null
+printf '%s\n' "$output" | rg '"eval_verdict_model_version": "memory-eval-verdict-v1"' >/dev/null
+printf '%s\n' "$output" | rg '"name": "strict_local_fail_closed"' >/dev/null
+printf '%s\n' "$output" | rg '"name": "hostile_fail_closed"' >/dev/null
+
+printf 'proof_accuracy: ok\n'
