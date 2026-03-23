@@ -792,14 +792,30 @@ async fn tool_token_benchmark(cfg: &AppConfig, args: TokenBenchmarkToolArgs) -> 
     compatibility::assert_supported(cfg).await?;
     let mut db = postgres::connect_admin(cfg).await?;
     let payload = verify::collect_token_benchmark(cfg, &mut db, &args.to_verify_args()).await?;
-    let savings = &payload["token_benchmark"]["savings"];
+    let benchmark_summary = token_benchmark_summary(&payload);
     let summary = format!(
-        "token benchmark :: saved_tokens={} savings_factor={:.3} savings_percent={:.3}",
-        savings["saved_tokens"].as_u64().unwrap_or_default(),
-        savings["savings_factor"].as_f64().unwrap_or_default(),
-        savings["savings_percent"].as_f64().unwrap_or_default(),
+        "token benchmark :: saved_tokens={} savings_factor={:.3} savings_percent={:.3} naive_tokens={} context_tokens={} files_considered={}",
+        benchmark_summary.saved_tokens,
+        benchmark_summary.savings_factor,
+        benchmark_summary.savings_percent,
+        benchmark_summary.naive_tokens,
+        benchmark_summary.context_tokens,
+        benchmark_summary.files_considered,
     );
-    Ok(tool_result(summary, payload))
+    Ok(tool_result(
+        summary,
+        json!({
+            "token_benchmark": payload["token_benchmark"].clone(),
+            "token_benchmark_summary": {
+                "saved_tokens": benchmark_summary.saved_tokens,
+                "savings_factor": benchmark_summary.savings_factor,
+                "savings_percent": benchmark_summary.savings_percent,
+                "naive_tokens": benchmark_summary.naive_tokens,
+                "context_tokens": benchmark_summary.context_tokens,
+                "files_considered": benchmark_summary.files_considered,
+            }
+        }),
+    ))
 }
 
 async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result<Value> {
@@ -1003,6 +1019,40 @@ fn decision_trace_summary(trace: &Value, key: &str) -> Option<String> {
         None
     } else {
         Some(parts.join(" • "))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TokenBenchmarkSummary {
+    saved_tokens: u64,
+    savings_factor: f64,
+    savings_percent: f64,
+    naive_tokens: u64,
+    context_tokens: u64,
+    files_considered: u64,
+}
+
+fn token_benchmark_summary(payload: &Value) -> TokenBenchmarkSummary {
+    let benchmark = &payload["token_benchmark"];
+    TokenBenchmarkSummary {
+        saved_tokens: benchmark["savings"]["saved_tokens"]
+            .as_u64()
+            .unwrap_or_default(),
+        savings_factor: benchmark["savings"]["savings_factor"]
+            .as_f64()
+            .unwrap_or_default(),
+        savings_percent: benchmark["savings"]["savings_percent"]
+            .as_f64()
+            .unwrap_or_default(),
+        naive_tokens: benchmark["naive_scope"]["tokens"]
+            .as_u64()
+            .unwrap_or_default(),
+        context_tokens: benchmark["context_pack_render"]["tokens"]
+            .as_u64()
+            .unwrap_or_default(),
+        files_considered: benchmark["naive_scope"]["files_considered"]
+            .as_u64()
+            .unwrap_or_default(),
     }
 }
 
@@ -1971,7 +2021,7 @@ fn default_warm_limit() -> usize {
 mod tests {
     use super::{
         McpConfigArgs, context_pack_summary, observe_snapshot_summary, render_client_config,
-        token_report_summary,
+        token_benchmark_summary, token_report_summary,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -2167,5 +2217,33 @@ mod tests {
                 "semantic_chunks — Semantic layer не добавил новых фрагментов после scope и relevance проверки."
             )
         );
+    }
+
+    #[test]
+    fn token_benchmark_summary_surfaces_naive_vs_context_scope() {
+        let payload = json!({
+            "token_benchmark": {
+                "naive_scope": {
+                    "files_considered": 12,
+                    "tokens": 4096
+                },
+                "context_pack_render": {
+                    "tokens": 512
+                },
+                "savings": {
+                    "saved_tokens": 3584,
+                    "savings_factor": 8.0,
+                    "savings_percent": 87.5
+                }
+            }
+        });
+
+        let summary = token_benchmark_summary(&payload);
+        assert_eq!(summary.saved_tokens, 3584);
+        assert_eq!(summary.savings_factor, 8.0);
+        assert_eq!(summary.savings_percent, 87.5);
+        assert_eq!(summary.naive_tokens, 4096);
+        assert_eq!(summary.context_tokens, 512);
+        assert_eq!(summary.files_considered, 12);
     }
 }

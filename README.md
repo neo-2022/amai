@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:43 MSK
-Ручная сверка guide/docs: 2026-03-23 22:43 MSK
+modified_at: 2026-03-23 22:47 MSK
+Ручная сверка guide/docs: 2026-03-23 22:47 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -880,6 +880,18 @@ cargo run -- deployment explain --target kubernetes_server
 `amai_context_pack` теперь тоже отдаёт наружу `context_pack_summary` с
 `included_reasons_summary / excluded_reasons_summary`, чтобы внешний клиент видел,
 почему именно этот контекст был собран и почему часть слоёв ничего не добавила.
+
+`amai_token_benchmark` теперь тоже отдаёт наружу `token_benchmark_summary`, где уже
+собраны:
+- `saved_tokens`
+- `savings_factor`
+- `savings_percent`
+- `naive_tokens`
+- `context_tokens`
+- `files_considered`
+
+Это делает сравнение `naive scope` против `Amai context pack` доступным без ручного
+разбора всего benchmark-payload.
 
 Понятный walkthrough для подключения:
 - [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)

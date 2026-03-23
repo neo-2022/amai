@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:43 MSK
-Ручная сверка guide/docs: 2026-03-23 22:43 MSK
+modified_at: 2026-03-23 22:47 MSK
+Ручная сверка guide/docs: 2026-03-23 22:47 MSK
 
 # Operations
 
@@ -641,6 +641,9 @@ cargo run -- mcp serve
 - `amai_context_pack` теперь тоже отдаёт наружу `context_pack_summary`, где уже
   лежат `included_reasons_summary / excluded_reasons_summary` для последнего
   собранного context pack.
+- `amai_token_benchmark` теперь тоже отдаёт наружу `token_benchmark_summary`, где
+  уже собраны `saved_tokens`, `savings_factor`, `savings_percent`,
+  `naive_tokens`, `context_tokens` и `files_considered`.
 
 ## MCP client config
 
