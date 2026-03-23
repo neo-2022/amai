@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 20:32 MSK
-Ручная сверка guide/docs: 2026-03-23 20:32 MSK
+modified_at: 2026-03-23 20:46 MSK
+Ручная сверка guide/docs: 2026-03-23 20:46 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -297,6 +297,7 @@ scripts\install_amai.cmd --client codex
 ./scripts/continuity_restore.sh --project art --namespace continuity
 cargo run --quiet -- verify continuity --project art --namespace continuity
 ./scripts/proof_art_continuity_answer.sh
+./scripts/proof_art_continuity_restore.sh
 ```
 
 Разница такая:
@@ -312,6 +313,7 @@ cargo run --quiet -- verify continuity --project art --namespace continuity
 - `continuity restore`
   - печатает raw restore-bundle JSON целиком;
   - теперь в этом JSON есть не только `working_state_restore`, но и отдельный `chat_start_restore` с готовым `prompt_text`;
+  - и тот же product path теперь сразу несёт `continuity_restore.canonical_eval`, `retrieval_science` и `degradation_policy`, чтобы machine-readable recovery было видно не только по сырому содержимому, но и по verdict-слою;
   - внутри `working_state_restore` теперь есть ещё и execution-aware слой:
     - `next_step_state = planned`;
     - `recent_actions[].execution_state` (`attempted / succeeded / superseded / stale`);
@@ -324,6 +326,7 @@ cargo run --quiet -- verify continuity --project art --namespace continuity
   - это уже не human-readable startup, а прямой machine-readable proof-контур для recovery;
   - теперь он покрывает не только startup/import/replay, но и direct temporal chat lookup;
   - а для самого product path есть отдельный proof `scripts/proof_art_continuity_answer.sh`, который прогоняет `continuity answer --json` и `chat_lookup.sh --json` на `last_chat / previous_chat / exact-time fail-closed`.
+  - отдельный proof `scripts/proof_art_continuity_restore.sh` теперь так же проверяет уже machine-readable `continuity restore` и ожидает `2 x recovered_useful` по `chat_start_restore` и `working_state_restore`.
   - он проверяет уже 9 отдельных probe:
     - есть ли свежий `continuity_handoff`;
     - собрался ли `working_state_restore`;

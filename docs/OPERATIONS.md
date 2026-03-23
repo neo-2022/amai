@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 20:32 MSK
-Ручная сверка guide/docs: 2026-03-23 20:32 MSK
+modified_at: 2026-03-23 20:46 MSK
+Ручная сверка guide/docs: 2026-03-23 20:46 MSK
 
 # Operations
 
@@ -293,6 +293,7 @@ cd /home/art/agent-memory-index
 
 ```bash
 ./scripts/proof_art_continuity_answer.sh
+./scripts/proof_art_continuity_restore.sh
 ```
 
 Он подтверждает:
@@ -300,6 +301,12 @@ cd /home/art/agent-memory-index
 - `previous_chat --json -> recovered_useful`
 - `exact-time miss --json -> hit_correct_target`
 - question-driven `chat_lookup.sh --json` не теряет тот же verdict-layer
+- `continuity restore -> 2 x recovered_useful` по `chat_start_restore` и `working_state_restore`
+
+`continuity restore` теперь возвращает не только `chat_start_restore` и `working_state_restore`,
+но и верхний `continuity_restore.canonical_eval`, плюс `retrieval_science` и
+`degradation_policy`. Это нужно затем, чтобы machine-readable recovery можно было проверять
+не только по сырым полям, но и по каноническим verdict-классам.
 
 Для обычного startup это теперь выглядит так:
 

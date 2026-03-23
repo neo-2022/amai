@@ -1,5 +1,5 @@
-modified_at = "2026-03-23 20:32 MSK"
-"Ручная сверка guide/docs" = "2026-03-23 20:32 MSK"
+modified_at = "2026-03-23 20:46 MSK"
+"Ручная сверка guide/docs" = "2026-03-23 20:46 MSK"
 
 [science]
 methodology_version = "retrieval-science-v1"
@@ -218,6 +218,13 @@ dataset_version = "continuity-answer-v1"
 query_suite_version = "continuity-answer-v1"
 manifest_path = "scripts/proof_art_continuity_answer.sh"
 reproducibility_contract = "The same read-only continuity answer input must produce the same answer-level verdict class and the same fail-closed behavior for last_chat, previous_chat and exact-time lookup."
+
+[science.suites.continuity_restore]
+suite_version = "continuity-restore-v1"
+dataset_version = "continuity-restore-v1"
+query_suite_version = "continuity-restore-v1"
+manifest_path = "scripts/proof_art_continuity_restore.sh"
+reproducibility_contract = "The same read-only continuity restore input must produce the same restore-level verdict classes for chat-start prompt recovery and working-state recovery."
 
 [science.suites.cold_path_benchmark]
 suite_version = "cold-path-benchmark-v2"

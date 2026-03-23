@@ -599,15 +599,15 @@ pub async fn print_restore(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
         &context.handoff_summary,
         Some(&restore),
     );
-    let mut output = serde_json::Map::new();
-    output.insert(
-        "chat_start_restore".to_string(),
-        chat_start_restore["chat_start_restore"].clone(),
-    );
-    if let Some(node) = restore.get("working_state_restore") {
-        output.insert("working_state_restore".to_string(), node.clone());
-    }
-    println!("{}", serde_json::to_string_pretty(&Value::Object(output))?);
+    let payload = build_continuity_restore_payload(
+        &context.project,
+        &context.namespace,
+        &context.continuity,
+        &context.handoff_summary,
+        &restore,
+        &chat_start_restore,
+    )?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
 
@@ -1063,6 +1063,91 @@ fn build_continuity_answer_payload(
             "canonical_eval": canonical_eval,
         },
         "retrieval_science": retrieval_science::suite_metadata("continuity_answer")?,
+        "degradation_policy": retrieval_science::degradation_policy_json()?,
+    }))
+}
+
+fn build_continuity_restore_payload(
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    continuity: &Value,
+    handoff_summary: &Value,
+    restore: &Value,
+    chat_start_restore: &Value,
+) -> Result<Value> {
+    let chat_start_node = &chat_start_restore["chat_start_restore"];
+    let working_state_node = &restore["working_state_restore"];
+    let prompt_text = chat_start_node["prompt_text"].as_str().unwrap_or_default();
+    let start_headline = chat_start_node["headline"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    let start_next_step = chat_start_node["next_step"]
+        .as_str()
+        .and_then(normalize_next_step_value)
+        .unwrap_or_else(|| "ещё нет данных".to_string());
+    let current_goal = working_state_node["current_goal"]
+        .as_str()
+        .unwrap_or_default();
+    let restore_next_step = working_state_node["next_step"].as_str().unwrap_or_default();
+    let authoritative_event_id = working_state_node["state_lineage"]["authoritative_event_id"]
+        .as_str()
+        .unwrap_or_default();
+    let probes = vec![
+        build_continuity_eval_probe(
+            "chat_start_restore_recovered_useful",
+            "recovered_useful",
+            EvalPattern::RecoveryTarget,
+            true,
+            json!({
+                "expected_present": !prompt_text.is_empty()
+                    && prompt_text.contains("CHAT_START_RESTORE")
+                    && prompt_text.contains(start_headline)
+                    && prompt_text.contains(&start_next_step),
+                "unexpected_present": false,
+                "headline": start_headline,
+                "next_step": start_next_step,
+                "prompt_text": prompt_text,
+            }),
+        )?,
+        build_continuity_eval_probe(
+            "working_state_restore_recovered_useful",
+            "recovered_useful",
+            EvalPattern::RecoveryTarget,
+            true,
+            json!({
+                "expected_present": !current_goal.is_empty()
+                    && !restore_next_step.is_empty()
+                    && !authoritative_event_id.is_empty(),
+                "unexpected_present": false,
+                "current_goal": current_goal,
+                "next_step": restore_next_step,
+                "restore_confidence": working_state_node["restore_confidence"],
+                "authoritative_event_id": authoritative_event_id,
+            }),
+        )?,
+    ];
+    let canonical_eval = build_continuity_canonical_eval(&probes)?;
+    Ok(json!({
+        "continuity_restore": {
+            "project": {
+                "code": project.code,
+                "display_name": project.display_name,
+                "repo_root": project.repo_root,
+            },
+            "namespace": {
+                "code": namespace.code,
+                "display_name": namespace.display_name,
+            },
+            "imported_at_epoch_ms": continuity["imported_at_epoch_ms"],
+            "handoff_summary": {
+                "headline": handoff_summary["headline"],
+                "next_step": handoff_summary["next_step"],
+            },
+            "canonical_eval": canonical_eval,
+        },
+        "chat_start_restore": chat_start_node.clone(),
+        "working_state_restore": working_state_node.clone(),
+        "retrieval_science": retrieval_science::suite_metadata("continuity_restore")?,
         "degradation_policy": retrieval_science::degradation_policy_json()?,
     }))
 }
@@ -2801,11 +2886,12 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::{
         build_chat_start_restore, build_continuity_answer_payload, build_continuity_canonical_eval,
-        continuity_replay_guard_probes, continuity_snapshot_semantic_epoch_ms,
-        continuity_temporal_lookup_probes, degradation_proof_scenarios, enrich_thread_index_file,
-        extract_next_step_from_text, fake_continuity_handoff_snapshot,
-        fake_continuity_import_snapshot, is_meta_continuity_handoff, latest_scoped_snapshot,
-        parse_chat_reference_spec, render_direct_answer, resolve_answer_intent,
+        build_continuity_restore_payload, continuity_replay_guard_probes,
+        continuity_snapshot_semantic_epoch_ms, continuity_temporal_lookup_probes,
+        degradation_proof_scenarios, enrich_thread_index_file, extract_next_step_from_text,
+        fake_continuity_handoff_snapshot, fake_continuity_import_snapshot,
+        is_meta_continuity_handoff, latest_scoped_snapshot, parse_chat_reference_spec,
+        render_direct_answer, resolve_answer_intent,
     };
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
@@ -3252,6 +3338,73 @@ mod tests {
             payload["continuity_answer"]["canonical_eval"]["verdict_counts"]["hit_correct_target"]
                 .as_u64(),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn continuity_restore_payload_keeps_recovered_useful_eval_layer() {
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "art".to_string(),
+            display_name: "Art".to_string(),
+            repo_root: "/home/art/Art".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let continuity = json!({
+            "imported_at_epoch_ms": 1_234_567,
+            "bootstrap_summary": {
+                "details": {
+                    "thread_count": 18,
+                    "latest_rendered_transcript": "/tmp/rendered.md"
+                }
+            }
+        });
+        let handoff = json!({
+            "headline": "Temporal lookup materialized",
+            "next_step": "Проверить lookup по точному времени на реальном новом чате."
+        });
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Temporal lookup materialized",
+                "next_step": "Проверить lookup по точному времени на реальном новом чате.",
+                "restore_confidence": "high",
+                "state_lineage": {
+                    "authoritative_event_id": "event-1"
+                },
+                "materialized_notes": ["temporal lookup materialized"],
+                "recent_actions": [],
+                "active_files": [],
+                "open_questions": [],
+                "workspace_graph": json!({
+                    "summary": {"file_count": 0, "structure_item_count": 0, "symbol_count": 0, "chunk_count": 0, "import_count": 0, "export_count": 0, "call_count": 0, "edge_count": 0}
+                }),
+            }
+        });
+        let chat_start_restore =
+            build_chat_start_restore(&project, &namespace, &continuity, &handoff, Some(&restore));
+        let payload = build_continuity_restore_payload(
+            &project,
+            &namespace,
+            &continuity,
+            &handoff,
+            &restore,
+            &chat_start_restore,
+        )
+        .expect("payload");
+        assert_eq!(
+            payload["continuity_restore"]["canonical_eval"]["verdict_counts"]["recovered_useful"]
+                .as_u64(),
+            Some(2)
+        );
+        assert_eq!(
+            payload["retrieval_science"]["suite_key"].as_str(),
+            Some("continuity_restore")
         );
     }
 
