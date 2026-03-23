@@ -713,4 +713,41 @@ impl Beta {
         assert_eq!(call["enclosing_owner_name"], json!("Beta"));
         assert_eq!(call["enclosing_owner_path"], json!("Beta"));
     }
+
+    #[test]
+    fn rust_analysis_collects_trait_qualified_call_path() {
+        let cfg = test_config();
+        let analysis = analyze(
+            &cfg,
+            "rust",
+            r#"
+pub struct Beta;
+pub trait Factory {
+    fn make() -> Beta;
+}
+
+impl Factory for Beta {
+    fn make() -> Beta {
+        Beta
+    }
+}
+
+pub fn runtime_summary() -> Beta {
+    <Beta as Factory>::make()
+}
+"#,
+        )
+        .expect("syntax analysis");
+        let call = analysis
+            .call_references
+            .as_array()
+            .and_then(|calls| {
+                calls.iter().find(|call| {
+                    call["call_style"] == json!("scoped_identifier")
+                        && call["callee_name"] == json!("make")
+                })
+            })
+            .expect("trait qualified call");
+        assert_eq!(call["callee_path"], json!("<Beta as Factory>::make"));
+    }
 }
