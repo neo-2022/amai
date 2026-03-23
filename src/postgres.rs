@@ -79,6 +79,20 @@ pub struct DocumentRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct DocumentStructureRecord {
+    pub project_code: String,
+    pub namespace_code: String,
+    pub repo_root: String,
+    pub relative_path: String,
+    pub language: Option<String>,
+    pub source_kind: String,
+    pub git_commit_sha: Option<String>,
+    pub structure: Value,
+    pub imports: Value,
+    pub exports: Value,
+}
+
+#[derive(Debug, Clone)]
 pub struct ObservabilitySnapshotRecord {
     pub snapshot_id: Uuid,
     pub snapshot_kind: String,
@@ -863,6 +877,67 @@ pub async fn list_chunks_by_qdrant_point_ids(
                     metadata: row.get(10),
                 },
             ))
+        })
+        .collect())
+}
+
+pub async fn list_document_structures_for_namespace_paths(
+    client: &Client,
+    requests: &[(Uuid, String)],
+) -> Result<Vec<DocumentStructureRecord>> {
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let namespace_ids = requests
+        .iter()
+        .map(|(namespace_id, _)| *namespace_id)
+        .collect::<Vec<_>>();
+    let relative_paths = requests
+        .iter()
+        .map(|(_, relative_path)| relative_path.clone())
+        .collect::<Vec<_>>();
+    let rows = client
+        .query(
+            r#"
+            WITH requested(namespace_id, relative_path) AS (
+                SELECT * FROM unnest($1::uuid[], $2::text[])
+            )
+            SELECT
+                p.code,
+                n.code,
+                d.repo_root,
+                d.relative_path,
+                d.language,
+                d.source_kind,
+                d.git_commit_sha,
+                d.structure,
+                d.imports,
+                d.exports
+            FROM requested r
+            JOIN ami.code_documents d
+              ON d.namespace_id = r.namespace_id
+             AND d.relative_path = r.relative_path
+            JOIN ami.projects p ON p.project_id = d.project_id
+            JOIN ami.namespaces n ON n.namespace_id = d.namespace_id
+            ORDER BY p.code, n.code, d.relative_path
+            "#,
+            &[&namespace_ids, &relative_paths],
+        )
+        .await
+        .context("failed to list document structures for scoped paths")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| DocumentStructureRecord {
+            project_code: row.get(0),
+            namespace_code: row.get(1),
+            repo_root: row.get(2),
+            relative_path: row.get(3),
+            language: row.get(4),
+            source_kind: row.get(5),
+            git_commit_sha: row.get(6),
+            structure: row.get(7),
+            imports: row.get(8),
+            exports: row.get(9),
         })
         .collect())
 }

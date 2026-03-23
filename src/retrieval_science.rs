@@ -18,6 +18,8 @@ pub struct RetrievalSciencePolicy {
     pub degradation_policy_version: String,
     pub execution_state_model_version: String,
     pub lineage_model_version: String,
+    pub workspace_graph_model_version: String,
+    pub artifact_lineage_model_version: String,
     pub same_input_same_verdict_required: bool,
     pub machine_variance_policy: String,
     pub truth_ranking: Vec<String>,
@@ -155,7 +157,19 @@ pub fn execution_state_catalog_json() -> Result<Value> {
     Ok(json!({
         "execution_state_model_version": policy.execution_state_model_version,
         "lineage_model_version": policy.lineage_model_version,
+        "workspace_graph_model_version": policy.workspace_graph_model_version,
+        "artifact_lineage_model_version": policy.artifact_lineage_model_version,
         "states": policy.execution_states,
+        "truth_ranking": policy.truth_ranking,
+    }))
+}
+
+pub fn workspace_graph_catalog_json() -> Result<Value> {
+    let policy = load_policy()?;
+    Ok(json!({
+        "workspace_graph_model_version": policy.workspace_graph_model_version,
+        "artifact_lineage_model_version": policy.artifact_lineage_model_version,
+        "lineage_model_version": policy.lineage_model_version,
         "truth_ranking": policy.truth_ranking,
     }))
 }
@@ -164,7 +178,7 @@ pub fn execution_state_catalog_json() -> Result<Value> {
 mod tests {
     use super::{
         degradation_matrix_json, degradation_policy_json, execution_state_catalog_json,
-        suite_metadata,
+        suite_metadata, workspace_graph_catalog_json,
     };
 
     #[test]
@@ -218,6 +232,19 @@ mod tests {
                 .expect("array")
                 .iter()
                 .any(|item| item.as_str() == Some("superseded"))
+        );
+    }
+
+    #[test]
+    fn workspace_graph_catalog_exposes_graph_versions() {
+        let catalog = workspace_graph_catalog_json().expect("workspace graph catalog");
+        assert_eq!(
+            catalog["workspace_graph_model_version"].as_str(),
+            Some("workspace-graph-v1")
+        );
+        assert_eq!(
+            catalog["artifact_lineage_model_version"].as_str(),
+            Some("artifact-lineage-v1")
         );
     }
 

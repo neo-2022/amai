@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 12:34 MSK
-Ручная сверка guide/docs: 2026-03-23 12:34 MSK
+modified_at: 2026-03-23 15:40 MSK
+Ручная сверка guide/docs: 2026-03-23 15:40 MSK
 
 # Operations
 
@@ -143,6 +143,8 @@ cd /home/art/agent-memory-index
 - поверх обычного handoff теперь materialized ещё и `working_state` слой:
   он автозахватывается после `continuity handoff` и после `context pack`,
   а новый chat-start поднимает не только headline/next-step, но и активные файлы, последние рабочие запросы и текущую рабочую сессию.
+  Если в этой линии уже были retrieval-context события, тот же startup-path поднимает и `workspace_graph_summary`,
+  чтобы было видно, сколько файлов/символов/структурных узлов уже легло в живой рабочий контур.
 - `--active-workline-file` больше не обязателен:
   если write-side handoff уже живёт в `Amai`, import может брать headline и next-step оттуда, а bootstrap/transcript слой остаётся только refresh-evidence.
 - `--thread-index-file` добавляет отдельный machine-readable temporal index всех chat threads.
@@ -295,6 +297,9 @@ cd /home/art/agent-memory-index
   - `next_step_state` всегда показывает, что следующий шаг пока только `planned`;
   - `recent_actions[].execution_state` разводит `attempted / succeeded / superseded / stale`;
   - `state_lineage` хранит `lineage_model_version = lineage-v2`, authoritative event, supporting event ids, truth ranking и явный graph-слой `nodes / edges`;
+  - `workspace_graph` хранит versioned structural runtime/workspace graph:
+    `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref`;
+  - `workspace_graph_summary` в `chat_start_restore` и startup-output нужен как короткий human-readable слой поверх этого graph;
   - при битом `session_id` restore-path теперь fail-closed и не смешивает несколько пустых сессий в один bundle.
 
 Если передан `--question`, helper сам должен:
@@ -499,6 +504,11 @@ cargo run -- context pack \
 - кэшируется в SQLite;
 - сохраняется в PostgreSQL;
 - выгружается в S3 context bucket.
+- внутри payload теперь отдельно materialize-ится `workspace_graph`:
+  это компактный structural graph по уже найденным scoped-артефактам, а не догадка “по соседним файлам”.
+- этот graph собирается только из того, что уже лежит в scope:
+  `file`, `structure_item`, `symbol`, `chunk`, `import_ref`, `export_ref`;
+- тот же graph потом без дополнительного reparse попадает в `working_state_restore`.
 
 Важно:
 - `namespace` участвует в retrieval буквально;

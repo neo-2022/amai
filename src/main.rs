@@ -38,6 +38,7 @@ mod token_budget;
 mod verify;
 mod warmup;
 mod working_state;
+mod workspace_graph;
 
 use anyhow::Result;
 use clap::Parser;

@@ -8,6 +8,7 @@ use crate::qdrant;
 use crate::s3;
 use crate::token_budget;
 use crate::working_state;
+use crate::workspace_graph;
 use anyhow::{Context, Result, anyhow};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use qdrant_client::qdrant::point_id::PointIdOptions;
@@ -488,6 +489,28 @@ async fn prepare_context_pack(
             })
             .collect::<Vec<_>>()
     );
+    let context_pack_id = Uuid::new_v4();
+    let workspace_requests = collect_workspace_document_requests(
+        &visible_scopes,
+        &documents,
+        &symbols,
+        &chunks,
+        &semantic_chunks,
+    );
+    let workspace_documents =
+        postgres::list_document_structures_for_namespace_paths(db, &workspace_requests).await?;
+    let workspace_graph = workspace_graph::build_context_pack_workspace_graph(
+        &context_pack_id,
+        &args.query,
+        &effective_mode,
+        &scope_signature,
+        &visible_projects_json,
+        &documents,
+        &symbols,
+        &chunks,
+        &semantic_chunks,
+        &workspace_documents,
+    )?;
     let provenance_minimum = json!([
         "source_project",
         "repo_root",
@@ -499,8 +522,6 @@ async fn prepare_context_pack(
         "trust_level"
     ]);
     let provenance_ms = provenance_started.elapsed().as_millis();
-
-    let context_pack_id = Uuid::new_v4();
     let generated_epoch_s = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
@@ -558,6 +579,7 @@ async fn prepare_context_pack(
         "quality": {
             "semantic_guard": semantic_guard_to_json(&semantic_guard)
         },
+        "workspace_graph": workspace_graph,
         "provenance_minimum": provenance_minimum,
         "retrieval_runtime": runtime_json(&stats)
     });
@@ -1795,6 +1817,94 @@ fn chunk_to_json(hit: &ChunkHit) -> Value {
             "trust_level": "local_repo"
         }
     })
+}
+
+fn collect_workspace_document_requests(
+    visible_scopes: &[ResolvedVisibleScope],
+    documents: &[DocumentHit],
+    symbols: &[SymbolHit],
+    chunks: &[ChunkHit],
+    semantic_chunks: &[Value],
+) -> Vec<(Uuid, String)> {
+    let scope_ids = visible_scopes
+        .iter()
+        .map(|scope| {
+            (
+                format!("{}::{}", scope.visible.project.code, scope.namespace.code),
+                scope.namespace.namespace_id,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    let mut requests = Vec::new();
+    for hit in documents {
+        push_workspace_request(
+            &scope_ids,
+            &mut seen,
+            &mut requests,
+            &hit.project_code,
+            &hit.namespace_code,
+            &hit.relative_path,
+        );
+    }
+    for hit in symbols {
+        push_workspace_request(
+            &scope_ids,
+            &mut seen,
+            &mut requests,
+            &hit.project_code,
+            &hit.namespace_code,
+            &hit.relative_path,
+        );
+    }
+    for hit in chunks {
+        push_workspace_request(
+            &scope_ids,
+            &mut seen,
+            &mut requests,
+            &hit.project_code,
+            &hit.namespace_code,
+            &hit.relative_path,
+        );
+    }
+    for hit in semantic_chunks {
+        let Some(project_code) = hit["project_code"].as_str() else {
+            continue;
+        };
+        let Some(namespace_code) = hit["namespace_code"].as_str() else {
+            continue;
+        };
+        let Some(relative_path) = hit["relative_path"].as_str() else {
+            continue;
+        };
+        push_workspace_request(
+            &scope_ids,
+            &mut seen,
+            &mut requests,
+            project_code,
+            namespace_code,
+            relative_path,
+        );
+    }
+    requests
+}
+
+fn push_workspace_request(
+    scope_ids: &HashMap<String, Uuid>,
+    seen: &mut HashSet<String>,
+    requests: &mut Vec<(Uuid, String)>,
+    project_code: &str,
+    namespace_code: &str,
+    relative_path: &str,
+) {
+    let key = format!("{project_code}::{namespace_code}");
+    let Some(namespace_id) = scope_ids.get(&key) else {
+        return;
+    };
+    let dedupe_key = format!("{namespace_id}::{relative_path}");
+    if seen.insert(dedupe_key) {
+        requests.push((*namespace_id, relative_path.to_string()));
+    }
 }
 
 pub fn degradation_proof_scenarios(local_fast_cache_ttl_ms: u128) -> Result<Vec<Value>> {

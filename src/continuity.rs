@@ -8,6 +8,7 @@ use crate::config::AppConfig;
 use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, ProjectRecord};
 use crate::s3;
 use crate::working_state;
+use crate::workspace_graph;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1210,6 +1211,8 @@ fn build_chat_start_restore(
         restore_node.and_then(|value| summarize_string_list(&value["active_files"], 4));
     let open_questions_summary =
         restore_node.and_then(|value| summarize_string_list(&value["open_questions"], 3));
+    let workspace_graph_summary =
+        restore_node.and_then(|value| workspace_graph::human_summary(&value["workspace_graph"]));
     let active_files = restore_node
         .and_then(|value| value["active_files"].as_array())
         .map(|items| {
@@ -1263,6 +1266,7 @@ fn build_chat_start_restore(
             "recent_actions_summary": recent_actions_summary,
             "active_files_summary": active_files_summary,
             "open_questions_summary": open_questions_summary,
+            "workspace_graph_summary": workspace_graph_summary,
             "active_files": active_files,
             "open_questions": open_questions,
             "prompt_text": render_chat_start_prompt(
@@ -1302,6 +1306,8 @@ fn render_chat_start_prompt(
         restore_node.and_then(|value| summarize_string_list(&value["active_files"], 4));
     let open_questions_summary =
         restore_node.and_then(|value| summarize_string_list(&value["open_questions"], 3));
+    let workspace_graph_summary =
+        restore_node.and_then(|value| workspace_graph::human_summary(&value["workspace_graph"]));
     let restore_confidence = restore_node
         .and_then(|value| value["restore_confidence"].as_str())
         .unwrap_or("preliminary");
@@ -1323,6 +1329,9 @@ fn render_chat_start_prompt(
     }
     if let Some(value) = active_files_summary {
         lines.push(format!("Активные файлы: {value}"));
+    }
+    if let Some(value) = workspace_graph_summary {
+        lines.push(format!("Структурный граф рабочей области: {value}"));
     }
     if let Some(value) = open_questions_summary {
         lines.push(format!("Открытые вопросы: {value}"));
@@ -1370,6 +1379,12 @@ fn print_chat_start_restore_human(value: &Value) {
         .filter(|value| !value.is_empty())
     {
         println!("- Активные файлы: {value}");
+    }
+    if let Some(value) = node["workspace_graph_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Структурный граф рабочей области: {value}");
     }
     if let Some(value) = node["open_questions_summary"]
         .as_str()

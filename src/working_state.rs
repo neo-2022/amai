@@ -1,6 +1,7 @@
 use crate::postgres::{self, NamespaceRecord, ObservabilitySnapshotRecord, ProjectRecord};
 use crate::retrieval_science;
 use crate::token_budget;
+use crate::workspace_graph;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -181,6 +182,7 @@ pub async fn record_context_pack_event(db: &Client, payload: &Value) -> Result<(
             "context_pack_id": node["context_pack_id"].as_str().unwrap_or_default(),
             "retrieval_mode": node["effective_retrieval_mode"].as_str().unwrap_or_default(),
             "latency_ms": node["retrieval_runtime"]["total_ms"].clone(),
+            "workspace_graph": node["workspace_graph"].clone(),
         }
     });
     postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
@@ -285,6 +287,9 @@ pub fn print_restore_bundle_human(restore: &Value) {
         &node["materialized_notes"],
         MAX_MATERIALIZED_NOTES,
     );
+    if let Some(summary) = workspace_graph::human_summary(&node["workspace_graph"]) {
+        println!("- Структурный граф рабочей области: {summary}");
+    }
     print_recent_actions("- Недавние действия", &node["recent_actions"], 3);
 }
 
@@ -364,6 +369,7 @@ fn compose_restore_bundle(
     let mut last_command = None::<String>;
     let mut last_results_summary = None::<String>;
     let mut recent_actions = Vec::new();
+    let mut workspace_graph_inputs = Vec::new();
     let now_epoch_ms = now_epoch_ms().unwrap_or(latest_recorded_at);
 
     for snapshot in events.iter().take(MAX_RECENT_ACTIONS) {
@@ -414,6 +420,9 @@ fn compose_restore_bundle(
             "execution_state": action_state,
             "authoritative": event["event_id"].as_str() == Some(authoritative_event_id.as_str()),
         }));
+        if !event["workspace_graph"].is_null() {
+            workspace_graph_inputs.push(event["workspace_graph"].clone());
+        }
     }
 
     let restore_confidence = if events.len() >= 4 && latest_recorded_at > 0 {
@@ -473,6 +482,7 @@ fn compose_restore_bundle(
         } else {
             "fresh"
         };
+    let merged_workspace_graph = workspace_graph::merge_workspace_graphs(&workspace_graph_inputs);
 
     json!({
         "working_state_restore": {
@@ -501,6 +511,7 @@ fn compose_restore_bundle(
             "restore_freshness_state": restore_freshness_state,
             "execution_catalog": execution_catalog,
             "action_state_counts": action_state_counts,
+            "workspace_graph": merged_workspace_graph,
             "state_lineage": {
                 "lineage_model_version": execution_catalog["lineage_model_version"].clone(),
                 "authoritative_event_id": authoritative_event["event_id"],
@@ -1783,6 +1794,94 @@ mod tests {
                 .is_some_and(|value| value.starts_with("Рабочий запрос: current context-"))
                 && edge["relation"] == json!("supports")
         }));
+    }
+
+    #[test]
+    fn compose_restore_bundle_merges_workspace_graphs_from_recent_actions() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let retrieval_a = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "retrieval-a",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "event_kind": "retrieval_context_pack",
+                    "source_kind": "context_pack",
+                    "headline": "Graph A",
+                    "summary": "Graph A",
+                    "recorded_at_epoch_ms": base,
+                    "workspace_graph": {
+                        "workspace_graph_model_version": "workspace-graph-v1",
+                        "artifact_lineage_model_version": "artifact-lineage-v1",
+                        "lineage_model_version": "lineage-v2",
+                        "truth_ranking": ["continuity_handoff"],
+                        "scope_signature": "scope-a",
+                        "visible_projects": [{"project_code":"art","namespace_code":"continuity"}],
+                        "source_context_pack_ids": ["ctx-a"],
+                        "nodes": [
+                            {"node_id":"file:art:continuity:src/lib.rs","node_type":"file"}
+                        ],
+                        "edges": [
+                            {"from_node_id":"context_pack:ctx-a","to_node_id":"file:art:continuity:src/lib.rs","relation":"retrieved_exact_document"}
+                        ]
+                    }
+                }
+            }),
+            created_at_epoch_ms: base,
+        };
+        let retrieval_b = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "retrieval-b",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "event_kind": "retrieval_context_pack",
+                    "source_kind": "context_pack",
+                    "headline": "Graph B",
+                    "summary": "Graph B",
+                    "recorded_at_epoch_ms": base - 1,
+                    "workspace_graph": {
+                        "workspace_graph_model_version": "workspace-graph-v1",
+                        "artifact_lineage_model_version": "artifact-lineage-v1",
+                        "lineage_model_version": "lineage-v2",
+                        "truth_ranking": ["continuity_handoff"],
+                        "scope_signature": "scope-b",
+                        "visible_projects": [{"project_code":"art","namespace_code":"continuity"}],
+                        "source_context_pack_ids": ["ctx-b"],
+                        "nodes": [
+                            {"node_id":"file:art:continuity:src/lib.rs","node_type":"file"},
+                            {"node_id":"symbol:art:continuity:src/lib.rs:alpha:1","node_type":"symbol"}
+                        ],
+                        "edges": [
+                            {"from_node_id":"file:art:continuity:src/lib.rs","to_node_id":"symbol:art:continuity:src/lib.rs:alpha:1","relation":"contains_symbol"}
+                        ]
+                    }
+                }
+            }),
+            created_at_epoch_ms: base - 1,
+        };
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[retrieval_a, retrieval_b],
+        );
+        let graph = &bundle["working_state_restore"]["workspace_graph"];
+        assert_eq!(
+            graph["source_context_pack_ids"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(graph["scope_signatures"].as_array().unwrap().len(), 2);
+        assert_eq!(graph["summary"]["node_counts"]["file"], json!(1));
+        assert_eq!(graph["summary"]["node_counts"]["symbol"], json!(1));
+        assert_eq!(graph["summary"]["edge_count"], json!(2));
     }
 
     #[test]

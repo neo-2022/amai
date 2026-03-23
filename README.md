@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 12:34 MSK
-Ручная сверка guide/docs: 2026-03-23 12:34 MSK
+modified_at: 2026-03-23 15:40 MSK
+Ручная сверка guide/docs: 2026-03-23 15:40 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -312,6 +312,8 @@ scripts\install_amai.cmd --client codex
     - `recent_actions[].execution_state` (`attempted / succeeded / superseded / stale`);
     - `action_state_counts`;
     - `state_lineage` с `lineage_model_version = lineage-v2`, authoritative event, truth ranking и явным graph-слоем `nodes / edges`, чтобы было видно, какой event authoritative, какие его поддерживают и какие уже superseded.
+    - `workspace_graph` с `workspace_graph_model_version = workspace-graph-v1` и `artifact_lineage_model_version = artifact-lineage-v1`, где recent retrieval теперь materialize-ится как graph `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref`;
+    - тот же `workspace_graph_summary` теперь поднимается и в `chat_start_restore`, и в human-readable startup/restore вывод, если в текущей линии уже были свежие retrieval-context события.
 
 Если у вас несколько параллельных агентов:
 
