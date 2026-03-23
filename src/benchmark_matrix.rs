@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -180,6 +181,38 @@ pub fn print_coverage(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn coverage_json(repo_root: &Path) -> Result<Value> {
+    let matrix = load_matrix(repo_root)?;
+    let totals = coverage_counts(matrix.benchmarks.values().map(|entry| entry.coverage_level));
+    let families = ordered_families(&matrix)
+        .into_iter()
+        .map(|(family_code, family)| {
+            let entries = family_benchmarks(&matrix, family_code);
+            let counts = coverage_counts(entries.iter().map(|(_, entry)| entry.coverage_level));
+            let next_priorities = entries
+                .iter()
+                .filter(|(_, entry)| entry.coverage_level == CoverageLevel::NextPriority)
+                .map(|(code, entry)| format!("{} ({})", entry.display_name, code))
+                .collect::<Vec<_>>();
+            json!({
+                "family_code": family_code,
+                "display_name": family.display_name,
+                "why_it_matters": family.why_it_matters,
+                "coverage_counts": coverage_counts_json(&counts),
+                "next_priorities": next_priorities,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "source": {
+            "display_name": matrix.source.display_name,
+            "url": matrix.source.url,
+        },
+        "coverage_counts": coverage_counts_json(&totals),
+        "families": families,
+    }))
+}
+
 fn print_counts(counts: &CoverageCounts) {
     println!("- Всего benchmark-эталонов в матрице: {}", counts.total);
     println!("- Уже materialized напрямую: {}", counts.materialized);
@@ -240,6 +273,17 @@ fn coverage_counts(levels: impl Iterator<Item = CoverageLevel>) -> CoverageCount
         }
     }
     counts
+}
+
+fn coverage_counts_json(counts: &CoverageCounts) -> Value {
+    json!({
+        "total": counts.total,
+        "materialized": counts.materialized,
+        "partial": counts.partial,
+        "mapped": counts.mapped,
+        "next_priority": counts.next_priority,
+        "future": counts.future,
+    })
 }
 
 fn coverage_title(level: CoverageLevel) -> &'static str {
@@ -310,7 +354,7 @@ fn matrix_path(repo_root: &Path) -> PathBuf {
 mod tests {
     use super::{
         BenchmarkEntry, BenchmarkFamily, BenchmarkMatrixFile, BenchmarkSource, CoverageLevel,
-        coverage_counts, normalize_key, ordered_families, resolve_benchmark,
+        coverage_counts, coverage_counts_json, normalize_key, ordered_families, resolve_benchmark,
     };
     use std::collections::BTreeMap;
 
@@ -333,6 +377,25 @@ mod tests {
         assert_eq!(counts.mapped, 2);
         assert_eq!(counts.next_priority, 1);
         assert_eq!(counts.future, 1);
+    }
+
+    #[test]
+    fn coverage_counts_json_renders_machine_readable_totals() {
+        let counts = coverage_counts(
+            [
+                CoverageLevel::Materialized,
+                CoverageLevel::Partial,
+                CoverageLevel::Mapped,
+                CoverageLevel::Future,
+            ]
+            .into_iter(),
+        );
+        let json = coverage_counts_json(&counts);
+        assert_eq!(json["total"].as_u64(), Some(4));
+        assert_eq!(json["materialized"].as_u64(), Some(1));
+        assert_eq!(json["partial"].as_u64(), Some(1));
+        assert_eq!(json["mapped"].as_u64(), Some(1));
+        assert_eq!(json["future"].as_u64(), Some(1));
     }
 
     #[test]

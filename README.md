@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 23:43 MSK
-Ручная сверка guide/docs: 2026-03-23 23:43 MSK
+modified_at: 2026-03-24 00:00 MSK
+Ручная сверка guide/docs: 2026-03-24 00:00 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -914,6 +914,14 @@ preview, а не только raw count.
 - можно ли честно обещать пиковые benchmark-контуры;
 - уместен ли remote mode;
 - где не хватает минимума, а где просто нет запаса прочности.
+
+`amai_benchmark_coverage` теперь тоже доступен через MCP. Он отдаёт наружу
+`benchmark_coverage` и `benchmark_coverage_summary`, чтобы внешний клиент видел
+не только список tools, но и сам machine-readable слой product-eval coverage:
+- сколько benchmark-эталонов у `Amai` уже materialized;
+- сколько покрыто частично;
+- сколько пока только mapped;
+- какие benchmark-приоритеты ещё висят следующими.
 
 `amai_warm_cache` теперь тоже отдаёт наружу `warm_cache_summary`, где уже собраны
 `compact_projects`, `cache_hits`, `exact_documents`, `symbol_hits`,

@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 23:43 MSK
-Ручная сверка guide/docs: 2026-03-23 23:43 MSK
+modified_at: 2026-03-24 00:00 MSK
+Ручная сверка guide/docs: 2026-03-24 00:00 MSK
 
 # Operations
 
@@ -652,6 +652,9 @@ cargo run -- mcp serve
 - `amai_stack_preflight` теперь даёт наружу `preflight_summary` и `preflight_report`,
   чтобы внешний клиент видел честный verdict по deployment profile и machine guarantees,
   а не только локальный human-print из CLI.
+- `amai_benchmark_coverage` теперь даёт наружу `benchmark_coverage` и
+  `benchmark_coverage_summary`, чтобы внешний клиент видел machine-readable
+  карту benchmark/eval coverage без парсинга human CLI-вывода.
 - `amai_warm_cache` теперь тоже отдаёт наружу `warm_cache_summary`, где уже
   собраны `compact_projects`, `cache_hits`, `exact_documents`, `symbol_hits`,
   `lexical_chunks` и `semantic_chunks`, а не только итоговый count warmed projects.

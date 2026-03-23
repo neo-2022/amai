@@ -2,8 +2,8 @@ use crate::cli::{
     ContextPackArgs, McpConfigArgs, VerifyMcpArgs, VerifyMemoryMatrixArgs, VerifyTokenBenchmarkArgs,
 };
 use crate::{
-    compatibility, config, memory_task_matrix, observe, postgres, profiles, retrieval,
-    token_budget, verify,
+    benchmark_matrix, compatibility, config, memory_task_matrix, observe, postgres, profiles,
+    retrieval, token_budget, verify,
 };
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
@@ -357,6 +357,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         .filter_map(|tool| tool["name"].as_str().map(ToOwned::to_owned))
         .collect::<BTreeSet<_>>();
     let expected_tools = BTreeSet::from([
+        "amai_benchmark_coverage".to_string(),
         "amai_list_projects".to_string(),
         "amai_list_namespaces".to_string(),
         "amai_stack_preflight".to_string(),
@@ -452,6 +453,20 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     if preflight["preflight_summary"]["profile_code"].as_str() != Some("default") {
         return Err(anyhow!(
             "MCP stack_preflight did not keep requested profile=default"
+        ));
+    }
+
+    let benchmark_coverage = session
+        .tool_call("amai_benchmark_coverage", json!({}))
+        .await
+        .context("MCP amai_benchmark_coverage failed")?;
+    if benchmark_coverage["benchmark_coverage_summary"]["total_benchmarks"]
+        .as_u64()
+        .unwrap_or_default()
+        == 0
+    {
+        return Err(anyhow!(
+            "MCP benchmark coverage returned zero benchmark entries"
         ));
     }
 
@@ -604,6 +619,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "protocol_version": MCP_PROTOCOL_VERSION,
             "tools": tool_names,
             "prompts": prompt_names,
+            "benchmark_coverage_total": benchmark_coverage["benchmark_coverage_summary"]["total_benchmarks"].clone(),
             "token_savings_factor": savings_factor,
             "token_savings_percent": savings_percent,
             "token_report_session_events": session_events,
@@ -857,6 +873,9 @@ async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> McpToolR
                 .await
                 .map_err(McpError::tool_runtime)
         }
+        "amai_benchmark_coverage" => tool_benchmark_coverage()
+            .await
+            .map_err(McpError::tool_runtime),
         "amai_context_pack" => {
             let args: ContextPackToolArgs = parse_arguments(request.arguments)?;
             tool_context_pack(cfg, args)
@@ -1002,6 +1021,37 @@ async fn tool_stack_preflight(args: StackPreflightToolArgs) -> Result<Value> {
                 "remote_mode_recommended": summary.remote_mode_recommended,
                 "unmet_minimums_count": summary.unmet_minimums_count,
                 "unmet_recommendations_count": summary.unmet_recommendations_count,
+            }
+        }),
+    ))
+}
+
+async fn tool_benchmark_coverage() -> Result<Value> {
+    let repo_root = config::discover_repo_root(None)?;
+    let payload = benchmark_matrix::coverage_json(&repo_root)?;
+    let summary = benchmark_coverage_summary(&payload);
+    Ok(tool_result(
+        format!(
+            "benchmark coverage :: total={} materialized={} partial={} mapped={} next_priority={} future={} next={}",
+            summary.total_benchmarks,
+            summary.materialized,
+            summary.partial,
+            summary.mapped,
+            summary.next_priority,
+            summary.future,
+            summary.next_priorities_summary,
+        ),
+        json!({
+            "benchmark_coverage": payload,
+            "benchmark_coverage_summary": {
+                "source_display_name": summary.source_display_name,
+                "total_benchmarks": summary.total_benchmarks,
+                "materialized": summary.materialized,
+                "partial": summary.partial,
+                "mapped": summary.mapped,
+                "next_priority": summary.next_priority,
+                "future": summary.future,
+                "next_priorities_summary": summary.next_priorities_summary,
             }
         }),
     ))
@@ -1353,6 +1403,42 @@ struct MemoryMatrixSummary {
     compact_verdict_counts: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct BenchmarkCoverageSummary {
+    source_display_name: String,
+    total_benchmarks: u64,
+    materialized: u64,
+    partial: u64,
+    mapped: u64,
+    next_priority: u64,
+    future: u64,
+    next_priorities_summary: String,
+}
+
+fn benchmark_coverage_summary(payload: &Value) -> BenchmarkCoverageSummary {
+    let counts = &payload["coverage_counts"];
+    let next_priorities = payload["families"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|family| family["next_priorities"].as_array().into_iter().flatten())
+        .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    BenchmarkCoverageSummary {
+        source_display_name: payload["source"]["display_name"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        total_benchmarks: counts["total"].as_u64().unwrap_or_default(),
+        materialized: counts["materialized"].as_u64().unwrap_or_default(),
+        partial: counts["partial"].as_u64().unwrap_or_default(),
+        mapped: counts["mapped"].as_u64().unwrap_or_default(),
+        next_priority: counts["next_priority"].as_u64().unwrap_or_default(),
+        future: counts["future"].as_u64().unwrap_or_default(),
+        next_priorities_summary: summarize_with_limit(&next_priorities),
+    }
+}
+
 fn memory_matrix_summary(payload: &Value) -> MemoryMatrixSummary {
     let matrix = &payload["memory_task_matrix"];
     MemoryMatrixSummary {
@@ -1628,6 +1714,7 @@ fn server_instructions() -> String {
         "Use amai_context_pack for retrieval instead of asking for whole repositories.",
         "Use amai_token_benchmark when you need a measured token-economy comparison.",
         "Use amai_token_report when you need cumulative token savings for the current session, budget window, or lifetime.",
+        "Use amai_benchmark_coverage when you need the external benchmark and eval coverage map for Amai.",
         "Use amai_memory_matrix when you need the measured product-eval verdict for memory usefulness and isolation.",
         "Use amai_observe_snapshot when you need live stack health and SLA evidence.",
     ]
@@ -1651,6 +1738,10 @@ fn protocol_manifest() -> Value {
             "amai_stack_preflight": {
                 "summary_field": "preflight_summary",
                 "short_summary_contract": "host suitability verdict plus machine guarantees for a named deployment profile",
+            },
+            "amai_benchmark_coverage": {
+                "summary_field": "benchmark_coverage_summary",
+                "short_summary_contract": "external benchmark coverage totals plus the next benchmark priorities for Amai",
             },
             "amai_context_pack": {
                 "summary_field": "context_pack_summary",
@@ -1777,6 +1868,22 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": stack_preflight_input_schema(),
             "annotations": {
                 "title": "Stack Preflight",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }),
+        json!({
+            "name": "amai_benchmark_coverage",
+            "description": "Read the machine-readable benchmark and eval coverage map for Amai.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            },
+            "annotations": {
+                "title": "Benchmark Coverage",
                 "readOnlyHint": true,
                 "destructiveHint": false,
                 "idempotentHint": true,
@@ -2749,9 +2856,9 @@ fn default_warm_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        McpConfigArgs, McpError, context_pack_summary, mcp_tool_error_result,
-        memory_matrix_summary, observe_snapshot_summary, protocol_manifest, render_client_config,
-        stack_preflight_summary, summarize_codes, summarize_namespace_modes,
+        McpConfigArgs, McpError, benchmark_coverage_summary, context_pack_summary,
+        mcp_tool_error_result, memory_matrix_summary, observe_snapshot_summary, protocol_manifest,
+        render_client_config, stack_preflight_summary, summarize_codes, summarize_namespace_modes,
         token_benchmark_summary, token_report_summary, warm_cache_summary,
     };
     use serde_json::json;
@@ -2964,6 +3071,42 @@ mod tests {
     }
 
     #[test]
+    fn benchmark_coverage_summary_surfaces_eval_taxonomy_totals() {
+        let payload = json!({
+            "source": {
+                "display_name": "Benchmark Compendium"
+            },
+            "coverage_counts": {
+                "total": 19,
+                "materialized": 0,
+                "partial": 2,
+                "mapped": 12,
+                "next_priority": 1,
+                "future": 4
+            },
+            "families": [{
+                "next_priorities": [
+                    "SWE-bench Verified (swe_bench_verified)",
+                    "τ-bench (tau_bench)"
+                ]
+            }]
+        });
+
+        let summary = benchmark_coverage_summary(&payload);
+        assert_eq!(summary.source_display_name, "Benchmark Compendium");
+        assert_eq!(summary.total_benchmarks, 19);
+        assert_eq!(summary.materialized, 0);
+        assert_eq!(summary.partial, 2);
+        assert_eq!(summary.mapped, 12);
+        assert_eq!(summary.next_priority, 1);
+        assert_eq!(summary.future, 4);
+        assert_eq!(
+            summary.next_priorities_summary,
+            "SWE-bench Verified (swe_bench_verified), τ-bench (tau_bench)"
+        );
+    }
+
+    #[test]
     fn context_pack_summary_surfaces_included_and_excluded_reasons() {
         let payload = json!({
             "decision_trace": {
@@ -3103,6 +3246,10 @@ mod tests {
         assert_eq!(
             manifest["tool_contracts"]["amai_stack_preflight"]["summary_field"].as_str(),
             Some("preflight_summary")
+        );
+        assert_eq!(
+            manifest["tool_contracts"]["amai_benchmark_coverage"]["summary_field"].as_str(),
+            Some("benchmark_coverage_summary")
         );
         assert_eq!(
             manifest["tool_contracts"]["amai_memory_matrix"]["summary_field"].as_str(),
