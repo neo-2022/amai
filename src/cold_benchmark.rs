@@ -258,6 +258,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
     let mut thermal_stop_count = 0usize;
     let mut stop_reason = None::<String>;
     let mut cold_workload_elapsed_ms = 0.0f64;
+    let mut indexed_repo_codes = BTreeSet::new();
 
     let repos = resolve_repos(repo_root, &manifest.repos)?;
     let repo_map = repos
@@ -291,49 +292,23 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
 
     for repo in &repos {
         ensure_repo_registered(cfg, db, repo).await?;
-        if !args.skip_index {
-            progress_guard.write(&build_live_progress_payload(
-                &output_dir,
-                &manifest,
-                args,
-                &repo_map,
-                &repo_target_file_counts,
-                run_started_epoch_ms,
-                &cold_samples,
-                &hot_samples,
-                &cycle_summaries,
-                &indexed_repos,
-                "indexing",
-                None,
-                Some(&repo.manifest.code),
-                None,
-            )?)?;
-            let summary = index_repo(cfg, db, repo, true).await?;
-            if let Some(summary) = summary {
-                indexed_repos.push(summary);
-                progress_guard.write(&build_live_progress_payload(
-                    &output_dir,
-                    &manifest,
-                    args,
-                    &repo_map,
-                    &repo_target_file_counts,
-                    run_started_epoch_ms,
-                    &cold_samples,
-                    &hot_samples,
-                    &cycle_summaries,
-                    &indexed_repos,
-                    "indexing",
-                    Some(0),
-                    Some(&repo.manifest.code),
-                    None,
-                )?)?;
-            }
-        }
     }
 
     'cycles: for cycle in 0..args.cycles {
-        if args.reindex_each_cycle && !args.skip_index && cycle > 0 {
-            for repo in repo_map.values() {
+        let mut cycle_indexed_repo_codes = BTreeSet::new();
+        let cold_start = cold_samples.len();
+        let hot_start = hot_samples.len();
+        for case in &manifest.cases {
+            let repo = repo_map
+                .get(&case.repo_code)
+                .ok_or_else(|| anyhow!("unknown repo_code in manifest case: {}", case.repo_code))?;
+            if should_index_repo_for_case(
+                args.skip_index,
+                args.reindex_each_cycle,
+                &repo.manifest.code,
+                &indexed_repo_codes,
+                &cycle_indexed_repo_codes,
+            ) {
                 progress_guard.write(&build_live_progress_payload(
                     &output_dir,
                     &manifest,
@@ -348,19 +323,14 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                     "indexing",
                     Some(cycle),
                     Some(&repo.manifest.code),
-                    None,
+                    Some(&case.query_slice),
                 )?)?;
                 if let Some(summary) = index_repo(cfg, db, repo, true).await? {
                     indexed_repos.push(summary);
+                    indexed_repo_codes.insert(repo.manifest.code.clone());
+                    cycle_indexed_repo_codes.insert(repo.manifest.code.clone());
                 }
             }
-        }
-        let cold_start = cold_samples.len();
-        let hot_start = hot_samples.len();
-        for case in &manifest.cases {
-            let repo = repo_map
-                .get(&case.repo_code)
-                .ok_or_else(|| anyhow!("unknown repo_code in manifest case: {}", case.repo_code))?;
             progress_guard.write(&build_live_progress_payload(
                 &output_dir,
                 &manifest,
@@ -727,6 +697,23 @@ async fn index_repo(
         elapsed_ms: stats.elapsed_ms,
         parser_coverage_ratio: stats.parser_coverage_ratio,
     }))
+}
+
+fn should_index_repo_for_case(
+    skip_index: bool,
+    reindex_each_cycle: bool,
+    repo_code: &str,
+    indexed_repo_codes: &BTreeSet<String>,
+    cycle_indexed_repo_codes: &BTreeSet<String>,
+) -> bool {
+    if skip_index {
+        return false;
+    }
+    if reindex_each_cycle {
+        !cycle_indexed_repo_codes.contains(repo_code)
+    } else {
+        !indexed_repo_codes.contains(repo_code)
+    }
 }
 
 async fn run_case(
@@ -1943,9 +1930,11 @@ mod tests {
     use super::{
         ColdBenchmarkCase, QualityScore, build_cold_benchmark_canonical_eval,
         cold_sample_eval_verdict, determine_verdict, distribution_from_f64, evaluate_case,
+        should_index_repo_for_case,
     };
     use crate::cold_benchmark::{ColdBenchmarkProfile, item_matches_case};
     use serde_json::json;
+    use std::collections::BTreeSet;
 
     #[test]
     fn evaluate_case_uses_expected_paths_terms_and_symbols() {
@@ -2035,6 +2024,56 @@ mod tests {
         })
         .expect("verdict");
         assert_eq!(verdict.class_key, "hit_wrong_target");
+    }
+
+    #[test]
+    fn repo_indexing_is_lazy_per_repo_when_cycle_reindex_is_disabled() {
+        let mut indexed_repo_codes = BTreeSet::new();
+        let cycle_indexed_repo_codes = BTreeSet::new();
+        assert!(should_index_repo_for_case(
+            false,
+            false,
+            "art_local",
+            &indexed_repo_codes,
+            &cycle_indexed_repo_codes,
+        ));
+        indexed_repo_codes.insert("art_local".to_string());
+        assert!(!should_index_repo_for_case(
+            false,
+            false,
+            "art_local",
+            &indexed_repo_codes,
+            &cycle_indexed_repo_codes,
+        ));
+        assert!(should_index_repo_for_case(
+            false,
+            false,
+            "amai_local",
+            &indexed_repo_codes,
+            &cycle_indexed_repo_codes,
+        ));
+    }
+
+    #[test]
+    fn repo_indexing_repeats_each_cycle_only_after_first_use_in_that_cycle() {
+        let mut indexed_repo_codes = BTreeSet::new();
+        indexed_repo_codes.insert("art_local".to_string());
+        let mut cycle_indexed_repo_codes = BTreeSet::new();
+        assert!(should_index_repo_for_case(
+            false,
+            true,
+            "art_local",
+            &indexed_repo_codes,
+            &cycle_indexed_repo_codes,
+        ));
+        cycle_indexed_repo_codes.insert("art_local".to_string());
+        assert!(!should_index_repo_for_case(
+            false,
+            true,
+            "art_local",
+            &indexed_repo_codes,
+            &cycle_indexed_repo_codes,
+        ));
     }
 
     #[test]

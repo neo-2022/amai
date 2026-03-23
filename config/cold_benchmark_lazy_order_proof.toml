@@ -1,0 +1,60 @@
+[profile]
+display_name = "Lazy Order Proof"
+summary = "Proof that cold benchmark starts running cases after the first repo is indexed, not after all repos are pre-indexed."
+target_p50_ms = 1000.0
+target_p95_ms = 5000.0
+target_p99_ms = 10000.0
+target_max_ms = 20000.0
+min_precision = 0.0
+min_target_hit_rate = 0.0
+min_recall = 0.0
+min_sample_count = 1
+min_repo_count = 1
+min_query_slice_count = 1
+max_duration_seconds = 3600.0
+max_leakage = 99
+max_error_rate = 1.0
+
+[[repos]]
+code = "art_local"
+display_name = "Art small"
+repo_root = "../Art"
+namespace = "cold_lazy_order_proof"
+repo_type = "mixed"
+size_class = "proof_small"
+limit_files = 2
+skip_embeddings = true
+default_retrieval_mode = "local_strict"
+
+[[repos]]
+code = "amai_local"
+display_name = "Amai bigger"
+repo_root = "."
+namespace = "cold_lazy_order_proof"
+repo_type = "code_heavy"
+size_class = "proof_large"
+limit_files = 400
+skip_embeddings = true
+default_retrieval_mode = "local_strict"
+
+[[cases]]
+repo_code = "art_local"
+query_slice = "art_case"
+query = "CHECKLIST_00_MASTER_ART_REGART"
+expected_projects = ["art_local"]
+expected_paths = ["docs/source/checklists/CHECKLIST_00_MASTER_ART_REGART.md"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
+
+[[cases]]
+repo_code = "amai_local"
+query_slice = "amai_case"
+query = "README.md"
+expected_projects = ["amai_local"]
+expected_paths = ["README.md"]
+limit_documents = 1
+limit_symbols = 0
+limit_chunks = 0
+limit_semantic_chunks = 0
