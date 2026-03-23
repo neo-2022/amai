@@ -17,6 +17,150 @@ use crate::config::AppConfig;
 pub(crate) const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 pub(crate) const SERVER_NAME: &str = "Art-memory-agent-index";
 
+type McpToolResult<T> = std::result::Result<T, McpError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct McpErrorSpec {
+    jsonrpc_code: i64,
+    message: &'static str,
+    amai_error_code: &'static str,
+    amai_error_class: &'static str,
+    retryable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpError {
+    spec: McpErrorSpec,
+    detail: String,
+}
+
+impl McpError {
+    fn parse(detail: impl Into<String>) -> Self {
+        Self {
+            spec: McpErrorSpec {
+                jsonrpc_code: -32700,
+                message: "invalid JSON-RPC payload",
+                amai_error_code: "invalid_json_rpc_payload",
+                amai_error_class: "protocol_parse",
+                retryable: false,
+            },
+            detail: detail.into(),
+        }
+    }
+
+    fn invalid_request(detail: impl Into<String>) -> Self {
+        Self {
+            spec: McpErrorSpec {
+                jsonrpc_code: -32600,
+                message: "invalid request",
+                amai_error_code: "invalid_request",
+                amai_error_class: "protocol_request",
+                retryable: false,
+            },
+            detail: detail.into(),
+        }
+    }
+
+    fn invalid_params(detail: impl Into<String>) -> Self {
+        Self {
+            spec: McpErrorSpec {
+                jsonrpc_code: -32602,
+                message: "invalid params",
+                amai_error_code: "invalid_params",
+                amai_error_class: "client_input",
+                retryable: false,
+            },
+            detail: detail.into(),
+        }
+    }
+
+    fn method_not_found(detail: impl Into<String>) -> Self {
+        Self {
+            spec: McpErrorSpec {
+                jsonrpc_code: -32601,
+                message: "method not found",
+                amai_error_code: "method_not_found",
+                amai_error_class: "protocol_dispatch",
+                retryable: false,
+            },
+            detail: detail.into(),
+        }
+    }
+
+    fn prompt_not_found(detail: impl Into<String>) -> Self {
+        Self {
+            spec: McpErrorSpec {
+                jsonrpc_code: -32601,
+                message: "prompt not found",
+                amai_error_code: "prompt_not_found",
+                amai_error_class: "prompt_dispatch",
+                retryable: false,
+            },
+            detail: detail.into(),
+        }
+    }
+
+    fn tool_not_found(detail: impl Into<String>) -> Self {
+        Self {
+            spec: McpErrorSpec {
+                jsonrpc_code: -32601,
+                message: "tool not found",
+                amai_error_code: "tool_not_found",
+                amai_error_class: "tool_dispatch",
+                retryable: false,
+            },
+            detail: detail.into(),
+        }
+    }
+
+    fn tool_runtime(error: anyhow::Error) -> Self {
+        Self {
+            spec: McpErrorSpec {
+                jsonrpc_code: -32000,
+                message: "tool execution failed",
+                amai_error_code: "tool_execution_failed",
+                amai_error_class: "tool_runtime",
+                retryable: false,
+            },
+            detail: format!("{error:#}"),
+        }
+    }
+}
+
+fn mcp_error_taxonomy_payload(error: &McpError) -> Value {
+    json!({
+        "amai_error_code": error.spec.amai_error_code,
+        "amai_error_class": error.spec.amai_error_class,
+        "retryable": error.spec.retryable,
+        "detail": error.detail,
+    })
+}
+
+fn mcp_jsonrpc_error_response(id: Value, error: &McpError) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": error.spec.jsonrpc_code,
+            "message": error.spec.message,
+            "data": mcp_error_taxonomy_payload(error),
+        }
+    })
+}
+
+fn mcp_tool_error_result(error: &McpError) -> Value {
+    json!({
+        "content": [{
+            "type": "text",
+            "text": format!("tool failed: {}", error.detail)
+        }],
+        "isError": true,
+        "structuredContent": {
+            "error_taxonomy": mcp_error_taxonomy_payload(error),
+        }
+    })
+}
+
 pub async fn serve(cfg: &AppConfig) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
@@ -35,15 +179,8 @@ pub async fn serve(cfg: &AppConfig) -> Result<()> {
         let incoming: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(error) => {
-                let response = json!({
-                    "jsonrpc": "2.0",
-                    "id": Value::Null,
-                    "error": {
-                        "code": -32700,
-                        "message": "invalid JSON-RPC payload",
-                        "data": error.to_string(),
-                    }
-                });
+                let response =
+                    mcp_jsonrpc_error_response(Value::Null, &McpError::parse(error.to_string()));
                 write_message(&mut writer, &response).await?;
                 continue;
             }
@@ -55,15 +192,19 @@ pub async fn serve(cfg: &AppConfig) -> Result<()> {
 
         let response = match handle_request(cfg, incoming).await {
             Ok(response) => response,
-            Err(error) => json!({
-                "jsonrpc": "2.0",
-                "id": Value::Null,
-                "error": {
-                    "code": -32000,
-                    "message": "MCP request handler failed",
-                    "data": error.to_string(),
-                }
-            }),
+            Err(error) => mcp_jsonrpc_error_response(
+                Value::Null,
+                &McpError {
+                    spec: McpErrorSpec {
+                        jsonrpc_code: -32000,
+                        message: "MCP request handler failed",
+                        amai_error_code: "request_handler_failed",
+                        amai_error_class: "server_runtime",
+                        retryable: false,
+                    },
+                    detail: error.to_string(),
+                },
+            ),
         };
         write_message(&mut writer, &response).await?;
     }
@@ -575,9 +716,15 @@ pub(crate) async fn spawn_proof_session(cfg: &AppConfig) -> Result<McpProofSessi
 
 async fn handle_request(cfg: &AppConfig, incoming: Value) -> Result<Value> {
     let id = incoming["id"].clone();
-    let method = incoming["method"]
-        .as_str()
-        .ok_or_else(|| anyhow!("JSON-RPC request is missing method"))?;
+    let method = match incoming["method"].as_str() {
+        Some(method) => method,
+        None => {
+            return Ok(mcp_jsonrpc_error_response(
+                id,
+                &McpError::invalid_request("JSON-RPC request is missing method"),
+            ));
+        }
+    };
     let params = incoming.get("params").cloned().unwrap_or_else(|| json!({}));
     let response = match method {
         "initialize" => json!({
@@ -620,20 +767,26 @@ async fn handle_request(cfg: &AppConfig, incoming: Value) -> Result<Value> {
         "prompts/get" => json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": prompt_result(params)?,
+            "result": match prompt_result(params) {
+                Ok(result) => result,
+                Err(error) => return Ok(mcp_jsonrpc_error_response(id, &error)),
+            },
         }),
         "tools/call" => {
-            let request: ToolCallRequest =
-                serde_json::from_value(params).context("failed to decode tool call request")?;
+            let request: ToolCallRequest = match serde_json::from_value(params) {
+                Ok(request) => request,
+                Err(error) => {
+                    return Ok(mcp_jsonrpc_error_response(
+                        id,
+                        &McpError::invalid_params(format!(
+                            "failed to decode tool call request: {error}"
+                        )),
+                    ));
+                }
+            };
             let result = match handle_tool_call(cfg, request).await {
                 Ok(result) => result,
-                Err(error) => json!({
-                    "content": [{
-                        "type": "text",
-                        "text": format!("tool failed: {error:#}")
-                    }],
-                    "isError": true
-                }),
+                Err(error) => mcp_tool_error_result(&error),
             };
             json!({
                 "jsonrpc": "2.0",
@@ -641,44 +794,50 @@ async fn handle_request(cfg: &AppConfig, incoming: Value) -> Result<Value> {
                 "result": result,
             })
         }
-        other => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {
-                "code": -32601,
-                "message": "method not found",
-                "data": other,
-            }
-        }),
+        other => mcp_jsonrpc_error_response(id, &McpError::method_not_found(other)),
     };
     Ok(response)
 }
 
-async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> Result<Value> {
+async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> McpToolResult<Value> {
     match request.name.as_str() {
-        "amai_list_projects" => tool_list_projects(cfg).await,
+        "amai_list_projects" => tool_list_projects(cfg)
+            .await
+            .map_err(McpError::tool_runtime),
         "amai_list_namespaces" => {
             let args: ListNamespacesArgs = parse_arguments(request.arguments)?;
-            tool_list_namespaces(cfg, args).await
+            tool_list_namespaces(cfg, args)
+                .await
+                .map_err(McpError::tool_runtime)
         }
         "amai_context_pack" => {
             let args: ContextPackToolArgs = parse_arguments(request.arguments)?;
-            tool_context_pack(cfg, args).await
+            tool_context_pack(cfg, args)
+                .await
+                .map_err(McpError::tool_runtime)
         }
         "amai_token_benchmark" => {
             let args: TokenBenchmarkToolArgs = parse_arguments(request.arguments)?;
-            tool_token_benchmark(cfg, args).await
+            tool_token_benchmark(cfg, args)
+                .await
+                .map_err(McpError::tool_runtime)
         }
         "amai_token_report" => {
             let args: TokenReportToolArgs = parse_arguments(request.arguments)?;
-            tool_token_report(cfg, args).await
+            tool_token_report(cfg, args)
+                .await
+                .map_err(McpError::tool_runtime)
         }
-        "amai_observe_snapshot" => tool_observe_snapshot(cfg).await,
+        "amai_observe_snapshot" => tool_observe_snapshot(cfg)
+            .await
+            .map_err(McpError::tool_runtime),
         "amai_warm_cache" => {
             let args: WarmCacheToolArgs = parse_arguments(request.arguments)?;
-            tool_warm_cache(cfg, args).await
+            tool_warm_cache(cfg, args)
+                .await
+                .map_err(McpError::tool_runtime)
         }
-        other => Err(anyhow!("unknown MCP tool: {other}")),
+        other => Err(McpError::tool_not_found(other)),
     }
 }
 
@@ -1275,6 +1434,43 @@ fn protocol_manifest() -> Value {
                 "purpose": "project-scoped retrieval guidance for context-pack requests",
             },
         },
+        "error_contracts": {
+            "invalid_json_rpc_payload": {
+                "carrier": "jsonrpc_error",
+                "jsonrpc_code": -32700,
+                "error_class": "protocol_parse",
+            },
+            "invalid_request": {
+                "carrier": "jsonrpc_error",
+                "jsonrpc_code": -32600,
+                "error_class": "protocol_request",
+            },
+            "method_not_found": {
+                "carrier": "jsonrpc_error",
+                "jsonrpc_code": -32601,
+                "error_class": "protocol_dispatch",
+            },
+            "prompt_not_found": {
+                "carrier": "jsonrpc_error",
+                "jsonrpc_code": -32601,
+                "error_class": "prompt_dispatch",
+            },
+            "invalid_params": {
+                "carrier": "jsonrpc_error_or_tool_is_error",
+                "jsonrpc_code": -32602,
+                "error_class": "client_input",
+            },
+            "tool_not_found": {
+                "carrier": "tool_is_error",
+                "jsonrpc_code": -32601,
+                "error_class": "tool_dispatch",
+            },
+            "tool_execution_failed": {
+                "carrier": "tool_is_error",
+                "jsonrpc_code": -32000,
+                "error_class": "tool_runtime",
+            },
+        },
         "safety_laws": [
             "project isolation comes before retrieval breadth",
             "lexical and exact evidence outrank semantic guesses",
@@ -1470,10 +1666,10 @@ fn prompt_definitions() -> Vec<Value> {
     ]
 }
 
-fn prompt_result(params: Value) -> Result<Value> {
+fn prompt_result(params: Value) -> McpToolResult<Value> {
     let name = params["name"]
         .as_str()
-        .ok_or_else(|| anyhow!("prompts/get requires a prompt name"))?;
+        .ok_or_else(|| McpError::invalid_params("prompts/get requires a prompt name"))?;
     let arguments = params["arguments"].as_object().cloned().unwrap_or_default();
     let result = match name {
         "amai-onboarding" => json!({
@@ -1510,7 +1706,7 @@ fn prompt_result(params: Value) -> Result<Value> {
                 }]
             })
         }
-        other => return Err(anyhow!("unknown MCP prompt: {other}")),
+        other => return Err(McpError::prompt_not_found(other)),
     };
     Ok(result)
 }
@@ -1679,12 +1875,14 @@ async fn write_message<W: AsyncWriteExt + Unpin>(writer: &mut W, message: &Value
         .context("failed to flush JSON-RPC writer")
 }
 
-fn parse_arguments<T>(value: Option<Value>) -> Result<T>
+fn parse_arguments<T>(value: Option<Value>) -> McpToolResult<T>
 where
     T: DeserializeOwned + Default,
 {
     match value {
-        Some(value) => serde_json::from_value(value).context("failed to decode tool arguments"),
+        Some(value) => serde_json::from_value(value).map_err(|error| {
+            McpError::invalid_params(format!("failed to decode tool arguments: {error}"))
+        }),
         None => Ok(T::default()),
     }
 }
@@ -2025,12 +2223,15 @@ fn remove_toml_server(existing: &str, server_name: &str) -> Result<(String, bool
     ))
 }
 
-fn required_prompt_arg(arguments: &serde_json::Map<String, Value>, key: &str) -> Result<String> {
+fn required_prompt_arg(
+    arguments: &serde_json::Map<String, Value>,
+    key: &str,
+) -> McpToolResult<String> {
     arguments
         .get(key)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-        .ok_or_else(|| anyhow!("prompt argument is required: {key}"))
+        .ok_or_else(|| McpError::invalid_params(format!("prompt argument is required: {key}")))
 }
 
 fn discover_repo_root() -> Result<PathBuf> {
@@ -2185,9 +2386,10 @@ fn default_warm_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        McpConfigArgs, context_pack_summary, observe_snapshot_summary, protocol_manifest,
-        render_client_config, summarize_codes, summarize_namespace_modes, token_benchmark_summary,
-        token_report_summary, warm_cache_summary,
+        McpConfigArgs, McpError, context_pack_summary, mcp_tool_error_result,
+        observe_snapshot_summary, protocol_manifest, render_client_config, summarize_codes,
+        summarize_namespace_modes, token_benchmark_summary, token_report_summary,
+        warm_cache_summary,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -2461,10 +2663,32 @@ mod tests {
             manifest["prompt_contracts"]["amai-onboarding"]["purpose"].as_str(),
             Some("safe onboarding without mixing projects")
         );
+        assert_eq!(
+            manifest["error_contracts"]["tool_execution_failed"]["error_class"].as_str(),
+            Some("tool_runtime")
+        );
+        assert_eq!(
+            manifest["error_contracts"]["invalid_params"]["carrier"].as_str(),
+            Some("jsonrpc_error_or_tool_is_error")
+        );
         let safety_laws = manifest["safety_laws"]
             .as_array()
             .expect("safety laws array");
         assert!(!safety_laws.is_empty());
+    }
+
+    #[test]
+    fn tool_error_result_carries_machine_readable_taxonomy() {
+        let result = mcp_tool_error_result(&McpError::tool_not_found("missing_tool"));
+        assert_eq!(result["isError"].as_bool(), Some(true));
+        assert_eq!(
+            result["structuredContent"]["error_taxonomy"]["amai_error_code"].as_str(),
+            Some("tool_not_found")
+        );
+        assert_eq!(
+            result["structuredContent"]["error_taxonomy"]["amai_error_class"].as_str(),
+            Some("tool_dispatch")
+        );
     }
 
     #[test]

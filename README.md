@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 23:04 MSK
-Ручная сверка guide/docs: 2026-03-23 23:04 MSK
+modified_at: 2026-03-23 23:16 MSK
+Ручная сверка guide/docs: 2026-03-23 23:16 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -908,6 +908,24 @@ preview, а не только raw count.
 - базовые safety laws;
 - prompt contracts;
 - per-tool `summary_field`, который внешний клиент может ожидать в structured output.
+
+Тот же manifest теперь фиксирует и `error_contracts`. Это даёт внешнему клиенту
+стабильные machine-readable failure classes:
+- `invalid_json_rpc_payload`
+- `invalid_request`
+- `method_not_found`
+- `prompt_not_found`
+- `invalid_params`
+- `tool_not_found`
+- `tool_execution_failed`
+
+Для каждого такого класса теперь отдельно виден и `carrier`:
+- `jsonrpc_error`
+- `tool_is_error`
+- `jsonrpc_error_or_tool_is_error`
+
+Это нужно, чтобы клиент не угадывал, искать ли taxonomy в top-level JSON-RPC error
+или внутри `tools/call -> structuredContent.error_taxonomy`.
 
 Понятный walkthrough для подключения:
 - [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)

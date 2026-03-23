@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 23:04 MSK
-Ручная сверка guide/docs: 2026-03-23 23:04 MSK
+modified_at: 2026-03-23 23:16 MSK
+Ручная сверка guide/docs: 2026-03-23 23:16 MSK
 
 # Operations
 
@@ -652,6 +652,13 @@ cargo run -- mcp serve
 - `initialize` теперь тоже отдаёт `amai_protocol_manifest`:
   versioned contract layer с `default_scope_rule`, `default_retrieval_mode`,
   `tool_contracts`, `prompt_contracts` и `safety_laws`.
+- тот же `amai_protocol_manifest` теперь несёт `error_contracts`, а `tools/call`
+  и JSON-RPC errors отдают machine-readable taxonomy вместо голого текста:
+  `invalid_json_rpc_payload`, `invalid_request`, `method_not_found`,
+  `prompt_not_found`, `invalid_params`, `tool_not_found`, `tool_execution_failed`.
+- в `error_contracts` теперь отдельно указан `carrier`, чтобы клиент заранее знал,
+  придёт ли ошибка через top-level JSON-RPC error, через `tool_is_error`,
+  или может встретиться в обоих каналах.
 
 ## MCP client config
 

@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 23:04 MSK
-Ручная сверка guide/docs: 2026-03-23 23:04 MSK
+modified_at: 2026-03-23 23:16 MSK
+Ручная сверка guide/docs: 2026-03-23 23:16 MSK
 
 # MCP Integration
 
@@ -257,6 +257,15 @@ cargo build --release
 - базовые safety laws;
 - per-tool `summary_field`, который должен появляться в structured output;
 - назначение MCP prompts.
+
+Кроме success-shape, handshake теперь публикует и `error_contracts`. Это даёт
+клиенту стабильную карту failure classes до первого сбоя, а в runtime:
+- JSON-RPC errors несут `error.data.amai_error_code / amai_error_class`;
+- tool-level failures в `tools/call` несут `structuredContent.error_taxonomy`.
+
+Отдельно у каждого error class теперь есть `carrier`. Это важно, потому что
+`invalid_params` может прийти и как top-level JSON-RPC error, и как `tool_is_error`
+внутри `tools/call`, а клиенту нельзя угадывать transport по тексту ошибки.
 
 И prompts:
 - `amai-onboarding`
