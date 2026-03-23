@@ -169,7 +169,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       display: grid;
       grid-template-columns: minmax(0, 2.34fr) minmax(320px, 0.28fr);
       gap: 8px;
-      align-items: stretch;
+      align-items: start;
       margin-bottom: 8px;
     }
 
@@ -251,8 +251,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       flex-direction: column;
       gap: 8px;
       min-height: 0;
-      align-self: stretch;
-      height: 100%;
+      align-self: start;
     }
 
     .status-pill {
@@ -815,12 +814,10 @@ pub fn render_html(refresh_ms: u64) -> String {
     .hero-links-block {
       display: flex;
       flex-direction: column;
-      height: 100%;
-      min-height: 100%;
+      min-height: 0;
     }
 
     .hero-links-block .link-list {
-      flex: 1;
       align-content: start;
       padding-left: 0;
       list-style: none;
