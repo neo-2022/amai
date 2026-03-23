@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 17:07 MSK
-Ручная сверка guide/docs: 2026-03-23 17:07 MSK
+modified_at: 2026-03-23 17:22 MSK
+Ручная сверка guide/docs: 2026-03-23 17:22 MSK
 
 # Operations
 
@@ -299,7 +299,7 @@ cd /home/art/agent-memory-index
   - `state_lineage` хранит `lineage_model_version = lineage-v2`, authoritative event, supporting event ids, truth ranking и явный graph-слой `nodes / edges`;
   - `workspace_graph` хранит versioned structural runtime/workspace graph:
     `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref / call_ref`,
-    а в `workspace-graph-v7` ещё и resolved relations `imports_file / re_exports_file / imports_symbol / re_exports_symbol / resolves_file / resolves_symbol / calls_file / calls_symbol / resolves_call_file / resolves_call_symbol`, включая owner-aware Rust symbol lookup для provable path-cases вроде `Type::new`, `Self::helper()`, `self.helper()`, trait-qualified forms вида `<Type as Trait>::make` и trait-qualified forms через доказанный imported alias;
+    а в `workspace-graph-v8` ещё и resolved relations `imports_file / re_exports_file / imports_symbol / re_exports_symbol / resolves_file / resolves_symbol / calls_file / calls_symbol / resolves_call_file / resolves_call_symbol`, включая owner-aware Rust symbol lookup для provable path-cases вроде `Type::new`, `Self::helper()`, `self.helper()`, trait-qualified forms вида `<Type as Trait>::make` и trait-qualified forms через доказанный imported alias; если impl-trait в symbol metadata виден только как alias или импортированный terminal selector, graph пишет дополнительное поле `trait_name_canonical` только при единственном доказуемом import-target;
   - `workspace_graph_summary` в `chat_start_restore` и startup-output нужен как короткий human-readable слой поверх этого graph;
   - при битом `session_id` restore-path теперь fail-closed и не смешивает несколько пустых сессий в один bundle.
 
@@ -509,8 +509,8 @@ cargo run -- context pack \
   это компактный structural graph по уже найденным scoped-артефактам, а не догадка “по соседним файлам”.
 - этот graph собирается только из того, что уже лежит в scope:
   `file`, `structure_item`, `symbol`, `chunk`, `import_ref`, `export_ref`, `call_ref`;
-- в `workspace-graph-v7` он теперь дополнительно materialize-ит resolved file-to-file, file-to-symbol и conservative call lineage
-  только там, где target реально существует в том же `project + namespace + scope`; owner-aware Rust lookup разрешён только для provable случаев вроде `crate::alpha::Beta::new`, `Beta::new` после уже доказанного import-target, `Self::helper()` и `self.helper()` при доказанном локальном `impl`-owner, trait-qualified forms вроде `<Beta as Factory>::make`, а также тех же trait-qualified forms через `use ... as Alias`, но только когда alias-map сам остаётся неамбигуозным; неоднозначный target остаётся неразрешённым, недоказуемый call остаётся просто `call_ref` без target-edge;
+- в `workspace-graph-v8` он теперь дополнительно materialize-ит resolved file-to-file, file-to-symbol и conservative call lineage
+  только там, где target реально существует в том же `project + namespace + scope`; owner-aware Rust lookup разрешён только для provable случаев вроде `crate::alpha::Beta::new`, `Beta::new` после уже доказанного import-target, `Self::helper()` и `self.helper()` при доказанном локальном `impl`-owner, trait-qualified forms вроде `<Beta as Factory>::make`, а также тех же trait-qualified forms через `use ... as Alias`, но только когда alias-map сам остаётся неамбигуозным; для тех же strict contours metadata теперь может получить `trait_name_canonical`, но только если видимый selector однозначно маппится в один import-target; неоднозначный target остаётся неразрешённым, недоказуемый call остаётся просто `call_ref` без target-edge;
 - property-based tests отдельно удерживают этот контур fail-closed:
   неоднозначный symbol-owner match в любом candidate-file или более одного уникального candidate-file обязаны давать `None`, а не “лучшее совпадение”.
 - тот же graph потом без дополнительного reparse попадает в `working_state_restore`.

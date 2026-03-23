@@ -70,6 +70,8 @@ pub fn build_context_pack_workspace_graph(
         populate_scoped_symbol_node(file, scoped_symbol);
     }
 
+    canonicalize_rust_trait_metadata(&mut files);
+
     for hit in documents {
         let file = ensure_file_aggregate_from_document_hit(&mut files, hit);
         file.retrieved_via.insert("exact_document".to_string());
@@ -738,6 +740,7 @@ fn populate_call_nodes(file: &mut FileAggregate, nodes: &Value) {
                     "enclosing_owner_name": item["enclosing_owner_name"].clone(),
                     "enclosing_owner_path": item["enclosing_owner_path"].clone(),
                     "enclosing_trait_name": item["enclosing_trait_name"].clone(),
+                    "enclosing_trait_name_canonical": item["enclosing_trait_name_canonical"].clone(),
                     "generic": item["generic"].clone(),
                     "label": label,
                     "text": item["text"].clone(),
@@ -813,7 +816,108 @@ fn compact_symbol_metadata(metadata: &Value) -> Value {
         "owner_name": metadata["owner_name"].clone(),
         "owner_path": metadata["owner_path"].clone(),
         "trait_name": metadata["trait_name"].clone(),
+        "trait_name_canonical": metadata["trait_name_canonical"].clone(),
     })
+}
+
+fn canonicalize_rust_trait_metadata(files: &mut BTreeMap<String, FileAggregate>) {
+    for file in files.values_mut() {
+        if file.language.as_deref() != Some("rust") {
+            continue;
+        }
+        let visible_trait_targets = rust_visible_trait_targets(&file.reference_nodes);
+        if visible_trait_targets.is_empty() {
+            continue;
+        }
+        canonicalize_symbol_trait_metadata(&mut file.symbol_nodes, &visible_trait_targets);
+        canonicalize_call_trait_metadata(&mut file.call_nodes, &visible_trait_targets);
+    }
+}
+
+fn rust_visible_trait_targets(
+    reference_nodes: &BTreeMap<String, Value>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut targets = BTreeMap::<String, BTreeSet<String>>::new();
+    for reference in reference_nodes.values() {
+        if reference["node_type"].as_str() != Some("import_ref") {
+            continue;
+        }
+        let Some((path, alias)) = parse_rust_reference_use_clause(reference) else {
+            continue;
+        };
+        let selector = alias.unwrap_or_else(|| terminal_path_name(&path));
+        if selector.is_empty() {
+            continue;
+        }
+        targets.entry(selector).or_default().insert(path);
+    }
+    targets
+}
+
+fn canonicalize_symbol_trait_metadata(
+    symbol_nodes: &mut BTreeMap<String, Value>,
+    visible_trait_targets: &BTreeMap<String, BTreeSet<String>>,
+) {
+    for symbol in symbol_nodes.values_mut() {
+        let Some(metadata) = symbol["metadata"].as_object_mut() else {
+            continue;
+        };
+        canonicalize_trait_selector_field(
+            metadata,
+            "trait_name",
+            "trait_name_canonical",
+            visible_trait_targets,
+        );
+    }
+}
+
+fn canonicalize_call_trait_metadata(
+    call_nodes: &mut BTreeMap<String, Value>,
+    visible_trait_targets: &BTreeMap<String, BTreeSet<String>>,
+) {
+    for call in call_nodes.values_mut() {
+        let Some(call_object) = call.as_object_mut() else {
+            continue;
+        };
+        canonicalize_trait_selector_field(
+            call_object,
+            "enclosing_trait_name",
+            "enclosing_trait_name_canonical",
+            visible_trait_targets,
+        );
+    }
+}
+
+fn canonicalize_trait_selector_field(
+    object: &mut serde_json::Map<String, Value>,
+    source_field: &str,
+    target_field: &str,
+    visible_trait_targets: &BTreeMap<String, BTreeSet<String>>,
+) {
+    let Some(selector) = object
+        .get(source_field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let Some(canonical) = canonical_rust_trait_selector(selector, visible_trait_targets) else {
+        return;
+    };
+    object.insert(target_field.to_string(), json!(canonical));
+}
+
+fn canonical_rust_trait_selector(
+    selector: &str,
+    visible_trait_targets: &BTreeMap<String, BTreeSet<String>>,
+) -> Option<String> {
+    if selector.contains("::") {
+        return Some(selector.to_string());
+    }
+    let targets = visible_trait_targets.get(selector)?;
+    (targets.len() == 1)
+        .then(|| targets.iter().next().cloned())
+        .flatten()
 }
 
 #[derive(Debug, Clone)]
@@ -1044,25 +1148,35 @@ fn build_graph_lookup(files: &BTreeMap<String, FileAggregate>) -> GraphLookup {
                 .as_str()
                 .filter(|value| !value.is_empty())
             {
+                let trait_name_canonical = symbol["metadata"]["trait_name_canonical"]
+                    .as_str()
+                    .filter(|value| !value.is_empty());
                 let owner_name = symbol["metadata"]["owner_name"]
                     .as_str()
                     .filter(|value| !value.is_empty());
                 let owner_path = symbol["metadata"]["owner_path"]
                     .as_str()
                     .filter(|value| !value.is_empty());
-                for (owner_selector, trait_selector) in
-                    trait_owner_selector_variants(owner_name, owner_path, trait_name)
-                {
-                    lookup
-                        .trait_owner_symbol_node_ids
-                        .entry((
-                            file_key.clone(),
-                            owner_selector,
-                            trait_selector,
-                            name.to_string(),
-                        ))
-                        .or_default()
-                        .push(symbol_node_id.to_string());
+                let mut trait_variants = BTreeSet::new();
+                trait_variants.insert(trait_name.to_string());
+                if let Some(canonical) = trait_name_canonical {
+                    trait_variants.insert(canonical.to_string());
+                }
+                for trait_variant in trait_variants {
+                    for (owner_selector, trait_selector) in
+                        trait_owner_selector_variants(owner_name, owner_path, &trait_variant)
+                    {
+                        lookup
+                            .trait_owner_symbol_node_ids
+                            .entry((
+                                file_key.clone(),
+                                owner_selector,
+                                trait_selector,
+                                name.to_string(),
+                            ))
+                            .or_default()
+                            .push(symbol_node_id.to_string());
+                    }
                 }
             }
         }
@@ -1909,9 +2023,10 @@ fn short_hash(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileAggregate, GraphLookup, build_context_pack_workspace_graph, file_node_id,
-        human_summary, merge_workspace_graphs, resolve_rust_owned_symbol_name_target,
-        resolve_rust_symbol_name_target, resolve_rust_trait_owned_symbol_name_target,
+        FileAggregate, GraphLookup, build_context_pack_workspace_graph,
+        canonical_rust_trait_selector, file_node_id, human_summary, merge_workspace_graphs,
+        resolve_rust_owned_symbol_name_target, resolve_rust_symbol_name_target,
+        resolve_rust_trait_owned_symbol_name_target,
         resolve_rust_trait_qualified_symbol_path_target, scoped_path_key,
     };
     use crate::postgres::{
@@ -3029,7 +3144,7 @@ mod tests {
                         "owner_kind":"impl_item",
                         "owner_name":"Beta",
                         "owner_path":"Beta",
-                        "trait_name":"crate::traits::Factory",
+                        "trait_name":"FactoryAlias",
                         "text":"fn make() -> Beta { Beta }"
                     }),
                 },
@@ -3065,6 +3180,37 @@ mod tests {
             edge["relation"] == json!("resolves_call_symbol")
                 && edge["to_node_id"] == json!("symbol:project_alpha:default:src/alpha.rs:make:8")
         }));
+        let nodes = graph["nodes"].as_array().expect("nodes");
+        let target = nodes
+            .iter()
+            .find(|node| {
+                node["node_id"] == json!("symbol:project_alpha:default:src/alpha.rs:make:8")
+            })
+            .expect("target symbol");
+        assert_eq!(target["metadata"]["trait_name"], json!("FactoryAlias"));
+        assert_eq!(
+            target["metadata"]["trait_name_canonical"],
+            json!("crate::traits::Factory")
+        );
+    }
+
+    #[test]
+    fn canonical_rust_trait_selector_stays_fail_closed_on_ambiguous_visible_name() {
+        let visible_trait_targets = BTreeMap::from([(
+            "FactoryAlias".to_string(),
+            BTreeSet::from([
+                "crate::traits::Factory".to_string(),
+                "crate::other::Factory".to_string(),
+            ]),
+        )]);
+        assert_eq!(
+            canonical_rust_trait_selector("FactoryAlias", &visible_trait_targets),
+            None
+        );
+        assert_eq!(
+            canonical_rust_trait_selector("crate::traits::Factory", &visible_trait_targets),
+            Some("crate::traits::Factory".to_string())
+        );
     }
 
     proptest! {
@@ -3300,7 +3446,7 @@ mod tests {
     fn merge_workspace_graphs_deduplicates_nodes_and_keeps_context_pack_lineage() {
         let merged = merge_workspace_graphs(&[
             json!({
-                "workspace_graph_model_version": "workspace-graph-v7",
+                "workspace_graph_model_version": "workspace-graph-v8",
                 "artifact_lineage_model_version": "artifact-lineage-v1",
                 "lineage_model_version": "lineage-v2",
                 "truth_ranking": ["continuity_handoff"],
@@ -3315,7 +3461,7 @@ mod tests {
                 ]
             }),
             json!({
-                "workspace_graph_model_version": "workspace-graph-v7",
+                "workspace_graph_model_version": "workspace-graph-v8",
                 "artifact_lineage_model_version": "artifact-lineage-v1",
                 "lineage_model_version": "lineage-v2",
                 "truth_ranking": ["continuity_handoff"],
