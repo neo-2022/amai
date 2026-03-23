@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 21:07 MSK
-Ручная сверка guide/docs: 2026-03-23 21:07 MSK
+modified_at: 2026-03-23 21:33 MSK
+Ручная сверка guide/docs: 2026-03-23 21:33 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1331,6 +1331,10 @@ HDF5-датасеты, которые уже зафиксированы как �
 ./scripts/proof_text_compare_real_projects.sh
 ```
 
+`./scripts/proof_cold_benchmark.sh` теперь проверяет не только
+`cold_benchmark.machine_readable_summary`, но и
+`cold_benchmark.canonical_eval` с probe-level verdict layer по каждому cold case.
+
 Для отдельного DB-level proof именно по observability guardrails:
 
 ```bash
@@ -1343,6 +1347,7 @@ cargo run --release -- observe guardrails
   - версии methodology/scoring/degradation/execution-state/lineage;
   - фиксированные suite-version для hot/cold/load/accuracy/continuity/token/text-compare;
   - truth ranking и политика `same input -> same verdict`;
+  - cold contour теперь тоже пишет machine-readable `canonical_eval`, а не только latency/precision summary;
   - machine-readable degradation matrix:
     - какие классы должны fail-closed;
     - какие должны уходить в безопасный мягкий откат;

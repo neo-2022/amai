@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 21:07 MSK
-Ручная сверка guide/docs: 2026-03-23 21:07 MSK
+modified_at: 2026-03-23 21:33 MSK
+Ручная сверка guide/docs: 2026-03-23 21:33 MSK
 
 # Operations
 
@@ -800,6 +800,7 @@ cargo run --release -- verify benchmark \
 - отдельно `cold` и `hot shadow`;
 - `P50 / P95 / P99 / max / sample_count`;
 - `precision / recall / target-hit rate / miss rate / fallback rate`;
+- `cold_benchmark.canonical_eval` с probe-level verdict-классами по каждому cold case;
 - отдельные fixed targets для:
   - `Cold P50 / P95 / P99 / Max`;
   - `precision / recall / hit rate`;
@@ -823,6 +824,10 @@ cargo run --release -- verify benchmark \
 - `state/cold-benchmark/latest/summary.json`
 - `state/cold-benchmark/latest/report.md`
 - `state/cold-benchmark/latest/samples.csv`
+
+`samples.csv` теперь дополнительно содержит `eval_verdict_class` и `eval_reason`,
+а proof `./scripts/proof_cold_benchmark.sh` проверяет, что `summary.json` несёт
+не только aggregate numbers, но и machine-readable `cold_benchmark.canonical_eval`.
 
 Для real-project text compare без полного индексирования монорепозитория теперь есть отдельный proof:
 

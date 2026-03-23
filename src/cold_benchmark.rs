@@ -1,5 +1,6 @@
 use crate::cli::{ContextPackArgs, IndexProjectArgs, VerifyColdPathArgs};
 use crate::config::AppConfig;
+use crate::eval_verdict::{self, EvalPattern, EvalSignals};
 use crate::indexer;
 use crate::postgres;
 use crate::retrieval::{self, ContextPackStats};
@@ -95,6 +96,8 @@ struct QualityScore {
     target_hit: bool,
     head_hit: bool,
     leakage_count: u64,
+    total_items: usize,
+    matched_items: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +123,8 @@ struct RetrievalSample {
     fallback_triggered: bool,
     head_hit: bool,
     leakage_count: u64,
+    eval_verdict_class: String,
+    eval_reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -303,6 +308,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
         stop_reason.as_ref(),
     );
     let target_met = verdict == "TARGET MET";
+    let canonical_eval = build_cold_benchmark_canonical_eval(&cold_samples)?;
 
     let summary = json!({
         "cold_benchmark": {
@@ -424,6 +430,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                 "thermal_stop_count": thermal_stop_count,
                 "cleanup_actions_count": cleanup_actions_count,
             },
+            "canonical_eval": canonical_eval,
             "indexed_repos": indexed_repos.iter().map(indexed_repo_to_json).collect::<Vec<_>>(),
         },
         "retrieval_science": retrieval_science::suite_metadata("cold_path_benchmark")?,
@@ -611,6 +618,7 @@ fn sample_from_case(
     stats: &ContextPackStats,
     quality: &QualityScore,
 ) -> RetrievalSample {
+    let eval = cold_sample_eval_verdict(quality).expect("cold sample eval verdict");
     RetrievalSample {
         cycle,
         mode: if cold { "cold" } else { "hot" },
@@ -638,7 +646,20 @@ fn sample_from_case(
         fallback_triggered: false,
         head_hit: quality.head_hit,
         leakage_count: quality.leakage_count,
+        eval_verdict_class: eval.class_key,
+        eval_reason: eval.reason,
     }
+}
+
+fn cold_sample_eval_verdict(quality: &QualityScore) -> Result<eval_verdict::EvalVerdict> {
+    let unexpected_present = quality.total_items > quality.matched_items;
+    let signals = EvalSignals {
+        expected_present: Some(quality.target_hit),
+        unexpected_present,
+        has_expected_target: true,
+        ..EvalSignals::default()
+    };
+    eval_verdict::derive_eval_verdict(EvalPattern::RetrievalTarget, &signals)
 }
 
 fn evaluate_case(payload: &Value, case: &ColdBenchmarkCase) -> QualityScore {
@@ -732,7 +753,44 @@ fn evaluate_case(payload: &Value, case: &ColdBenchmarkCase) -> QualityScore {
         target_hit,
         head_hit,
         leakage_count,
+        total_items,
+        matched_items,
     }
+}
+
+fn build_cold_benchmark_canonical_eval(samples: &[RetrievalSample]) -> Result<Value> {
+    let summary = eval_verdict::summarize_eval_layer(
+        samples
+            .iter()
+            .map(|sample| sample.eval_verdict_class.as_str()),
+    )?;
+    Ok(json!({
+        "eval_verdict_model_version": summary["eval_verdict_model_version"].clone(),
+        "verdict_order": summary["verdict_order"].clone(),
+        "verdict_counts": summary["verdict_counts"].clone(),
+        "verdict_catalog": summary["verdict_catalog"].clone(),
+        "probes": samples.iter().map(|sample| {
+            json!({
+                "name": format!(
+                    "cold_case_{}_{}_cycle_{}",
+                    sample.repo_code,
+                    sample.query_slice,
+                    sample.cycle,
+                ),
+                "mode": sample.mode,
+                "repo_code": sample.repo_code,
+                "query_slice": sample.query_slice,
+                "query": sample.query,
+                "eval_verdict_class": sample.eval_verdict_class,
+                "eval_reason": sample.eval_reason,
+                "precision": sample.precision,
+                "recall": sample.recall,
+                "target_hit": sample.target_hit,
+                "head_hit": sample.head_hit,
+                "leakage_count": sample.leakage_count,
+            })
+        }).collect::<Vec<_>>(),
+    }))
 }
 
 fn collect_strategy_items(payload: &Value) -> Vec<Value> {
@@ -1420,11 +1478,11 @@ fn render_report(summary: &Value, cold_count: usize, hot_count: usize) -> String
 
 fn render_samples_csv(cold_samples: &[RetrievalSample], hot_samples: &[RetrievalSample]) -> String {
     let mut output = String::from(
-        "mode,cycle,repo_code,repo_type,size_class,query_slice,query,total_ms,policy_ms,retrieval_ms,ranking_ms,provenance_ms,pack_assembly_ms,orchestration_ms,precision,recall,target_hit,miss,fallback_triggered,head_hit\n",
+        "mode,cycle,repo_code,repo_type,size_class,query_slice,query,total_ms,policy_ms,retrieval_ms,ranking_ms,provenance_ms,pack_assembly_ms,orchestration_ms,precision,recall,target_hit,miss,fallback_triggered,head_hit,eval_verdict_class,eval_reason\n",
     );
     for sample in cold_samples.iter().chain(hot_samples.iter()) {
         output.push_str(&format!(
-            "{},{},{},{},{},{},{:?},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{},{},{},{}\n",
+            "{},{},{},{},{},{},{:?},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4},{},{},{},{},{},{:?}\n",
             sample.mode,
             sample.cycle,
             sample.repo_code,
@@ -1445,6 +1503,8 @@ fn render_samples_csv(cold_samples: &[RetrievalSample], hot_samples: &[Retrieval
             sample.miss,
             sample.fallback_triggered,
             sample.head_hit,
+            sample.eval_verdict_class,
+            sample.eval_reason,
         ));
     }
     output
@@ -1539,7 +1599,10 @@ fn read_max_temperature_celsius() -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ColdBenchmarkCase, determine_verdict, distribution_from_f64, evaluate_case};
+    use super::{
+        ColdBenchmarkCase, QualityScore, build_cold_benchmark_canonical_eval,
+        cold_sample_eval_verdict, determine_verdict, distribution_from_f64, evaluate_case,
+    };
     use crate::cold_benchmark::{ColdBenchmarkProfile, item_matches_case};
     use serde_json::json;
 
@@ -1579,6 +1642,8 @@ mod tests {
         assert_eq!(score.precision, 1.0);
         assert_eq!(score.recall, 1.0);
         assert!(score.head_hit);
+        assert_eq!(score.total_items, 1);
+        assert_eq!(score.matched_items, 1);
     }
 
     #[test]
@@ -1614,6 +1679,87 @@ mod tests {
         assert_eq!(score.precision, 1.0);
         assert_eq!(score.recall, 1.0);
         assert!(score.target_hit);
+    }
+
+    #[test]
+    fn cold_sample_eval_marks_wrong_target_when_only_wrong_items_arrive() {
+        let verdict = cold_sample_eval_verdict(&QualityScore {
+            precision: 0.0,
+            recall: 0.0,
+            target_hit: false,
+            head_hit: false,
+            leakage_count: 1,
+            total_items: 2,
+            matched_items: 0,
+        })
+        .expect("verdict");
+        assert_eq!(verdict.class_key, "hit_wrong_target");
+    }
+
+    #[test]
+    fn cold_benchmark_canonical_eval_summarizes_probe_counts() {
+        let summary = build_cold_benchmark_canonical_eval(&[
+            super::RetrievalSample {
+                cycle: 0,
+                mode: "cold",
+                repo_code: "repo_a".to_string(),
+                repo_type: "mixed".to_string(),
+                size_class: "small".to_string(),
+                query_slice: "docs_lookup".to_string(),
+                query: "README.md".to_string(),
+                total_ms: 1.0,
+                policy_ms: 0.1,
+                retrieval_ms: 0.2,
+                ranking_ms: 0.1,
+                provenance_ms: 0.1,
+                pack_assembly_ms: 0.1,
+                orchestration_ms: 1.0,
+                precision: 1.0,
+                recall: 1.0,
+                target_hit: true,
+                miss: false,
+                fallback_triggered: false,
+                head_hit: true,
+                leakage_count: 0,
+                eval_verdict_class: "hit_correct_target".to_string(),
+                eval_reason: "ok".to_string(),
+            },
+            super::RetrievalSample {
+                cycle: 0,
+                mode: "cold",
+                repo_code: "repo_b".to_string(),
+                repo_type: "mixed".to_string(),
+                size_class: "small".to_string(),
+                query_slice: "docs_lookup".to_string(),
+                query: "missing".to_string(),
+                total_ms: 1.0,
+                policy_ms: 0.1,
+                retrieval_ms: 0.2,
+                ranking_ms: 0.1,
+                provenance_ms: 0.1,
+                pack_assembly_ms: 0.1,
+                orchestration_ms: 1.0,
+                precision: 0.0,
+                recall: 0.0,
+                target_hit: false,
+                miss: true,
+                fallback_triggered: false,
+                head_hit: false,
+                leakage_count: 0,
+                eval_verdict_class: "under_retrieved".to_string(),
+                eval_reason: "miss".to_string(),
+            },
+        ])
+        .expect("summary");
+        assert_eq!(
+            summary["verdict_counts"]["hit_correct_target"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            summary["verdict_counts"]["under_retrieved"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(summary["probes"].as_array().map(Vec::len), Some(2));
     }
 
     #[test]

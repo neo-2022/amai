@@ -1,5 +1,5 @@
-modified_at = "2026-03-23 21:07 MSK"
-"Ручная сверка guide/docs" = "2026-03-23 21:07 MSK"
+modified_at = "2026-03-23 21:33 MSK"
+"Ручная сверка guide/docs" = "2026-03-23 21:33 MSK"
 
 [science]
 methodology_version = "retrieval-science-v1"
@@ -234,11 +234,11 @@ manifest_path = "scripts/proof_art_continuity_startup.sh"
 reproducibility_contract = "The same read-only continuity startup input must produce the same startup-level verdict classes for startup summary, chat-start prompt recovery and working-state recovery."
 
 [science.suites.cold_path_benchmark]
-suite_version = "cold-path-benchmark-v2"
+suite_version = "cold-path-benchmark-v3"
 dataset_version = "local-real-repos-manifest-v2"
 query_suite_version = "cold-query-slices-v2"
 manifest_path = "config/cold_benchmark_manifest.toml"
-reproducibility_contract = "The same manifest must produce the same verdict class and the same measured correctness contour, with machine-dependent latency variance called out explicitly."
+reproducibility_contract = "The same manifest must produce the same canonical eval verdict layer and the same measured correctness contour, with machine-dependent latency variance called out explicitly."
 
 [science.suites.token_benchmark_suite]
 suite_version = "token-benchmark-suite-v1"

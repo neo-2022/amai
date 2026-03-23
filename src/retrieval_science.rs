@@ -294,6 +294,19 @@ mod tests {
     }
 
     #[test]
+    fn suite_metadata_loads_cold_path_benchmark_suite() {
+        let suite = suite_metadata("cold_path_benchmark").expect("suite metadata");
+        assert_eq!(
+            suite["suite_version"].as_str(),
+            Some("cold-path-benchmark-v3")
+        );
+        assert_eq!(
+            suite["manifest_path"].as_str(),
+            Some("config/cold_benchmark_manifest.toml")
+        );
+    }
+
+    #[test]
     fn degradation_policy_includes_fail_closed_classes() {
         let policy = degradation_policy_json().expect("degradation policy");
         assert!(
