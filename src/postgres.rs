@@ -1465,6 +1465,33 @@ pub async fn latest_observability_snapshot(
     Ok(row.map(|row| row.get(0)))
 }
 
+pub async fn latest_observability_snapshot_for_project(
+    client: &Client,
+    snapshot_kind: &str,
+    payload_root: &str,
+    project_code: &str,
+) -> Result<Option<Value>> {
+    let row = client
+        .query_opt(
+            &format!(
+                r#"
+                SELECT payload
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = $1
+                  AND (
+                        scope_project_code = $2
+                        OR payload->'{payload_root}'->'project'->>'code' = $2
+                  )
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#
+            ),
+            &[&snapshot_kind, &project_code],
+        )
+        .await?;
+    Ok(row.map(|row| row.get(0)))
+}
+
 pub async fn list_observability_snapshots_by_kinds(
     client: &Client,
     kinds: &[&str],
@@ -1709,6 +1736,7 @@ fn prepare_observability_payload(
         &[
             &["_observability", "scope_project_code"],
             &["project", "code"],
+            &["working_state_restore", "project", "code"],
             &["working_state_event", "project", "code"],
             &["continuity_import", "project", "code"],
             &["continuity_handoff", "project", "code"],
@@ -1725,6 +1753,7 @@ fn prepare_observability_payload(
         &[
             &["_observability", "scope_namespace_code"],
             &["namespace", "code"],
+            &["working_state_restore", "namespace", "code"],
             &["working_state_event", "namespace", "code"],
             &["continuity_import", "namespace", "code"],
             &["continuity_handoff", "namespace", "code"],
@@ -1740,6 +1769,7 @@ fn prepare_observability_payload(
         &[
             &["_observability", "captured_at_epoch_ms"],
             &["captured_at_epoch_ms"],
+            &["working_state_restore", "captured_at_epoch_ms"],
             &["working_state_event", "recorded_at_epoch_ms"],
             &["token_budget_event", "created_at_epoch_ms"],
             &["continuity_import", "imported_at_epoch_ms"],
@@ -1954,6 +1984,26 @@ mod tests {
         assert_eq!(meta.scope_project_code.as_deref(), Some("project_alpha"));
         assert_eq!(meta.scope_namespace_code.as_deref(), Some("default"));
         assert_eq!(meta.captured_at_epoch_ms, Some(777));
+    }
+
+    #[test]
+    fn observability_payload_extracts_scope_from_working_state_restore_root() {
+        let payload = json!({
+            "working_state_restore": {
+                "project": {
+                    "code": "amai"
+                },
+                "namespace": {
+                    "code": "default"
+                },
+                "captured_at_epoch_ms": 999
+            }
+        });
+        let (_stored, meta) =
+            prepare_observability_payload("working_state_restore", &payload).expect("payload");
+        assert_eq!(meta.scope_project_code.as_deref(), Some("amai"));
+        assert_eq!(meta.scope_namespace_code.as_deref(), Some("default"));
+        assert_eq!(meta.captured_at_epoch_ms, Some(999));
     }
 
     #[test]

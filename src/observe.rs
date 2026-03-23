@@ -582,6 +582,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         maybe_cleanup_observability_snapshots(cfg).await?;
     }
     let profile = load_profile()?;
+    let repo_root = discover_repo_root(None)?;
     let db = postgres::connect_admin(cfg).await?;
     let previous = postgres::latest_observability_snapshot(&db, "system_snapshot").await?;
     let http = http_client()?;
@@ -620,10 +621,22 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         postgres::latest_observability_snapshot(&db, "cold_path_benchmark").await?;
     let latest_working_state_restore =
         postgres::latest_observability_snapshot(&db, "working_state_restore").await?;
+    let latest_repo_working_state_restore =
+        match postgres::get_project_by_repo_root(&db, &repo_root.display().to_string()).await {
+            Ok(project) => {
+                postgres::latest_observability_snapshot_for_project(
+                    &db,
+                    "working_state_restore",
+                    "working_state_restore",
+                    &project.code,
+                )
+                .await?
+            }
+            Err(_) => None,
+        };
     let latest_degradation_verification =
         postgres::latest_observability_snapshot(&db, "degradation_verification").await?;
     let token_budget_report = token_budget::collect_default_report(&db).await?;
-    let repo_root = discover_repo_root(None)?;
     let artifact_cleanup_summary = artifact_cleanup::read_latest_summary(&repo_root)?
         .unwrap_or_else(|| {
             json!({
@@ -654,6 +667,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_token_benchmark": latest_token_benchmark,
         "latest_cold_path_benchmark": latest_cold_path_benchmark,
         "latest_working_state_restore": latest_working_state_restore,
+        "latest_repo_working_state_restore": latest_repo_working_state_restore,
         "latest_degradation_verification": latest_degradation_verification,
         "token_budget_report": token_budget_report,
         "artifact_cleanup": artifact_cleanup_summary["artifact_cleanup"].clone(),
@@ -681,6 +695,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_token_benchmark": payload["latest_token_benchmark"].clone(),
         "latest_cold_path_benchmark": payload["latest_cold_path_benchmark"].clone(),
         "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
+        "latest_repo_working_state_restore": payload["latest_repo_working_state_restore"].clone(),
         "latest_degradation_verification": payload["latest_degradation_verification"].clone(),
         "token_budget_report": payload["token_budget_report"].clone(),
         "artifact_cleanup": payload["artifact_cleanup"].clone(),

@@ -3014,7 +3014,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                     format_count_with_word(session_answer_count, "случай", "случая", "случаев"),
                     format_percent(session_answer_rate),
                     format_percent(session_answer_percent)
-                ) + &format!(" {}", verified_vs_excluded_sentence(current_session))
+                ) + " Подробные цифры по главному итогу, всему живому потоку и тому, что пока вне главного итога, вынесены в нижние строки."
             } else if session_events_total > 0 {
                 format!(
                     "В этой сессии уже есть Amai-запросы: {}. Но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому главный итог по сессии ещё не накоплен.",
@@ -4496,7 +4496,24 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
 }
 
 fn working_state_live_card(snapshot: &Value) -> Value {
-    let restore = &snapshot["latest_working_state_restore"]["working_state_restore"];
+    let restore_root = &snapshot["latest_repo_working_state_restore"]["working_state_restore"];
+    if !restore_root.is_object() {
+        return with_status_tooltip(
+            card_with_rows(
+                "Текущая работа",
+                "ещё нет данных".to_string(),
+                "Для текущего репозитория локальный рабочий снимок пока не materialized. Панель специально не подмешивает сюда более свежую рабочую линию другого проекта.".to_string(),
+                "unknown",
+                Some(
+                    "Источник: latest_repo_working_state_restore.working_state_restore".to_string(),
+                ),
+                Some("Показывает, чем Amai действительно занят сейчас именно в текущем репозитории: какая цель активна, какой следующий шаг он держит, какая команда была последней и какие файлы остаются в работе. Если локального рабочего снимка нет, карточка честно остаётся пустой и не подмешивает чужой проект.".to_string()),
+                vec![],
+            ),
+            "Статус пока не может считаться нормальным по следующим причинам:\n- Для текущего репозитория ещё нет локального рабочего снимка.\n- Панель специально не подмешивает сюда более свежую рабочую линию другого проекта.",
+        );
+    }
+    let restore = restore_root;
     if !restore.is_object() {
         return with_status_tooltip(
             card_with_rows(
@@ -4525,8 +4542,11 @@ fn working_state_live_card(snapshot: &Value) -> Value {
             .unwrap_or("ещё нет данных"),
         restore["agent_scope"].as_str().unwrap_or("shared"),
     );
-    let session_age_ms = restore["session_age_ms"].as_u64().map(|value| value as f64);
     let events_count = restore["events_count"].as_u64();
+    let snapshot_age = elapsed_since_epoch_label(
+        restore["captured_at_epoch_ms"].as_u64(),
+        snapshot["captured_at_epoch_ms"].as_u64(),
+    );
     let last_command =
         compact_dashboard_text(restore["last_command"].as_str(), 72, "ещё нет данных");
     let last_results = compact_dashboard_text(
@@ -4566,96 +4586,103 @@ fn working_state_live_card(snapshot: &Value) -> Value {
         "low" => "низкая",
         other => other,
     };
-    let included_reasons = working_state_decision_trace_summary(
-        &restore["latest_decision_trace"],
-        "included",
-        "ещё нет объяснения",
-    );
-    let excluded_reasons = working_state_decision_trace_summary(
-        &restore["latest_decision_trace"],
-        "not_included",
-        "ещё нет объяснения",
-    );
+    let included_reasons =
+        working_state_decision_trace_summary(&restore["latest_decision_trace"], "included", "");
+    let excluded_reasons =
+        working_state_decision_trace_summary(&restore["latest_decision_trace"], "not_included", "");
     let status = match restore_confidence {
         "high" | "medium" => "pass",
         _ if events_count.unwrap_or(0) > 0 => "alert",
         _ => "unknown",
     };
+    let has_decision_trace = !included_reasons.is_empty() || !excluded_reasons.is_empty();
+    let mut rows = vec![
+        metric_row(
+            "Область",
+            scope,
+            Some("В каком проекте, разделе и рабочем контуре Amai сейчас держит эту линию работы."),
+        ),
+        metric_row(
+            "Последний снимок",
+            format!(
+                "{} • {}",
+                snapshot_age,
+                format_count_with_word(events_count.unwrap_or(0), "событие", "события", "событий")
+            ),
+            Some(
+                "Сколько прошло с момента последнего локального рабочего снимка и сколько событий в него вошло.",
+            ),
+        ),
+        metric_row(
+            "Последняя команда",
+            last_command,
+            Some("Какое последнее действие оставило этот рабочий след."),
+        ),
+        metric_row(
+            "Последний результат",
+            last_results,
+            Some(
+                "Короткое человеческое описание того, что Amai считает последним реально полученным результатом.",
+            ),
+        ),
+    ];
+    if has_decision_trace {
+        rows.push(metric_row(
+            "Почему включено",
+            included_reasons,
+            Some("Через какие retrieval-слои последний полезный контекст реально вошёл в рабочую линию и почему Amai посчитал их нужными."),
+        ));
+        rows.push(metric_row(
+            "Почему не вошло",
+            excluded_reasons,
+            Some("Какие retrieval-слои в последнем запросе ничего не добавили и по какой причине они были честно пропущены."),
+        ));
+    }
+    rows.extend(vec![
+        metric_row(
+            "Активные файлы",
+            if active_files_preview.is_empty() {
+                format_u64(Some(active_files_count))
+            } else {
+                format!("{} • {}", format_u64(Some(active_files_count)), active_files_preview)
+            },
+            Some("Сколько файлов Amai считает активными сейчас и какие первые несколько он видит в этой линии работы."),
+        ),
+        metric_row(
+            "Недавние запросы",
+            format_u64(Some(recent_queries)),
+            Some("Сколько недавних запросов вошло в рабочий снимок. Здесь может быть 0, если работа шла через continuity, проверочные прогоны или другой не-потоковый путь."),
+        ),
+    ]);
 
     let mut card = card_with_rows(
         "Текущая работа",
         current_goal,
-        format!(
-            "Сейчас Amai ведёт такую работу. Следующий обязательный шаг: {}.",
-            next_step
-        ),
+        if has_decision_trace {
+            format!(
+                "Сейчас Amai ведёт такую работу. Следующий обязательный шаг: {}.",
+                next_step
+            )
+        } else {
+            format!(
+                "Сейчас Amai ведёт такую работу. Следующий обязательный шаг: {}. Эта линия пришла не из последнего подбора контекста, поэтому причины включения и исключения здесь пока не показываются.",
+                next_step
+            )
+        },
         status,
         Some(source_label(
-            "Источник: latest_working_state_restore.working_state_restore. Этот блок питается рабочей линией Amai, а не счётчиком токенов.",
+            "Источник: latest_repo_working_state_restore.working_state_restore. Этот блок берёт последнюю рабочую линию именно текущего репозитория, а не глобально самый новый handoff.",
             restore["captured_at_epoch_ms"].as_u64(),
         )),
-        Some("Показывает, чем Amai действительно занят сейчас: какая цель активна, какой следующий шаг остаётся обязательным, какая команда была последней и какие файлы ещё в работе. Это не замер скорости ответа, а снимок текущей рабочей линии.".to_string()),
-        vec![
-            metric_row(
-                "Область",
-                scope,
-                Some("В каком проекте, разделе и рабочем контуре Amai сейчас держит эту линию работы."),
-            ),
-            metric_row(
-                "Сессия",
-                format!(
-                    "{} • {}",
-                    format_ms(snapshot, session_age_ms),
-                    format_count_with_word(
-                        events_count.unwrap_or(0),
-                        "событие",
-                        "события",
-                        "событий"
-                    )
-                ),
-                Some("Возраст текущего непрерывного захода работы и сколько событий уже вошло в этот рабочий снимок."),
-            ),
-            metric_row(
-                "Последняя команда",
-                last_command,
-                Some("Какое последнее действие оставило этот рабочий след."),
-            ),
-            metric_row(
-                "Последний результат",
-                last_results,
-                Some("Короткое человеческое описание того, что Amai считает последним реально полученным результатом."),
-            ),
-            metric_row(
-                "Почему включено",
-                included_reasons,
-                Some("Через какие retrieval-слои последний полезный контекст реально вошёл в рабочую линию и почему Amai посчитал их нужными."),
-            ),
-            metric_row(
-                "Почему не вошло",
-                excluded_reasons,
-                Some("Какие retrieval-слои в последнем запросе ничего не добавили и по какой причине они были честно пропущены."),
-            ),
-            metric_row(
-                "Активные файлы",
-                if active_files_preview.is_empty() {
-                    format_u64(Some(active_files_count))
-                } else {
-                    format!("{} • {}", format_u64(Some(active_files_count)), active_files_preview)
-                },
-                Some("Сколько файлов Amai считает активными сейчас и какие первые несколько он видит в этой линии работы."),
-            ),
-            metric_row(
-                "Недавние запросы",
-                format_u64(Some(recent_queries)),
-                Some("Сколько недавних запросов вошло в рабочий снимок. Здесь может быть 0, если работа шла через continuity, проверочные прогоны или другой не-потоковый путь."),
-            ),
-        ],
+        Some("Показывает, чем Amai действительно занят сейчас именно в текущем репозитории: какая цель активна, какой следующий шаг остаётся обязательным, какая команда была последней и какие файлы ещё в работе. Это не замер скорости ответа, а снимок локальной рабочей линии.".to_string()),
+        rows,
     );
     if status != "pass" {
         let tooltip = if status == "alert" {
             format!(
-                "Статус требует внимания по следующим причинам:\n- Уверенность в этом рабочем снимке пока {}.\n- Рабочая линия уже содержит {}, но снимок ещё недостаточно устойчив.\n- Следующий обязательный шаг сейчас: {}.",
+                "Статус требует внимания по следующим причинам:\n- Уверенность в этом рабочем снимке пока {}.\n- Последний локальный снимок сделан {}.\n- Рабочая линия уже содержит {}, но снимок ещё недостаточно устойчив.\n- Следующий обязательный шаг сейчас: {}.",
                 restore_confidence_human,
+                snapshot_age,
                 format_count_with_word(events_count.unwrap_or(0), "событие", "события", "событий"),
                 next_step
             )
@@ -5338,52 +5365,6 @@ fn raw_savings_sentence(
     }
 }
 
-fn verified_vs_excluded_sentence(summary: &Value) -> String {
-    let verified_events = summary["counted_events"].as_u64().unwrap_or(0);
-    let verified_baseline = summary["verified_baseline_tokens"].as_u64();
-    let verified_delivered = summary["verified_delivered_tokens"].as_u64();
-    let verified_recovery = summary["verified_recovery_tokens"].as_u64();
-    let verified_saved = summary["verified_effective_saved_tokens"].as_i64();
-    let excluded_events = summary["excluded_events_count"].as_u64().unwrap_or(0);
-    let excluded_baseline = summary["excluded_baseline_tokens"].as_u64();
-    let excluded_delivered = summary["excluded_delivered_tokens"].as_u64();
-    let excluded_recovery = summary["excluded_recovery_tokens"].as_u64();
-    let excluded_saved = summary["excluded_effective_saved_tokens"].as_i64();
-
-    let verified_lane = match (verified_baseline, verified_delivered, verified_recovery) {
-        (Some(baseline), Some(delivered), Some(recovery)) => format!(
-            "В главный итог уже вошли {}: без Amai было бы {}, от Amai пришло {}, на уточнения ушло {}, итоговая разница {}.",
-            format_count_with_word(verified_events, "событие", "события", "событий"),
-            format_u64(Some(baseline)),
-            format_u64(Some(delivered)),
-            format_u64(Some(recovery)),
-            format_signed_count(verified_saved)
-        ),
-        _ => format!(
-            "В главный итог уже вошли {}.",
-            format_count_with_word(verified_events, "событие", "события", "событий")
-        ),
-    };
-    if excluded_events == 0 {
-        return verified_lane;
-    }
-    let excluded_lane = match (excluded_baseline, excluded_delivered, excluded_recovery) {
-        (Some(baseline), Some(delivered), Some(recovery)) => format!(
-            "Пока вне главного итога остаются {}: без Amai было бы {}, от Amai пришло {}, на уточнения ушло {}, итоговая разница {}.",
-            format_count_with_word(excluded_events, "событие", "события", "событий"),
-            format_u64(Some(baseline)),
-            format_u64(Some(delivered)),
-            format_u64(Some(recovery)),
-            format_signed_count(excluded_saved)
-        ),
-        _ => format!(
-            "Пока вне главного итога остаются {}.",
-            format_count_with_word(excluded_events, "событие", "события", "событий")
-        ),
-    };
-    format!("{verified_lane} {excluded_lane}")
-}
-
 fn client_budget_disclaimer() -> &'static str {
     "Это не процент от лимита этого чата. Здесь считается только размер контекста, который Amai приносит в ответ, а не все токены разговора целиком."
 }
@@ -6015,7 +5996,7 @@ mod tests {
         benchmark_qdrant_live_card, browser_base_url, build_benchmark_cards,
         build_degradation_model_card, build_hero_cards, build_links, build_machine_cards,
         build_top_cards, format_ms, format_time_compare_pair, human_elapsed_ms,
-        live_latency_compare_card, monitoring_url, worst_status,
+        live_latency_compare_card, monitoring_url, working_state_live_card, worst_status,
     };
     use serde_json::json;
 
@@ -6365,6 +6346,7 @@ mod tests {
     #[test]
     fn top_cards_split_live_retrieval_from_real_workline() {
         let snapshot = json!({
+            "captured_at_epoch_ms": 1774239286880u64,
             "thresholds": {
                 "dashboard": {
                     "timing_format": {
@@ -6423,7 +6405,7 @@ mod tests {
                     }
                 }
             },
-            "latest_working_state_restore": {
+            "latest_repo_working_state_restore": {
                 "working_state_restore": {
                     "captured_at_epoch_ms": 1774239281880u64,
                     "project": { "code": "art" },
@@ -6482,6 +6464,10 @@ mod tests {
                 .unwrap_or_default()
                 .contains("Сейчас Amai ведёт такую работу")
         );
+        assert!(cards[1]["rows"].as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row["label"].as_str() == Some("Последний снимок"))
+        }));
         let rows = cards[1]["rows"].as_array().expect("rows");
         assert!(rows.iter().any(|row| {
             row["label"].as_str() == Some("Почему включено")
@@ -6495,6 +6481,60 @@ mod tests {
                     .as_str()
                     .is_some_and(|value| value.contains("семантические фрагменты"))
         }));
+    }
+
+    #[test]
+    fn working_state_card_hides_empty_decision_trace_rows_and_requires_repo_scoped_snapshot() {
+        let snapshot = json!({
+            "captured_at_epoch_ms": 1774239286880u64,
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1774239281880u64,
+                    "project": { "code": "amai" },
+                    "namespace": { "code": "default" },
+                    "agent_scope": "amai::default::default",
+                    "session_age_ms": 7u64,
+                    "events_count": 1u64,
+                    "current_goal": "Рабочий запрос: structural graph proof",
+                    "next_step": "Уточните запрос или задайте follow-up.",
+                    "last_command": "context pack",
+                    "last_results_summary": "Найдено: документов 0, символов 0.",
+                    "latest_decision_trace": null,
+                    "active_files": [],
+                    "recent_queries": ["structural graph proof"],
+                    "restore_confidence": "preliminary"
+                }
+            }
+        });
+
+        let card = working_state_live_card(&snapshot);
+        let rows = card["rows"].as_array().expect("rows");
+        assert!(
+            rows.iter()
+                .all(|row| row["label"].as_str() != Some("Почему включено"))
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row["label"].as_str() != Some("Почему не вошло"))
+        );
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("причины включения и исключения здесь пока не показываются")
+        );
+
+        let unknown_card = working_state_live_card(&json!({
+            "captured_at_epoch_ms": 1774239286880u64,
+            "latest_repo_working_state_restore": null
+        }));
+        assert_eq!(unknown_card["status"], json!("unknown"));
+        assert!(
+            unknown_card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("не подмешивает сюда более свежую рабочую линию другого проекта")
+        );
     }
 
     #[test]
