@@ -70,6 +70,8 @@ pub fn render_html(refresh_ms: u64) -> String {
       --alert-soft: rgba(185, 109, 16, 0.12);
       --critical: #b6382b;
       --critical-soft: rgba(182, 56, 43, 0.12);
+      --waiting: #3f6f93;
+      --waiting-soft: rgba(63, 111, 147, 0.12);
       --unknown: #61717a;
       --unknown-soft: rgba(97, 113, 122, 0.12);
       --panel-outer-shadow:
@@ -269,6 +271,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     .status-pill.pass { background: var(--pass-soft); color: var(--pass); }
     .status-pill.alert { background: var(--alert-soft); color: var(--alert); }
     .status-pill.critical { background: var(--critical-soft); color: var(--critical); }
+    .status-pill.waiting { background: var(--waiting-soft); color: var(--waiting); }
     .status-pill.unknown { background: var(--unknown-soft); color: var(--unknown); }
 
     .side-block {
@@ -410,6 +413,8 @@ pub fn render_html(refresh_ms: u64) -> String {
     .service-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.04), var(--surface-solid)); }
     .metric-card.critical,
     .service-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.04), var(--surface-solid)); }
+    .metric-card.waiting,
+    .service-card.waiting { background: linear-gradient(180deg, rgba(63, 111, 147, 0.04), var(--surface-solid)); }
     .metric-card.unknown,
     .service-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.04), var(--surface-solid)); }
 
@@ -543,6 +548,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     .compare-card.pass { background: linear-gradient(180deg, rgba(29, 124, 91, 0.04), var(--surface-solid)); }
     .compare-card.alert { background: linear-gradient(180deg, rgba(185, 109, 16, 0.04), var(--surface-solid)); }
     .compare-card.critical { background: linear-gradient(180deg, rgba(182, 56, 43, 0.04), var(--surface-solid)); }
+    .compare-card.waiting { background: linear-gradient(180deg, rgba(63, 111, 147, 0.04), var(--surface-solid)); }
     .compare-card.unknown { background: linear-gradient(180deg, rgba(97, 113, 122, 0.04), var(--surface-solid)); }
 
     .benchmark-span-full {
@@ -921,6 +927,8 @@ pub fn render_html(refresh_ms: u64) -> String {
         --alert-soft: rgba(185, 109, 16, 0.24);
         --critical: #ff8f82;
         --critical-soft: rgba(182, 56, 43, 0.24);
+        --waiting: #8fb9e0;
+        --waiting-soft: rgba(76, 127, 173, 0.24);
         --unknown: #b2bfca;
         --unknown-soft: rgba(97, 113, 122, 0.24);
         --panel-outer-shadow:
@@ -1085,7 +1093,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     let activeTooltipTarget = null;
 
     function statusClass(status) {
-      return ["pass", "alert", "critical", "unknown"].includes(status) ? status : "unknown";
+      return ["pass", "alert", "critical", "waiting", "unknown"].includes(status) ? status : "unknown";
     }
 
     function clearNode(node) {
@@ -3861,6 +3869,7 @@ fn status_label(status: &str) -> &'static str {
         "pass" => "в норме",
         "alert" => "внимание",
         "critical" => "критично",
+        "waiting" => "ждём verified-выборку",
         _ => "нет данных",
     }
 }
@@ -3870,6 +3879,7 @@ fn headline_status_label(status: &str) -> &'static str {
         "pass" => "система в норме",
         "alert" => "нужно внимание",
         "critical" => "есть критичные сигналы",
+        "waiting" => "идёт накопление выборки",
         _ => "данных пока мало",
     }
 }
@@ -4064,7 +4074,7 @@ fn savings_status(
         if events_total == 0 {
             "unknown"
         } else {
-            "alert"
+            "waiting"
         }
     } else if saved_tokens.unwrap_or_default() < 0 {
         "alert"
@@ -5350,6 +5360,7 @@ mod tests {
         });
 
         let cards = build_hero_cards(&snapshot);
+        assert_eq!(cards[0]["status"].as_str(), Some("pass"));
         assert_eq!(
             cards[0]["title_tooltip"].as_str(),
             Some(
@@ -5373,6 +5384,62 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("22 из 56")
+        );
+    }
+
+    #[test]
+    fn hero_session_card_uses_waiting_status_before_verified_sample_exists() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "events_total": 1,
+                        "counted_events": 0,
+                        "verified_effective_saved_tokens": 0,
+                        "verified_effective_savings_pct": 0.0,
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 0.0,
+                        "answer_like_counted_events": 0,
+                        "verified_answer_like_savings_pct": 0.0,
+                        "excluded_events_count": 1,
+                        "excluded_effective_saved_tokens": 243216,
+                        "excluded_baseline_tokens": 243300,
+                        "excluded_delivered_tokens": 84,
+                        "excluded_recovery_tokens": 0,
+                        "total_naive_tokens": 243300,
+                        "total_context_tokens": 84,
+                        "effective_savings_pct": 99.97,
+                        "total_effective_saved_tokens": 243216,
+                        "total_recovery_tokens": 0
+                    },
+                    "rolling_window": {
+                        "events_total": 0,
+                        "counted_events": 0
+                    },
+                    "lifetime": {
+                        "events_total": 0,
+                        "counted_events": 0
+                    },
+                    "profile": {
+                        "display_name": "Обычная рабочая машина"
+                    }
+                }
+            }
+        });
+
+        let cards = build_hero_cards(&snapshot);
+        assert_eq!(cards[0]["status"].as_str(), Some("waiting"));
+        assert_eq!(
+            cards[0]["status_label"].as_str(),
+            Some("ждём verified-выборку")
+        );
+        assert!(
+            cards[0]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("строго verified live для главного KPI пока: 0 из 1")
         );
     }
 
