@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:51 MSK
-Ручная сверка guide/docs: 2026-03-23 22:51 MSK
+modified_at: 2026-03-23 22:59 MSK
+Ручная сверка guide/docs: 2026-03-23 22:59 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -896,6 +896,11 @@ cargo run -- deployment explain --target kubernetes_server
 `amai_list_projects` и `amai_list_namespaces` теперь тоже не схлопывают discovery
 до одного числа: короткий summary сразу показывает коды проектов и namespace/mode
 preview, а не только raw count.
+
+`amai_warm_cache` теперь тоже отдаёт наружу `warm_cache_summary`, где уже собраны
+`compact_projects`, `cache_hits`, `exact_documents`, `symbol_hits`,
+`lexical_chunks` и `semantic_chunks`. Это позволяет внешнему клиенту понять,
+что именно реально прогрелось, а не видеть только финальное количество проектов.
 
 Понятный walkthrough для подключения:
 - [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)

@@ -1144,6 +1144,7 @@ async fn tool_warm_cache(cfg: &AppConfig, args: WarmCacheToolArgs) -> Result<Val
             "scope_signature": stats.scope_signature,
         }));
     }
+    let warm_summary = warm_cache_summary(&warmed, &args.projects);
     let structured = json!({
         "warmup_cache": {
             "projects": args.projects,
@@ -1151,17 +1152,69 @@ async fn tool_warm_cache(cfg: &AppConfig, args: WarmCacheToolArgs) -> Result<Val
             "query": args.query,
             "retrieval_mode": args.retrieval_mode,
             "warmed": warmed,
-        }
+        },
+        "warm_cache_summary": {
+            "project_count": warm_summary.project_count,
+            "compact_projects": warm_summary.compact_projects,
+            "cache_hits": warm_summary.cache_hits,
+            "exact_documents": warm_summary.exact_documents,
+            "symbol_hits": warm_summary.symbol_hits,
+            "lexical_chunks": warm_summary.lexical_chunks,
+            "semantic_chunks": warm_summary.semantic_chunks,
+        },
     });
     Ok(tool_result(
         format!(
-            "warmup finished for {} project(s)",
-            structured["warmup_cache"]["warmed"]
-                .as_array()
-                .map_or(0, Vec::len)
+            "warmup finished for {} project(s) [{}] cache_hits={}/{} exact={} symbol={} lexical={} semantic={}",
+            warm_summary.project_count,
+            warm_summary.compact_projects,
+            warm_summary.cache_hits,
+            warm_summary.project_count,
+            warm_summary.exact_documents,
+            warm_summary.symbol_hits,
+            warm_summary.lexical_chunks,
+            warm_summary.semantic_chunks,
         ),
         structured,
     ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WarmCacheSummary {
+    project_count: usize,
+    compact_projects: String,
+    cache_hits: u64,
+    exact_documents: u64,
+    symbol_hits: u64,
+    lexical_chunks: u64,
+    semantic_chunks: u64,
+}
+
+fn warm_cache_summary(warmed: &[Value], projects: &[String]) -> WarmCacheSummary {
+    WarmCacheSummary {
+        project_count: warmed.len(),
+        compact_projects: summarize_with_limit(projects),
+        cache_hits: warmed
+            .iter()
+            .filter(|entry| entry["cache_hit"].as_bool().unwrap_or(false))
+            .count() as u64,
+        exact_documents: warmed
+            .iter()
+            .map(|entry| entry["exact_documents"].as_u64().unwrap_or_default())
+            .sum(),
+        symbol_hits: warmed
+            .iter()
+            .map(|entry| entry["symbol_hits"].as_u64().unwrap_or_default())
+            .sum(),
+        lexical_chunks: warmed
+            .iter()
+            .map(|entry| entry["lexical_chunks"].as_u64().unwrap_or_default())
+            .sum(),
+        semantic_chunks: warmed
+            .iter()
+            .map(|entry| entry["semantic_chunks"].as_u64().unwrap_or_default())
+            .sum(),
+    }
 }
 
 fn server_instructions() -> String {
@@ -2081,6 +2134,7 @@ mod tests {
     use super::{
         McpConfigArgs, context_pack_summary, observe_snapshot_summary, render_client_config,
         summarize_codes, summarize_namespace_modes, token_benchmark_summary, token_report_summary,
+        warm_cache_summary,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -2304,6 +2358,38 @@ mod tests {
         assert_eq!(summary.naive_tokens, 4096);
         assert_eq!(summary.context_tokens, 512);
         assert_eq!(summary.files_considered, 12);
+    }
+
+    #[test]
+    fn warm_cache_summary_surfaces_cache_and_layer_totals() {
+        let warmed = vec![
+            json!({
+                "project": "art",
+                "cache_hit": true,
+                "exact_documents": 2,
+                "symbol_hits": 1,
+                "lexical_chunks": 3,
+                "semantic_chunks": 0,
+            }),
+            json!({
+                "project": "regart",
+                "cache_hit": false,
+                "exact_documents": 1,
+                "symbol_hits": 0,
+                "lexical_chunks": 2,
+                "semantic_chunks": 4,
+            }),
+        ];
+        let projects = vec!["art".to_string(), "regart".to_string()];
+
+        let summary = warm_cache_summary(&warmed, &projects);
+        assert_eq!(summary.project_count, 2);
+        assert_eq!(summary.compact_projects, "art, regart");
+        assert_eq!(summary.cache_hits, 1);
+        assert_eq!(summary.exact_documents, 3);
+        assert_eq!(summary.symbol_hits, 1);
+        assert_eq!(summary.lexical_chunks, 5);
+        assert_eq!(summary.semantic_chunks, 4);
     }
 
     #[test]

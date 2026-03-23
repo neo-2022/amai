@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 10:52 MSK
-Ручная сверка guide/docs: 2026-03-21 10:52 MSK
+modified_at: 2026-03-23 22:59 MSK
+Ручная сверка guide/docs: 2026-03-23 22:59 MSK
 
 # MCP Integration
 
@@ -245,6 +245,11 @@ cargo build --release
 - `amai_token_report`
 - `amai_observe_snapshot`
 - `amai_warm_cache`
+
+У `amai_warm_cache` короткий summary теперь тоже не ограничивается сообщением
+`сколько проектов прогрето`. Он показывает preview проектов и totals по
+`cache_hit / exact / symbol / lexical / semantic`, а в structured output это же
+лежит отдельно в `warm_cache_summary`.
 
 И prompts:
 - `amai-onboarding`
