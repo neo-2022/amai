@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 19:09 MSK
-Ручная сверка guide/docs: 2026-03-23 19:09 MSK
+modified_at: 2026-03-23 19:20 MSK
+Ручная сверка guide/docs: 2026-03-23 19:20 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1140,6 +1140,10 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
   - happy-path;
   - hostile fail-closed;
   - multi-agent isolation;
+- теперь ещё и раскладывает этот MCP-contour в общий `canonical_eval` слой:
+  - `live_mcpbench_local` даёт `11 x hit_correct_target`;
+  - `mcp_universe_local` даёт `8 x hit_correct_target` и `1 x recovered_useful`;
+  - continuity restore внутри `mcp_universe_local` теперь считается не просто как `status=success`, а как канонический recovery verdict;
 - даёт честный локальный bridge между `Amai` и классами `LiveMCPBench` / `MCP-Universe`.
 
 Отдельно materialized и memory-eval слой по мотивам `Letta Leaderboard`:

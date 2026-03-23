@@ -1,8 +1,10 @@
 use crate::bootstrap;
 use crate::cli::VerifyMcpMatrixArgs;
 use crate::config::AppConfig;
+use crate::eval_verdict::{self, EvalPattern, EvalSignals};
 use crate::mcp;
 use crate::postgres;
+use crate::retrieval_science;
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -42,6 +44,7 @@ struct MatrixTask {
     class: MatrixTaskClass,
     display_name: String,
     kind: MatrixTaskKind,
+    eval_pattern: EvalPattern,
     project: Option<String>,
     related_project: Option<String>,
     namespace: Option<String>,
@@ -224,6 +227,7 @@ async fn run_matrix_inner(
             "matrix": args.matrix,
             "display_name": matrix.display_name,
             "summary": matrix.summary,
+            "retrieval_science": retrieval_science::suite_metadata("mcp_task_matrix")?,
             "source": {
                 "display_name": source.display_name,
                 "summary": source.summary,
@@ -238,6 +242,11 @@ async fn run_matrix_inner(
             "p95_ms": p95_ms,
             "max_ms": max_ms,
             "class_breakdown": class_breakdown,
+            "canonical_eval": eval_verdict::summarize_eval_layer(
+                task_results
+                    .iter()
+                    .map(|task| task.eval_verdict_class.as_str())
+            )?,
             "tasks": task_results.iter().map(TaskResult::as_json).collect::<Vec<_>>(),
         }
     });
@@ -282,6 +291,7 @@ async fn run_task(
         }
     };
 
+    let eval = derive_task_eval(task, &details)?;
     Ok(TaskResult {
         code: task_code.to_string(),
         class: task.class,
@@ -289,8 +299,61 @@ async fn run_task(
         kind: format!("{:?}", task.kind),
         success: true,
         latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+        eval_verdict_class: eval.class_key,
+        eval_reason: eval.reason,
         details,
     })
+}
+
+fn derive_task_eval(task: &MatrixTask, details: &Value) -> Result<eval_verdict::EvalVerdict> {
+    let signals = match task.kind {
+        MatrixTaskKind::ContextLocalStrictIsolation => {
+            let visible = details["visible_projects"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.as_str())
+                .collect::<BTreeSet<_>>();
+            let primary = task.project.as_deref().unwrap_or_default();
+            let boundary_clean = task
+                .related_project
+                .as_deref()
+                .is_none_or(|related| !visible.contains(related));
+            EvalSignals {
+                expected_present: Some(visible.contains(primary)),
+                unexpected_present: !boundary_clean,
+                boundary_clean: Some(boundary_clean),
+                fail_closed_ok: Some(boundary_clean),
+                has_expected_target: true,
+            }
+        }
+        MatrixTaskKind::UnknownToolFailClosed
+        | MatrixTaskKind::UnknownProjectFailClosed
+        | MatrixTaskKind::UnknownNamespaceFailClosed
+        | MatrixTaskKind::ContinuityRestoreFailClosed => {
+            let fail_closed = details["status"].as_str() == Some("fail_closed");
+            EvalSignals {
+                expected_present: Some(false),
+                unexpected_present: !fail_closed,
+                boundary_clean: Some(fail_closed),
+                fail_closed_ok: Some(fail_closed),
+                has_expected_target: false,
+            }
+        }
+        MatrixTaskKind::ContinuityRestoreSuccess => EvalSignals {
+            expected_present: Some(details["status"].as_str() == Some("success")),
+            unexpected_present: false,
+            has_expected_target: true,
+            ..EvalSignals::default()
+        },
+        _ => EvalSignals {
+            expected_present: Some(true),
+            unexpected_present: false,
+            has_expected_target: true,
+            ..EvalSignals::default()
+        },
+    };
+    eval_verdict::derive_eval_verdict(task.eval_pattern, &signals)
 }
 
 async fn run_tool_catalog_task(session: &mut mcp::McpProofSession) -> Result<Value> {
@@ -885,6 +948,8 @@ struct TaskResult {
     kind: String,
     success: bool,
     latency_ms: f64,
+    eval_verdict_class: String,
+    eval_reason: String,
     details: Value,
 }
 
@@ -897,6 +962,8 @@ impl TaskResult {
             "kind": self.kind,
             "success": self.success,
             "latency_ms": self.latency_ms,
+            "eval_verdict_class": self.eval_verdict_class,
+            "eval_reason": self.eval_reason,
             "details": self.details,
         })
     }
@@ -904,7 +971,9 @@ impl TaskResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{MatrixTaskClass, load_registry};
+    use super::{MatrixTask, MatrixTaskClass, MatrixTaskKind, derive_task_eval, load_registry};
+    use crate::eval_verdict::EvalPattern;
+    use serde_json::json;
 
     #[test]
     fn registry_loads_with_required_matrices() {
@@ -923,5 +992,57 @@ mod tests {
             .filter(|task| task.class == MatrixTaskClass::Isolation)
             .count();
         assert!(isolation_tasks >= 2);
+    }
+
+    #[test]
+    fn continuity_restore_success_maps_to_recovered_useful() {
+        let task = MatrixTask {
+            order: 1,
+            class: MatrixTaskClass::Isolation,
+            display_name: "restore".to_string(),
+            kind: MatrixTaskKind::ContinuityRestoreSuccess,
+            eval_pattern: EvalPattern::RecoveryTarget,
+            project: Some("mcp_continuity_alpha".to_string()),
+            related_project: None,
+            namespace: Some("continuity".to_string()),
+            query: None,
+            retrieval_mode: None,
+            budget_profile: None,
+            agent_scope: Some("mcp::continuity::default".to_string()),
+            seed_agent_scope: None,
+            expected_error_contains: None,
+            bootstrap_lines: Vec::new(),
+            seed_headline: None,
+            seed_next_step: None,
+            seed_details_lines: Vec::new(),
+        };
+        let verdict = derive_task_eval(&task, &json!({"status":"success"})).expect("verdict");
+        assert_eq!(verdict.class_key, "recovered_useful");
+    }
+
+    #[test]
+    fn hostile_fail_closed_task_maps_to_hit_correct_target() {
+        let task = MatrixTask {
+            order: 1,
+            class: MatrixTaskClass::Hostile,
+            display_name: "unknown tool".to_string(),
+            kind: MatrixTaskKind::UnknownToolFailClosed,
+            eval_pattern: EvalPattern::IsolationBoundary,
+            project: None,
+            related_project: None,
+            namespace: None,
+            query: None,
+            retrieval_mode: None,
+            budget_profile: None,
+            agent_scope: None,
+            seed_agent_scope: None,
+            expected_error_contains: Some("unknown MCP tool".to_string()),
+            bootstrap_lines: Vec::new(),
+            seed_headline: None,
+            seed_next_step: None,
+            seed_details_lines: Vec::new(),
+        };
+        let verdict = derive_task_eval(&task, &json!({"status":"fail_closed"})).expect("verdict");
+        assert_eq!(verdict.class_key, "hit_correct_target");
     }
 }

@@ -49,12 +49,14 @@ order = 1
 class = "happy_path"
 display_name = "Tool catalog is stable and complete"
 kind = "tool_catalog"
+eval_pattern = "retrieval_target"
 
 [tasks.project_listing]
 order = 2
 class = "happy_path"
 display_name = "Registered projects are visible through MCP"
 kind = "project_listing"
+eval_pattern = "retrieval_target"
 project = "project_alpha"
 related_project = "project_beta"
 
@@ -63,6 +65,7 @@ order = 3
 class = "happy_path"
 display_name = "Registered namespace is visible through MCP"
 kind = "namespace_listing"
+eval_pattern = "retrieval_target"
 project = "project_alpha"
 namespace = "review"
 
@@ -71,6 +74,7 @@ order = 4
 class = "happy_path"
 display_name = "local_strict context pack stays inside primary project"
 kind = "context_local_strict_isolation"
+eval_pattern = "isolation_boundary"
 project = "project_alpha"
 related_project = "project_beta"
 namespace = "review"
@@ -82,6 +86,7 @@ order = 5
 class = "happy_path"
 display_name = "local_plus_related routes across allowed related scope"
 kind = "context_related_scope_routing"
+eval_pattern = "retrieval_target"
 project = "project_alpha"
 related_project = "project_beta"
 namespace = "review"
@@ -93,12 +98,14 @@ order = 6
 class = "happy_path"
 display_name = "Observe snapshot stays green"
 kind = "observe_snapshot_green"
+eval_pattern = "retrieval_target"
 
 [tasks.token_report_live]
 order = 7
 class = "happy_path"
 display_name = "Live token report uses verified headline"
 kind = "token_report_live"
+eval_pattern = "retrieval_target"
 budget_profile = "codex_5h"
 
 [tasks.warm_cache]
@@ -106,6 +113,7 @@ order = 8
 class = "happy_path"
 display_name = "Warm cache completes through MCP"
 kind = "warm_cache"
+eval_pattern = "retrieval_target"
 project = "project_alpha"
 namespace = "review"
 query = "shared_runtime_marker"
@@ -116,6 +124,7 @@ order = 9
 class = "hostile"
 display_name = "Unknown MCP tool fails closed"
 kind = "unknown_tool_fail_closed"
+eval_pattern = "isolation_boundary"
 expected_error_contains = "unknown MCP tool"
 
 [tasks.unknown_project_fail_closed]
@@ -123,6 +132,7 @@ order = 10
 class = "hostile"
 display_name = "Unknown project fails closed"
 kind = "unknown_project_fail_closed"
+eval_pattern = "isolation_boundary"
 project = "unknown_project"
 namespace = "review"
 query = "shared_runtime_marker"
@@ -134,6 +144,7 @@ order = 11
 class = "hostile"
 display_name = "Unknown namespace fails closed"
 kind = "unknown_namespace_fail_closed"
+eval_pattern = "isolation_boundary"
 project = "project_alpha"
 namespace = "unknown_namespace"
 query = "shared_runtime_marker"
@@ -145,6 +156,7 @@ order = 12
 class = "isolation"
 display_name = "Default synthetic continuity scope restores successfully"
 kind = "continuity_restore_success"
+eval_pattern = "recovery_target"
 project = "mcp_continuity_alpha"
 namespace = "continuity"
 agent_scope = "mcp::continuity::default"
@@ -163,6 +175,7 @@ order = 13
 class = "isolation"
 display_name = "Isolated agent scope does not see чужой working-state"
 kind = "continuity_restore_fail_closed"
+eval_pattern = "isolation_boundary"
 project = "mcp_continuity_alpha"
 namespace = "continuity"
 agent_scope = "mcp::continuity::matrix_isolated"

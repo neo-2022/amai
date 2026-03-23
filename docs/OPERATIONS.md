@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 19:09 MSK
-Ручная сверка guide/docs: 2026-03-23 19:09 MSK
+modified_at: 2026-03-23 19:20 MSK
+Ручная сверка guide/docs: 2026-03-23 19:20 MSK
 
 # Operations
 
@@ -1175,6 +1175,21 @@ cargo run -- verify mcp-matrix --matrix mcp_universe_local --project project_alp
 - fail-closed restore для изолированного agent scope.
 
 Это уже не “кажется, MCP работает”, а measured local benchmark contour с честным pass/fail и class breakdown.
+
+Теперь этот contour ещё и пишет общий verdict-layer:
+- `mcp_task_matrix.retrieval_science`
+- `mcp_task_matrix.canonical_eval.verdict_counts`
+- `tasks[*].eval_verdict_class`
+- `tasks[*].eval_reason`
+
+Смысл этого слоя:
+- обычные MCP happy-path задачи считаются как `hit_correct_target`;
+- hostile fail-closed задачи считаются не как “просто ошибка”, а как корректно сохранённая граница, то есть тоже `hit_correct_target` для isolation-boundary pattern;
+- `continuity_restore_success` считается как `recovered_useful`, потому что контур реально восстановил рабочее состояние, а не просто вернул произвольный успешный ответ.
+
+На текущем каноническом proof-контуре это даёт:
+- `live_mcpbench_local` -> `11 x hit_correct_target`
+- `mcp_universe_local` -> `8 x hit_correct_target`, `1 x recovered_useful`
 
 ## Memory task matrix
 

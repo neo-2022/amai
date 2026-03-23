@@ -232,3 +232,10 @@ dataset_version = "text-compare-cases-v1"
 query_suite_version = "text-compare-cases-v1"
 manifest_path = "fixtures/text_compare_cases.jsonl"
 reproducibility_contract = "The same cases file must produce the same per-strategy canonical eval verdict classes for the same indexed state."
+
+[science.suites.mcp_task_matrix]
+suite_version = "mcp-task-matrix-v1"
+dataset_version = "mcp-task-matrix-v1"
+query_suite_version = "mcp-task-matrix-v1"
+manifest_path = "config/mcp_task_matrix.toml"
+reproducibility_contract = "The same MCP task matrix on the same indexed state must produce the same task-level canonical eval verdict classes and fail-closed statuses."

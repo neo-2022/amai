@@ -57,6 +57,8 @@ printf '%s\n' "$live_output" | rg '"matrix": "live_mcpbench_local"' >/dev/null
 printf '%s\n' "$live_output" | rg '"tasks_failed": 0' >/dev/null
 printf '%s\n' "$live_output" | rg '"success_rate": 1.0' >/dev/null
 printf '%s\n' "$live_output" | rg '"class": "hostile"' >/dev/null
+printf '%s\n' "$live_output" | jq -e '.mcp_task_matrix.canonical_eval.eval_verdict_model_version == "memory-eval-verdict-v1"' >/dev/null
+printf '%s\n' "$live_output" | jq -e '.mcp_task_matrix.canonical_eval.verdict_counts.hit_correct_target == 11' >/dev/null
 
 universe_output="$(cargo run --release --quiet -- verify mcp-matrix \
   --matrix mcp_universe_local \
@@ -69,5 +71,8 @@ printf '%s\n' "$universe_output" | rg '"matrix": "mcp_universe_local"' >/dev/nul
 printf '%s\n' "$universe_output" | rg '"tasks_failed": 0' >/dev/null
 printf '%s\n' "$universe_output" | rg '"class": "isolation"' >/dev/null
 printf '%s\n' "$universe_output" | rg '"status": "fail_closed"' >/dev/null
+printf '%s\n' "$universe_output" | jq -e '.mcp_task_matrix.canonical_eval.eval_verdict_model_version == "memory-eval-verdict-v1"' >/dev/null
+printf '%s\n' "$universe_output" | jq -e '.mcp_task_matrix.canonical_eval.verdict_counts.hit_correct_target == 8' >/dev/null
+printf '%s\n' "$universe_output" | jq -e '.mcp_task_matrix.canonical_eval.verdict_counts.recovered_useful == 1' >/dev/null
 
 printf 'proof_mcp_task_matrix: ok\n'
