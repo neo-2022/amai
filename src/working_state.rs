@@ -1815,7 +1815,7 @@ mod tests {
                     "summary": "Graph A",
                     "recorded_at_epoch_ms": base,
                     "workspace_graph": {
-                        "workspace_graph_model_version": "workspace-graph-v8",
+                        "workspace_graph_model_version": "workspace-graph-v9",
                         "artifact_lineage_model_version": "artifact-lineage-v1",
                         "lineage_model_version": "lineage-v2",
                         "truth_ranking": ["continuity_handoff"],
@@ -1849,7 +1849,7 @@ mod tests {
                     "summary": "Graph B",
                     "recorded_at_epoch_ms": base - 1,
                     "workspace_graph": {
-                        "workspace_graph_model_version": "workspace-graph-v8",
+                        "workspace_graph_model_version": "workspace-graph-v9",
                         "artifact_lineage_model_version": "artifact-lineage-v1",
                         "lineage_model_version": "lineage-v2",
                         "truth_ranking": ["continuity_handoff"],

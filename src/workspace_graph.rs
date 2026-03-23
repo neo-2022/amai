@@ -842,14 +842,14 @@ fn rust_visible_trait_targets(
         if reference["node_type"].as_str() != Some("import_ref") {
             continue;
         }
-        let Some((path, alias)) = parse_rust_reference_use_clause(reference) else {
+        let Some((selector, target_path)) = extract_rust_reference_visible_selector(reference)
+        else {
             continue;
         };
-        let selector = alias.unwrap_or_else(|| terminal_path_name(&path));
         if selector.is_empty() {
             continue;
         }
-        targets.entry(selector).or_default().insert(path);
+        targets.entry(selector).or_default().insert(target_path);
     }
     targets
 }
@@ -901,23 +901,41 @@ fn canonicalize_trait_selector_field(
     else {
         return;
     };
-    let Some(canonical) = canonical_rust_trait_selector(selector, visible_trait_targets) else {
+    let Some(canonical) = canonicalize_rust_visible_path(selector, visible_trait_targets) else {
         return;
     };
     object.insert(target_field.to_string(), json!(canonical));
 }
 
-fn canonical_rust_trait_selector(
+fn canonicalize_rust_visible_path(
     selector: &str,
     visible_trait_targets: &BTreeMap<String, BTreeSet<String>>,
 ) -> Option<String> {
-    if selector.contains("::") {
-        return Some(selector.to_string());
+    let trimmed = selector.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    let targets = visible_trait_targets.get(selector)?;
-    (targets.len() == 1)
-        .then(|| targets.iter().next().cloned())
-        .flatten()
+    if let Some(targets) = visible_trait_targets.get(trimmed) {
+        return (targets.len() == 1)
+            .then(|| targets.iter().next().cloned())
+            .flatten();
+    }
+    if let Some((prefix, suffix)) = trimmed.split_once("::") {
+        if let Some(targets) = visible_trait_targets.get(prefix) {
+            if targets.len() != 1 {
+                return None;
+            }
+            let base = targets
+                .iter()
+                .next()
+                .expect("single visible selector target");
+            return Some(format!("{base}::{suffix}"));
+        }
+    }
+    if trimmed.contains("::") {
+        return Some(trimmed.to_string());
+    }
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -948,7 +966,7 @@ fn append_resolved_reference_edges(
 ) {
     let lookup = build_graph_lookup(files);
     let mut imported_files_by_source = BTreeMap::<ScopedPathKey, BTreeSet<ScopedPathKey>>::new();
-    let mut rust_import_aliases_by_source =
+    let mut rust_visible_selectors_by_source =
         BTreeMap::<ScopedPathKey, BTreeMap<String, BTreeSet<String>>>::new();
     for file in files.values() {
         let source_key = scoped_path_key(
@@ -1000,11 +1018,13 @@ fn append_resolved_reference_edges(
                 .or_default()
                 .insert(resolution.target_file_key.clone());
             if reference_kind == "import_ref" {
-                if let Some((alias, target_path)) = extract_rust_reference_alias(reference) {
-                    rust_import_aliases_by_source
+                if let Some((selector, target_path)) =
+                    extract_rust_reference_visible_selector(reference)
+                {
+                    rust_visible_selectors_by_source
                         .entry(source_key.clone())
                         .or_default()
-                        .entry(alias)
+                        .entry(selector)
                         .or_default()
                         .insert(target_path);
                 }
@@ -1050,7 +1070,7 @@ fn append_resolved_reference_edges(
                 call,
                 &lookup,
                 imported_files_by_source.get(&source_key),
-                rust_import_aliases_by_source.get(&source_key),
+                rust_visible_selectors_by_source.get(&source_key),
             ) else {
                 continue;
             };
@@ -1166,7 +1186,7 @@ fn build_graph_lookup(files: &BTreeMap<String, FileAggregate>) -> GraphLookup {
                     for (owner_selector, trait_selector) in
                         trait_owner_selector_variants(owner_name, owner_path, &trait_variant)
                     {
-                        lookup
+                        let entry = lookup
                             .trait_owner_symbol_node_ids
                             .entry((
                                 file_key.clone(),
@@ -1174,8 +1194,10 @@ fn build_graph_lookup(files: &BTreeMap<String, FileAggregate>) -> GraphLookup {
                                 trait_selector,
                                 name.to_string(),
                             ))
-                            .or_default()
-                            .push(symbol_node_id.to_string());
+                            .or_default();
+                        if !entry.iter().any(|existing| existing == symbol_node_id) {
+                            entry.push(symbol_node_id.to_string());
+                        }
                     }
                 }
             }
@@ -1239,7 +1261,7 @@ fn resolve_call(
     call: &Value,
     lookup: &GraphLookup,
     imported_files: Option<&BTreeSet<ScopedPathKey>>,
-    rust_import_aliases: Option<&BTreeMap<String, BTreeSet<String>>>,
+    rust_visible_selectors: Option<&BTreeMap<String, BTreeSet<String>>>,
 ) -> Option<ReferenceResolution> {
     let call_style = call["call_style"].as_str()?;
     let local_owner_name = call["enclosing_owner_name"].as_str();
@@ -1253,7 +1275,7 @@ fn resolve_call(
                         call["callee_path"].as_str()?,
                         lookup,
                         imported_files,
-                        rust_import_aliases,
+                        rust_visible_selectors,
                         local_owner_name,
                         local_owner_path,
                     )
@@ -1353,7 +1375,7 @@ fn resolve_rust_trait_qualified_symbol_path_target(
     path: &str,
     lookup: &GraphLookup,
     imported_files: Option<&BTreeSet<ScopedPathKey>>,
-    rust_import_aliases: Option<&BTreeMap<String, BTreeSet<String>>>,
+    rust_visible_selectors: Option<&BTreeMap<String, BTreeSet<String>>>,
     local_owner_name: Option<&str>,
     local_owner_path: Option<&str>,
 ) -> Option<ReferenceResolution> {
@@ -1366,9 +1388,9 @@ fn resolve_rust_trait_qualified_symbol_path_target(
     } else {
         trait_path.owner_selector
     };
-    let owner_candidates = rust_selector_candidates(&owner_selector, rust_import_aliases);
+    let owner_candidates = rust_selector_candidates(&owner_selector, rust_visible_selectors);
     let trait_candidates =
-        rust_selector_candidates(&trait_path.trait_selector, rust_import_aliases);
+        rust_selector_candidates(&trait_path.trait_selector, rust_visible_selectors);
     resolve_rust_trait_owned_symbol_name_target(
         source_file,
         &owner_candidates,
@@ -1528,7 +1550,7 @@ fn resolve_rust_trait_owned_symbol_name_target(
 
 fn rust_selector_candidates(
     selector: &str,
-    rust_import_aliases: Option<&BTreeMap<String, BTreeSet<String>>>,
+    rust_visible_selectors: Option<&BTreeMap<String, BTreeSet<String>>>,
 ) -> Vec<String> {
     let mut candidates = BTreeSet::new();
     let trimmed = selector.trim();
@@ -1537,16 +1559,20 @@ fn rust_selector_candidates(
     }
     candidates.insert(trimmed.to_string());
     candidates.insert(terminal_path_name(trimmed));
-    if let Some(resolved_paths) = rust_import_aliases.and_then(|aliases| aliases.get(trimmed)) {
-        if resolved_paths.len() != 1 {
+    if let Some(visible_selectors) = rust_visible_selectors {
+        if let Some(resolved) = canonicalize_rust_visible_path(trimmed, visible_selectors) {
+            candidates.insert(resolved.clone());
+            candidates.insert(terminal_path_name(&resolved));
+        } else if trimmed.contains("::")
+            && trimmed
+                .split_once("::")
+                .and_then(|(prefix, _)| visible_selectors.get(prefix))
+                .is_some()
+        {
+            return Vec::new();
+        } else if visible_selectors.get(trimmed).is_some() {
             return Vec::new();
         }
-        let resolved = resolved_paths
-            .iter()
-            .next()
-            .expect("single alias resolution");
-        candidates.insert(resolved.clone());
-        candidates.insert(terminal_path_name(resolved));
     }
     candidates.into_iter().collect()
 }
@@ -1680,9 +1706,10 @@ fn extract_rust_reference_path(reference: &Value) -> Option<String> {
     Some(path)
 }
 
-fn extract_rust_reference_alias(reference: &Value) -> Option<(String, String)> {
+fn extract_rust_reference_visible_selector(reference: &Value) -> Option<(String, String)> {
     let (path, alias) = parse_rust_reference_use_clause(reference)?;
-    Some((alias?, path))
+    let selector = alias.unwrap_or_else(|| terminal_path_name(&path));
+    (!selector.is_empty()).then_some((selector, path))
 }
 
 fn parse_rust_reference_use_clause(reference: &Value) -> Option<(String, Option<String>)> {
@@ -2024,10 +2051,10 @@ fn short_hash(value: &str) -> String {
 mod tests {
     use super::{
         FileAggregate, GraphLookup, build_context_pack_workspace_graph,
-        canonical_rust_trait_selector, file_node_id, human_summary, merge_workspace_graphs,
+        canonicalize_rust_visible_path, file_node_id, human_summary, merge_workspace_graphs,
         resolve_rust_owned_symbol_name_target, resolve_rust_symbol_name_target,
         resolve_rust_trait_owned_symbol_name_target,
-        resolve_rust_trait_qualified_symbol_path_target, scoped_path_key,
+        resolve_rust_trait_qualified_symbol_path_target, rust_selector_candidates, scoped_path_key,
     };
     use crate::postgres::{
         ChunkHit, DocumentHit, DocumentScopedSymbolRecord, DocumentStructureRecord, SymbolHit,
@@ -3195,7 +3222,175 @@ mod tests {
     }
 
     #[test]
-    fn canonical_rust_trait_selector_stays_fail_closed_on_ambiguous_visible_name() {
+    fn context_pack_workspace_graph_resolves_trait_qualified_calls_through_module_alias() {
+        let context_pack_id = Uuid::parse_str("00000000-0000-0000-0000-000000000661").unwrap();
+        let graph = build_context_pack_workspace_graph(
+            &context_pack_id,
+            "<Beta as trait_mod::Factory>::make",
+            "local_strict",
+            "scope-1",
+            &json!([{
+                "project_code": "project_alpha",
+                "namespace_code": "default"
+            }]),
+            &[DocumentHit {
+                project_code: "project_alpha".to_string(),
+                namespace_code: "default".to_string(),
+                repo_root: "/repo".to_string(),
+                relative_path: "src/alpha.rs".to_string(),
+                language: Some("rust".to_string()),
+                source_kind: "git_tracked".to_string(),
+                git_commit_sha: Some("abc".to_string()),
+                score: 10.0,
+                snippet: "<Beta as trait_mod::Factory>::make()".to_string(),
+            }],
+            &[],
+            &[],
+            &[],
+            &[
+                DocumentStructureRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    structure: json!([
+                        {
+                            "kind": "struct_item",
+                            "name": "Beta",
+                            "start_line": 1,
+                            "end_line": 1
+                        },
+                        {
+                            "kind": "function_item",
+                            "name": "make",
+                            "start_line": 8,
+                            "end_line": 10
+                        }
+                    ]),
+                    imports: json!([{
+                        "kind": "use_declaration",
+                        "name": "crate::traits",
+                        "text": "use crate::traits as trait_mod;",
+                        "start_line": 3,
+                        "end_line": 3
+                    }]),
+                    exports: json!([]),
+                    metadata: json!({
+                        "call_references": [{
+                            "kind": "call_expression",
+                            "call_style": "scoped_identifier",
+                            "callee_name": "make",
+                            "callee_path": "<Beta as trait_mod::Factory>::make",
+                            "receiver_text": null,
+                            "enclosing_owner_kind": null,
+                            "enclosing_owner_name": null,
+                            "enclosing_owner_path": null,
+                            "enclosing_trait_name": null,
+                            "generic": false,
+                            "start_line": 12,
+                            "end_line": 12,
+                            "text": "<Beta as trait_mod::Factory>::make()"
+                        }]
+                    }),
+                },
+                DocumentStructureRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/traits.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    structure: json!([{
+                        "kind": "trait_item",
+                        "name": "Factory",
+                        "start_line": 1,
+                        "end_line": 3
+                    }]),
+                    imports: json!([]),
+                    exports: json!([]),
+                    metadata: json!({"call_references":[]}),
+                },
+            ],
+            &[
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "make".to_string(),
+                    kind: "function_item".to_string(),
+                    start_line: 8,
+                    end_line: 10,
+                    start_byte: 80,
+                    end_byte: 118,
+                    metadata: json!({
+                        "language":"rust",
+                        "node_kind":"function_item",
+                        "owner_kind":"impl_item",
+                        "owner_name":"Beta",
+                        "owner_path":"Beta",
+                        "trait_name":"trait_mod::Factory",
+                        "text":"fn make() -> Beta { Beta }"
+                    }),
+                },
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/traits.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "Factory".to_string(),
+                    kind: "trait_item".to_string(),
+                    start_line: 1,
+                    end_line: 3,
+                    start_byte: 0,
+                    end_byte: 36,
+                    metadata: json!({
+                        "language":"rust",
+                        "node_kind":"trait_item",
+                        "text":"pub trait Factory { fn make() -> Beta; }"
+                    }),
+                },
+            ],
+        )
+        .expect("graph");
+        let edges = graph["edges"].as_array().expect("edges");
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("calls_symbol")
+                && edge["to_node_id"] == json!("symbol:project_alpha:default:src/alpha.rs:make:8")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("resolves_call_symbol")
+                && edge["to_node_id"] == json!("symbol:project_alpha:default:src/alpha.rs:make:8")
+        }));
+        let nodes = graph["nodes"].as_array().expect("nodes");
+        let target = nodes
+            .iter()
+            .find(|node| {
+                node["node_id"] == json!("symbol:project_alpha:default:src/alpha.rs:make:8")
+            })
+            .expect("target symbol");
+        assert_eq!(
+            target["metadata"]["trait_name"],
+            json!("trait_mod::Factory")
+        );
+        assert_eq!(
+            target["metadata"]["trait_name_canonical"],
+            json!("crate::traits::Factory")
+        );
+    }
+
+    #[test]
+    fn canonicalize_rust_visible_path_stays_fail_closed_on_ambiguous_visible_name() {
         let visible_trait_targets = BTreeMap::from([(
             "FactoryAlias".to_string(),
             BTreeSet::from([
@@ -3204,12 +3399,38 @@ mod tests {
             ]),
         )]);
         assert_eq!(
-            canonical_rust_trait_selector("FactoryAlias", &visible_trait_targets),
+            canonicalize_rust_visible_path("FactoryAlias", &visible_trait_targets),
             None
         );
         assert_eq!(
-            canonical_rust_trait_selector("crate::traits::Factory", &visible_trait_targets),
+            canonicalize_rust_visible_path("crate::traits::Factory", &visible_trait_targets),
             Some("crate::traits::Factory".to_string())
+        );
+    }
+
+    #[test]
+    fn canonicalize_rust_visible_path_resolves_module_alias_prefix() {
+        let visible_trait_targets = BTreeMap::from([(
+            "trait_mod".to_string(),
+            BTreeSet::from(["crate::traits".to_string()]),
+        )]);
+        assert_eq!(
+            canonicalize_rust_visible_path("trait_mod::Factory", &visible_trait_targets),
+            Some("crate::traits::Factory".to_string())
+        );
+    }
+
+    #[test]
+    fn rust_selector_candidates_fail_closed_on_ambiguous_module_alias_prefix() {
+        let visible_trait_targets = BTreeMap::from([(
+            "trait_mod".to_string(),
+            BTreeSet::from([
+                "crate::traits".to_string(),
+                "crate::other_traits".to_string(),
+            ]),
+        )]);
+        assert!(
+            rust_selector_candidates("trait_mod::Factory", Some(&visible_trait_targets)).is_empty()
         );
     }
 
@@ -3446,7 +3667,7 @@ mod tests {
     fn merge_workspace_graphs_deduplicates_nodes_and_keeps_context_pack_lineage() {
         let merged = merge_workspace_graphs(&[
             json!({
-                "workspace_graph_model_version": "workspace-graph-v8",
+                "workspace_graph_model_version": "workspace-graph-v9",
                 "artifact_lineage_model_version": "artifact-lineage-v1",
                 "lineage_model_version": "lineage-v2",
                 "truth_ranking": ["continuity_handoff"],
@@ -3461,7 +3682,7 @@ mod tests {
                 ]
             }),
             json!({
-                "workspace_graph_model_version": "workspace-graph-v8",
+                "workspace_graph_model_version": "workspace-graph-v9",
                 "artifact_lineage_model_version": "artifact-lineage-v1",
                 "lineage_model_version": "lineage-v2",
                 "truth_ranking": ["continuity_handoff"],
