@@ -227,8 +227,8 @@ manifest_path = "config/memory_task_matrix.toml"
 reproducibility_contract = "The same memory task cases on the same indexed state must produce the same canonical eval verdict classes, even when latency differs by machine."
 
 [science.suites.text_compare]
-suite_version = "text-compare-v1"
+suite_version = "text-compare-v2"
 dataset_version = "text-compare-cases-v1"
 query_suite_version = "text-compare-cases-v1"
 manifest_path = "fixtures/text_compare_cases.jsonl"
-reproducibility_contract = "The same cases file must produce the same hit/head-hit verdicts for the same indexed state."
+reproducibility_contract = "The same cases file must produce the same per-strategy canonical eval verdict classes for the same indexed state."

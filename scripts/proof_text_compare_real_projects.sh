@@ -124,5 +124,7 @@ grep -q '"text_compare"' "${output_file}"
 grep -q '"mean_precision"' "${output_file}"
 grep -q "\"${art_project_code}\"" "${output_file}"
 grep -q "\"${amai_project_code}\"" "${output_file}"
+jq -e '.text_compare.canonical_eval.eval_verdict_model_version == "memory-eval-verdict-v1"' "${output_file}" >/dev/null
+jq -e '.text_compare.canonical_eval.probes | length > 0' "${output_file}" >/dev/null
 
 echo "proof_text_compare_real_projects: ok"

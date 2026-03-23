@@ -17,7 +17,7 @@ use anyhow::{Context, Result, anyhow};
 use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1199,6 +1199,16 @@ struct StrategyOutcome {
     prompt_tokens: usize,
 }
 
+#[derive(Debug, Clone)]
+struct TextCompareEvalProbe {
+    name: String,
+    strategy: &'static str,
+    query: String,
+    verdict_class: String,
+    verdict_reason: String,
+    details: Value,
+}
+
 pub async fn run_text_compare(
     cfg: &AppConfig,
     db: &mut Client,
@@ -1234,6 +1244,7 @@ pub async fn run_text_compare(
     let mut semantic_tokens = Vec::with_capacity(cases.len());
     let mut naive_tokens = Vec::with_capacity(cases.len());
     let mut hybrid_savings_factors = Vec::with_capacity(cases.len());
+    let mut eval_probes = Vec::with_capacity(cases.len() * 3);
 
     for case in cases {
         let context = ContextPackArgs {
@@ -1283,6 +1294,9 @@ pub async fn run_text_compare(
         } else {
             naive_prompt_tokens as f64 / hybrid.prompt_tokens as f64
         };
+        let hybrid_eval = text_compare_eval_probe("hybrid", &case, &hybrid)?;
+        let lexical_eval = text_compare_eval_probe("lexical_only", &case, &lexical)?;
+        let semantic_eval = text_compare_eval_probe("semantic_only", &case, &semantic)?;
 
         hybrid_precisions.push(hybrid.precision);
         lexical_precisions.push(lexical.precision);
@@ -1298,6 +1312,9 @@ pub async fn run_text_compare(
         semantic_tokens.push(semantic.prompt_tokens as f64);
         naive_tokens.push(naive_prompt_tokens as f64);
         hybrid_savings_factors.push(hybrid_savings_factor);
+        eval_probes.push(hybrid_eval.clone());
+        eval_probes.push(lexical_eval.clone());
+        eval_probes.push(semantic_eval.clone());
 
         runs.push(json!({
             "query": case.query,
@@ -1309,9 +1326,9 @@ pub async fn run_text_compare(
                 "symbols": case.expected_symbols,
             },
             "strategies": {
-                "hybrid": strategy_to_json(&hybrid),
-                "lexical_only": strategy_to_json(&lexical),
-                "semantic_only": strategy_to_json(&semantic),
+                "hybrid": strategy_to_json(&hybrid, &hybrid_eval),
+                "lexical_only": strategy_to_json(&lexical, &lexical_eval),
+                "semantic_only": strategy_to_json(&semantic, &semantic_eval),
             },
             "token_budget": {
                 "hybrid_prompt_tokens": hybrid.prompt_tokens,
@@ -1338,6 +1355,7 @@ pub async fn run_text_compare(
     let mean_semantic_tokens = mean_f64(&semantic_tokens);
     let mean_naive_tokens = mean_f64(&naive_tokens);
     let mean_hybrid_savings_factor = mean_f64(&hybrid_savings_factors);
+    let canonical_eval = build_text_compare_canonical_eval(&eval_probes)?;
 
     let mut violations = Vec::new();
     if hybrid_hit_ratio < args.min_hybrid_hit_ratio {
@@ -1395,6 +1413,7 @@ pub async fn run_text_compare(
                 "naive": mean_naive_tokens,
             },
             "mean_hybrid_savings_factor_vs_naive": mean_hybrid_savings_factor,
+            "canonical_eval": canonical_eval,
             "runs": runs,
         },
         "retrieval_science": retrieval_science::suite_metadata("text_compare")?,
@@ -2097,7 +2116,7 @@ fn evaluate_strategy(
     }
 }
 
-fn strategy_to_json(outcome: &StrategyOutcome) -> Value {
+fn strategy_to_json(outcome: &StrategyOutcome, eval: &TextCompareEvalProbe) -> Value {
     json!({
         "precision": outcome.precision,
         "hit": outcome.hit,
@@ -2105,7 +2124,87 @@ fn strategy_to_json(outcome: &StrategyOutcome) -> Value {
         "total_items": outcome.total_items,
         "matched_items": outcome.matched_items,
         "prompt_tokens": outcome.prompt_tokens,
+        "eval_verdict_class": eval.verdict_class,
+        "eval_reason": eval.verdict_reason,
     })
+}
+
+fn text_compare_eval_probe(
+    strategy: &'static str,
+    case: &TextCompareCase,
+    outcome: &StrategyOutcome,
+) -> Result<TextCompareEvalProbe> {
+    let verdict = eval_verdict::derive_eval_verdict(
+        EvalPattern::RetrievalTarget,
+        &EvalSignals {
+            expected_present: Some(outcome.hit),
+            unexpected_present: outcome.total_items > outcome.matched_items,
+            has_expected_target: true,
+            ..EvalSignals::default()
+        },
+    )?;
+    Ok(TextCompareEvalProbe {
+        name: format!("{strategy}:{}", case.query),
+        strategy,
+        query: case.query.clone(),
+        verdict_class: verdict.class_key,
+        verdict_reason: verdict.reason,
+        details: json!({
+            "description": case.description,
+            "expected": {
+                "projects": case.expected_projects,
+                "paths": case.expected_paths,
+                "terms": case.expected_terms,
+                "symbols": case.expected_symbols,
+            },
+            "hit": outcome.hit,
+            "head_hit": outcome.head_hit,
+            "matched_items": outcome.matched_items,
+            "total_items": outcome.total_items,
+            "precision": outcome.precision,
+            "prompt_tokens": outcome.prompt_tokens,
+            "unexpected_present": outcome.total_items > outcome.matched_items,
+        }),
+    })
+}
+
+fn build_text_compare_canonical_eval(probes: &[TextCompareEvalProbe]) -> Result<Value> {
+    let mut summary = eval_verdict::summarize_eval_layer(
+        probes.iter().map(|probe| probe.verdict_class.as_str()),
+    )?;
+    let mut strategy_groups = BTreeMap::<&'static str, Vec<&TextCompareEvalProbe>>::new();
+    for probe in probes {
+        strategy_groups
+            .entry(probe.strategy)
+            .or_default()
+            .push(probe);
+    }
+    let mut strategy_breakdown = serde_json::Map::new();
+    for (strategy, probes) in strategy_groups {
+        strategy_breakdown.insert(
+            strategy.to_string(),
+            eval_verdict::summarize_eval_layer(
+                probes.iter().map(|probe| probe.verdict_class.as_str()),
+            )?,
+        );
+    }
+    summary["strategy_breakdown"] = Value::Object(strategy_breakdown);
+    summary["probes"] = json!(
+        probes
+            .iter()
+            .map(|probe| {
+                json!({
+                    "name": probe.name,
+                    "strategy": probe.strategy,
+                    "query": probe.query,
+                    "eval_verdict_class": probe.verdict_class,
+                    "eval_reason": probe.verdict_reason,
+                    "details": probe.details,
+                })
+            })
+            .collect::<Vec<_>>()
+    );
+    Ok(summary)
 }
 
 fn item_matches_text_compare_case(item: &Value, case: &TextCompareCase) -> bool {
@@ -2515,11 +2614,12 @@ fn precision_ratio(items: &Value, predicate: impl Fn(&Value) -> bool) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccuracyEvalProbe, TextCompareCase, build_accuracy_canonical_eval,
-        collect_visible_namespaces, count_foreign_hits, count_foreign_namespace_hits,
-        item_belongs_to_namespace, item_belongs_to_project, item_matches_text_compare_case,
-        payload_contains_text_hit, percentile_sample, precision_ratio, render_context_pack_prompt,
-        render_filtered_context_prompt, safe_lossy_prefix,
+        AccuracyEvalProbe, StrategyOutcome, TextCompareCase, build_accuracy_canonical_eval,
+        build_text_compare_canonical_eval, collect_visible_namespaces, count_foreign_hits,
+        count_foreign_namespace_hits, item_belongs_to_namespace, item_belongs_to_project,
+        item_matches_text_compare_case, payload_contains_text_hit, percentile_sample,
+        precision_ratio, render_context_pack_prompt, render_filtered_context_prompt,
+        safe_lossy_prefix, text_compare_eval_probe,
     };
     use proptest::prelude::*;
     use serde_json::json;
@@ -2603,6 +2703,106 @@ mod tests {
         assert_eq!(
             summary["probes"][2]["name"],
             json!("related_retrieval_target")
+        );
+    }
+
+    #[test]
+    fn text_compare_eval_probe_marks_noise_as_over_included() {
+        let case = TextCompareCase {
+            query: "alpha_runtime_summary".to_string(),
+            expected_projects: vec!["project_alpha".to_string()],
+            expected_paths: vec!["src/lib.rs".to_string()],
+            expected_terms: Vec::new(),
+            expected_symbols: vec!["alpha_runtime_summary".to_string()],
+            description: Some("alpha target".to_string()),
+        };
+        let probe = text_compare_eval_probe(
+            "hybrid",
+            &case,
+            &StrategyOutcome {
+                precision: 0.25,
+                hit: true,
+                head_hit: true,
+                total_items: 4,
+                matched_items: 1,
+                prompt_tokens: 82,
+            },
+        )
+        .expect("probe");
+        assert_eq!(probe.verdict_class, "over_included");
+        assert_eq!(probe.details["unexpected_present"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn text_compare_eval_probe_marks_wrong_target_when_results_miss_expected() {
+        let case = TextCompareCase {
+            query: "alpha_runtime_summary".to_string(),
+            expected_projects: vec!["project_alpha".to_string()],
+            expected_paths: vec!["src/lib.rs".to_string()],
+            expected_terms: Vec::new(),
+            expected_symbols: vec!["alpha_runtime_summary".to_string()],
+            description: None,
+        };
+        let probe = text_compare_eval_probe(
+            "semantic_only",
+            &case,
+            &StrategyOutcome {
+                precision: 0.0,
+                hit: false,
+                head_hit: false,
+                total_items: 1,
+                matched_items: 0,
+                prompt_tokens: 67,
+            },
+        )
+        .expect("probe");
+        assert_eq!(probe.verdict_class, "hit_wrong_target");
+    }
+
+    #[test]
+    fn text_compare_canonical_eval_keeps_strategy_breakdown() {
+        let case = TextCompareCase {
+            query: "shared_runtime_marker".to_string(),
+            expected_projects: vec!["project_alpha".to_string(), "project_beta".to_string()],
+            expected_paths: vec!["src/lib.rs".to_string()],
+            expected_terms: vec!["shared_runtime_marker".to_string()],
+            expected_symbols: Vec::new(),
+            description: Some("shared token".to_string()),
+        };
+        let summary = build_text_compare_canonical_eval(&[
+            text_compare_eval_probe(
+                "hybrid",
+                &case,
+                &StrategyOutcome {
+                    precision: 0.8,
+                    hit: true,
+                    head_hit: true,
+                    total_items: 10,
+                    matched_items: 8,
+                    prompt_tokens: 223,
+                },
+            )
+            .expect("hybrid probe"),
+            text_compare_eval_probe(
+                "semantic_only",
+                &case,
+                &StrategyOutcome {
+                    precision: 1.0,
+                    hit: true,
+                    head_hit: true,
+                    total_items: 2,
+                    matched_items: 2,
+                    prompt_tokens: 71,
+                },
+            )
+            .expect("semantic probe"),
+        ])
+        .expect("summary");
+        assert_eq!(summary["verdict_counts"]["over_included"].as_u64(), Some(1));
+        assert_eq!(
+            summary["strategy_breakdown"]["semantic_only"]["verdict_counts"]["hit_correct_target"]
+                .as_u64(),
+            Some(1)
         );
     }
 

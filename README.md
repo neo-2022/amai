@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 18:59 MSK
-Ручная сверка guide/docs: 2026-03-23 18:59 MSK
+modified_at: 2026-03-23 19:09 MSK
+Ручная сверка guide/docs: 2026-03-23 19:09 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1318,6 +1318,13 @@ cargo run --release -- observe guardrails
   - отдельные hostile visible/hit invariants по проекту и namespace;
   - versioned query suite и scoring rules для `verify accuracy`;
   - тот же `verify accuracy` теперь тоже пишет `canonical_eval` через тот же общий verdict layer, а не только raw precision/invariant числа.
+- [fixtures/text_compare_cases.jsonl](/home/art/agent-memory-index/fixtures/text_compare_cases.jsonl)
+  - versioned comparative retrieval quality suite для `verify text-compare`;
+  - теперь этот contour тоже пишет `canonical_eval`, а не только precision/hit ratio и token contour;
+  - по каждому кейсу и по каждой стратегии (`hybrid / lexical_only / semantic_only`) сохраняются:
+    - `eval_verdict_class`
+    - `eval_reason`;
+  - сверху строится общий `text_compare.canonical_eval` с `verdict_counts`, `strategy_breakdown` и probe-level details.
 
 В human dashboard это теперь видно отдельной service-card `Поведение при сбоях`.
 
@@ -1384,7 +1391,10 @@ cargo run --release -- verify degradation
 - не делает слепой full-index огромных repo только ради нескольких checks;
 - сначала строит точные allowlist-файлы из `fixtures/real_project_text_compare_cases.jsonl`;
 - затем индексирует `Art` и `Amai` только по этим exact relative paths через `index project --paths-file ...`;
-- после этого запускает `verify text-compare` уже на реальных локальных проектах, а не только на маленьких fixture-repo.
+- после этого запускает `verify text-compare` уже на реальных локальных проектах, а не только на маленьких fixture-repo;
+- и теперь дополнительно проверяет, что в output materialized canonical verdict layer:
+  - `text_compare.canonical_eval.eval_verdict_model_version`
+  - `text_compare.canonical_eval.probes`.
 
 ## Что означают ключевые слова
 

@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 18:59 MSK
-Ручная сверка guide/docs: 2026-03-23 18:59 MSK
+modified_at: 2026-03-23 19:09 MSK
+Ручная сверка guide/docs: 2026-03-23 19:09 MSK
 
 # Operations
 
@@ -1483,6 +1483,24 @@ cargo run -- verify text-compare \
   --retrieval-mode local_plus_related \
   --cases-file fixtures/text_compare_cases.jsonl
 ```
+
+Теперь этот contour пишет не только:
+- `mean_precision`
+- `case_hit_ratio`
+- `head_hit_ratio`
+- `mean_prompt_tokens`
+- `mean_hybrid_savings_factor_vs_naive`
+
+Но и один канонический eval-layer:
+- `text_compare.canonical_eval.verdict_counts`
+- `text_compare.canonical_eval.strategy_breakdown`
+- `text_compare.canonical_eval.probes[*].eval_verdict_class`
+- `runs[*].strategies.*.eval_verdict_class`
+
+Смысл этого слоя:
+- для каждого `case x strategy` verdict берётся из того же общего vocabulary `hit_correct_target / hit_wrong_target / stale_target / under_retrieved / over_included / recovered_useful / not_useful`;
+- `hybrid` и `lexical_only` здесь часто показывают `over_included`, если цель нашлась, но вместе с ней приехал лишний контекст;
+- `semantic_only` может показать `hit_wrong_target`, если retrieval что-то вернул, но нужная цель не попала в ответ.
 
 Или напрямую:
 

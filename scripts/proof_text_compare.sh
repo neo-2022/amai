@@ -16,6 +16,10 @@ grep -q '"hybrid"' /tmp/amai-text-compare.out
 grep -q '"lexical_only"' /tmp/amai-text-compare.out
 grep -q '"semantic_only"' /tmp/amai-text-compare.out
 grep -q '"mean_hybrid_savings_factor_vs_naive"' /tmp/amai-text-compare.out
+jq -e '.text_compare.canonical_eval.eval_verdict_model_version == "memory-eval-verdict-v1"' /tmp/amai-text-compare.out >/dev/null
+jq -e '.text_compare.canonical_eval.verdict_counts.over_included == 6' /tmp/amai-text-compare.out >/dev/null
+jq -e '.text_compare.canonical_eval.verdict_counts.hit_correct_target == 2' /tmp/amai-text-compare.out >/dev/null
+jq -e '.text_compare.canonical_eval.verdict_counts.hit_wrong_target == 1' /tmp/amai-text-compare.out >/dev/null
 
 rm -f /tmp/amai-text-compare.out
 
