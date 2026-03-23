@@ -739,6 +739,7 @@ fn populate_call_nodes(file: &mut FileAggregate, nodes: &Value) {
                     "enclosing_owner_kind": item["enclosing_owner_kind"].clone(),
                     "enclosing_owner_name": item["enclosing_owner_name"].clone(),
                     "enclosing_owner_path": item["enclosing_owner_path"].clone(),
+                    "enclosing_owner_path_canonical": item["enclosing_owner_path_canonical"].clone(),
                     "enclosing_trait_name": item["enclosing_trait_name"].clone(),
                     "enclosing_trait_name_canonical": item["enclosing_trait_name_canonical"].clone(),
                     "generic": item["generic"].clone(),
@@ -815,6 +816,7 @@ fn compact_symbol_metadata(metadata: &Value) -> Value {
         "owner_kind": metadata["owner_kind"].clone(),
         "owner_name": metadata["owner_name"].clone(),
         "owner_path": metadata["owner_path"].clone(),
+        "owner_path_canonical": metadata["owner_path_canonical"].clone(),
         "trait_name": metadata["trait_name"].clone(),
         "trait_name_canonical": metadata["trait_name_canonical"].clone(),
     })
@@ -862,6 +864,12 @@ fn canonicalize_symbol_trait_metadata(
         let Some(metadata) = symbol["metadata"].as_object_mut() else {
             continue;
         };
+        canonicalize_visible_selector_field(
+            metadata,
+            "owner_path",
+            "owner_path_canonical",
+            visible_trait_targets,
+        );
         canonicalize_trait_selector_field(
             metadata,
             "trait_name",
@@ -879,6 +887,12 @@ fn canonicalize_call_trait_metadata(
         let Some(call_object) = call.as_object_mut() else {
             continue;
         };
+        canonicalize_visible_selector_field(
+            call_object,
+            "enclosing_owner_path",
+            "enclosing_owner_path_canonical",
+            visible_trait_targets,
+        );
         canonicalize_trait_selector_field(
             call_object,
             "enclosing_trait_name",
@@ -889,6 +903,25 @@ fn canonicalize_call_trait_metadata(
 }
 
 fn canonicalize_trait_selector_field(
+    object: &mut serde_json::Map<String, Value>,
+    source_field: &str,
+    target_field: &str,
+    visible_trait_targets: &BTreeMap<String, BTreeSet<String>>,
+) {
+    let Some(selector) = object
+        .get(source_field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let Some(canonical) = canonicalize_rust_visible_path(selector, visible_trait_targets) else {
+        return;
+    };
+    object.insert(target_field.to_string(), json!(canonical));
+}
+
+fn canonicalize_visible_selector_field(
     object: &mut serde_json::Map<String, Value>,
     source_field: &str,
     target_field: &str,
@@ -1154,15 +1187,35 @@ fn build_graph_lookup(files: &BTreeMap<String, FileAggregate>) -> GraphLookup {
                 .entry((file_key.clone(), name.to_string()))
                 .or_default()
                 .push(symbol_node_id.to_string());
-            if let Some(owner_name) = symbol["metadata"]["owner_name"]
+            let owner_name = symbol["metadata"]["owner_name"]
                 .as_str()
-                .filter(|value| !value.is_empty())
-            {
-                lookup
-                    .owner_symbol_node_ids
-                    .entry((file_key.clone(), owner_name.to_string(), name.to_string()))
-                    .or_default()
-                    .push(symbol_node_id.to_string());
+                .filter(|value| !value.is_empty());
+            let owner_path = symbol["metadata"]["owner_path"]
+                .as_str()
+                .filter(|value| !value.is_empty());
+            let owner_path_canonical = symbol["metadata"]["owner_path_canonical"]
+                .as_str()
+                .filter(|value| !value.is_empty());
+            if owner_name.is_some() || owner_path.is_some() || owner_path_canonical.is_some() {
+                let mut owner_variants = BTreeSet::new();
+                if let Some(owner_name) = owner_name {
+                    owner_variants.insert(owner_name.to_string());
+                }
+                if let Some(owner_path) = owner_path {
+                    owner_variants.insert(owner_path.to_string());
+                }
+                if let Some(owner_path_canonical) = owner_path_canonical {
+                    owner_variants.insert(owner_path_canonical.to_string());
+                }
+                for owner_variant in owner_variants {
+                    let entry = lookup
+                        .owner_symbol_node_ids
+                        .entry((file_key.clone(), owner_variant, name.to_string()))
+                        .or_default();
+                    if !entry.iter().any(|existing| existing == symbol_node_id) {
+                        entry.push(symbol_node_id.to_string());
+                    }
+                }
             }
             if let Some(trait_name) = symbol["metadata"]["trait_name"]
                 .as_str()
@@ -1171,21 +1224,18 @@ fn build_graph_lookup(files: &BTreeMap<String, FileAggregate>) -> GraphLookup {
                 let trait_name_canonical = symbol["metadata"]["trait_name_canonical"]
                     .as_str()
                     .filter(|value| !value.is_empty());
-                let owner_name = symbol["metadata"]["owner_name"]
-                    .as_str()
-                    .filter(|value| !value.is_empty());
-                let owner_path = symbol["metadata"]["owner_path"]
-                    .as_str()
-                    .filter(|value| !value.is_empty());
                 let mut trait_variants = BTreeSet::new();
                 trait_variants.insert(trait_name.to_string());
                 if let Some(canonical) = trait_name_canonical {
                     trait_variants.insert(canonical.to_string());
                 }
                 for trait_variant in trait_variants {
-                    for (owner_selector, trait_selector) in
-                        trait_owner_selector_variants(owner_name, owner_path, &trait_variant)
-                    {
+                    for (owner_selector, trait_selector) in trait_owner_selector_variants(
+                        owner_name,
+                        owner_path,
+                        owner_path_canonical,
+                        &trait_variant,
+                    ) {
                         let entry = lookup
                             .trait_owner_symbol_node_ids
                             .entry((
@@ -1209,6 +1259,7 @@ fn build_graph_lookup(files: &BTreeMap<String, FileAggregate>) -> GraphLookup {
 fn trait_owner_selector_variants(
     owner_name: Option<&str>,
     owner_path: Option<&str>,
+    owner_path_canonical: Option<&str>,
     trait_name: &str,
 ) -> BTreeSet<(String, String)> {
     let mut variants = BTreeSet::new();
@@ -1220,6 +1271,13 @@ fn trait_owner_selector_variants(
     if let Some(owner_path) = owner_path.filter(|value| !value.is_empty()) {
         variants.insert((owner_path.to_string(), trait_name.to_string()));
         variants.insert((owner_path.to_string(), trait_terminal));
+    }
+    if let Some(owner_path_canonical) = owner_path_canonical.filter(|value| !value.is_empty()) {
+        variants.insert((owner_path_canonical.to_string(), trait_name.to_string()));
+        variants.insert((
+            owner_path_canonical.to_string(),
+            terminal_path_name(trait_name),
+        ));
     }
     variants
 }
@@ -1287,6 +1345,7 @@ fn resolve_call(
                         lookup,
                         imported_files,
                         local_owner_name,
+                        rust_visible_selectors,
                     )
                 })
         }
@@ -1351,19 +1410,22 @@ fn resolve_rust_owner_symbol_path_target(
     lookup: &GraphLookup,
     imported_files: Option<&BTreeSet<ScopedPathKey>>,
     local_owner_name: Option<&str>,
+    rust_visible_selectors: Option<&BTreeMap<String, BTreeSet<String>>>,
 ) -> Option<ReferenceResolution> {
     let (_, segments) = rust_reference_base_and_segments(&source_file.relative_path, path)?;
-    let [owner_name, symbol_name] = segments.as_slice() else {
+    if segments.len() < 2 {
         return None;
-    };
-    let effective_owner_name = if owner_name == "Self" {
-        local_owner_name?
+    }
+    let symbol_name = segments.last()?.as_str();
+    let owner_selector = segments[..segments.len() - 1].join("::");
+    let owner_candidates = if owner_selector == "Self" {
+        vec![local_owner_name?.to_string()]
     } else {
-        owner_name.as_str()
+        rust_selector_candidates(&owner_selector, rust_visible_selectors)
     };
-    resolve_rust_owned_symbol_name_target(
+    resolve_rust_owned_symbol_name_target_candidates(
         source_file,
-        effective_owner_name,
+        &owner_candidates,
         symbol_name,
         lookup,
         imported_files,
@@ -1447,6 +1509,22 @@ fn resolve_rust_owned_symbol_name_target(
     lookup: &GraphLookup,
     imported_files: Option<&BTreeSet<ScopedPathKey>>,
 ) -> Option<ReferenceResolution> {
+    resolve_rust_owned_symbol_name_target_candidates(
+        source_file,
+        &[owner_name.to_string()],
+        symbol_name,
+        lookup,
+        imported_files,
+    )
+}
+
+fn resolve_rust_owned_symbol_name_target_candidates(
+    source_file: &FileAggregate,
+    owner_selectors: &[String],
+    symbol_name: &str,
+    lookup: &GraphLookup,
+    imported_files: Option<&BTreeSet<ScopedPathKey>>,
+) -> Option<ReferenceResolution> {
     let source_key = scoped_path_key(
         &source_file.project_code,
         &source_file.namespace_code,
@@ -1459,17 +1537,33 @@ fn resolve_rust_owned_symbol_name_target(
     }
     let mut matches = Vec::<(ScopedPathKey, String)>::new();
     for candidate_file in candidate_files {
-        let symbol_key = (
-            candidate_file.clone(),
-            owner_name.to_string(),
-            symbol_name.to_string(),
-        );
-        match lookup.owner_symbol_node_ids.get(&symbol_key) {
-            Some(symbol_node_ids) if symbol_node_ids.len() == 1 => {
-                matches.push((candidate_file, symbol_node_ids[0].clone()));
+        let mut local_matches = BTreeSet::<String>::new();
+        for owner_selector in owner_selectors {
+            let symbol_key = (
+                candidate_file.clone(),
+                owner_selector.to_string(),
+                symbol_name.to_string(),
+            );
+            match lookup.owner_symbol_node_ids.get(&symbol_key) {
+                Some(symbol_node_ids) if symbol_node_ids.len() == 1 => {
+                    local_matches.insert(symbol_node_ids[0].clone());
+                }
+                Some(_) => return None,
+                None => {}
             }
-            Some(_) => return None,
-            None => {}
+        }
+        match local_matches.len() {
+            0 => {}
+            1 => {
+                matches.push((
+                    candidate_file,
+                    local_matches
+                        .into_iter()
+                        .next()
+                        .expect("single local owner match"),
+                ));
+            }
+            _ => return None,
         }
     }
     if matches.len() != 1 {
@@ -2745,6 +2839,160 @@ mod tests {
     }
 
     #[test]
+    fn context_pack_workspace_graph_resolves_owner_scoped_calls_through_module_alias_path() {
+        let context_pack_id = Uuid::parse_str("00000000-0000-0000-0000-000000000662").unwrap();
+        let graph = build_context_pack_workspace_graph(
+            &context_pack_id,
+            "type_mod::Beta::new",
+            "local_strict",
+            "scope-1",
+            &json!([{
+                "project_code": "project_alpha",
+                "namespace_code": "default"
+            }]),
+            &[DocumentHit {
+                project_code: "project_alpha".to_string(),
+                namespace_code: "default".to_string(),
+                repo_root: "/repo".to_string(),
+                relative_path: "src/lib.rs".to_string(),
+                language: Some("rust".to_string()),
+                source_kind: "git_tracked".to_string(),
+                git_commit_sha: Some("abc".to_string()),
+                score: 10.0,
+                snippet: "type_mod::Beta::new()".to_string(),
+            }],
+            &[],
+            &[],
+            &[],
+            &[
+                DocumentStructureRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/lib.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    structure: json!([
+                        {
+                            "kind": "function_item",
+                            "name": "new",
+                            "start_line": 4,
+                            "end_line": 6
+                        },
+                        {
+                            "kind": "function_item",
+                            "name": "runtime_summary",
+                            "start_line": 8,
+                            "end_line": 10
+                        }
+                    ]),
+                    imports: json!([{
+                        "kind": "use_declaration",
+                        "name": "crate::alpha",
+                        "text": "use crate::alpha as type_mod;",
+                        "start_line": 1,
+                        "end_line": 1
+                    }]),
+                    exports: json!([]),
+                    metadata: json!({
+                        "call_references": [{
+                            "kind": "call_expression",
+                            "call_style": "scoped_identifier",
+                            "callee_name": "new",
+                            "callee_path": "type_mod::Beta::new",
+                            "receiver_text": null,
+                            "generic": false,
+                            "start_line": 9,
+                            "end_line": 9,
+                            "text": "type_mod::Beta::new()"
+                        }]
+                    }),
+                },
+                DocumentStructureRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    structure: json!([{
+                        "kind": "struct_item",
+                        "name": "Beta",
+                        "start_line": 1,
+                        "end_line": 1
+                    }]),
+                    imports: json!([]),
+                    exports: json!([]),
+                    metadata: json!({"call_references":[]}),
+                },
+            ],
+            &[
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "Beta".to_string(),
+                    kind: "struct_item".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte: 0,
+                    end_byte: 16,
+                    metadata: json!({"language":"rust","node_kind":"struct_item","text":"pub struct Beta;"}),
+                },
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/lib.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "new".to_string(),
+                    kind: "function_item".to_string(),
+                    start_line: 4,
+                    end_line: 6,
+                    start_byte: 32,
+                    end_byte: 88,
+                    metadata: json!({
+                        "language":"rust",
+                        "node_kind":"function_item",
+                        "owner_kind":"impl_item",
+                        "owner_name":"Beta",
+                        "owner_path":"type_mod::Beta",
+                        "text":"impl type_mod::Beta { pub fn new() -> Self { Self } }"
+                    }),
+                },
+            ],
+        )
+        .expect("graph");
+        let edges = graph["edges"].as_array().expect("edges");
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("calls_symbol")
+                && edge["to_node_id"] == json!("symbol:project_alpha:default:src/lib.rs:new:4")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("resolves_call_symbol")
+                && edge["to_node_id"] == json!("symbol:project_alpha:default:src/lib.rs:new:4")
+        }));
+        let nodes = graph["nodes"].as_array().expect("nodes");
+        let target = nodes
+            .iter()
+            .find(|node| node["node_id"] == json!("symbol:project_alpha:default:src/lib.rs:new:4"))
+            .expect("target symbol");
+        assert_eq!(target["metadata"]["owner_path"], json!("type_mod::Beta"));
+        assert_eq!(
+            target["metadata"]["owner_path_canonical"],
+            json!("crate::alpha::Beta")
+        );
+    }
+
+    #[test]
     fn context_pack_workspace_graph_resolves_self_field_calls_inside_impl() {
         let context_pack_id = Uuid::parse_str("00000000-0000-0000-0000-000000000658").unwrap();
         let graph = build_context_pack_workspace_graph(
@@ -3667,7 +3915,7 @@ mod tests {
     fn merge_workspace_graphs_deduplicates_nodes_and_keeps_context_pack_lineage() {
         let merged = merge_workspace_graphs(&[
             json!({
-                "workspace_graph_model_version": "workspace-graph-v9",
+                "workspace_graph_model_version": "workspace-graph-v10",
                 "artifact_lineage_model_version": "artifact-lineage-v1",
                 "lineage_model_version": "lineage-v2",
                 "truth_ranking": ["continuity_handoff"],
@@ -3682,7 +3930,7 @@ mod tests {
                 ]
             }),
             json!({
-                "workspace_graph_model_version": "workspace-graph-v9",
+                "workspace_graph_model_version": "workspace-graph-v10",
                 "artifact_lineage_model_version": "artifact-lineage-v1",
                 "lineage_model_version": "lineage-v2",
                 "truth_ranking": ["continuity_handoff"],
