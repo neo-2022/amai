@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:32 MSK
-Ручная сверка guide/docs: 2026-03-23 22:32 MSK
+modified_at: 2026-03-23 22:39 MSK
+Ручная сверка guide/docs: 2026-03-23 22:39 MSK
 
 # Operations
 
@@ -636,6 +636,8 @@ cargo run -- mcp serve
 - `amai_observe_snapshot` теперь отдаёт наружу не только SLA summary, но и
   `observe_snapshot_summary.included_reasons_summary / excluded_reasons_summary`,
   чтобы клиентский слой видел причины включения и невключения последнего контекста.
+- `amai_token_report` теперь тоже отдаёт наружу `token_report_summary`, где уже
+  собраны `scope_label`, `status`, `counted_events / events_count` и `note`.
 
 ## MCP client config
 

@@ -799,15 +799,34 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
         args.include_verify_events,
     )
     .await?;
-    let headline = &payload["token_budget_report"]["headline"];
+    let token_summary = token_report_summary(&payload);
     let summary = format!(
-        "token report :: metric={} value_percent={:.3} saved_tokens={} events={}",
-        headline["metric_code"].as_str().unwrap_or("unknown"),
-        headline["value_percent"].as_f64().unwrap_or_default(),
-        headline["saved_tokens"].as_i64().unwrap_or_default(),
-        headline["events_count"].as_u64().unwrap_or_default(),
+        "token report :: metric={} scope={} status={} value_percent={:.3} saved_tokens={} counted={}/{} note={}",
+        token_summary.metric_code,
+        token_summary.scope_label,
+        token_summary.status,
+        token_summary.value_percent,
+        token_summary.saved_tokens,
+        token_summary.counted_events,
+        token_summary.events_count,
+        token_summary.note,
     );
-    Ok(tool_result(summary, payload))
+    Ok(tool_result(
+        summary,
+        json!({
+            "token_budget_report": payload["token_budget_report"].clone(),
+            "token_report_summary": {
+                "metric_code": token_summary.metric_code,
+                "scope_label": token_summary.scope_label,
+                "status": token_summary.status,
+                "value_percent": token_summary.value_percent,
+                "saved_tokens": token_summary.saved_tokens,
+                "events_count": token_summary.events_count,
+                "counted_events": token_summary.counted_events,
+                "note": token_summary.note,
+            }
+        }),
+    ))
 }
 
 async fn tool_observe_snapshot(cfg: &AppConfig) -> Result<Value> {
@@ -899,6 +918,38 @@ fn observe_snapshot_reason_summary(
         None
     } else {
         Some(parts.join(" • "))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TokenReportSummary {
+    metric_code: String,
+    scope_label: String,
+    status: String,
+    value_percent: f64,
+    saved_tokens: i64,
+    events_count: u64,
+    counted_events: u64,
+    note: String,
+}
+
+fn token_report_summary(payload: &Value) -> TokenReportSummary {
+    let headline = &payload["token_budget_report"]["headline"];
+    TokenReportSummary {
+        metric_code: headline["metric_code"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        scope_label: headline["scope_label"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        status: headline["status"].as_str().unwrap_or("unknown").to_string(),
+        value_percent: headline["value_percent"].as_f64().unwrap_or_default(),
+        saved_tokens: headline["saved_tokens"].as_i64().unwrap_or_default(),
+        events_count: headline["events_count"].as_u64().unwrap_or_default(),
+        counted_events: headline["counted_events"].as_u64().unwrap_or_default(),
+        note: headline["note"].as_str().unwrap_or("").to_string(),
     }
 }
 
@@ -1865,7 +1916,9 @@ fn default_warm_limit() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{McpConfigArgs, observe_snapshot_summary, render_client_config};
+    use super::{
+        McpConfigArgs, observe_snapshot_summary, render_client_config, token_report_summary,
+    };
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -1997,6 +2050,37 @@ mod tests {
         assert_eq!(
             summary.excluded_reasons_summary.as_deref(),
             Some("semantic_chunks — Semantic layer abstained.")
+        );
+    }
+
+    #[test]
+    fn token_report_summary_surfaces_scope_and_counting_semantics() {
+        let payload = json!({
+            "token_budget_report": {
+                "headline": {
+                    "metric_code": "verified_effective_savings_pct",
+                    "scope_label": "окно Обычная рабочая машина",
+                    "status": "pass",
+                    "value_percent": 99.48,
+                    "saved_tokens": 6923645,
+                    "events_count": 120,
+                    "counted_events": 75,
+                    "note": "Это главный честный KPI: live-only, quality-gated и с учётом recovery."
+                }
+            }
+        });
+
+        let summary = token_report_summary(&payload);
+        assert_eq!(summary.metric_code, "verified_effective_savings_pct");
+        assert_eq!(summary.scope_label, "окно Обычная рабочая машина");
+        assert_eq!(summary.status, "pass");
+        assert_eq!(summary.value_percent, 99.48);
+        assert_eq!(summary.saved_tokens, 6923645);
+        assert_eq!(summary.events_count, 120);
+        assert_eq!(summary.counted_events, 75);
+        assert_eq!(
+            summary.note,
+            "Это главный честный KPI: live-only, quality-gated и с учётом recovery."
         );
     }
 }
