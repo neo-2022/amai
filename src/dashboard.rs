@@ -3826,12 +3826,102 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
         nats_card = with_status_tooltip(nats_card, &tooltip);
     }
 
+    let degradation_card = build_degradation_model_card(snapshot);
+
     vec![
         postgres_card,
         qdrant_live_card,
         benchmark_qdrant_card,
         nats_card,
+        degradation_card,
     ]
+}
+
+fn build_degradation_model_card(snapshot: &Value) -> Value {
+    let model = &snapshot["degradation_model"];
+    if !model.is_object() {
+        return with_status_tooltip(
+            card_with_rows(
+                "Поведение при сбоях",
+                "ещё нет данных".to_string(),
+                "Пока панель не собрала machine-readable карту того, как Amai должен вести себя при частичных поломках и устаревании данных.".to_string(),
+                "unknown",
+                Some("Источник: retrieval science policy + latest verification snapshots".to_string()),
+                Some("Показывает, что Amai должен делать, если часть системы сломалась, устарела или вернула неполные данные. Здесь видны не только обещания policy, но и последние доказательства по каждому классу сбоя.".to_string()),
+                vec![],
+            ),
+            "Статус пока не может считаться нормальным по следующим причинам:\n- Degradation model ещё не попал в системный snapshot.\n- Пока панель не видит, какие классы уже подтверждены свежим proof, а какие остаются только policy.",
+        );
+    }
+
+    let summary = &model["summary"];
+    let pass = summary["pass"].as_u64().unwrap_or(0);
+    let critical = summary["critical"].as_u64().unwrap_or(0);
+    let unknown = summary["unknown"].as_u64().unwrap_or(0);
+    let fail_closed_total = summary["fail_closed_total"].as_u64().unwrap_or(0);
+    let graceful_total = summary["graceful_fallback_total"].as_u64().unwrap_or(0);
+    let fail_closed_verified = degradation_status_count(model, Some("fail_closed"), "pass");
+    let graceful_verified = degradation_status_count(model, Some("graceful_fallback"), "pass");
+    let evidence_gaps = summary["evidence_gaps"].as_u64().unwrap_or(0);
+    let status = summary["status"].as_str().unwrap_or("unknown");
+    let headline = format!(
+        "{} из {} классов подтверждены",
+        pass,
+        fail_closed_total + graceful_total
+    );
+    let truth_ranking = compact_truth_ranking(model["truth_ranking"].as_array());
+    let mut card = card_with_rows(
+        "Поведение при сбоях",
+        headline,
+        format!(
+            "Это честная карта поведения Amai при частичных поломках, устаревании и неполных данных. Сейчас свежим machine-readable proof подтверждены {} из {} классов; без свежего доказательства пока остаются {}.",
+            pass,
+            fail_closed_total + graceful_total,
+            evidence_gaps
+        ),
+        status,
+        Some(source_label(
+            "Источник: retrieval science policy + последние accuracy / working-state snapshots. Карточка показывает не только policy, но и последний известный proof или gap по каждому классу.",
+            newest_degradation_evidence_epoch_ms(model),
+        )),
+        Some("Показывает, что Amai должен делать, если часть системы сломалась, устарела или вернула неполные данные. Здесь видно, какие классы уже подтверждены свежим доказательством, а какие пока описаны только как policy.".to_string()),
+        vec![
+            metric_row(
+                "Жёсткая защита",
+                format!("{fail_closed_verified} из {fail_closed_total} подтверждены"),
+                Some("Классы, где Amai обязан fail-closed: не угадывать и не подмешивать чужой контур."),
+            ),
+            metric_row(
+                "Мягкий откат",
+                format!("{graceful_verified} из {graceful_total} подтверждены"),
+                Some("Классы, где Amai должен сохранить безопасный ответный путь даже при частичной поломке."),
+            ),
+            metric_row(
+                "Без свежего доказательства",
+                format_u64(Some(evidence_gaps)),
+                Some("Сколько классов уже описаны в policy, но ещё не подтверждены свежим machine-readable proof."),
+            ),
+            metric_row(
+                "Сломано сейчас",
+                format_u64(Some(critical)),
+                Some("Сколько классов сейчас провалили последний известный proof."),
+            ),
+            metric_row(
+                "Порядок истины",
+                truth_ranking,
+                Some("Какой слой Amai считает более надёжным, если несколько источников спорят друг с другом."),
+            ),
+            metric_row(
+                "Неизвестно сейчас",
+                format_u64(Some(unknown)),
+                Some("Сколько классов сейчас остаются в неизвестном состоянии, потому что свежего доказательства ещё нет."),
+            ),
+        ],
+    );
+    if let Some(tooltip) = degradation_model_status_tooltip(model) {
+        card = with_status_tooltip(card, &tooltip);
+    }
+    card
 }
 
 fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
@@ -3975,6 +4065,57 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
         "title_tooltip": Some("Это отдельный инстанс Qdrant для внешнего benchmark-прогона. Он не должен смешиваться с основным Qdrant Amai.".to_string()),
         "rows": rows,
     })
+}
+
+fn degradation_status_count(model: &Value, mode: Option<&str>, status: &str) -> u64 {
+    model["classes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["status"].as_str() == Some(status))
+        .filter(|item| mode.map_or(true, |value| item["mode"].as_str() == Some(value)))
+        .count() as u64
+}
+
+fn newest_degradation_evidence_epoch_ms(model: &Value) -> Option<u64> {
+    model["classes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["last_evidence_at_epoch_ms"].as_u64())
+        .max()
+}
+
+fn compact_truth_ranking(ranking: Option<&Vec<Value>>) -> String {
+    let items = ranking
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|item| item.replace('_', " "))
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return "ещё нет данных".to_string();
+    }
+    items.into_iter().take(3).collect::<Vec<_>>().join(" -> ")
+}
+
+fn degradation_model_status_tooltip(model: &Value) -> Option<String> {
+    let status = model["summary"]["status"].as_str().unwrap_or("unknown");
+    let mut reasons = Vec::new();
+    for class in model["classes"].as_array().into_iter().flatten() {
+        let class_status = class["status"].as_str().unwrap_or("unknown");
+        if class_status == "pass" {
+            continue;
+        }
+        let title = class["title"].as_str().unwrap_or("Без названия");
+        let reason = class["reason"].as_str().unwrap_or("ещё нет деталей");
+        reasons.push(format!("{title}: {reason}"));
+    }
+    status_reason_tooltip(
+        status,
+        reasons,
+        "Часть классов деградации пока не подтверждена свежим proof или уже вышла из безопасной нормы.",
+    )
 }
 
 fn benchmark_qdrant_status_tooltip(snapshot: &Value) -> Option<String> {
@@ -5814,9 +5955,10 @@ fn human_elapsed_ms(value_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        benchmark_qdrant_live_card, browser_base_url, build_benchmark_cards, build_hero_cards,
-        build_links, build_machine_cards, build_top_cards, format_ms, format_time_compare_pair,
-        human_elapsed_ms, live_latency_compare_card, monitoring_url, worst_status,
+        benchmark_qdrant_live_card, browser_base_url, build_benchmark_cards,
+        build_degradation_model_card, build_hero_cards, build_links, build_machine_cards,
+        build_top_cards, format_ms, format_time_compare_pair, human_elapsed_ms,
+        live_latency_compare_card, monitoring_url, worst_status,
     };
     use serde_json::json;
 
@@ -6503,6 +6645,64 @@ mod tests {
         assert_eq!(
             cleanup_card["rows"][2]["value"].as_str(),
             Some("46.96 GiB (30, aggressive)")
+        );
+    }
+
+    #[test]
+    fn degradation_card_surfaces_policy_gaps_without_fake_green_status() {
+        let snapshot = json!({
+            "degradation_model": {
+                "summary": {
+                    "status": "unknown",
+                    "pass": 2,
+                    "critical": 0,
+                    "unknown": 9,
+                    "fail_closed_total": 5,
+                    "graceful_fallback_total": 6,
+                    "evidence_gaps": 9
+                },
+                "truth_ranking": [
+                    "continuity_handoff",
+                    "working_state_restore",
+                    "live_context_pack"
+                ],
+                "classes": [
+                    {
+                        "class_key": "cross_project_scope",
+                        "title": "Чужой проект",
+                        "mode": "fail_closed",
+                        "status": "pass",
+                        "reason": "Proof passed."
+                    },
+                    {
+                        "class_key": "stale_handoff",
+                        "title": "Устаревший handoff",
+                        "mode": "graceful_fallback",
+                        "status": "unknown",
+                        "reason": "Fresh proof is missing.",
+                        "last_evidence_at_epoch_ms": 42
+                    }
+                ]
+            }
+        });
+
+        let card = build_degradation_model_card(&snapshot);
+        assert_eq!(card["title"], json!("Поведение при сбоях"));
+        assert_eq!(card["status"], json!("unknown"));
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("без свежего доказательства")
+        );
+        assert_eq!(card["rows"][0]["value"], json!("1 из 5 подтверждены"));
+        assert_eq!(card["rows"][1]["value"], json!("0 из 6 подтверждены"));
+        assert_eq!(card["rows"][2]["value"], json!("9"));
+        assert!(
+            card["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Устаревший handoff")
         );
     }
 

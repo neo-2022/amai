@@ -1,7 +1,7 @@
 use crate::config::{AppConfig, discover_repo_root};
 use crate::{
-    artifact_cleanup, dashboard, external_benchmark, nats, observability_policy, postgres, s3,
-    token_budget,
+    artifact_cleanup, dashboard, external_benchmark, nats, observability_policy, postgres,
+    retrieval_science, s3, token_budget,
 };
 use anyhow::{Context, Result, anyhow};
 use axum::{
@@ -653,6 +653,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "token_budget_report": token_budget_report,
         "artifact_cleanup": artifact_cleanup_summary["artifact_cleanup"].clone(),
     });
+    let degradation_model = build_degradation_model(&payload)?;
     let sla = evaluate_sla(&payload, &profile);
     let snapshot = json!({
         "captured_at_epoch_ms": captured_at_epoch_ms,
@@ -676,12 +677,283 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
         "token_budget_report": payload["token_budget_report"].clone(),
         "artifact_cleanup": payload["artifact_cleanup"].clone(),
+        "degradation_model": degradation_model,
         "sla": sla,
     });
     if persist_snapshot {
         let _ = postgres::insert_observability_snapshot(&db, "system_snapshot", &snapshot).await?;
     }
     Ok(snapshot)
+}
+
+fn build_degradation_model(payload: &Value) -> Result<Value> {
+    let entries = retrieval_science::degradation_matrix_entries()?;
+    let matrix_json = retrieval_science::degradation_matrix_json()?;
+    let truth_ranking = matrix_json
+        .get("truth_ranking")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
+    let classes = entries
+        .into_iter()
+        .map(|(class_key, entry)| evaluate_degradation_class(payload, &class_key, &entry))
+        .collect::<Vec<_>>();
+
+    let fail_closed_total = classes
+        .iter()
+        .filter(|item| item["mode"].as_str() == Some("fail_closed"))
+        .count() as u64;
+    let graceful_total = classes
+        .iter()
+        .filter(|item| item["mode"].as_str() == Some("graceful_fallback"))
+        .count() as u64;
+    let pass = classes
+        .iter()
+        .filter(|item| item["status"].as_str() == Some("pass"))
+        .count() as u64;
+    let critical = classes
+        .iter()
+        .filter(|item| item["status"].as_str() == Some("critical"))
+        .count() as u64;
+    let unknown = classes
+        .iter()
+        .filter(|item| item["status"].as_str() == Some("unknown"))
+        .count() as u64;
+    let evidence_gaps = classes
+        .iter()
+        .filter(|item| item["evidence_gap"].as_bool() == Some(true))
+        .count() as u64;
+    let overall_status = if critical > 0 {
+        "critical"
+    } else if unknown > 0 {
+        "unknown"
+    } else {
+        "pass"
+    };
+
+    Ok(json!({
+        "policy_version": matrix_json["policy_version"].clone(),
+        "truth_ranking": truth_ranking,
+        "summary": {
+            "status": overall_status,
+            "pass": pass,
+            "critical": critical,
+            "unknown": unknown,
+            "fail_closed_total": fail_closed_total,
+            "graceful_fallback_total": graceful_total,
+            "evidence_gaps": evidence_gaps,
+        },
+        "classes": classes,
+    }))
+}
+
+fn evaluate_degradation_class(
+    payload: &Value,
+    class_key: &str,
+    entry: &retrieval_science::DegradationMatrixEntry,
+) -> Value {
+    match class_key {
+        "cross_project_scope" => evaluate_accuracy_degradation_class(
+            payload,
+            class_key,
+            entry,
+            "cross_project_leakage",
+            &[
+                "strict_local_visible_projects_only",
+                "strict_local_hits_do_not_leak_projects",
+                "hostile_mixed_query_fail_closed",
+            ],
+            "Последний accuracy / isolation прогон подтвердил zero leakage между проектами.",
+        ),
+        "cross_namespace_scope" => evaluate_accuracy_degradation_class(
+            payload,
+            class_key,
+            entry,
+            "cross_namespace_leakage",
+            &["namespace_strict_fail_closed"],
+            "Последний accuracy / isolation прогон подтвердил zero leakage между namespace.",
+        ),
+        _ => evaluate_policy_gap_class(payload, class_key, entry),
+    }
+}
+
+fn evaluate_accuracy_degradation_class(
+    payload: &Value,
+    class_key: &str,
+    entry: &retrieval_science::DegradationMatrixEntry,
+    leakage_key: &str,
+    invariant_names: &[&str],
+    success_reason: &str,
+) -> Value {
+    let accuracy = &payload["latest_retrieval_accuracy"]["accuracy_verification"];
+    if !accuracy.is_object() {
+        return degradation_class_value(
+            class_key,
+            entry,
+            "unknown",
+            "Свежий accuracy / isolation verification ещё не записан.",
+            None,
+            None,
+            true,
+        );
+    }
+    let captured_at = accuracy["captured_at_epoch_ms"].as_u64();
+    let leakage = accuracy[leakage_key]
+        .as_f64()
+        .or_else(|| accuracy[leakage_key].as_u64().map(|value| value as f64))
+        .unwrap_or(0.0);
+    let invariants = invariant_names
+        .iter()
+        .map(|name| {
+            (
+                *name,
+                accuracy["formal_invariants"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|item| item["name"].as_str() == Some(*name))
+                    .and_then(|item| item["pass"].as_bool()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let missing = invariants
+        .iter()
+        .filter(|(_, pass)| pass.is_none())
+        .map(|(name, _)| (*name).to_string())
+        .collect::<Vec<_>>();
+    let failed = invariants
+        .iter()
+        .filter_map(|(name, pass)| {
+            if pass == &Some(false) {
+                Some((*name).to_string())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if leakage > 0.0 || !failed.is_empty() {
+        let mut reasons = Vec::new();
+        if leakage > 0.0 {
+            reasons.push(format!("observed leakage = {}", leakage));
+        }
+        if !failed.is_empty() {
+            reasons.push(format!("formal invariants failed: {}", failed.join(", ")));
+        }
+        return degradation_class_value(
+            class_key,
+            entry,
+            "critical",
+            &format!("Последний proof поймал нарушение: {}.", reasons.join("; ")),
+            Some("retrieval_accuracy"),
+            captured_at,
+            false,
+        );
+    }
+
+    if !missing.is_empty() {
+        return degradation_class_value(
+            class_key,
+            entry,
+            "unknown",
+            &format!(
+                "Последний accuracy proof неполный: не хватает formal invariants {}.",
+                missing.join(", ")
+            ),
+            Some("retrieval_accuracy"),
+            captured_at,
+            true,
+        );
+    }
+
+    degradation_class_value(
+        class_key,
+        entry,
+        "pass",
+        success_reason,
+        Some("retrieval_accuracy"),
+        captured_at,
+        false,
+    )
+}
+
+fn evaluate_policy_gap_class(
+    payload: &Value,
+    class_key: &str,
+    entry: &retrieval_science::DegradationMatrixEntry,
+) -> Value {
+    let working_state = &payload["latest_working_state_restore"]["working_state_restore"];
+    if class_key == "stale_handoff" && working_state.is_object() {
+        let freshness = working_state["restore_freshness_state"]
+            .as_str()
+            .unwrap_or("ещё нет данных");
+        return degradation_class_value(
+            class_key,
+            entry,
+            "unknown",
+            &format!(
+                "Текущий рабочий снимок уже умеет помечать freshness = {freshness}, но отдельный degradation proof для этого класса ещё не записан."
+            ),
+            Some("working_state_restore"),
+            working_state["captured_at_epoch_ms"].as_u64(),
+            true,
+        );
+    }
+
+    if class_key == "working_state_conflict" && working_state.is_object() {
+        let confidence = working_state["restore_confidence"]
+            .as_str()
+            .unwrap_or("ещё нет данных");
+        return degradation_class_value(
+            class_key,
+            entry,
+            "unknown",
+            &format!(
+                "Текущий рабочий снимок уже даёт confidence = {confidence}, но отдельный conflict-proof для этого класса ещё не записан."
+            ),
+            Some("working_state_restore"),
+            working_state["captured_at_epoch_ms"].as_u64(),
+            true,
+        );
+    }
+
+    degradation_class_value(
+        class_key,
+        entry,
+        "unknown",
+        &format!(
+            "Этот класс уже описан в policy, но свежий machine-readable proof через '{}' пока не materialized.",
+            entry.evidence_source
+        ),
+        None,
+        None,
+        true,
+    )
+}
+
+fn degradation_class_value(
+    class_key: &str,
+    entry: &retrieval_science::DegradationMatrixEntry,
+    status: &str,
+    reason: &str,
+    last_evidence_kind: Option<&str>,
+    last_evidence_at_epoch_ms: Option<u64>,
+    evidence_gap: bool,
+) -> Value {
+    json!({
+        "class_key": class_key,
+        "title": entry.title,
+        "mode": entry.mode,
+        "summary": entry.summary,
+        "expected_behavior": entry.expected_behavior,
+        "user_signal": entry.user_signal,
+        "evidence_source": entry.evidence_source,
+        "runbook": entry.runbook,
+        "status": status,
+        "reason": reason,
+        "last_evidence_kind": last_evidence_kind,
+        "last_evidence_at_epoch_ms": last_evidence_at_epoch_ms,
+        "evidence_gap": evidence_gap,
+    })
 }
 
 async fn latest_clean_benchmark_snapshot(
@@ -2488,6 +2760,42 @@ fn render_prometheus_metrics(snapshot: &Value) -> String {
         "Count of SLA checks currently unknown.",
         snapshot["sla"]["summary"]["unknown"].as_f64(),
     );
+    push_metric(
+        &mut output,
+        "amai_degradation_pass_total",
+        "Count of degradation classes with fresh passing evidence.",
+        snapshot["degradation_model"]["summary"]["pass"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_degradation_critical_total",
+        "Count of degradation classes currently failing their last known proof.",
+        snapshot["degradation_model"]["summary"]["critical"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_degradation_unknown_total",
+        "Count of degradation classes without fresh machine-readable proof.",
+        snapshot["degradation_model"]["summary"]["unknown"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_degradation_fail_closed_total",
+        "Count of fail-closed degradation classes in the current policy.",
+        snapshot["degradation_model"]["summary"]["fail_closed_total"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_degradation_graceful_fallback_total",
+        "Count of graceful-fallback degradation classes in the current policy.",
+        snapshot["degradation_model"]["summary"]["graceful_fallback_total"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_degradation_evidence_gaps_total",
+        "Count of degradation classes that still lack fresh machine-readable proof.",
+        snapshot["degradation_model"]["summary"]["evidence_gaps"].as_f64(),
+    );
 
     output
 }
@@ -2532,8 +2840,9 @@ fn push_metric(output: &mut String, name: &str, help: &str, value: Option<f64>) 
 #[cfg(test)]
 mod tests {
     use super::{
-        benchmark_contamination_value, evaluate_sla, expired_retention_candidates, load_profile,
-        profile_thresholds_json, render_prometheus_metrics, select_latest_clean_benchmark_snapshot,
+        benchmark_contamination_value, build_degradation_model, evaluate_sla,
+        expired_retention_candidates, load_profile, profile_thresholds_json,
+        render_prometheus_metrics, select_latest_clean_benchmark_snapshot,
     };
     use crate::postgres::ObservabilityRetentionCandidate;
     use serde_json::json;
@@ -2591,6 +2900,16 @@ mod tests {
                     "critical": 0.0,
                     "unknown": 0.0
                 }
+            },
+            "degradation_model": {
+                "summary": {
+                    "pass": 2.0,
+                    "critical": 0.0,
+                    "unknown": 9.0,
+                    "fail_closed_total": 5.0,
+                    "graceful_fallback_total": 6.0,
+                    "evidence_gaps": 9.0
+                }
             }
         });
 
@@ -2600,6 +2919,58 @@ mod tests {
         assert!(output.contains("amai_tokens_raw_saved_session_total 90"));
         assert!(output.contains("amai_tokens_quality_ok_rate_lifetime 90"));
         assert!(output.contains("amai_tokens_answer_like_rate_window 40"));
+        assert!(output.contains("amai_degradation_unknown_total 9"));
+        assert!(output.contains("amai_degradation_fail_closed_total 5"));
+        assert!(output.contains("amai_degradation_graceful_fallback_total 6"));
+    }
+
+    #[test]
+    fn degradation_model_reports_proven_and_gap_classes_honestly() {
+        let payload = json!({
+            "latest_retrieval_accuracy": {
+                "accuracy_verification": {
+                    "captured_at_epoch_ms": 100,
+                    "cross_project_leakage": 0,
+                    "cross_namespace_leakage": 0,
+                    "formal_invariants": [
+                        { "name": "strict_local_visible_projects_only", "pass": true },
+                        { "name": "strict_local_hits_do_not_leak_projects", "pass": true },
+                        { "name": "hostile_mixed_query_fail_closed", "pass": true },
+                        { "name": "namespace_strict_fail_closed", "pass": true }
+                    ]
+                }
+            },
+            "latest_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 200,
+                    "restore_freshness_state": "fresh",
+                    "restore_confidence": "medium"
+                }
+            }
+        });
+
+        let model = build_degradation_model(&payload).expect("degradation model");
+        assert_eq!(model["summary"]["pass"], json!(2));
+        assert_eq!(model["summary"]["unknown"], json!(9));
+        assert_eq!(model["summary"]["evidence_gaps"], json!(9));
+
+        let classes = model["classes"].as_array().expect("classes");
+        let cross_project = classes
+            .iter()
+            .find(|item| item["class_key"].as_str() == Some("cross_project_scope"))
+            .expect("cross_project_scope");
+        assert_eq!(cross_project["status"], json!("pass"));
+
+        let stale_handoff = classes
+            .iter()
+            .find(|item| item["class_key"].as_str() == Some("stale_handoff"))
+            .expect("stale_handoff");
+        assert_eq!(stale_handoff["status"], json!("unknown"));
+        assert_eq!(
+            stale_handoff["last_evidence_kind"],
+            json!("working_state_restore")
+        );
+        assert_eq!(stale_handoff["evidence_gap"], json!(true));
     }
 
     #[test]

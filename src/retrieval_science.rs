@@ -25,6 +25,8 @@ pub struct RetrievalSciencePolicy {
     pub graceful_fallback_classes: Vec<String>,
     pub execution_states: Vec<String>,
     #[serde(default)]
+    pub degradation_matrix: BTreeMap<String, DegradationMatrixEntry>,
+    #[serde(default)]
     pub suites: BTreeMap<String, RetrievalScienceSuite>,
 }
 
@@ -35,6 +37,17 @@ pub struct RetrievalScienceSuite {
     pub query_suite_version: String,
     pub manifest_path: String,
     pub reproducibility_contract: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DegradationMatrixEntry {
+    pub title: String,
+    pub mode: String,
+    pub summary: String,
+    pub expected_behavior: String,
+    pub user_signal: String,
+    pub evidence_source: String,
+    pub runbook: String,
 }
 
 static POLICY: OnceLock<Result<RetrievalSciencePolicy, String>> = OnceLock::new();
@@ -103,6 +116,40 @@ pub fn degradation_policy_json() -> Result<Value> {
     }))
 }
 
+pub fn degradation_matrix_entries() -> Result<Vec<(String, DegradationMatrixEntry)>> {
+    let policy = load_policy()?;
+    Ok(policy
+        .degradation_matrix
+        .iter()
+        .map(|(class_key, entry)| (class_key.clone(), entry.clone()))
+        .collect())
+}
+
+pub fn degradation_matrix_json() -> Result<Value> {
+    let policy = load_policy()?;
+    let classes = policy
+        .degradation_matrix
+        .iter()
+        .map(|(class_key, entry)| {
+            json!({
+                "class_key": class_key,
+                "title": entry.title,
+                "mode": entry.mode,
+                "summary": entry.summary,
+                "expected_behavior": entry.expected_behavior,
+                "user_signal": entry.user_signal,
+                "evidence_source": entry.evidence_source,
+                "runbook": entry.runbook,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "policy_version": policy.degradation_policy_version,
+        "truth_ranking": policy.truth_ranking,
+        "classes": classes,
+    }))
+}
+
 pub fn execution_state_catalog_json() -> Result<Value> {
     let policy = load_policy()?;
     Ok(json!({
@@ -115,7 +162,10 @@ pub fn execution_state_catalog_json() -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{degradation_policy_json, execution_state_catalog_json, suite_metadata};
+    use super::{
+        degradation_matrix_json, degradation_policy_json, execution_state_catalog_json,
+        suite_metadata,
+    };
 
     #[test]
     fn suite_metadata_loads_known_suite() {
@@ -155,6 +205,22 @@ mod tests {
                 .expect("array")
                 .iter()
                 .any(|item| item.as_str() == Some("superseded"))
+        );
+    }
+
+    #[test]
+    fn degradation_matrix_exposes_cross_project_contract() {
+        let matrix = degradation_matrix_json().expect("degradation matrix");
+        let classes = matrix["classes"].as_array().expect("classes");
+        let cross_project = classes
+            .iter()
+            .find(|entry| entry["class_key"].as_str() == Some("cross_project_scope"))
+            .expect("cross project entry");
+        assert_eq!(cross_project["mode"].as_str(), Some("fail_closed"));
+        assert!(
+            cross_project["summary"]
+                .as_str()
+                .is_some_and(|value| value.contains("чужого проекта"))
         );
     }
 }

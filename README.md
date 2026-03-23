@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 09:00 MSK
-Ручная сверка guide/docs: 2026-03-23 09:00 MSK
+modified_at: 2026-03-23 11:20 MSK
+Ручная сверка guide/docs: 2026-03-23 11:20 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1289,11 +1289,22 @@ cargo run --release -- observe guardrails
 - [config/retrieval_science.toml](/home/art/agent-memory-index/config/retrieval_science.toml)
   - версии methodology/scoring/degradation/execution-state/lineage;
   - фиксированные suite-version для hot/cold/load/accuracy/token/text-compare;
-  - truth ranking и политика `same input -> same verdict`.
+  - truth ranking и политика `same input -> same verdict`;
+  - machine-readable degradation matrix:
+    - какие классы должны fail-closed;
+    - какие должны уходить в безопасный мягкий откат;
+    - какой proof/runbook закреплён за каждым классом.
 - [config/red_team_retrieval_isolation.toml](/home/art/agent-memory-index/config/red_team_retrieval_isolation.toml)
   - фиксированный red-team retrieval isolation contour для `project_alpha/project_beta`;
   - hostile mixed query;
   - versioned query suite и scoring rules для `verify accuracy`.
+
+В human dashboard это теперь видно отдельной service-card `Поведение при сбоях`.
+
+Она показывает не только сам policy, но и:
+- сколько классов уже подтверждены свежим machine-readable proof;
+- сколько пока остаются только policy и честно помечены как evidence gap;
+- какой порядок истины действует, если несколько слоёв спорят друг с другом.
 
 Если нужен уже не короткий smoke, а честный end-to-end cold contour на большом real-repo pool:
 

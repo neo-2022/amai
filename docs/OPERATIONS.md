@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 09:00 MSK
-Ручная сверка guide/docs: 2026-03-23 09:00 MSK
+modified_at: 2026-03-23 11:20 MSK
+Ручная сверка guide/docs: 2026-03-23 11:20 MSK
 
 # Operations
 
@@ -820,6 +820,11 @@ cargo run --release -- verify accuracy \
   - `degradation_policy`;
   - versioned suite metadata из `config/red_team_retrieval_isolation.toml`.
 
+Эти данные теперь используются ещё и как живое evidence для `degradation_model`:
+- `cross_project_scope` считается подтверждённым только если zero leakage и проходят все нужные `formal_invariants`;
+- `cross_namespace_scope` считается подтверждённым только если zero leakage и проходит `namespace_strict_fail_closed`;
+- если proof неполный или snapshot отсутствует, класс честно остаётся в `unknown`, а не красится в зелёный.
+
 ## Load proof
 
 ```bash
@@ -844,6 +849,25 @@ cargo run --release -- verify load \
 - выдаёт `qps`, `error_rate`, `p50/p95/p99/max`;
 - сохраняет snapshot `retrieval_load_hot`;
 - теперь тоже stamp-ит `retrieval_science` и `degradation_policy`, чтобы результат был воспроизводимым и machine-readable.
+
+## Degradation model
+
+Machine-readable карта деградации и partial-failure поведения теперь собирается прямо в live system snapshot:
+- policy source of truth: `config/retrieval_science.toml`;
+- raw JSON: `/api/snapshot -> degradation_model`;
+- human-visible слой: service-card `Поведение при сбоях`;
+- Prometheus:
+  - `amai_degradation_pass_total`
+  - `amai_degradation_critical_total`
+  - `amai_degradation_unknown_total`
+  - `amai_degradation_fail_closed_total`
+  - `amai_degradation_graceful_fallback_total`
+  - `amai_degradation_evidence_gaps_total`
+
+Важно:
+- зелёным считаются только классы со свежим machine-readable proof;
+- классы без свежего proof не маскируются под `pass`, а остаются `unknown`;
+- working-state freshness/confidence может выступать evidence only как сигнал, но не как полноценный proof для isolation/degradation класса, пока не materialized отдельный suite.
 
 Текущий репозиторный guard:
 - `qps > 35000`

@@ -1,5 +1,5 @@
-modified_at = "2026-03-23 07:40 MSK"
-"Ручная сверка guide/docs" = "2026-03-23 07:40 MSK"
+modified_at = "2026-03-23 15:32 MSK"
+"Ручная сверка guide/docs" = "2026-03-23 15:32 MSK"
 
 [science]
 methodology_version = "retrieval-science-v1"
@@ -32,6 +32,105 @@ graceful_fallback_classes = [
   "stale_handoff",
 ]
 execution_states = ["planned", "attempted", "succeeded", "superseded", "stale"]
+
+[science.degradation_matrix.cross_project_scope]
+title = "Чужой проект"
+mode = "fail_closed"
+summary = "Запрос не должен вытаскивать файлы, символы и сниппеты из чужого проекта."
+expected_behavior = "Если область запроса смешана или враждебна, Amai должен оставить только свой проект или вернуть пустой безопасный результат."
+user_signal = "В ответе не должно быть путей и фрагментов из другого проекта."
+evidence_source = "verify accuracy: strict local, hostile mixed query"
+runbook = "Запустить retrieval accuracy / isolation verification и проверить zero leakage."
+
+[science.degradation_matrix.cross_namespace_scope]
+title = "Чужой namespace"
+mode = "fail_closed"
+summary = "Даже внутри одного проекта ответ не должен перескакивать в чужой namespace."
+expected_behavior = "Если namespace не совпадает, retrieval обязан отфильтровать чужие попадания или вернуть пустой безопасный результат."
+user_signal = "В ответе не должно быть файлов и символов из соседнего namespace."
+evidence_source = "verify accuracy: namespace strict proof"
+runbook = "Запустить retrieval accuracy verification с namespace strict contour и проверить zero leakage."
+
+[science.degradation_matrix.cross_agent_scope]
+title = "Чужой рабочий контур агента"
+mode = "fail_closed"
+summary = "Restore и continuity не должны смешивать рабочие линии разных agent scope."
+expected_behavior = "Если у запроса другой agent scope, restore-path должен выбрать только свой контур или честно не дать результат."
+user_signal = "Amai не должен подсовывать задачи и handoff другой рабочей линии."
+evidence_source = "isolated agent-scope restore proof"
+runbook = "Запустить isolated agent-scope restore suite и проверить fail-closed выбор событий."
+
+[science.degradation_matrix.corrupt_scope_metadata]
+title = "Битые scope-метаданные"
+mode = "fail_closed"
+summary = "Если project / namespace / agent scope повреждены, retrieval не должен угадывать ближайший похожий контур."
+expected_behavior = "При битых метаданных система должна остановиться на безопасной ошибке, а не вытаскивать чужой контекст."
+user_signal = "Вместо случайного ответа должен быть честный отказ или пустой безопасный результат."
+evidence_source = "fault-injection scope corruption proof"
+runbook = "Запустить hostile scope-corruption suite и проверить fail-closed поведение."
+
+[science.degradation_matrix.partial_refresh]
+title = "Неполный refresh"
+mode = "fail_closed"
+summary = "Частично обновлённый continuity-контур не должен выглядеть как целиком свежий."
+expected_behavior = "Если refresh неполный, система должна честно показать пробел или вернуть отказ, а не маскировать устаревшие данные под свежие."
+user_signal = "Amai должен явно сообщать о неполном обновлении, а не притворяться точным."
+evidence_source = "temporal / continuity partial refresh proof"
+runbook = "Запустить continuity temporal hostile suite и проверить fail-closed при неполном refresh."
+
+[science.degradation_matrix.qdrant_unavailable]
+title = "Qdrant недоступен"
+mode = "graceful_fallback"
+summary = "При недоступном векторном слое Amai должен сохранить безопасный ответный путь, не ломая изоляцию."
+expected_behavior = "Система должна перейти на более грубый безопасный путь, честно отметить деградацию и не смешать чужой контекст."
+user_signal = "Ответ может стать беднее, но не должен стать чужим или небезопасным."
+evidence_source = "degradation suite: vector layer unavailable"
+runbook = "Запустить degradation suite с отключённым Qdrant и проверить безопасный fallback."
+
+[science.degradation_matrix.stale_cache]
+title = "Устаревший cache"
+mode = "graceful_fallback"
+summary = "Старый cache не должен ломать смысл ответа и не должен выдавать видимость свежего результата."
+expected_behavior = "Система должна либо переобновить данные, либо честно показать, что ответ строится по устаревшему слою."
+user_signal = "Ответ может стать медленнее, но не должен притворяться свежим, если данные устарели."
+evidence_source = "degradation suite: stale cache path"
+runbook = "Запустить degradation suite со старым cache и проверить честный fallback или refresh."
+
+[science.degradation_matrix.partial_thread_index]
+title = "Неполный thread index"
+mode = "graceful_fallback"
+summary = "Если индекс переписки неполный, temporal lookup не должен выдумывать ближайший похожий чат."
+expected_behavior = "Система должна дать точный ответ по имеющемуся индексу или честно сказать, что точного совпадения нет."
+user_signal = "Не должно быть подмены нужного чата случайным соседним."
+evidence_source = "temporal lookup fail-closed proof"
+runbook = "Запустить temporal lookup suite и проверить отсутствие fake fallback."
+
+[science.degradation_matrix.empty_embeddings]
+title = "Пустые embeddings"
+mode = "graceful_fallback"
+summary = "При пустом семантическом слое retrieval не должен падать целиком."
+expected_behavior = "Система должна опереться на exact / symbols / lexical fallback и честно показать, что семантика недоступна."
+user_signal = "Ответ может стать менее полным, но базовый безопасный результат должен остаться."
+evidence_source = "degradation suite: empty embeddings"
+runbook = "Запустить degradation suite с пустыми embeddings и проверить безопасный lexical fallback."
+
+[science.degradation_matrix.working_state_conflict]
+title = "Конфликт рабочего состояния"
+mode = "graceful_fallback"
+summary = "Если несколько рабочих событий спорят друг с другом, restore не должен выдавать ложную однозначность."
+expected_behavior = "Система должна понизить уверенность, показать конфликт и оставить источник истины прозрачным."
+user_signal = "Пользователь должен видеть, что рабочий снимок спорный, а не окончательный."
+evidence_source = "working-state conflict proof"
+runbook = "Запустить working-state conflict suite и проверить честное понижение confidence."
+
+[science.degradation_matrix.stale_handoff]
+title = "Устаревший handoff"
+mode = "graceful_fallback"
+summary = "Старый handoff не должен маскироваться под текущую рабочую линию."
+expected_behavior = "Система должна показать устаревание handoff и опереться на более свежий слой истины, если он есть."
+user_signal = "Пользователь должен видеть, что handoff старый, а не принимать его за свежий статус."
+evidence_source = "working-state freshness proof"
+runbook = "Проверить restore freshness contour и hostile stale-handoff suite."
 
 [science.suites.retrieval_benchmark_hot]
 suite_version = "retrieval-benchmark-hot-v1"
