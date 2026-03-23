@@ -1,13 +1,10 @@
-modified_at: 2026-03-20 14:45 MSK
-Ручная сверка guide/docs: 2026-03-20 14:45 MSK
+modified_at: 2026-03-23 06:57 MSK
+Ручная сверка guide/docs: 2026-03-23 06:57 MSK
 
 # Brand
 
 Этот каталог удерживает канонический branding contour проекта `Art-memory-agent-index (Amai)`.
 
-Источник:
-- branding pack был дан пользователем напрямую из `/home/art/Загрузки/Amai label`;
-- поэтому эти assets разрешены для baseline именно отдельным прямым приказом пользователя.
 
 ## Что здесь лежит
 
