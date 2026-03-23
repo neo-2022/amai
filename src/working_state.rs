@@ -289,19 +289,17 @@ pub fn print_restore_bundle_human(restore: &Value) {
         &node["materialized_notes"],
         MAX_MATERIALIZED_NOTES,
     );
-    if let Some(trace) = node["latest_decision_trace"].as_object() {
-        let included = trace["included"]
-            .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item["strategy"].as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "ничего не включено".to_string());
-        println!("- Последнее объяснение retrieval: включено через {included}");
+    if let Some(value) = node["included_reasons_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Почему вошло: {value}");
+    }
+    if let Some(value) = node["excluded_reasons_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Почему часть не вошла: {value}");
     }
     if let Some(summary) = workspace_graph::human_summary(&node["workspace_graph"]) {
         println!("- Структурный граф рабочей области: {summary}");
@@ -509,6 +507,9 @@ fn compose_restore_bundle(
         .first()
         .cloned()
         .unwrap_or(Value::Null);
+    let included_reasons_summary = decision_trace_summary(Some(&latest_decision_trace), "included");
+    let excluded_reasons_summary =
+        decision_trace_summary(Some(&latest_decision_trace), "not_included");
 
     json!({
         "working_state_restore": {
@@ -534,6 +535,8 @@ fn compose_restore_bundle(
             "last_command": last_command,
             "last_results_summary": last_results_summary,
             "latest_decision_trace": latest_decision_trace,
+            "included_reasons_summary": included_reasons_summary,
+            "excluded_reasons_summary": excluded_reasons_summary,
             "recent_decision_traces": recent_decision_traces,
             "restore_confidence": restore_confidence,
             "restore_freshness_state": restore_freshness_state,
@@ -1049,6 +1052,42 @@ fn summarize_decision_trace(event: &Value) -> Option<Value> {
         "not_included": not_included,
         "semantic_guard": trace.get("semantic_guard").cloned().unwrap_or(Value::Null),
     }))
+}
+
+fn decision_trace_strategy_label(strategy: &str) -> &str {
+    match strategy {
+        "exact_documents" => "точные совпадения",
+        "symbol_hits" => "совпадения по символам",
+        "lexical_chunks" => "текстовые фрагменты",
+        "semantic_chunks" => "смысловые фрагменты",
+        _ => strategy,
+    }
+}
+
+fn decision_trace_summary(trace: Option<&Value>, key: &str) -> Option<String> {
+    let items = trace?.get(key)?.as_array()?;
+    let parts = items
+        .iter()
+        .take(3)
+        .filter_map(|item| {
+            let reason = item["reason"].as_str()?.trim();
+            if reason.is_empty() {
+                return None;
+            }
+            let strategy =
+                decision_trace_strategy_label(item["strategy"].as_str().unwrap_or_default());
+            let count = item["count"].as_u64();
+            Some(match count {
+                Some(value) if value > 0 => format!("{strategy} ({value}) — {reason}"),
+                _ => format!("{strategy} — {reason}"),
+            })
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" • "))
+    }
 }
 
 async fn resolve_session_id(
@@ -2011,6 +2050,14 @@ mod tests {
         assert_eq!(
             restore["latest_decision_trace"]["included"][0]["strategy"],
             json!("exact_documents")
+        );
+        assert_eq!(
+            restore["included_reasons_summary"],
+            json!("точные совпадения (1) — Exact hit")
+        );
+        assert_eq!(
+            restore["excluded_reasons_summary"],
+            json!("смысловые фрагменты — abstained")
         );
         assert_eq!(
             restore["recent_decision_traces"].as_array().map(Vec::len),

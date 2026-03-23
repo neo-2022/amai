@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:12 MSK
-Ручная сверка guide/docs: 2026-03-23 22:12 MSK
+modified_at: 2026-03-23 22:16 MSK
+Ручная сверка guide/docs: 2026-03-23 22:16 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -332,6 +332,12 @@ cargo run --quiet -- verify continuity --project art --namespace continuity
   - в этом же `chat_start_restore` теперь лежат и короткие explainability-summary:
     - `included_reasons_summary`
     - `excluded_reasons_summary`;
+  - сам `working_state_restore` теперь тоже поднимает те же summary прямо в своём JSON:
+    - `included_reasons_summary`
+    - `excluded_reasons_summary`;
+  - human-readable `working_state` вывод теперь печатает их как:
+    - `Почему вошло`
+    - `Почему часть не вошла`;
   - и тот же product path теперь сразу несёт `continuity_restore.canonical_eval`, `retrieval_science` и `degradation_policy`, чтобы machine-readable recovery было видно не только по сырому содержимому, но и по verdict-слою;
   - внутри `working_state_restore` теперь есть ещё и execution-aware слой:
     - `next_step_state = planned`;

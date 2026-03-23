@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:12 MSK
-Ручная сверка guide/docs: 2026-03-23 22:12 MSK
+modified_at: 2026-03-23 22:16 MSK
+Ручная сверка guide/docs: 2026-03-23 22:16 MSK
 
 # Operations
 
@@ -343,6 +343,11 @@ cd /home/art/agent-memory-index
 - `Chat-start restore pack`;
 - готовый `prompt_text` для первого содержательного ответа;
 - затем уже расширенное `working_state`.
+
+И этот `working_state` теперь обязан печатать не сырой список strategy-key, а две
+человеческие explainability-строки:
+- `Почему вошло`
+- `Почему часть не вошла`
 
 Второй helper печатает raw JSON и теперь возвращает сразу два узла:
 - `chat_start_restore`

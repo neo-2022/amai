@@ -19,6 +19,8 @@ cargo run --release --quiet -- observe snapshot >/tmp/amai-proof-working-state-s
 
 jq -e '.latest_working_state_restore.working_state_restore.latest_decision_trace.scope.project_code == "project_alpha"' /tmp/amai-proof-working-state-snapshot.json >/dev/null
 jq -e '.latest_working_state_restore.working_state_restore.latest_decision_trace.included | length > 0' /tmp/amai-proof-working-state-snapshot.json >/dev/null
+jq -e '.latest_working_state_restore.working_state_restore.included_reasons_summary != null' /tmp/amai-proof-working-state-snapshot.json >/dev/null
+jq -e '.latest_working_state_restore.working_state_restore | has("excluded_reasons_summary")' /tmp/amai-proof-working-state-snapshot.json >/dev/null
 jq -e '.latest_working_state_restore.working_state_restore.recent_decision_traces | length > 0' /tmp/amai-proof-working-state-snapshot.json >/dev/null
 
 printf 'proof_working_state_decision_trace: PASS\n'
