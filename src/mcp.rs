@@ -684,7 +684,17 @@ async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> Result<V
 async fn tool_list_projects(cfg: &AppConfig) -> Result<Value> {
     let db = postgres::connect_admin(cfg).await?;
     let projects = postgres::list_projects(&db).await?;
+    let project_summary = summarize_codes(
+        &projects
+            .iter()
+            .map(|project| project.code.as_str())
+            .collect::<Vec<_>>(),
+    );
     let structured = json!({
+        "projects_summary": {
+            "codes": projects.iter().map(|project| project.code.clone()).collect::<Vec<_>>(),
+            "compact_codes": project_summary,
+        },
         "projects": projects.iter().map(|project| {
             json!({
                 "project_id": project.project_id,
@@ -697,8 +707,11 @@ async fn tool_list_projects(cfg: &AppConfig) -> Result<Value> {
     });
     Ok(tool_result(
         format!(
-            "registered projects: {}",
-            structured["projects"].as_array().map_or(0, Vec::len)
+            "registered projects: {} [{}]",
+            structured["projects"].as_array().map_or(0, Vec::len),
+            structured["projects_summary"]["compact_codes"]
+                .as_str()
+                .unwrap_or("none")
         ),
         structured,
     ))
@@ -708,11 +721,20 @@ async fn tool_list_namespaces(cfg: &AppConfig, args: ListNamespacesArgs) -> Resu
     let db = postgres::connect_admin(cfg).await?;
     let project = postgres::get_project_by_code(&db, &args.project).await?;
     let namespaces = postgres::list_namespaces_for_project(&db, project.project_id).await?;
+    let namespace_summary = summarize_namespace_modes(
+        &namespaces
+            .iter()
+            .map(|namespace| (namespace.code.as_str(), namespace.retrieval_mode.as_str()))
+            .collect::<Vec<_>>(),
+    );
     let structured = json!({
         "project": {
             "code": project.code,
             "display_name": project.display_name,
             "repo_root": project.repo_root,
+        },
+        "namespaces_summary": {
+            "compact_codes": namespace_summary,
         },
         "namespaces": namespaces.iter().map(|namespace| {
             json!({
@@ -725,12 +747,49 @@ async fn tool_list_namespaces(cfg: &AppConfig, args: ListNamespacesArgs) -> Resu
     });
     Ok(tool_result(
         format!(
-            "namespaces for {}: {}",
+            "namespaces for {}: {} [{}]",
             args.project,
-            structured["namespaces"].as_array().map_or(0, Vec::len)
+            structured["namespaces"].as_array().map_or(0, Vec::len),
+            structured["namespaces_summary"]["compact_codes"]
+                .as_str()
+                .unwrap_or("none")
         ),
         structured,
     ))
+}
+
+fn summarize_codes(codes: &[&str]) -> String {
+    summarize_with_limit(
+        &codes
+            .iter()
+            .map(|code| (*code).to_string())
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn summarize_namespace_modes(items: &[(&str, &str)]) -> String {
+    summarize_with_limit(
+        &items
+            .iter()
+            .map(|(code, mode)| format!("{code}={mode}"))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn summarize_with_limit(items: &[String]) -> String {
+    if items.is_empty() {
+        return "none".to_string();
+    }
+    let preview = items.iter().take(3).cloned().collect::<Vec<_>>();
+    if items.len() > preview.len() {
+        format!(
+            "{} +{} more",
+            preview.join(", "),
+            items.len() - preview.len()
+        )
+    } else {
+        preview.join(", ")
+    }
 }
 
 async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result<Value> {
@@ -2021,7 +2080,7 @@ fn default_warm_limit() -> usize {
 mod tests {
     use super::{
         McpConfigArgs, context_pack_summary, observe_snapshot_summary, render_client_config,
-        token_benchmark_summary, token_report_summary,
+        summarize_codes, summarize_namespace_modes, token_benchmark_summary, token_report_summary,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -2245,5 +2304,27 @@ mod tests {
         assert_eq!(summary.naive_tokens, 4096);
         assert_eq!(summary.context_tokens, 512);
         assert_eq!(summary.files_considered, 12);
+    }
+
+    #[test]
+    fn summarize_codes_limits_preview() {
+        assert_eq!(summarize_codes(&[]), "none");
+        assert_eq!(summarize_codes(&["art", "amai"]), "art, amai");
+        assert_eq!(
+            summarize_codes(&["art", "amai", "alpha", "beta"]),
+            "art, amai, alpha +1 more"
+        );
+    }
+
+    #[test]
+    fn summarize_namespace_modes_shows_mode_preview() {
+        assert_eq!(summarize_namespace_modes(&[]), "none");
+        assert_eq!(
+            summarize_namespace_modes(&[
+                ("continuity", "local_strict"),
+                ("review", "local_plus_related")
+            ]),
+            "continuity=local_strict, review=local_plus_related"
+        );
     }
 }

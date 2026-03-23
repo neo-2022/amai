@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:47 MSK
-Ручная сверка guide/docs: 2026-03-23 22:47 MSK
+modified_at: 2026-03-23 22:51 MSK
+Ручная сверка guide/docs: 2026-03-23 22:51 MSK
 
 # Operations
 
@@ -644,6 +644,8 @@ cargo run -- mcp serve
 - `amai_token_benchmark` теперь тоже отдаёт наружу `token_benchmark_summary`, где
   уже собраны `saved_tokens`, `savings_factor`, `savings_percent`,
   `naive_tokens`, `context_tokens` и `files_considered`.
+- `amai_list_projects` и `amai_list_namespaces` теперь тоже дают compact discovery
+  preview в short summary, а не только count.
 
 ## MCP client config
 

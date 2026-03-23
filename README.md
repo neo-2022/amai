@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:47 MSK
-Ручная сверка guide/docs: 2026-03-23 22:47 MSK
+modified_at: 2026-03-23 22:51 MSK
+Ручная сверка guide/docs: 2026-03-23 22:51 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -892,6 +892,10 @@ cargo run -- deployment explain --target kubernetes_server
 
 Это делает сравнение `naive scope` против `Amai context pack` доступным без ручного
 разбора всего benchmark-payload.
+
+`amai_list_projects` и `amai_list_namespaces` теперь тоже не схлопывают discovery
+до одного числа: короткий summary сразу показывает коды проектов и namespace/mode
+preview, а не только raw count.
 
 Понятный walkthrough для подключения:
 - [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)
