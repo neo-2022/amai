@@ -240,7 +240,7 @@ mod tests {
         let catalog = workspace_graph_catalog_json().expect("workspace graph catalog");
         assert_eq!(
             catalog["workspace_graph_model_version"].as_str(),
-            Some("workspace-graph-v3")
+            Some("workspace-graph-v4")
         );
         assert_eq!(
             catalog["artifact_lineage_model_version"].as_str(),

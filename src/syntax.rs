@@ -1,7 +1,7 @@
 use crate::config::AppConfig;
 use crate::postgres::SymbolRecord;
 use anyhow::{Result, anyhow};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tree_sitter::{Language, Node, Parser};
 
 #[derive(Debug, Clone)]
@@ -126,14 +126,105 @@ fn collect_symbols(language: &str, root: Node<'_>, bytes: &[u8]) -> Vec<SymbolRe
                 end_line: (node.end_position().row + 1) as i32,
                 start_byte: node.start_byte() as i32,
                 end_byte: node.end_byte() as i32,
-                metadata: json!({
-                    "language": language,
-                    "node_kind": node.kind(),
-                    "text": snippet(node, bytes, 240)
-                }),
+                metadata: symbol_metadata(language, node, bytes),
             })
         })
         .collect()
+}
+
+fn symbol_metadata(language: &str, node: Node<'_>, bytes: &[u8]) -> Value {
+    let mut metadata = Map::new();
+    metadata.insert("language".to_string(), json!(language));
+    metadata.insert("node_kind".to_string(), json!(node.kind()));
+    metadata.insert("text".to_string(), json!(snippet(node, bytes, 240)));
+    if language == "rust" {
+        if let Some(owner) = rust_symbol_owner_context(node, bytes) {
+            metadata.insert("owner_kind".to_string(), json!(owner.owner_kind));
+            metadata.insert("owner_name".to_string(), json!(owner.owner_name));
+            metadata.insert("owner_path".to_string(), json!(owner.owner_path));
+            if let Some(trait_name) = owner.trait_name {
+                metadata.insert("trait_name".to_string(), json!(trait_name));
+            }
+        }
+    }
+    Value::Object(metadata)
+}
+
+#[derive(Debug, Clone)]
+struct RustSymbolOwnerContext {
+    owner_kind: String,
+    owner_name: String,
+    owner_path: String,
+    trait_name: Option<String>,
+}
+
+fn rust_symbol_owner_context(node: Node<'_>, bytes: &[u8]) -> Option<RustSymbolOwnerContext> {
+    let mut cursor = node.parent();
+    while let Some(parent) = cursor {
+        match parent.kind() {
+            "impl_item" => {
+                let owner_type = parent.child_by_field_name("type")?;
+                let owner_name = rust_type_terminal_name(owner_type, bytes)?;
+                let owner_path = rust_type_path(owner_type, bytes)?;
+                let trait_name = parent
+                    .child_by_field_name("trait")
+                    .and_then(|trait_node| rust_type_path(trait_node, bytes));
+                return Some(RustSymbolOwnerContext {
+                    owner_kind: "impl_item".to_string(),
+                    owner_name,
+                    owner_path,
+                    trait_name,
+                });
+            }
+            "trait_item" => {
+                let owner_name = node_name("rust", parent, bytes)?;
+                return Some(RustSymbolOwnerContext {
+                    owner_kind: "trait_item".to_string(),
+                    owner_path: owner_name.clone(),
+                    owner_name,
+                    trait_name: None,
+                });
+            }
+            _ => {
+                cursor = parent.parent();
+            }
+        }
+    }
+    None
+}
+
+fn rust_type_path(node: Node<'_>, bytes: &[u8]) -> Option<String> {
+    match node.kind() {
+        "generic_type" | "generic_type_with_turbofish" => node
+            .child_by_field_name("type")
+            .and_then(|inner| rust_type_path(inner, bytes)),
+        "identifier" | "type_identifier" | "scoped_identifier" | "scoped_type_identifier" => {
+            Some(trimmed_text(node, bytes))
+        }
+        _ => {
+            let value = trimmed_text(node, bytes);
+            (!value.is_empty()).then_some(value)
+        }
+    }
+}
+
+fn rust_type_terminal_name(node: Node<'_>, bytes: &[u8]) -> Option<String> {
+    match node.kind() {
+        "generic_type" | "generic_type_with_turbofish" => node
+            .child_by_field_name("type")
+            .and_then(|inner| rust_type_terminal_name(inner, bytes)),
+        "scoped_type_identifier" | "scoped_identifier" => node
+            .child_by_field_name("name")
+            .map(|name| trimmed_text(name, bytes)),
+        "identifier" | "type_identifier" => Some(trimmed_text(node, bytes)),
+        _ => rust_type_path(node, bytes).map(|path| {
+            path.split("::")
+                .filter(|segment| !segment.is_empty())
+                .last()
+                .unwrap_or(path.as_str())
+                .to_string()
+        }),
+    }
 }
 
 fn collect_call_references(language: &str, root: Node<'_>, bytes: &[u8]) -> Vec<Value> {
@@ -548,5 +639,32 @@ pub fn runtime_summary() -> &'static str {
             call["call_style"] == json!("macro_identifier")
                 && call["callee_name"] == json!("println")
         }));
+    }
+
+    #[test]
+    fn rust_analysis_collects_impl_owner_metadata_for_methods() {
+        let cfg = test_config();
+        let analysis = analyze(
+            &cfg,
+            "rust",
+            r#"
+pub struct Beta;
+
+impl Beta {
+    pub fn new() -> Self {
+        Self
+    }
+}
+"#,
+        )
+        .expect("syntax analysis");
+        let method = analysis
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "new")
+            .expect("method symbol");
+        assert_eq!(method.metadata["owner_kind"], json!("impl_item"));
+        assert_eq!(method.metadata["owner_name"], json!("Beta"));
+        assert_eq!(method.metadata["owner_path"], json!("Beta"));
     }
 }

@@ -805,6 +805,10 @@ fn compact_symbol_metadata(metadata: &Value) -> Value {
     json!({
         "language": metadata["language"].clone(),
         "node_kind": metadata["node_kind"].clone(),
+        "owner_kind": metadata["owner_kind"].clone(),
+        "owner_name": metadata["owner_name"].clone(),
+        "owner_path": metadata["owner_path"].clone(),
+        "trait_name": metadata["trait_name"].clone(),
     })
 }
 
@@ -826,6 +830,7 @@ struct ScopedPathKey {
 struct GraphLookup {
     file_node_ids: BTreeMap<ScopedPathKey, String>,
     symbol_node_ids: BTreeMap<(ScopedPathKey, String), Vec<String>>,
+    owner_symbol_node_ids: BTreeMap<(ScopedPathKey, String, String), Vec<String>>,
 }
 
 fn append_resolved_reference_edges(
@@ -1007,6 +1012,16 @@ fn build_graph_lookup(files: &BTreeMap<String, FileAggregate>) -> GraphLookup {
                 .entry((file_key.clone(), name.to_string()))
                 .or_default()
                 .push(symbol_node_id.to_string());
+            if let Some(owner_name) = symbol["metadata"]["owner_name"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+            {
+                lookup
+                    .owner_symbol_node_ids
+                    .entry((file_key.clone(), owner_name.to_string(), name.to_string()))
+                    .or_default()
+                    .push(symbol_node_id.to_string());
+            }
         }
     }
     lookup
@@ -1053,7 +1068,16 @@ fn resolve_call(
     let call_style = call["call_style"].as_str()?;
     match call_style {
         "scoped_identifier" | "macro_scoped_identifier" => {
-            resolve_rust_path_target(source_file, call["callee_path"].as_str()?, lookup)
+            resolve_rust_path_target(source_file, call["callee_path"].as_str()?, lookup).or_else(
+                || {
+                    resolve_rust_owner_symbol_path_target(
+                        source_file,
+                        call["callee_path"].as_str()?,
+                        lookup,
+                        imported_files,
+                    )
+                },
+            )
         }
         "identifier" | "macro_identifier" => resolve_rust_symbol_name_target(
             source_file,
@@ -1071,7 +1095,7 @@ fn resolve_rust_path_target(
     lookup: &GraphLookup,
 ) -> Option<ReferenceResolution> {
     let (base_dir, segments) = rust_reference_base_and_segments(&source_file.relative_path, &path)?;
-    let (target_relative_path, imported_symbol) = select_rust_target_path(
+    let path_target = select_rust_target_path(
         &source_file.project_code,
         &source_file.namespace_code,
         &base_dir,
@@ -1081,23 +1105,41 @@ fn resolve_rust_path_target(
     let file_key = scoped_path_key(
         &source_file.project_code,
         &source_file.namespace_code,
-        &target_relative_path,
+        &path_target.target_relative_path,
     );
     let target_file_node_id = lookup.file_node_ids.get(&file_key)?.clone();
-    let target_symbol_node_id = imported_symbol.and_then(|name| {
-        let symbol_key = (file_key.clone(), name);
-        let symbol_node_ids = lookup.symbol_node_ids.get(&symbol_key)?;
-        if symbol_node_ids.len() == 1 {
-            Some(symbol_node_ids[0].clone())
-        } else {
-            None
+    let target_symbol_node_id = match path_target.trailing_segments.as_slice() {
+        [] => None,
+        [symbol_name] => resolve_unique_symbol_node_id(lookup, &file_key, symbol_name),
+        [owner_name, symbol_name] => {
+            resolve_unique_owned_symbol_node_id(lookup, &file_key, owner_name, symbol_name)
         }
-    });
+        _ => None,
+    };
     Some(ReferenceResolution {
         target_file_key: file_key,
         target_file_node_id,
         target_symbol_node_id,
     })
+}
+
+fn resolve_rust_owner_symbol_path_target(
+    source_file: &FileAggregate,
+    path: &str,
+    lookup: &GraphLookup,
+    imported_files: Option<&BTreeSet<ScopedPathKey>>,
+) -> Option<ReferenceResolution> {
+    let (_, segments) = rust_reference_base_and_segments(&source_file.relative_path, path)?;
+    let [owner_name, symbol_name] = segments.as_slice() else {
+        return None;
+    };
+    resolve_rust_owned_symbol_name_target(
+        source_file,
+        owner_name,
+        symbol_name,
+        lookup,
+        imported_files,
+    )
 }
 
 fn resolve_rust_symbol_name_target(
@@ -1119,13 +1161,13 @@ fn resolve_rust_symbol_name_target(
     let mut matches = Vec::<(ScopedPathKey, String)>::new();
     for candidate_file in candidate_files {
         let symbol_key = (candidate_file.clone(), symbol_name.to_string());
-        let Some(symbol_node_ids) = lookup.symbol_node_ids.get(&symbol_key) else {
-            continue;
-        };
-        if symbol_node_ids.len() != 1 {
-            return None;
+        match lookup.symbol_node_ids.get(&symbol_key) {
+            Some(symbol_node_ids) if symbol_node_ids.len() == 1 => {
+                matches.push((candidate_file, symbol_node_ids[0].clone()));
+            }
+            Some(_) => return None,
+            None => {}
         }
-        matches.push((candidate_file, symbol_node_ids[0].clone()));
     }
     if matches.len() != 1 {
         return None;
@@ -1137,6 +1179,83 @@ fn resolve_rust_symbol_name_target(
         target_file_node_id,
         target_symbol_node_id: Some(target_symbol_node_id),
     })
+}
+
+fn resolve_rust_owned_symbol_name_target(
+    source_file: &FileAggregate,
+    owner_name: &str,
+    symbol_name: &str,
+    lookup: &GraphLookup,
+    imported_files: Option<&BTreeSet<ScopedPathKey>>,
+) -> Option<ReferenceResolution> {
+    let source_key = scoped_path_key(
+        &source_file.project_code,
+        &source_file.namespace_code,
+        &source_file.relative_path,
+    );
+    let mut candidate_files = BTreeSet::new();
+    candidate_files.insert(source_key.clone());
+    if let Some(imported_files) = imported_files {
+        candidate_files.extend(imported_files.iter().cloned());
+    }
+    let mut matches = Vec::<(ScopedPathKey, String)>::new();
+    for candidate_file in candidate_files {
+        let symbol_key = (
+            candidate_file.clone(),
+            owner_name.to_string(),
+            symbol_name.to_string(),
+        );
+        match lookup.owner_symbol_node_ids.get(&symbol_key) {
+            Some(symbol_node_ids) if symbol_node_ids.len() == 1 => {
+                matches.push((candidate_file, symbol_node_ids[0].clone()));
+            }
+            Some(_) => return None,
+            None => {}
+        }
+    }
+    if matches.len() != 1 {
+        return None;
+    }
+    let (target_file_key, target_symbol_node_id) = matches.into_iter().next()?;
+    let target_file_node_id = lookup.file_node_ids.get(&target_file_key)?.clone();
+    Some(ReferenceResolution {
+        target_file_key,
+        target_file_node_id,
+        target_symbol_node_id: Some(target_symbol_node_id),
+    })
+}
+
+fn resolve_unique_symbol_node_id(
+    lookup: &GraphLookup,
+    file_key: &ScopedPathKey,
+    symbol_name: &str,
+) -> Option<String> {
+    let symbol_key = (file_key.clone(), symbol_name.to_string());
+    let symbol_node_ids = lookup.symbol_node_ids.get(&symbol_key)?;
+    if symbol_node_ids.len() == 1 {
+        Some(symbol_node_ids[0].clone())
+    } else {
+        None
+    }
+}
+
+fn resolve_unique_owned_symbol_node_id(
+    lookup: &GraphLookup,
+    file_key: &ScopedPathKey,
+    owner_name: &str,
+    symbol_name: &str,
+) -> Option<String> {
+    let symbol_key = (
+        file_key.clone(),
+        owner_name.to_string(),
+        symbol_name.to_string(),
+    );
+    let symbol_node_ids = lookup.owner_symbol_node_ids.get(&symbol_key)?;
+    if symbol_node_ids.len() == 1 {
+        Some(symbol_node_ids[0].clone())
+    } else {
+        None
+    }
 }
 
 fn resolve_ecmascript_reference(
@@ -1257,13 +1376,19 @@ fn rust_reference_base_and_segments(
     Some((base_dir, segments))
 }
 
+#[derive(Debug, Clone)]
+struct RustPathTarget {
+    target_relative_path: String,
+    trailing_segments: Vec<String>,
+}
+
 fn select_rust_target_path(
     project_code: &str,
     namespace_code: &str,
     base_dir: &Path,
     segments: &[String],
     lookup: &GraphLookup,
-) -> Option<(String, Option<String>)> {
+) -> Option<RustPathTarget> {
     let mut matches = BTreeMap::<usize, BTreeSet<String>>::new();
     for consumed in 1..=segments.len() {
         let relative_path = normalize_relative_path(
@@ -1282,7 +1407,10 @@ fn select_rust_target_path(
     }
     if let Some(full_matches) = matches.get(&segments.len()) {
         if full_matches.len() == 1 {
-            return Some((full_matches.iter().next()?.clone(), None));
+            return Some(RustPathTarget {
+                target_relative_path: full_matches.iter().next()?.clone(),
+                trailing_segments: Vec::new(),
+            });
         }
         return None;
     }
@@ -1291,10 +1419,10 @@ fn select_rust_target_path(
     if best_matches.len() != 1 {
         return None;
     }
-    Some((
-        best_matches.iter().next()?.clone(),
-        segments.last().cloned(),
-    ))
+    Some(RustPathTarget {
+        target_relative_path: best_matches.iter().next()?.clone(),
+        trailing_segments: segments[best_depth..].to_vec(),
+    })
 }
 
 fn rust_file_candidates(relative_path: &str) -> Vec<String> {
@@ -1997,10 +2125,184 @@ mod tests {
     }
 
     #[test]
+    fn context_pack_workspace_graph_resolves_owner_scoped_calls_via_imported_type() {
+        let context_pack_id = Uuid::parse_str("00000000-0000-0000-0000-000000000657").unwrap();
+        let graph = build_context_pack_workspace_graph(
+            &context_pack_id,
+            "Beta::new",
+            "local_strict",
+            "scope-1",
+            &json!([{
+                "project_code": "project_alpha",
+                "namespace_code": "default"
+            }]),
+            &[DocumentHit {
+                project_code: "project_alpha".to_string(),
+                namespace_code: "default".to_string(),
+                repo_root: "/repo".to_string(),
+                relative_path: "src/lib.rs".to_string(),
+                language: Some("rust".to_string()),
+                source_kind: "git_tracked".to_string(),
+                git_commit_sha: Some("abc".to_string()),
+                score: 10.0,
+                snippet: "Beta::new()".to_string(),
+            }],
+            &[],
+            &[],
+            &[],
+            &[
+                DocumentStructureRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/lib.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    structure: json!([{
+                        "kind": "function_item",
+                        "name": "runtime_summary",
+                        "start_line": 3,
+                        "end_line": 5
+                    }]),
+                    imports: json!([{
+                        "kind": "use_declaration",
+                        "name": "crate::alpha::Beta",
+                        "text": "use crate::alpha::Beta;",
+                        "start_line": 1,
+                        "end_line": 1
+                    }]),
+                    exports: json!([]),
+                    metadata: json!({
+                        "call_references": [{
+                            "kind": "call_expression",
+                            "call_style": "scoped_identifier",
+                            "callee_name": "new",
+                            "callee_path": "Beta::new",
+                            "receiver_text": null,
+                            "generic": false,
+                            "start_line": 4,
+                            "end_line": 4,
+                            "text": "Beta::new()"
+                        }]
+                    }),
+                },
+                DocumentStructureRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    structure: json!([
+                        {
+                            "kind": "struct_item",
+                            "name": "Beta",
+                            "start_line": 1,
+                            "end_line": 1
+                        },
+                        {
+                            "kind": "function_item",
+                            "name": "new",
+                            "start_line": 4,
+                            "end_line": 6
+                        },
+                        {
+                            "kind": "function_item",
+                            "name": "new",
+                            "start_line": 9,
+                            "end_line": 11
+                        }
+                    ]),
+                    imports: json!([]),
+                    exports: json!([]),
+                    metadata: json!({"call_references":[]}),
+                },
+            ],
+            &[
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "Beta".to_string(),
+                    kind: "struct_item".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte: 0,
+                    end_byte: 16,
+                    metadata: json!({"language":"rust","node_kind":"struct_item","text":"pub struct Beta;"}),
+                },
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "new".to_string(),
+                    kind: "function_item".to_string(),
+                    start_line: 4,
+                    end_line: 6,
+                    start_byte: 17,
+                    end_byte: 62,
+                    metadata: json!({
+                        "language":"rust",
+                        "node_kind":"function_item",
+                        "owner_kind":"impl_item",
+                        "owner_name":"Beta",
+                        "owner_path":"Beta",
+                        "text":"impl Beta { pub fn new() -> Self { Self } }"
+                    }),
+                },
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "new".to_string(),
+                    kind: "function_item".to_string(),
+                    start_line: 9,
+                    end_line: 11,
+                    start_byte: 63,
+                    end_byte: 92,
+                    metadata: json!({
+                        "language":"rust",
+                        "node_kind":"function_item",
+                        "text":"pub fn new() -> Beta { Beta }"
+                    }),
+                },
+            ],
+        )
+        .expect("graph");
+        let edges = graph["edges"].as_array().expect("edges");
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("calls_symbol")
+                && edge["to_node_id"] == json!("symbol:project_alpha:default:src/alpha.rs:new:4")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("resolves_call_symbol")
+                && edge["to_node_id"] == json!("symbol:project_alpha:default:src/alpha.rs:new:4")
+        }));
+        assert_eq!(
+            graph["summary"]["relation_counts"]["calls_symbol"].as_u64(),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn merge_workspace_graphs_deduplicates_nodes_and_keeps_context_pack_lineage() {
         let merged = merge_workspace_graphs(&[
             json!({
-                "workspace_graph_model_version": "workspace-graph-v3",
+                "workspace_graph_model_version": "workspace-graph-v4",
                 "artifact_lineage_model_version": "artifact-lineage-v1",
                 "lineage_model_version": "lineage-v2",
                 "truth_ranking": ["continuity_handoff"],
@@ -2015,7 +2317,7 @@ mod tests {
                 ]
             }),
             json!({
-                "workspace_graph_model_version": "workspace-graph-v3",
+                "workspace_graph_model_version": "workspace-graph-v4",
                 "artifact_lineage_model_version": "artifact-lineage-v1",
                 "lineage_model_version": "lineage-v2",
                 "truth_ranking": ["continuity_handoff"],
