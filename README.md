@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 21:33 MSK
-Ручная сверка guide/docs: 2026-03-23 21:33 MSK
+modified_at: 2026-03-23 21:42 MSK
+Ручная сверка guide/docs: 2026-03-23 21:42 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1322,6 +1322,7 @@ HDF5-датасеты, которые уже зафиксированы как �
 ./scripts/proof_art_continuity_migration.sh
 ./scripts/proof_token_benchmark.sh
 ./scripts/proof_cold_benchmark.sh
+./scripts/proof_context_decision_trace.sh
 ./scripts/proof_observability.sh
 ./scripts/proof_mcp.sh
 ./scripts/proof_onboarding.sh
@@ -1334,6 +1335,9 @@ HDF5-датасеты, которые уже зафиксированы как �
 `./scripts/proof_cold_benchmark.sh` теперь проверяет не только
 `cold_benchmark.machine_readable_summary`, но и
 `cold_benchmark.canonical_eval` с probe-level verdict layer по каждому cold case.
+
+`./scripts/proof_context_decision_trace.sh` теперь отдельно проверяет, что обычный
+`context pack` возвращает machine-readable `decision_trace`, а не только raw retrieval arrays.
 
 Для отдельного DB-level proof именно по observability guardrails:
 

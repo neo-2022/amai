@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 21:33 MSK
-Ручная сверка guide/docs: 2026-03-23 21:33 MSK
+modified_at: 2026-03-23 21:42 MSK
+Ручная сверка guide/docs: 2026-03-23 21:42 MSK
 
 # Operations
 
@@ -547,6 +547,9 @@ cargo run -- context pack \
 - кэшируется в SQLite;
 - сохраняется в PostgreSQL;
 - выгружается в S3 context bucket.
+- внутри payload теперь есть и `decision_trace`:
+  machine-readable объяснение, почему именно `exact / symbol / lexical / semantic`
+  слои дали вклад или не дали ничего;
 - внутри payload теперь отдельно materialize-ится `workspace_graph`:
   это компактный structural graph по уже найденным scoped-артефактам, а не догадка “по соседним файлам”.
 - этот graph собирается только из того, что уже лежит в scope:
@@ -561,6 +564,12 @@ cargo run -- context pack \
 - `namespace` участвует в retrieval буквально;
 - если вы запросили `default`, `Amai` не должен молча тянуть `smoke` или другой namespace того же проекта;
 - если related project не имеет такого же namespace code, он просто не попадает в scope этого `context pack`.
+
+Отдельный proof для explainability этого слоя:
+
+```bash
+./scripts/proof_context_decision_trace.sh
+```
 
 ## MCP server
 

@@ -586,6 +586,8 @@ async fn prepare_context_pack(
         "provenance_minimum": provenance_minimum,
         "retrieval_runtime": runtime_json(&stats)
     });
+    let mut payload = payload;
+    ensure_context_pack_decision_trace(&mut payload);
     let pack_assembly_ms = pack_assembly_started.elapsed().as_millis();
     let payload_json: Arc<str> = Arc::from(serde_json::to_string(&payload)?);
     let mut stats = stats;
@@ -1240,6 +1242,117 @@ fn semantic_guard_to_json(guard: &SemanticGuardSummary) -> Value {
     })
 }
 
+fn ensure_context_pack_decision_trace(payload: &mut Value) {
+    if payload["decision_trace"].is_object() {
+        return;
+    }
+    payload["decision_trace"] = build_context_pack_decision_trace(payload);
+}
+
+fn build_context_pack_decision_trace(payload: &Value) -> Value {
+    let exact_count = payload["retrieval"]["exact_documents"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or_default();
+    let symbol_count = payload["retrieval"]["symbol_hits"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or_default();
+    let lexical_count = payload["retrieval"]["lexical_chunks"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or_default();
+    let semantic_count = payload["retrieval"]["semantic_chunks"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or_default();
+    let semantic_guard = &payload["quality"]["semantic_guard"];
+
+    let mut included = Vec::new();
+    if exact_count > 0 {
+        included.push(json!({
+            "strategy": "exact_documents",
+            "count": exact_count,
+            "reason": "Нашлись точные document/path совпадения внутри видимого контура."
+        }));
+    }
+    if symbol_count > 0 {
+        included.push(json!({
+            "strategy": "symbol_hits",
+            "count": symbol_count,
+            "reason": "Нашлись symbol-совпадения по именам и доступным namespace."
+        }));
+    }
+    if lexical_count > 0 {
+        included.push(json!({
+            "strategy": "lexical_chunks",
+            "count": lexical_count,
+            "reason": "Лексический поиск добавил текстовые фрагменты с прямым совпадением по запросу."
+        }));
+    }
+    if semantic_count > 0 {
+        included.push(json!({
+            "strategy": "semantic_chunks",
+            "count": semantic_count,
+            "reason": "Semantic layer добавил фрагменты после relevance guard и scope-фильтра."
+        }));
+    }
+
+    let mut not_included = Vec::new();
+    if exact_count == 0 {
+        not_included.push(json!({
+            "strategy": "exact_documents",
+            "reason": "Точных document/path совпадений по этому запросу не нашлось."
+        }));
+    }
+    if symbol_count == 0 {
+        not_included.push(json!({
+            "strategy": "symbol_hits",
+            "reason": "По этому запросу не нашлось symbol-совпадений в видимом контуре."
+        }));
+    }
+    if lexical_count == 0 {
+        not_included.push(json!({
+            "strategy": "lexical_chunks",
+            "reason": "Лексический поиск не дал новых chunk-фрагментов."
+        }));
+    }
+    if semantic_count == 0 {
+        let reason = if semantic_guard["abstained"].as_bool() == Some(true) {
+            semantic_guard["detail"]
+                .as_str()
+                .or_else(|| semantic_guard["reason"].as_str())
+                .unwrap_or("Semantic layer честно abstained и не добавил фрагменты.")
+                .to_string()
+        } else {
+            "Semantic layer не добавил новых фрагментов после scope и relevance проверки."
+                .to_string()
+        };
+        not_included.push(json!({
+            "strategy": "semantic_chunks",
+            "reason": reason
+        }));
+    }
+
+    json!({
+        "selection_priority": [
+            "exact_documents",
+            "symbol_hits",
+            "lexical_chunks",
+            "semantic_chunks"
+        ],
+        "scope": {
+            "project_code": payload["project"]["code"].clone(),
+            "namespace_code": payload["namespace"]["code"].clone(),
+            "effective_retrieval_mode": payload["effective_retrieval_mode"].clone(),
+            "visible_projects_total": payload["visible_projects"].as_array().map(Vec::len).unwrap_or_default(),
+        },
+        "included": included,
+        "not_included": not_included,
+        "semantic_guard": semantic_guard.clone(),
+    })
+}
+
 fn build_query_embedder(cfg: &AppConfig) -> Result<TextEmbedding> {
     let model = match cfg.code_embed_model.as_str() {
         "jina_base_code" => EmbeddingModel::JinaEmbeddingsV2BaseCode,
@@ -1344,6 +1457,7 @@ fn prepared_from_cached_payload(
     );
     let mut payload = cached.payload.as_ref().clone();
     payload["retrieval_runtime"] = runtime_json(&stats);
+    ensure_context_pack_decision_trace(&mut payload);
     let payload_json: Arc<str> = Arc::from(serde_json::to_string(&payload)?);
 
     Ok(PreparedContextPack {
@@ -1557,6 +1671,7 @@ fn context_pack_result_from_local_entry(cached: LocalContextPackEntry) -> Contex
     let stats = cached_fast_context_pack_stats(&cached);
     let mut payload = cached.payload.as_ref().clone();
     payload["retrieval_runtime"] = runtime_json(&stats);
+    ensure_context_pack_decision_trace(&mut payload);
     ContextPackResult { payload, stats }
 }
 
@@ -2048,9 +2163,9 @@ fn synthetic_chunk_hit(relative_path: &str, content: &str) -> ChunkHit {
 #[cfg(test)]
 mod tests {
     use super::{
-        SemanticTimings, apply_semantic_relevance_guard, degradation_probe_stale_fast_cache,
-        degradation_proof_scenarios, query_terms, semantic_fallback_result,
-        semantic_hit_has_query_overlap, synthetic_chunk_hit,
+        SemanticTimings, apply_semantic_relevance_guard, build_context_pack_decision_trace,
+        degradation_probe_stale_fast_cache, degradation_proof_scenarios, query_terms,
+        semantic_fallback_result, semantic_hit_has_query_overlap, synthetic_chunk_hit,
     };
     use serde_json::json;
 
@@ -2097,6 +2212,40 @@ mod tests {
         assert_eq!(accepted.len(), 1);
         assert!(!summary.abstained);
         assert_eq!(summary.accepted_hits, 1);
+    }
+
+    #[test]
+    fn context_pack_decision_trace_explains_included_and_missing_layers() {
+        let payload = json!({
+            "project": {"code": "art"},
+            "namespace": {"code": "continuity"},
+            "effective_retrieval_mode": "local_strict",
+            "visible_projects": [{"project_code": "art"}],
+            "retrieval": {
+                "exact_documents": [{"relative_path": "README.md"}],
+                "symbol_hits": [],
+                "lexical_chunks": [{"relative_path": "docs/guide.md"}],
+                "semantic_chunks": []
+            },
+            "quality": {
+                "semantic_guard": {
+                    "abstained": true,
+                    "reason": "semantic_hits_missing_query_overlap",
+                    "detail": "semantic layer abstained"
+                }
+            }
+        });
+        let trace = build_context_pack_decision_trace(&payload);
+        assert_eq!(trace["included"].as_array().map(Vec::len), Some(2));
+        assert_eq!(trace["not_included"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            trace["not_included"][1]["reason"].as_str(),
+            Some("semantic layer abstained")
+        );
+        assert_eq!(
+            trace["scope"]["effective_retrieval_mode"].as_str(),
+            Some("local_strict")
+        );
     }
 
     #[test]
