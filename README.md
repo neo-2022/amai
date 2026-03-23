@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 19:52 MSK
-Ручная сверка guide/docs: 2026-03-23 19:52 MSK
+modified_at: 2026-03-23 20:15 MSK
+Ручная сверка guide/docs: 2026-03-23 20:15 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -318,13 +318,20 @@ cargo run --quiet -- verify continuity --project art --namespace continuity
     - тот же `workspace_graph_summary` теперь поднимается и в `chat_start_restore`, и в human-readable startup/restore вывод, если в текущей линии уже были свежие retrieval-context события.
 - `verify continuity`
   - это уже не human-readable startup, а прямой machine-readable proof-контур для recovery;
-  - он проверяет 5 отдельных probe:
+  - он проверяет уже 9 отдельных probe:
     - есть ли свежий `continuity_handoff`;
     - собрался ли `working_state_restore`;
     - есть ли непустой `chat_start_restore.prompt_text`;
     - не подменяет ли поздний replay старый handoff;
     - не подменяет ли поздний replay старый import;
-  - этот contour пишет `continuity_verification.canonical_eval`, где тот же общий verdict-layer теперь умеет отмечать recovery как `recovered_useful`, а replay-регресс как `stale_target`.
+    - умеет ли direct `previous_chat` вернуть осмысленный прошлый chat tail;
+    - умеет ли direct `chat_at_time` вернуть точный смысловой срез по времени;
+    - fail-closed ли ведёт себя `previous_chat`, когда такого смещения назад нет;
+    - fail-closed ли ведёт себя `chat_at_time`, когда точного временного совпадения нет.
+  - этот contour пишет `continuity_verification.canonical_eval`, где:
+    - полезное recovery идёт как `recovered_useful`;
+    - честный fail-closed на прямом temporal lookup считается как `hit_correct_target` для isolation-boundary pattern;
+    - replay-регресс опускается до `stale_target`, а не маскируется под success.
 
 Если у вас несколько параллельных агентов:
 
@@ -1329,8 +1336,8 @@ cargo run --release -- observe guardrails
     - какой proof/runbook закреплён за каждым классом.
   - теперь сюда же входит и `continuity_verification`:
     - direct recovery proof вне MCP-обёртки;
-    - machine-readable verdict по `handoff / working_state / chat_start_prompt / replay freshness`;
-    - reproducibility contract для continuity import/handoff/restore.
+    - machine-readable verdict по `handoff / working_state / chat_start_prompt / replay freshness / previous_chat / exact_time`;
+    - reproducibility contract для continuity import/handoff/startup и direct temporal lookup.
 - [config/red_team_retrieval_isolation.toml](/home/art/agent-memory-index/config/red_team_retrieval_isolation.toml)
   - фиксированный red-team retrieval isolation contour для `project_alpha/project_beta`;
   - hostile mixed query;

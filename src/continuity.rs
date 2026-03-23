@@ -88,6 +88,7 @@ struct ContinuityStartupContext {
 #[derive(Debug)]
 struct ContinuityEvalProbe {
     name: &'static str,
+    expected_verdict_class: &'static str,
     verdict_class: String,
     verdict_reason: String,
     details: Value,
@@ -645,6 +646,9 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
     let mut probes = vec![
         build_continuity_eval_probe(
             "handoff_summary_present",
+            "recovered_useful",
+            EvalPattern::RecoveryTarget,
+            true,
             json!({
                 "expected_present": handoff_summary_present,
                 "unexpected_present": false,
@@ -654,6 +658,9 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
         )?,
         build_continuity_eval_probe(
             "working_state_restore_present",
+            "recovered_useful",
+            EvalPattern::RecoveryTarget,
+            true,
             json!({
                 "expected_present": working_state_restore_present,
                 "unexpected_present": false,
@@ -669,6 +676,9 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
         )?,
         build_continuity_eval_probe(
             "chat_start_prompt_present",
+            "recovered_useful",
+            EvalPattern::RecoveryTarget,
+            true,
             json!({
                 "expected_present": chat_start_prompt_present,
                 "unexpected_present": false,
@@ -680,11 +690,17 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
         )?,
     ];
     probes.extend(continuity_replay_guard_probes()?);
+    probes.extend(continuity_temporal_lookup_probes()?);
     let canonical_eval = build_continuity_canonical_eval(&probes)?;
     let failing_probes = probes
         .iter()
-        .filter(|probe| probe.verdict_class != "recovered_useful")
-        .map(|probe| format!("{}={}", probe.name, probe.verdict_class))
+        .filter(|probe| probe.verdict_class != probe.expected_verdict_class)
+        .map(|probe| {
+            format!(
+                "{}={} (expected {})",
+                probe.name, probe.verdict_class, probe.expected_verdict_class
+            )
+        })
         .collect::<Vec<_>>();
     if !failing_probes.is_empty() {
         return Err(anyhow!(
@@ -1214,11 +1230,18 @@ pub fn degradation_proof_scenarios() -> Result<Vec<Value>> {
     ])
 }
 
-fn build_continuity_eval_probe(name: &'static str, details: Value) -> Result<ContinuityEvalProbe> {
-    let signals = EvalSignals::from_details(&details, true);
-    let verdict = eval_verdict::derive_eval_verdict(EvalPattern::RecoveryTarget, &signals)?;
+fn build_continuity_eval_probe(
+    name: &'static str,
+    expected_verdict_class: &'static str,
+    pattern: EvalPattern,
+    has_expected_target: bool,
+    details: Value,
+) -> Result<ContinuityEvalProbe> {
+    let signals = EvalSignals::from_details(&details, has_expected_target);
+    let verdict = eval_verdict::derive_eval_verdict(pattern, &signals)?;
     Ok(ContinuityEvalProbe {
         name,
+        expected_verdict_class,
         verdict_class: verdict.class_key,
         verdict_reason: verdict.reason,
         details,
@@ -1235,6 +1258,7 @@ fn build_continuity_canonical_eval(probes: &[ContinuityEvalProbe]) -> Result<Val
             .map(|probe| {
                 json!({
                     "name": probe.name,
+                    "expected_eval_verdict_class": probe.expected_verdict_class,
                     "eval_verdict_class": probe.verdict_class,
                     "eval_reason": probe.verdict_reason,
                     "details": probe.details,
@@ -1287,6 +1311,9 @@ fn continuity_replay_guard_probes() -> Result<Vec<ContinuityEvalProbe>> {
     Ok(vec![
         build_continuity_eval_probe(
             "handoff_replay_rejected",
+            "recovered_useful",
+            EvalPattern::RecoveryTarget,
+            true,
             json!({
                 "expected_present": handoff_replay_rejected,
                 "unexpected_present": !handoff_replay_rejected,
@@ -1303,6 +1330,9 @@ fn continuity_replay_guard_probes() -> Result<Vec<ContinuityEvalProbe>> {
         )?,
         build_continuity_eval_probe(
             "import_replay_rejected",
+            "recovered_useful",
+            EvalPattern::RecoveryTarget,
+            true,
             json!({
                 "expected_present": import_replay_rejected,
                 "unexpected_present": !import_replay_rejected,
@@ -1315,6 +1345,163 @@ fn continuity_replay_guard_probes() -> Result<Vec<ContinuityEvalProbe>> {
                 ),
                 "expected_headline": "Fresh import",
                 "expected_semantic_epoch_ms": 2_000,
+            }),
+        )?,
+    ])
+}
+
+fn continuity_temporal_lookup_probes() -> Result<Vec<ContinuityEvalProbe>> {
+    let handoff = json!({
+        "headline": "Current project line",
+        "next_step": "Current project next step."
+    });
+    let previous_chat = codex_threads::ChatTail {
+        thread_id: "thread-2".to_string(),
+        title: "чат про continuity".to_string(),
+        summary_headline: Some("Закончили на temporal contour.".to_string()),
+        summary_next_step: Some("Проверить новый чат ещё раз.".to_string()),
+        selected_time_slice: None,
+        messages: vec![
+            codex_threads::TranscriptMessage {
+                role: "user".to_string(),
+                text: "на чем закончили?".to_string(),
+            },
+            codex_threads::TranscriptMessage {
+                role: "assistant".to_string(),
+                text: "Закончили на temporal contour.\nБлижайший обязательный следующий шаг: Проверить новый чат ещё раз.".to_string(),
+            },
+        ],
+    };
+    let previous_answer = render_direct_answer(
+        &handoff,
+        None,
+        Some(&previous_chat),
+        "previous_chat",
+        None,
+        1,
+    );
+    let previous_chat_recovered = previous_answer
+        .contains("На чём закончился прошлый чат: Закончили на temporal contour.")
+        && previous_answer
+            .contains("Ближайший обязательный следующий шаг: Проверить новый чат ещё раз.")
+        && previous_answer.contains("Предыдущий чат по времени: чат про continuity");
+
+    let exact_time = "2026-03-19T12:00:00+03:00";
+    let exact_time_chat = codex_threads::ChatTail {
+        thread_id: "thread-1".to_string(),
+        title: "чат про continuity".to_string(),
+        summary_headline: Some("про temporal lookup".to_string()),
+        summary_next_step: None,
+        selected_time_slice: Some(codex_threads::ThreadTimeSliceSummary {
+            started_at: "2026-03-19T11:59:20+03:00".to_string(),
+            ended_at: "2026-03-19T12:01:10+03:00".to_string(),
+            started_at_epoch_s: 1,
+            ended_at_epoch_s: 2,
+            user_anchor: "разбирали temporal lookup и его точный смысловой ответ".to_string(),
+            assistant_anchor: "про temporal lookup".to_string(),
+            summary_headline: "про temporal lookup".to_string(),
+            summary_next_step: String::new(),
+        }),
+        messages: vec![
+            codex_threads::TranscriptMessage {
+                role: "user".to_string(),
+                text: "о чём говорили?".to_string(),
+            },
+            codex_threads::TranscriptMessage {
+                role: "assistant".to_string(),
+                text: "про temporal lookup".to_string(),
+            },
+        ],
+    };
+    let exact_time_answer = render_direct_answer(
+        &handoff,
+        None,
+        Some(&exact_time_chat),
+        "chat_at_time",
+        Some(exact_time),
+        1,
+    );
+    let exact_time_recovered = exact_time_answer
+        .contains("Что было в чате на этот момент: про temporal lookup")
+        && exact_time_answer.contains(
+            "Смысловой срез времени: 2026-03-19T11:59:20+03:00 -> 2026-03-19T12:01:10+03:00",
+        )
+        && exact_time_answer.contains("Подходящий chat thread: чат про continuity");
+
+    let missing_previous_answer =
+        render_direct_answer(&handoff, None, None, "previous_chat", None, 30);
+    let missing_previous_fail_closed = missing_previous_answer
+        .contains("На чём закончился прошлый чат: для такого смещения назад нет известного чата.")
+        && missing_previous_answer.contains("Смещение назад по чатам: 30")
+        && missing_previous_answer
+            .contains("Текущая активная линия проекта сейчас: Current project line");
+
+    let missing_exact_time = "2099-01-01T12:00:00Z";
+    let missing_exact_time_answer = render_direct_answer(
+        &handoff,
+        None,
+        None,
+        "chat_at_time",
+        Some(missing_exact_time),
+        1,
+    );
+    let missing_exact_time_fail_closed = missing_exact_time_answer.contains(
+        "Что было в чате на этот момент: для этого момента нет точного совпадения в известных чатах.",
+    ) && missing_exact_time_answer.contains("Целевой момент времени: 2099-01-01T12:00:00Z")
+        && missing_exact_time_answer.contains("Текущая активная линия проекта сейчас: Current project line");
+
+    Ok(vec![
+        build_continuity_eval_probe(
+            "previous_chat_recovered_useful",
+            "recovered_useful",
+            EvalPattern::RecoveryTarget,
+            true,
+            json!({
+                "expected_present": previous_chat_recovered,
+                "unexpected_present": false,
+                "intent": "previous_chat",
+                "answer": previous_answer,
+            }),
+        )?,
+        build_continuity_eval_probe(
+            "exact_time_recovered_useful",
+            "recovered_useful",
+            EvalPattern::RecoveryTarget,
+            true,
+            json!({
+                "expected_present": exact_time_recovered,
+                "unexpected_present": false,
+                "intent": "chat_at_time",
+                "target_time": exact_time,
+                "answer": exact_time_answer,
+            }),
+        )?,
+        build_continuity_eval_probe(
+            "missing_previous_chat_fail_closed",
+            "hit_correct_target",
+            EvalPattern::IsolationBoundary,
+            false,
+            json!({
+                "boundary_clean": missing_previous_fail_closed,
+                "fail_closed_ok": missing_previous_fail_closed,
+                "unexpected_present": false,
+                "intent": "previous_chat",
+                "offset": 30,
+                "answer": missing_previous_answer,
+            }),
+        )?,
+        build_continuity_eval_probe(
+            "missing_exact_time_fail_closed",
+            "hit_correct_target",
+            EvalPattern::IsolationBoundary,
+            false,
+            json!({
+                "boundary_clean": missing_exact_time_fail_closed,
+                "fail_closed_ok": missing_exact_time_fail_closed,
+                "unexpected_present": false,
+                "intent": "chat_at_time",
+                "target_time": missing_exact_time,
+                "answer": missing_exact_time_answer,
             }),
         )?,
     ])
@@ -2350,10 +2537,11 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::{
         build_chat_start_restore, build_continuity_canonical_eval, continuity_replay_guard_probes,
-        continuity_snapshot_semantic_epoch_ms, degradation_proof_scenarios,
-        enrich_thread_index_file, extract_next_step_from_text, fake_continuity_handoff_snapshot,
-        fake_continuity_import_snapshot, is_meta_continuity_handoff, latest_scoped_snapshot,
-        parse_chat_reference_spec, render_direct_answer,
+        continuity_snapshot_semantic_epoch_ms, continuity_temporal_lookup_probes,
+        degradation_proof_scenarios, enrich_thread_index_file, extract_next_step_from_text,
+        fake_continuity_handoff_snapshot, fake_continuity_import_snapshot,
+        is_meta_continuity_handoff, latest_scoped_snapshot, parse_chat_reference_spec,
+        render_direct_answer,
     };
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
@@ -2632,6 +2820,21 @@ mod tests {
         let summary = build_continuity_canonical_eval(&probes).expect("summary");
         assert_eq!(
             summary["verdict_counts"]["recovered_useful"].as_u64(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn continuity_temporal_lookup_probes_cover_useful_and_fail_closed_paths() {
+        let probes = continuity_temporal_lookup_probes().expect("probes");
+        assert_eq!(probes.len(), 4);
+        let summary = build_continuity_canonical_eval(&probes).expect("summary");
+        assert_eq!(
+            summary["verdict_counts"]["recovered_useful"].as_u64(),
+            Some(2)
+        );
+        assert_eq!(
+            summary["verdict_counts"]["hit_correct_target"].as_u64(),
             Some(2)
         );
     }

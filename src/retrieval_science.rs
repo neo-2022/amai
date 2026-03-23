@@ -250,7 +250,7 @@ mod tests {
         );
         assert_eq!(
             suite["query_suite_version"].as_str(),
-            Some("continuity-verification-v1")
+            Some("continuity-verification-v2")
         );
     }
 

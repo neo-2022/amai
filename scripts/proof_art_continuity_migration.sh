@@ -111,8 +111,9 @@ node = payload["continuity_verification"]
 canonical_eval = node["canonical_eval"]
 assert payload["retrieval_science"]["suite_key"] == "continuity_verification", payload
 assert canonical_eval["eval_verdict_model_version"] == "memory-eval-verdict-v1", canonical_eval
-assert canonical_eval["verdict_counts"]["recovered_useful"] == 5, canonical_eval
-assert len(canonical_eval["probes"]) == 5, canonical_eval
+assert canonical_eval["verdict_counts"]["recovered_useful"] == 7, canonical_eval
+assert canonical_eval["verdict_counts"]["hit_correct_target"] == 2, canonical_eval
+assert len(canonical_eval["probes"]) == 9, canonical_eval
 assert node["working_state_restore_present"] is True, node
 assert node["handoff_summary_source"] == "continuity_handoff", node
 assert node["chat_start_restore"]["prompt_text"], node
