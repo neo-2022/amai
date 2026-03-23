@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:06 MSK
-Ручная сверка guide/docs: 2026-03-23 22:06 MSK
+modified_at: 2026-03-23 22:12 MSK
+Ручная сверка guide/docs: 2026-03-23 22:12 MSK
 
 # Operations
 
@@ -36,6 +36,14 @@ cd /home/art/agent-memory-index
 - работает как более человеческое имя для product install path.
 - если запускать его повторно, он не должен плодить дубликаты, а должен аккуратно пересинхронизировать текущую установку.
 - после локальной установки `~/.local/bin/memory` больше не должен указывать на старый bridge; он должен запускать `Amai` compatibility runner.
+- `memory search` через этот bridge теперь обязан печатать не только hits, но и две explainability-строки:
+  - `Почему вошло`
+  - `Почему часть не вошла`
+- для этого пути есть отдельный proof:
+
+```bash
+./scripts/proof_memory_bridge_search.sh
+```
 
 Если нужен cheap remote/smoke contour под слабый VPS:
 

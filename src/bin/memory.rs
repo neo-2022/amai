@@ -115,6 +115,8 @@ struct SearchState {
     project_code: String,
     namespace: String,
     created_at_epoch_ms: u128,
+    included_reasons_summary: Option<String>,
+    excluded_reasons_summary: Option<String>,
     hits: Vec<SearchHit>,
 }
 
@@ -274,6 +276,11 @@ async fn run_search(paths: &BridgePaths, args: &SearchArgs) -> Result<()> {
         project_code: resolved.project_code,
         namespace: args.namespace.clone(),
         created_at_epoch_ms: now_epoch_ms(),
+        included_reasons_summary: decision_trace_summary(&payload["decision_trace"], "included"),
+        excluded_reasons_summary: decision_trace_summary(
+            &payload["decision_trace"],
+            "not_included",
+        ),
         hits,
     };
     save_search_state(&state)?;
@@ -547,6 +554,41 @@ fn summarize_text(input: &str) -> String {
     preview
 }
 
+fn strategy_label(strategy: &str) -> &str {
+    match strategy {
+        "exact_documents" => "точные совпадения",
+        "symbol_hits" => "совпадения по символам",
+        "lexical_chunks" => "текстовые фрагменты",
+        "semantic_chunks" => "смысловые фрагменты",
+        _ => strategy,
+    }
+}
+
+fn decision_trace_summary(trace: &Value, key: &str) -> Option<String> {
+    let items = trace.get(key)?.as_array()?;
+    let parts = items
+        .iter()
+        .take(3)
+        .filter_map(|item| {
+            let reason = item["reason"].as_str()?.trim();
+            if reason.is_empty() {
+                return None;
+            }
+            let strategy = strategy_label(item["strategy"].as_str().unwrap_or_default());
+            let count = item["count"].as_u64();
+            Some(match count {
+                Some(value) if value > 0 => format!("{strategy} ({value}) — {reason}"),
+                _ => format!("{strategy} — {reason}"),
+            })
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(summarize_text(&parts.join(" • ")))
+    }
+}
+
 fn contains_legacy_bridge_marker(hit: &SearchHit) -> bool {
     let lowered = format!("{} {}", hit.title, hit.summary).to_lowercase();
     lowered.contains("echovault")
@@ -560,6 +602,12 @@ fn print_search_state(state: &SearchState) {
     println!("Проект: {}", state.project_code);
     println!("Namespace: {}", state.namespace);
     println!("Запрос: {}", state.query);
+    if let Some(summary) = &state.included_reasons_summary {
+        println!("Почему вошло: {summary}");
+    }
+    if let Some(summary) = &state.excluded_reasons_summary {
+        println!("Почему часть не вошла: {summary}");
+    }
     println!("Найдено записей: {}", state.hits.len());
     println!();
     for hit in &state.hits {
@@ -739,7 +787,7 @@ fn now_epoch_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_search_hits, is_amai_root, render_save_details};
+    use super::{build_search_hits, decision_trace_summary, is_amai_root, render_save_details};
     use serde_json::json;
     use std::path::Path;
 
@@ -798,6 +846,29 @@ mod tests {
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].id, "1");
         assert_eq!(hits[1].kind, "symbol");
+    }
+
+    #[test]
+    fn decision_trace_summary_compacts_included_and_missing_layers() {
+        let trace = json!({
+            "included": [{
+                "strategy": "exact_documents",
+                "count": 1,
+                "reason": "Нашлись точные совпадения по continuity."
+            }],
+            "not_included": [{
+                "strategy": "semantic_chunks",
+                "reason": "Semantic layer честно abstained и не добавил фрагменты."
+            }]
+        });
+        assert_eq!(
+            decision_trace_summary(&trace, "included").as_deref(),
+            Some("точные совпадения (1) — Нашлись точные совпадения по continuity.")
+        );
+        assert_eq!(
+            decision_trace_summary(&trace, "not_included").as_deref(),
+            Some("смысловые фрагменты — Semantic layer честно abstained и не добавил фрагменты.")
+        );
     }
 
     #[test]
