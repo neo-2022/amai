@@ -11,7 +11,7 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use ignore::WalkBuilder;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -98,7 +98,7 @@ pub async fn index_project(
     postgres::delete_namespace_documents(db, namespace.namespace_id).await?;
 
     let git_commit_sha = resolve_git_commit(&project.repo_root).await.ok();
-    let files = collect_files(&args.path, args.limit_files)?;
+    let files = collect_files(&args.path, args.limit_files, args.paths_file.as_deref())?;
     let qdrant_client = if args.skip_embeddings {
         None
     } else {
@@ -241,7 +241,14 @@ fn build_code_embedder(cfg: &AppConfig) -> Result<TextEmbedding> {
     TextEmbedding::try_new(InitOptions::new(model).with_show_download_progress(false))
 }
 
-fn collect_files(root: &Path, limit: Option<usize>) -> Result<Vec<PathBuf>> {
+fn collect_files(
+    root: &Path,
+    limit: Option<usize>,
+    paths_file: Option<&Path>,
+) -> Result<Vec<PathBuf>> {
+    if let Some(paths_file) = paths_file {
+        return collect_explicit_files(root, limit, paths_file);
+    }
     let mut builder = WalkBuilder::new(root);
     builder
         .standard_filters(true)
@@ -263,6 +270,55 @@ fn collect_files(root: &Path, limit: Option<usize>) -> Result<Vec<PathBuf>> {
         .filter(|path| detect(path).is_some())
         .take(limit.unwrap_or(usize::MAX))
         .collect::<Vec<_>>();
+    Ok(files)
+}
+
+fn collect_explicit_files(
+    root: &Path,
+    limit: Option<usize>,
+    paths_file: &Path,
+) -> Result<Vec<PathBuf>> {
+    let content = fs::read_to_string(paths_file)
+        .with_context(|| format!("failed to read paths file {}", paths_file.display()))?;
+    let mut unique_paths = BTreeSet::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        unique_paths.insert(line.to_string());
+    }
+
+    let mut files = Vec::with_capacity(unique_paths.len());
+    for relative_path in unique_paths {
+        let candidate = root.join(&relative_path);
+        if !candidate.is_file() {
+            return Err(anyhow!(
+                "paths file {} references missing file {}",
+                paths_file.display(),
+                candidate.display()
+            ));
+        }
+        if !should_index_path(root, &candidate) {
+            return Err(anyhow!(
+                "paths file {} references non-indexable path {}",
+                paths_file.display(),
+                candidate.display()
+            ));
+        }
+        if detect(&candidate).is_none() {
+            return Err(anyhow!(
+                "paths file {} references unsupported file {}",
+                paths_file.display(),
+                candidate.display()
+            ));
+        }
+        files.push(candidate);
+    }
+
+    if let Some(limit) = limit {
+        files.truncate(limit);
+    }
     Ok(files)
 }
 
@@ -625,8 +681,10 @@ fn hex_sha256(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_parser_coverage_ratio, should_index_path};
+    use super::{collect_explicit_files, compute_parser_coverage_ratio, should_index_path};
+    use std::fs;
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn skips_runtime_and_generated_directories() {
@@ -673,5 +731,49 @@ mod tests {
     #[test]
     fn parser_coverage_penalizes_real_ast_fallbacks() {
         assert!((compute_parser_coverage_ratio(3, 2) - 0.6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn explicit_paths_file_is_deterministic_and_ignores_comments() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("amai-indexer-explicit-paths-{unique}"));
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("src/lib.rs"), "pub fn alpha() {}\n").expect("write lib");
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"demo\"\n").expect("write cargo");
+        let paths_file = root.join("paths.txt");
+        fs::write(
+            &paths_file,
+            "# comment\nCargo.toml\nsrc/lib.rs\nCargo.toml\n\n",
+        )
+        .expect("write paths");
+
+        let files = collect_explicit_files(&root, None, &paths_file).expect("collect");
+        assert_eq!(
+            files,
+            vec![root.join("Cargo.toml"), root.join("src/lib.rs")]
+        );
+
+        fs::remove_dir_all(&root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn explicit_paths_file_rejects_missing_entries() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("amai-indexer-explicit-missing-{unique}"));
+        fs::create_dir_all(root.join("src")).expect("create src");
+        fs::write(root.join("src/lib.rs"), "pub fn alpha() {}\n").expect("write lib");
+        let paths_file = root.join("paths.txt");
+        fs::write(&paths_file, "src/lib.rs\nmissing.rs\n").expect("write paths");
+
+        let error = collect_explicit_files(&root, None, &paths_file).expect_err("must fail");
+        assert!(error.to_string().contains("references missing file"));
+
+        fs::remove_dir_all(&root).expect("cleanup temp root");
     }
 }

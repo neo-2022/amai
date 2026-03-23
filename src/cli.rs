@@ -383,6 +383,11 @@ pub struct IndexProjectArgs {
     pub namespace: String,
     #[arg(long)]
     pub limit_files: Option<usize>,
+    #[arg(
+        long,
+        help = "Optional newline-delimited file with exact relative paths to index deterministically"
+    )]
+    pub paths_file: Option<PathBuf>,
     #[arg(long, default_value_t = false)]
     pub skip_embeddings: bool,
 }

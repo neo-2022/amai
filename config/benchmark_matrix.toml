@@ -388,6 +388,7 @@ current_gaps = [
 ]
 proof_commands = [
   "./scripts/proof_text_compare.sh",
+  "./scripts/proof_text_compare_real_projects.sh",
   "./scripts/proof_accuracy.sh"
 ]
 next_step = "Собрать Rust-first coding-agent eval contour: issue context, patch support, regression checks."
@@ -418,7 +419,8 @@ current_gaps = [
   "Нет measured report по language slices."
 ]
 proof_commands = [
-  "./scripts/proof_text_compare.sh"
+  "./scripts/proof_text_compare.sh",
+  "./scripts/proof_text_compare_real_projects.sh"
 ]
 next_step = "Добавить в Rust fixtures набор polyglot coding tasks и measured slices по языкам."
 
@@ -448,7 +450,8 @@ current_gaps = [
   "Нет measured self-correction contour по нескольким языкам."
 ]
 proof_commands = [
-  "./scripts/proof_text_compare.sh"
+  "./scripts/proof_text_compare.sh",
+  "./scripts/proof_text_compare_real_projects.sh"
 ]
 next_step = "Добавить polyglot eval fixtures и measured report по language slices."
 

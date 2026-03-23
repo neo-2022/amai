@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 02:05 MSK
-Ручная сверка guide/docs: 2026-03-23 02:05 MSK
+modified_at: 2026-03-23 06:45 MSK
+Ручная сверка guide/docs: 2026-03-23 06:45 MSK
 
 # Operations
 
@@ -761,6 +761,18 @@ cargo run --release -- verify benchmark \
 - `state/cold-benchmark/latest/summary.json`
 - `state/cold-benchmark/latest/report.md`
 - `state/cold-benchmark/latest/samples.csv`
+
+Для real-project text compare без полного индексирования монорепозитория теперь есть отдельный proof:
+
+```bash
+./scripts/proof_text_compare_real_projects.sh
+```
+
+Что он делает:
+- читает `fixtures/real_project_text_compare_cases.jsonl`;
+- из `expected_paths` строит точные allowlist-файлы по `Art` и `Amai`;
+- индексирует оба проекта через `index project --paths-file ... --skip-embeddings`;
+- затем запускает `verify text-compare` уже на реальных локальных путях и relation-графе `Art -> Amai`.
 
 Кроме файлов, runner теперь ещё и пишет snapshot `cold_path_benchmark`, поэтому:
 - human dashboard показывает сервисную карточку `Cold contour`;

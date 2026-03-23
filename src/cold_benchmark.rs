@@ -512,6 +512,7 @@ async fn index_repo(
             path: repo.resolved_root.clone(),
             namespace: repo.manifest.namespace.clone(),
             limit_files: repo.manifest.limit_files,
+            paths_file: None,
             skip_embeddings: repo.manifest.skip_embeddings,
         },
     )
