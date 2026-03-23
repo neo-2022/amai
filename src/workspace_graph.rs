@@ -1641,12 +1641,48 @@ fn short_hash(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_context_pack_workspace_graph, human_summary, merge_workspace_graphs};
+    use super::{
+        FileAggregate, GraphLookup, build_context_pack_workspace_graph, file_node_id,
+        human_summary, merge_workspace_graphs, resolve_rust_owned_symbol_name_target,
+        resolve_rust_symbol_name_target, scoped_path_key,
+    };
     use crate::postgres::{
         ChunkHit, DocumentHit, DocumentScopedSymbolRecord, DocumentStructureRecord, SymbolHit,
     };
+    use proptest::prelude::*;
     use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;
+
+    fn fake_file(relative_path: &str) -> FileAggregate {
+        FileAggregate {
+            node_id: file_node_id("project_alpha", "default", relative_path),
+            project_code: "project_alpha".to_string(),
+            namespace_code: "default".to_string(),
+            repo_root: "/repo".to_string(),
+            relative_path: relative_path.to_string(),
+            language: Some("rust".to_string()),
+            source_kind: "git_tracked".to_string(),
+            git_commit_sha: None,
+            structure_nodes: BTreeMap::new(),
+            symbol_nodes: BTreeMap::new(),
+            reference_nodes: BTreeMap::new(),
+            call_nodes: BTreeMap::new(),
+            retrieved_via: BTreeSet::new(),
+        }
+    }
+
+    fn fake_lookup() -> GraphLookup {
+        let mut lookup = GraphLookup::default();
+        for relative_path in ["src/lib.rs", "src/alpha.rs", "src/beta.rs"] {
+            let file_key = scoped_path_key("project_alpha", "default", relative_path);
+            lookup.file_node_ids.insert(
+                file_key,
+                file_node_id("project_alpha", "default", relative_path),
+            );
+        }
+        lookup
+    }
 
     #[test]
     fn context_pack_workspace_graph_contains_structure_symbol_chunk_and_reference_nodes() {
@@ -2296,6 +2332,127 @@ mod tests {
             graph["summary"]["relation_counts"]["calls_symbol"].as_u64(),
             Some(1)
         );
+    }
+
+    proptest! {
+        #[test]
+        fn plain_symbol_resolution_stays_fail_closed_under_candidate_ambiguity(
+            source_matches in 0usize..3,
+            alpha_matches in 0usize..3,
+            beta_matches in 0usize..3,
+        ) {
+            let source_file = fake_file("src/lib.rs");
+            let alpha_key = scoped_path_key("project_alpha", "default", "src/alpha.rs");
+            let beta_key = scoped_path_key("project_alpha", "default", "src/beta.rs");
+            let mut imported_files = BTreeSet::new();
+            imported_files.insert(alpha_key.clone());
+            imported_files.insert(beta_key.clone());
+            let mut lookup = fake_lookup();
+
+            for (relative_path, count, label) in [
+                ("src/lib.rs", source_matches, "source"),
+                ("src/alpha.rs", alpha_matches, "alpha"),
+                ("src/beta.rs", beta_matches, "beta"),
+            ] {
+                if count == 0 {
+                    continue;
+                }
+                let file_key = scoped_path_key("project_alpha", "default", relative_path);
+                let entry = lookup
+                    .symbol_node_ids
+                    .entry((file_key, "new".to_string()))
+                    .or_default();
+                for index in 0..count {
+                    entry.push(format!("symbol:{label}:new:{index}"));
+                }
+            }
+
+            let resolution = resolve_rust_symbol_name_target(
+                &source_file,
+                "new",
+                &lookup,
+                Some(&imported_files),
+            );
+
+            let file_states = [
+                ("src/lib.rs", source_matches),
+                ("src/alpha.rs", alpha_matches),
+                ("src/beta.rs", beta_matches),
+            ];
+            let ambiguous = file_states.iter().any(|(_, count)| *count > 1);
+            let unique_files = file_states
+                .iter()
+                .filter(|(_, count)| *count == 1)
+                .map(|(relative_path, _)| *relative_path)
+                .collect::<Vec<_>>();
+
+            if ambiguous || unique_files.len() != 1 {
+                prop_assert!(resolution.is_none());
+            } else {
+                let resolution = resolution.expect("unique resolution");
+                prop_assert_eq!(resolution.target_file_key.relative_path, unique_files[0]);
+            }
+        }
+
+        #[test]
+        fn owner_symbol_resolution_stays_fail_closed_under_candidate_ambiguity(
+            source_matches in 0usize..3,
+            alpha_matches in 0usize..3,
+            beta_matches in 0usize..3,
+        ) {
+            let source_file = fake_file("src/lib.rs");
+            let alpha_key = scoped_path_key("project_alpha", "default", "src/alpha.rs");
+            let beta_key = scoped_path_key("project_alpha", "default", "src/beta.rs");
+            let mut imported_files = BTreeSet::new();
+            imported_files.insert(alpha_key.clone());
+            imported_files.insert(beta_key.clone());
+            let mut lookup = fake_lookup();
+
+            for (relative_path, count, label) in [
+                ("src/lib.rs", source_matches, "source"),
+                ("src/alpha.rs", alpha_matches, "alpha"),
+                ("src/beta.rs", beta_matches, "beta"),
+            ] {
+                if count == 0 {
+                    continue;
+                }
+                let file_key = scoped_path_key("project_alpha", "default", relative_path);
+                let entry = lookup
+                    .owner_symbol_node_ids
+                    .entry((file_key, "Beta".to_string(), "new".to_string()))
+                    .or_default();
+                for index in 0..count {
+                    entry.push(format!("symbol:{label}:Beta:new:{index}"));
+                }
+            }
+
+            let resolution = resolve_rust_owned_symbol_name_target(
+                &source_file,
+                "Beta",
+                "new",
+                &lookup,
+                Some(&imported_files),
+            );
+
+            let file_states = [
+                ("src/lib.rs", source_matches),
+                ("src/alpha.rs", alpha_matches),
+                ("src/beta.rs", beta_matches),
+            ];
+            let ambiguous = file_states.iter().any(|(_, count)| *count > 1);
+            let unique_files = file_states
+                .iter()
+                .filter(|(_, count)| *count == 1)
+                .map(|(relative_path, _)| *relative_path)
+                .collect::<Vec<_>>();
+
+            if ambiguous || unique_files.len() != 1 {
+                prop_assert!(resolution.is_none());
+            } else {
+                let resolution = resolution.expect("unique owner resolution");
+                prop_assert_eq!(resolution.target_file_key.relative_path, unique_files[0]);
+            }
+        }
     }
 
     #[test]

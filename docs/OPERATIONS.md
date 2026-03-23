@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 16:28 MSK
-Ручная сверка guide/docs: 2026-03-23 16:28 MSK
+modified_at: 2026-03-23 16:35 MSK
+Ручная сверка guide/docs: 2026-03-23 16:35 MSK
 
 # Operations
 
@@ -511,6 +511,8 @@ cargo run -- context pack \
   `file`, `structure_item`, `symbol`, `chunk`, `import_ref`, `export_ref`, `call_ref`;
 - в `workspace-graph-v4` он теперь дополнительно materialize-ит resolved file-to-file, file-to-symbol и conservative call lineage
   только там, где target реально существует в том же `project + namespace + scope`; owner-aware Rust lookup разрешён только для provable случаев вроде `crate::alpha::Beta::new` или `Beta::new` после уже доказанного import-target, а неоднозначный target остаётся неразрешённым, недоказуемый call остаётся просто `call_ref` без target-edge;
+- property-based tests отдельно удерживают этот контур fail-closed:
+  неоднозначный symbol-owner match в любом candidate-file или более одного уникального candidate-file обязаны давать `None`, а не “лучшее совпадение”.
 - тот же graph потом без дополнительного reparse попадает в `working_state_restore`.
 
 Важно:
