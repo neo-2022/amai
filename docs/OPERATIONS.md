@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 00:22 MSK
-Ручная сверка guide/docs: 2026-03-24 00:22 MSK
+modified_at: 2026-03-24 02:18 MSK
+Ручная сверка guide/docs: 2026-03-24 02:18 MSK
 
 # Operations
 
@@ -519,6 +519,11 @@ cargo run -- project register \
   --display-name "Project Alpha" \
   --repo-root /path/to/project-alpha
 ```
+
+Правило для этого шага:
+- `repo_root` будет сохранён только в canonical absolute form;
+- если тот же физический корень уже зарегистрирован под другим `project code`, команда обязана завершиться ошибкой;
+- использовать alias-path вроде `../Art` вместо уже зарегистрированного `/home/art/Art` запрещено: это не новый проект, а конфликт регистрации.
 
 ## Ensure a workspace inside the project
 

@@ -7248,7 +7248,7 @@ mod tests {
                         "current_repo_indexed_files": 512,
                         "current_repo_target_files": 800
                     },
-                    "current_repo_code": "amai_local",
+                    "current_repo_code": "amai",
                     "current_repo_display_name": "Amai",
                     "profile": {
                         "target_p50_ms": 2.0,

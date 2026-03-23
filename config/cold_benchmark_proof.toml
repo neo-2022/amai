@@ -16,7 +16,7 @@ max_leakage = 0
 max_error_rate = 0.0
 
 [[repos]]
-code = "art_local"
+code = "art"
 display_name = "Art"
 repo_root = "../Art"
 namespace = "cold_benchmark"
@@ -27,7 +27,7 @@ skip_embeddings = true
 default_retrieval_mode = "local_strict"
 
 [[repos]]
-code = "amai_local"
+code = "amai"
 display_name = "Amai"
 repo_root = "."
 namespace = "cold_benchmark"
@@ -49,7 +49,7 @@ skip_embeddings = true
 default_retrieval_mode = "local_strict"
 
 [[repos]]
-code = "agent_regart_local"
+code = "agent_regart"
 display_name = "agent-RegArt"
 repo_root = "../agent-RegArt"
 namespace = "cold_benchmark"
@@ -60,10 +60,10 @@ skip_embeddings = true
 default_retrieval_mode = "local_strict"
 
 [[cases]]
-repo_code = "art_local"
+repo_code = "art"
 query_slice = "code_lookup"
 query = "scripts/tools/amai_art_continuity_startup.sh"
-expected_projects = ["art_local"]
+expected_projects = ["art"]
 expected_paths = ["scripts/tools/amai_art_continuity_startup.sh"]
 limit_documents = 1
 limit_symbols = 0
@@ -71,10 +71,10 @@ limit_chunks = 0
 limit_semantic_chunks = 0
 
 [[cases]]
-repo_code = "amai_local"
+repo_code = "amai"
 query_slice = "symbol_lookup"
 query = "run_text_compare"
-expected_projects = ["amai_local"]
+expected_projects = ["amai"]
 expected_paths = ["src/verify.rs"]
 expected_symbols = ["run_text_compare"]
 limit_documents = 0
@@ -83,10 +83,10 @@ limit_chunks = 0
 limit_semantic_chunks = 0
 
 [[cases]]
-repo_code = "amai_local"
+repo_code = "amai"
 query_slice = "docs_lookup"
 query = "README.md"
-expected_projects = ["amai_local"]
+expected_projects = ["amai"]
 expected_paths = ["README.md"]
 limit_documents = 1
 limit_symbols = 0
@@ -94,10 +94,10 @@ limit_chunks = 0
 limit_semantic_chunks = 0
 
 [[cases]]
-repo_code = "amai_local"
+repo_code = "amai"
 query_slice = "architecture_question"
 query = "docs/OPERATIONS.md"
-expected_projects = ["amai_local"]
+expected_projects = ["amai"]
 expected_paths = ["docs/OPERATIONS.md"]
 limit_documents = 1
 limit_symbols = 0
@@ -105,10 +105,10 @@ limit_chunks = 0
 limit_semantic_chunks = 0
 
 [[cases]]
-repo_code = "amai_local"
+repo_code = "amai"
 query_slice = "config_lookup"
 query = "src/config.rs"
-expected_projects = ["amai_local"]
+expected_projects = ["amai"]
 expected_paths = ["src/config.rs"]
 limit_documents = 1
 limit_symbols = 0
@@ -116,7 +116,7 @@ limit_chunks = 0
 limit_semantic_chunks = 0
 
 [[cases]]
-repo_code = "amai_local"
+repo_code = "amai"
 query_slice = "cross_file_trace"
 query = "scripts/human_dashboard.sh"
 expected_paths = ["scripts/human_dashboard.sh"]
@@ -126,7 +126,7 @@ limit_chunks = 0
 limit_semantic_chunks = 0
 
 [[cases]]
-repo_code = "amai_local"
+repo_code = "amai"
 query_slice = "onboarding_query"
 query = "scripts/install_amai.sh"
 expected_paths = ["scripts/install_amai.sh"]
@@ -147,10 +147,10 @@ limit_chunks = 0
 limit_semantic_chunks = 0
 
 [[cases]]
-repo_code = "agent_regart_local"
+repo_code = "agent_regart"
 query_slice = "architecture_question"
 query = "docs/vector-store-module.md"
-expected_projects = ["agent_regart_local"]
+expected_projects = ["agent_regart"]
 expected_paths = ["docs/vector-store-module.md"]
 limit_documents = 1
 limit_symbols = 0

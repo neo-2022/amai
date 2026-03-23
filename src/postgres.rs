@@ -2,6 +2,7 @@ use crate::{config::AppConfig, observability_policy};
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use tokio_postgres::{Client, NoTls};
 use uuid::Uuid;
 
@@ -278,6 +279,41 @@ pub async fn upsert_project(
     default_branch: Option<&str>,
     default_mode: &str,
 ) -> Result<ProjectRecord> {
+    let canonical_repo_root = canonical_repo_root_string(repo_root)?;
+    if let Some(existing) = client
+        .query_opt(
+            r#"
+            SELECT
+                project_id,
+                code,
+                display_name,
+                repo_root,
+                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+            FROM ami.projects
+            WHERE repo_root = $1
+            "#,
+            &[&canonical_repo_root],
+        )
+        .await?
+        .map(|row| ProjectRecord {
+            project_id: row.get(0),
+            code: row.get(1),
+            display_name: row.get(2),
+            repo_root: row.get(3),
+            updated_at: row.get(4),
+        })
+    {
+        if existing.code != code {
+            return Err(anyhow!(
+                "canonical repo_root {} is already registered as project {} (display_name: {}); alias code {} is blocked",
+                canonical_repo_root,
+                existing.code,
+                existing.display_name,
+                code
+            ));
+        }
+    }
+
     let row = client
         .query_one(
             r#"
@@ -295,7 +331,7 @@ pub async fn upsert_project(
                 repo_root,
                 to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
             "#,
-            &[&code, &display_name, &repo_root, &default_branch],
+            &[&code, &display_name, &canonical_repo_root, &default_branch],
         )
         .await
         .context("failed to upsert project")?;
@@ -375,6 +411,7 @@ pub async fn get_project_by_code(client: &Client, code: &str) -> Result<ProjectR
 }
 
 pub async fn get_project_by_repo_root(client: &Client, repo_root: &str) -> Result<ProjectRecord> {
+    let canonical_repo_root = canonical_repo_root_string(repo_root)?;
     let row = client
         .query_opt(
             r#"
@@ -387,10 +424,10 @@ pub async fn get_project_by_repo_root(client: &Client, repo_root: &str) -> Resul
             FROM ami.projects
             WHERE repo_root = $1
             "#,
-            &[&repo_root],
+            &[&canonical_repo_root],
         )
         .await?
-        .ok_or_else(|| anyhow!("project not found for repo_root: {repo_root}"))?;
+        .ok_or_else(|| anyhow!("project not found for repo_root: {canonical_repo_root}"))?;
     Ok(ProjectRecord {
         project_id: row.get(0),
         code: row.get(1),
@@ -398,6 +435,19 @@ pub async fn get_project_by_repo_root(client: &Client, repo_root: &str) -> Resul
         repo_root: row.get(3),
         updated_at: row.get(4),
     })
+}
+
+fn canonical_repo_root_string(repo_root: &str) -> Result<String> {
+    let canonical = Path::new(repo_root)
+        .canonicalize()
+        .with_context(|| format!("failed to resolve repo_root {}", repo_root))?;
+    if !canonical.is_dir() {
+        return Err(anyhow!(
+            "repo_root must resolve to a directory: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical.display().to_string())
 }
 
 pub async fn ensure_namespace(
@@ -1930,8 +1980,8 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ObservabilityInsertMeta, observability_conflict_error, observability_source_class,
-        prepare_observability_payload, validate_observability_update,
+        ObservabilityInsertMeta, canonical_repo_root_string, observability_conflict_error,
+        observability_source_class, prepare_observability_payload, validate_observability_update,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -2184,5 +2234,26 @@ mod tests {
                 .to_string()
                 .contains("observability snapshot is immutable and cannot be updated")
         );
+    }
+
+    #[test]
+    fn canonical_repo_root_string_resolves_relative_segments() {
+        let temp_root =
+            std::env::temp_dir().join(format!("amai-postgres-canonical-{}", Uuid::new_v4()));
+        let nested = temp_root.join("nested");
+        std::fs::create_dir_all(&nested).expect("temp dir");
+        let raw = nested.join("..").join("nested").join(".");
+        let canonical = canonical_repo_root_string(&raw.display().to_string()).expect("canonical");
+        assert_eq!(canonical, nested.display().to_string());
+        std::fs::remove_dir_all(&temp_root).expect("cleanup");
+    }
+
+    #[test]
+    fn canonical_repo_root_string_rejects_missing_paths() {
+        let missing =
+            std::env::temp_dir().join(format!("amai-postgres-missing-{}", Uuid::new_v4()));
+        let error = canonical_repo_root_string(&missing.display().to_string())
+            .expect_err("missing path must fail");
+        assert!(error.to_string().contains("failed to resolve repo_root"));
     }
 }

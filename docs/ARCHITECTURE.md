@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 17:17 MSK
-Ручная сверка guide/docs: 2026-03-21 17:17 MSK
+modified_at: 2026-03-24 02:18 MSK
+Ручная сверка guide/docs: 2026-03-24 02:18 MSK
 
 # Architecture
 
@@ -194,7 +194,9 @@ Code structure plane:
   - создаёт NATS streams;
   - создаёт SQLite edge cache.
 - `project register`
-  - регистрирует project root и default namespace.
+  - регистрирует project root и default namespace;
+  - перед записью canonicalize-ит `repo_root` до абсолютного физического пути;
+  - блокирует alias-регистрацию, если тот же canonical root уже принадлежит другому `project code`.
 - `namespace ensure`
   - создаёт namespace внутри уже зарегистрированного проекта.
 - `relation add`

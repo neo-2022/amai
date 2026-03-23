@@ -16,8 +16,8 @@ max_leakage = 99
 max_error_rate = 1.0
 
 [[repos]]
-code = "art_local"
-display_name = "Art small"
+code = "art"
+display_name = "Art"
 repo_root = "../Art"
 namespace = "cold_lazy_order_proof"
 repo_type = "mixed"
@@ -27,8 +27,8 @@ skip_embeddings = true
 default_retrieval_mode = "local_strict"
 
 [[repos]]
-code = "amai_local"
-display_name = "Amai bigger"
+code = "amai"
+display_name = "Amai"
 repo_root = "."
 namespace = "cold_lazy_order_proof"
 repo_type = "code_heavy"
@@ -38,10 +38,10 @@ skip_embeddings = true
 default_retrieval_mode = "local_strict"
 
 [[cases]]
-repo_code = "art_local"
+repo_code = "art"
 query_slice = "art_case"
 query = "CHECKLIST_00_MASTER_ART_REGART"
-expected_projects = ["art_local"]
+expected_projects = ["art"]
 expected_paths = ["docs/source/checklists/CHECKLIST_00_MASTER_ART_REGART.md"]
 limit_documents = 1
 limit_symbols = 0
@@ -49,10 +49,10 @@ limit_chunks = 0
 limit_semantic_chunks = 0
 
 [[cases]]
-repo_code = "amai_local"
+repo_code = "amai"
 query_slice = "amai_case"
 query = "README.md"
-expected_projects = ["amai_local"]
+expected_projects = ["amai"]
 expected_paths = ["README.md"]
 limit_documents = 1
 limit_symbols = 0

@@ -1,8 +1,8 @@
 code	type	location
 art	local	../Art
-amai_local	local	.
+amai	local	.
 langgraph_local	local	../my_langgraph_agent
-agent_regart_local	local	../agent-RegArt
+agent_regart	local	../agent-RegArt
 ripgrep	git	https://github.com/BurntSushi/ripgrep.git
 bat	git	https://github.com/sharkdp/bat.git
 fd	git	https://github.com/sharkdp/fd.git

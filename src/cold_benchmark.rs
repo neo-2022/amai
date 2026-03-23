@@ -1942,7 +1942,7 @@ mod tests {
             "retrieval": {
                 "exact_documents": [
                     {
-                        "project_code": "amai_local",
+                        "project_code": "amai",
                         "relative_path": "src/verify.rs",
                         "name": "run_text_compare",
                         "snippet": "pub async fn run_text_compare("
@@ -1954,7 +1954,7 @@ mod tests {
             }
         });
         let case = ColdBenchmarkCase {
-            repo_code: "amai_local".to_string(),
+            repo_code: "amai".to_string(),
             query_slice: "symbol_lookup".to_string(),
             query: "run_text_compare".to_string(),
             retrieval_mode: None,
@@ -1962,7 +1962,7 @@ mod tests {
             limit_symbols: None,
             limit_chunks: None,
             limit_semantic_chunks: None,
-            expected_projects: vec!["amai_local".to_string()],
+            expected_projects: vec!["amai".to_string()],
             expected_paths: vec!["src/verify.rs".to_string()],
             expected_terms: vec!["run_text_compare".to_string()],
             expected_symbols: vec!["run_text_compare".to_string()],
@@ -2033,22 +2033,22 @@ mod tests {
         assert!(should_index_repo_for_case(
             false,
             false,
-            "art_local",
+            "art",
             &indexed_repo_codes,
             &cycle_indexed_repo_codes,
         ));
-        indexed_repo_codes.insert("art_local".to_string());
+        indexed_repo_codes.insert("art".to_string());
         assert!(!should_index_repo_for_case(
             false,
             false,
-            "art_local",
+            "art",
             &indexed_repo_codes,
             &cycle_indexed_repo_codes,
         ));
         assert!(should_index_repo_for_case(
             false,
             false,
-            "amai_local",
+            "amai",
             &indexed_repo_codes,
             &cycle_indexed_repo_codes,
         ));
@@ -2057,20 +2057,20 @@ mod tests {
     #[test]
     fn repo_indexing_repeats_each_cycle_only_after_first_use_in_that_cycle() {
         let mut indexed_repo_codes = BTreeSet::new();
-        indexed_repo_codes.insert("art_local".to_string());
+        indexed_repo_codes.insert("art".to_string());
         let mut cycle_indexed_repo_codes = BTreeSet::new();
         assert!(should_index_repo_for_case(
             false,
             true,
-            "art_local",
+            "art",
             &indexed_repo_codes,
             &cycle_indexed_repo_codes,
         ));
-        cycle_indexed_repo_codes.insert("art_local".to_string());
+        cycle_indexed_repo_codes.insert("art".to_string());
         assert!(!should_index_repo_for_case(
             false,
             true,
-            "art_local",
+            "art",
             &indexed_repo_codes,
             &cycle_indexed_repo_codes,
         ));
@@ -2186,13 +2186,13 @@ mod tests {
     #[test]
     fn item_matches_case_checks_multiple_evidence_types() {
         let item = json!({
-            "project_code": "amai_local",
+            "project_code": "amai",
             "relative_path": "README.md",
             "name": "install_amai",
             "snippet": "install_amai.sh"
         });
         let case = ColdBenchmarkCase {
-            repo_code: "amai_local".to_string(),
+            repo_code: "amai".to_string(),
             query_slice: "onboarding_query".to_string(),
             query: "install_amai.sh".to_string(),
             retrieval_mode: None,
@@ -2200,7 +2200,7 @@ mod tests {
             limit_symbols: None,
             limit_chunks: None,
             limit_semantic_chunks: None,
-            expected_projects: vec!["amai_local".to_string()],
+            expected_projects: vec!["amai".to_string()],
             expected_paths: vec!["README.md".to_string()],
             expected_terms: vec!["install_amai.sh".to_string()],
             expected_symbols: vec!["install_amai".to_string()],

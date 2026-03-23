@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 00:22 MSK
-Ручная сверка guide/docs: 2026-03-24 00:22 MSK
+modified_at: 2026-03-24 02:18 MSK
+Ручная сверка guide/docs: 2026-03-24 02:18 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -832,6 +832,8 @@ cargo run -- deployment explain --target kubernetes_server
 
 Это главный закон проекта:
 - новый `repo_root` считается отдельным проектом;
+- `repo_root` перед записью всегда canonicalize-ится до абсолютного пути без `.` и `..`;
+- если тот же самый физический корень уже зарегистрирован под другим `project code`, новая alias-регистрация блокируется fail-closed, а не создаёт второй проект;
 - смешивать проекты по умолчанию нельзя;
 - чтение другого проекта разрешается только по явным relation/policy правилам.
 
@@ -1253,6 +1255,11 @@ cargo run -- index project --code project_alpha --path /path/to/project-alpha --
 cargo run -- context pack --project project_alpha --namespace review --query "how configuration is loaded"
 ```
 
+Важно:
+- `project register` хранит `repo_root` только в canonical absolute form;
+- строки вроде `../Art`, `/srv/amai/.` и `/repo/subdir/..` не считаются разными проектами, если они указывают на один и тот же физический корень;
+- если такой корень уже занят другим `project code`, `Amai` честно остановит регистрацию с ошибкой, а не создаст скрытый alias.
+
 ## Benchmark matrix
 
 Чтобы не жить на одном удобном локальном proof и не придумывать benchmark-цели из головы, в `Amai` теперь есть machine-readable benchmark matrix.
@@ -1557,6 +1564,7 @@ cargo run --release -- verify degradation
 
 Этот runner:
 - сначала materialize-ит repo-pool так, чтобы `expected_paths` указывали только на реально существующие exact relative paths;
+- для локальных репозиториев использует канонические `project code`, чтобы один и тот же repo не жил в benchmark-пуле под alias и под обычным именем одновременно;
 - сам индексирует указанные repo из manifest;
 - считает отдельно `cold` и `hot shadow`;
 - держит фиксированный набор эталонов для `Cold P50 / P95 / P99 / Max`, `precision / recall / hit rate`, `sample_count`, `repo_count`, `query_slice_count`, `duration`, `leakage` и `error rate`;
