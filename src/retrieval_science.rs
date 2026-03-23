@@ -1,0 +1,160 @@
+use anyhow::{Context, Result, anyhow};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+#[derive(Debug, Clone, Deserialize)]
+struct RetrievalScienceFile {
+    science: RetrievalSciencePolicy,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RetrievalSciencePolicy {
+    pub methodology_version: String,
+    pub scoring_rules_version: String,
+    pub degradation_policy_version: String,
+    pub execution_state_model_version: String,
+    pub lineage_model_version: String,
+    pub same_input_same_verdict_required: bool,
+    pub machine_variance_policy: String,
+    pub truth_ranking: Vec<String>,
+    pub fail_closed_classes: Vec<String>,
+    pub graceful_fallback_classes: Vec<String>,
+    pub execution_states: Vec<String>,
+    #[serde(default)]
+    pub suites: BTreeMap<String, RetrievalScienceSuite>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RetrievalScienceSuite {
+    pub suite_version: String,
+    pub dataset_version: String,
+    pub query_suite_version: String,
+    pub manifest_path: String,
+    pub reproducibility_contract: String,
+}
+
+static POLICY: OnceLock<Result<RetrievalSciencePolicy, String>> = OnceLock::new();
+
+pub fn load_policy() -> Result<&'static RetrievalSciencePolicy> {
+    POLICY
+        .get_or_init(|| load_policy_uncached().map_err(|error| format!("{error:#}")))
+        .as_ref()
+        .map_err(|error| anyhow!(error.clone()))
+}
+
+fn load_policy_uncached() -> Result<RetrievalSciencePolicy> {
+    let path = retrieval_science_profile_path();
+    let content = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "failed to read retrieval science profile {}",
+            path.display()
+        )
+    })?;
+    let file: RetrievalScienceFile =
+        toml::from_str(&content).context("failed to parse retrieval science profile")?;
+    Ok(file.science)
+}
+
+pub fn retrieval_science_profile_path() -> PathBuf {
+    let cwd_path = Path::new("config/retrieval_science.toml");
+    if cwd_path.exists() {
+        cwd_path.to_path_buf()
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("config")
+            .join("retrieval_science.toml")
+    }
+}
+
+pub fn suite_metadata(suite_key: &str) -> Result<Value> {
+    let policy = load_policy()?;
+    let suite = policy
+        .suites
+        .get(suite_key)
+        .ok_or_else(|| anyhow!("retrieval science suite not found: {suite_key}"))?;
+    Ok(json!({
+        "suite_key": suite_key,
+        "suite_version": suite.suite_version,
+        "dataset_version": suite.dataset_version,
+        "query_suite_version": suite.query_suite_version,
+        "manifest_path": suite.manifest_path,
+        "methodology_version": policy.methodology_version,
+        "scoring_rules_version": policy.scoring_rules_version,
+        "same_input_same_verdict_required": policy.same_input_same_verdict_required,
+        "machine_variance_policy": policy.machine_variance_policy,
+        "reproducibility_contract": suite.reproducibility_contract,
+        "recorded_by": "amai",
+        "recorded_by_version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+pub fn degradation_policy_json() -> Result<Value> {
+    let policy = load_policy()?;
+    Ok(json!({
+        "policy_version": policy.degradation_policy_version,
+        "fail_closed_classes": policy.fail_closed_classes,
+        "graceful_fallback_classes": policy.graceful_fallback_classes,
+        "truth_ranking": policy.truth_ranking,
+        "machine_variance_policy": policy.machine_variance_policy,
+    }))
+}
+
+pub fn execution_state_catalog_json() -> Result<Value> {
+    let policy = load_policy()?;
+    Ok(json!({
+        "execution_state_model_version": policy.execution_state_model_version,
+        "lineage_model_version": policy.lineage_model_version,
+        "states": policy.execution_states,
+        "truth_ranking": policy.truth_ranking,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{degradation_policy_json, execution_state_catalog_json, suite_metadata};
+
+    #[test]
+    fn suite_metadata_loads_known_suite() {
+        let suite = suite_metadata("retrieval_accuracy").expect("suite metadata");
+        assert_eq!(
+            suite["query_suite_version"].as_str(),
+            Some("red-team-retrieval-isolation-v1")
+        );
+        assert_eq!(
+            suite["manifest_path"].as_str(),
+            Some("config/red_team_retrieval_isolation.toml")
+        );
+    }
+
+    #[test]
+    fn degradation_policy_includes_fail_closed_classes() {
+        let policy = degradation_policy_json().expect("degradation policy");
+        assert!(
+            policy["fail_closed_classes"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .any(|item| item.as_str() == Some("cross_project_scope"))
+        );
+    }
+
+    #[test]
+    fn execution_state_catalog_exposes_lineage_versions() {
+        let catalog = execution_state_catalog_json().expect("execution state catalog");
+        assert_eq!(
+            catalog["execution_state_model_version"].as_str(),
+            Some("execution-state-v1")
+        );
+        assert!(
+            catalog["states"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .any(|item| item.as_str() == Some("superseded"))
+        );
+    }
+}

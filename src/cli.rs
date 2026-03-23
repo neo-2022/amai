@@ -479,6 +479,12 @@ pub struct VerifyAccuracyArgs {
     pub related_project: String,
     #[arg(long, default_value = "review")]
     pub namespace: String,
+    #[arg(
+        long,
+        default_value = "config/red_team_retrieval_isolation.toml",
+        help = "Path to the machine-readable red-team retrieval isolation suite manifest"
+    )]
+    pub manifest: PathBuf,
 }
 
 #[derive(Debug, Clone, Args)]

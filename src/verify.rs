@@ -8,6 +8,7 @@ use crate::config::AppConfig;
 use crate::language;
 use crate::postgres;
 use crate::retrieval;
+use crate::retrieval_science;
 use crate::token_budget;
 use anyhow::{Context, Result, anyhow};
 use ignore::WalkBuilder;
@@ -30,6 +31,28 @@ struct LoadWorkerOutcome {
     error_count: usize,
     cache_probe_miss_count: usize,
     last_stats: Option<retrieval::ContextPackStats>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AccuracySuiteFile {
+    suite: AccuracySuiteManifest,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AccuracySuiteManifest {
+    suite_version: String,
+    dataset_version: String,
+    query_suite_version: String,
+    scoring_rules_version: String,
+    summary: String,
+    strict_query: String,
+    related_query: String,
+    namespace_query: String,
+    hostile_mixed_query: String,
+    strict_namespace: String,
+    related_path: String,
+    related_term: String,
+    symbol_name: String,
 }
 
 pub async fn run_benchmark(
@@ -118,6 +141,11 @@ pub async fn run_benchmark(
         .as_millis() as u64;
 
     enforce_benchmark_thresholds(args, mean_ms, p95_ms, p99_ms, max_ms)?;
+    let suite_key = if args.context.disable_cache {
+        "retrieval_benchmark_cold"
+    } else {
+        "retrieval_benchmark_hot"
+    };
 
     let payload = json!({
         "_observability": {
@@ -185,6 +213,8 @@ pub async fn run_benchmark(
                 "persist_ms": persist_p95_ms,
             }
         },
+        "retrieval_science": retrieval_science::suite_metadata(suite_key)?,
+        "degradation_policy": retrieval_science::degradation_policy_json()?,
         "context_pack_id": last_stats.context_pack_id,
     });
 
@@ -204,13 +234,14 @@ pub async fn run_accuracy(
     db: &mut Client,
     args: &VerifyAccuracyArgs,
 ) -> Result<()> {
+    let suite = load_accuracy_suite(&args.manifest)?;
     let strict_pack = retrieval::execute_context_pack_capture_with_options(
         cfg,
         db,
         &ContextPackArgs {
             project: args.project.clone(),
             namespace: args.namespace.clone(),
-            query: "beta_only_token".to_string(),
+            query: suite.strict_query.clone(),
             retrieval_mode: Some("local_strict".to_string()),
             disable_cache: true,
             limit_documents: 8,
@@ -226,7 +257,7 @@ pub async fn run_accuracy(
     let related_args = ContextPackArgs {
         project: args.project.clone(),
         namespace: args.namespace.clone(),
-        query: "shared_runtime_marker".to_string(),
+        query: suite.related_query.clone(),
         retrieval_mode: Some("local_plus_related".to_string()),
         disable_cache: true,
         limit_documents: 8,
@@ -244,7 +275,7 @@ pub async fn run_accuracy(
         &ContextPackArgs {
             project: args.project.clone(),
             namespace: args.namespace.clone(),
-            query: "alpha_runtime_summary".to_string(),
+            query: suite.namespace_query.clone(),
             retrieval_mode: Some("local_strict".to_string()),
             disable_cache: true,
             limit_documents: 8,
@@ -262,8 +293,26 @@ pub async fn run_accuracy(
         db,
         &ContextPackArgs {
             project: args.project.clone(),
-            namespace: "default".to_string(),
-            query: "alpha_runtime_summary".to_string(),
+            namespace: suite.strict_namespace.clone(),
+            query: suite.namespace_query.clone(),
+            retrieval_mode: Some("local_strict".to_string()),
+            disable_cache: true,
+            limit_documents: 8,
+            limit_symbols: 8,
+            limit_chunks: 8,
+            limit_semantic_chunks: 8,
+        },
+        false,
+        false,
+    )
+    .await?;
+    let hostile_pack = retrieval::execute_context_pack_capture_with_options(
+        cfg,
+        db,
+        &ContextPackArgs {
+            project: args.project.clone(),
+            namespace: args.namespace.clone(),
+            query: suite.hostile_mixed_query.clone(),
             retrieval_mode: Some("local_strict".to_string()),
             disable_cache: true,
             limit_documents: 8,
@@ -287,37 +336,44 @@ pub async fn run_accuracy(
     let namespace_visible = collect_visible_namespaces(&namespace_strict_pack.payload);
     let namespace_visible_unexpected = namespace_visible
         .iter()
-        .filter(|namespace| namespace.as_str() != "default")
+        .filter(|namespace| namespace.as_str() != suite.strict_namespace.as_str())
         .count();
     let namespace_hit_leaks =
-        count_foreign_namespace_hits(&namespace_strict_pack.payload, "default");
+        count_foreign_namespace_hits(&namespace_strict_pack.payload, &suite.strict_namespace);
     let cross_namespace_leakage = namespace_visible_unexpected + namespace_hit_leaks;
+    let hostile_visible = collect_visible_projects(&hostile_pack.payload);
+    let hostile_visible_unexpected = hostile_visible
+        .iter()
+        .filter(|project| project.as_str() != args.project)
+        .count();
+    let hostile_hit_leaks = count_foreign_hits(&hostile_pack.payload, &args.project);
+    let hostile_cross_project_leakage = hostile_visible_unexpected + hostile_hit_leaks;
 
     let exact_precision = precision_ratio(
         &related_pack.payload["retrieval"]["exact_documents"],
         |item| {
             expected_project(item, &expected_related)
-                && item["relative_path"].as_str() == Some("src/lib.rs")
+                && item["relative_path"].as_str() == Some(suite.related_path.as_str())
                 && item["snippet"]
                     .as_str()
-                    .is_some_and(|snippet| snippet.contains("shared_runtime_marker"))
+                    .is_some_and(|snippet| snippet.contains(suite.related_term.as_str()))
         },
     );
     let lexical_precision = precision_ratio(
         &related_pack.payload["retrieval"]["lexical_chunks"],
         |item| {
             expected_project(item, &expected_related)
-                && item["relative_path"].as_str() == Some("src/lib.rs")
+                && item["relative_path"].as_str() == Some(suite.related_path.as_str())
         },
     );
     let mut semantic_precision = precision_ratio(
         &related_pack.payload["retrieval"]["semantic_chunks"],
         |item| {
             expected_project(item, &expected_related)
-                && item["relative_path"].as_str() == Some("src/lib.rs")
+                && item["relative_path"].as_str() == Some(suite.related_path.as_str())
                 && item["content"]
                     .as_str()
-                    .is_some_and(|content| content.contains("shared_runtime_marker"))
+                    .is_some_and(|content| content.contains(suite.related_term.as_str()))
         },
     );
     for _ in 0..3 {
@@ -337,24 +393,67 @@ pub async fn run_accuracy(
             &related_pack.payload["retrieval"]["semantic_chunks"],
             |item| {
                 expected_project(item, &expected_related)
-                    && item["relative_path"].as_str() == Some("src/lib.rs")
+                    && item["relative_path"].as_str() == Some(suite.related_path.as_str())
                     && item["content"]
                         .as_str()
-                        .is_some_and(|content| content.contains("shared_runtime_marker"))
+                        .is_some_and(|content| content.contains(suite.related_term.as_str()))
             },
         );
     }
     let symbol_precision =
         precision_ratio(&symbol_pack.payload["retrieval"]["symbol_hits"], |item| {
             item["project_code"].as_str() == Some(args.project.as_str())
-                && item["name"].as_str() == Some("alpha_runtime_summary")
+                && item["name"].as_str() == Some(suite.symbol_name.as_str())
         });
     let overall_precision =
         (exact_precision + lexical_precision + semantic_precision + symbol_precision) / 4.0;
+    let formal_invariants = vec![
+        json!({
+            "name": "strict_local_visible_projects_only",
+            "expected": args.project,
+            "observed": strict_visible,
+            "pass": strict_visible_unexpected == 0,
+        }),
+        json!({
+            "name": "strict_local_hits_do_not_leak_projects",
+            "expected": 0,
+            "observed": strict_hit_leaks,
+            "pass": strict_hit_leaks == 0,
+        }),
+        json!({
+            "name": "hostile_mixed_query_fail_closed",
+            "expected": 0,
+            "observed": hostile_cross_project_leakage,
+            "pass": hostile_cross_project_leakage == 0,
+        }),
+        json!({
+            "name": "namespace_strict_fail_closed",
+            "expected": 0,
+            "observed": cross_namespace_leakage,
+            "pass": cross_namespace_leakage == 0,
+        }),
+        json!({
+            "name": "symbol_precision_exact",
+            "expected": 1.0,
+            "observed": symbol_precision,
+            "pass": (symbol_precision - 1.0).abs() < f64::EPSILON,
+        }),
+        json!({
+            "name": "semantic_precision_exact",
+            "expected": 1.0,
+            "observed": semantic_precision,
+            "pass": (semantic_precision - 1.0).abs() < f64::EPSILON,
+        }),
+    ];
 
     if cross_project_leakage != 0 {
         return Err(anyhow!(
             "accuracy verification failed: cross_project_leakage={cross_project_leakage}"
+        ));
+    }
+    if hostile_cross_project_leakage != 0 {
+        return Err(anyhow!(
+            "accuracy verification failed: hostile_cross_project_leakage={hostile_cross_project_leakage}"
         ));
     }
     if cross_namespace_leakage != 0 {
@@ -387,10 +486,20 @@ pub async fn run_accuracy(
             "project": args.project,
             "related_project": args.related_project,
             "namespace": args.namespace,
+            "suite_version": suite.suite_version,
+            "dataset_version": suite.dataset_version,
+            "query_suite_version": suite.query_suite_version,
+            "scoring_rules_version": suite.scoring_rules_version,
+            "suite_summary": suite.summary,
             "cross_project_leakage": cross_project_leakage,
             "strict_visible_projects": strict_visible,
             "strict_visible_projects_unexpected": strict_visible_unexpected,
             "strict_hit_leaks": strict_hit_leaks,
+            "hostile_mixed_query": suite.hostile_mixed_query,
+            "hostile_visible_projects": hostile_visible,
+            "hostile_visible_projects_unexpected": hostile_visible_unexpected,
+            "hostile_hit_leaks": hostile_hit_leaks,
+            "hostile_cross_project_leakage": hostile_cross_project_leakage,
             "cross_namespace_leakage": cross_namespace_leakage,
             "namespace_strict_visible_projects": collect_visible_projects(&namespace_strict_pack.payload),
             "namespace_strict_visible_namespaces": namespace_visible,
@@ -400,8 +509,11 @@ pub async fn run_accuracy(
             "lexical_precision": lexical_precision,
             "semantic_precision": semantic_precision,
             "symbol_precision": symbol_precision,
-            "overall_precision": overall_precision
-        }
+            "overall_precision": overall_precision,
+            "formal_invariants": formal_invariants
+        },
+        "retrieval_science": retrieval_science::suite_metadata("retrieval_accuracy")?,
+        "degradation_policy": retrieval_science::degradation_policy_json()?
     });
     let _ = postgres::insert_observability_snapshot(db, "retrieval_accuracy", &payload).await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -651,6 +763,11 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
     };
 
     enforce_load_thresholds(args, p95_ms, qps, error_rate)?;
+    let suite_key = if args.context.disable_cache {
+        "retrieval_load_cold"
+    } else {
+        "retrieval_load_hot"
+    };
 
     let last_stats =
         last_stats.ok_or_else(|| anyhow!("load verification produced no final stats"))?;
@@ -720,7 +837,9 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
                 "cache_probe_miss_count": total_cache_probe_misses,
                 "db_fallback_count": 0
             }
-        }
+        },
+        "retrieval_science": retrieval_science::suite_metadata(suite_key)?,
+        "degradation_policy": retrieval_science::degradation_policy_json()?
     });
     if publish_benchmark_snapshot {
         let snapshot_kind = if args.context.disable_cache {
@@ -866,7 +985,9 @@ pub async fn run_token_benchmark_suite(
             "mean_naive_tokens": mean_naive_tokens,
             "mean_context_tokens": mean_context_tokens,
             "runs": runs,
-        }
+        },
+        "retrieval_science": retrieval_science::suite_metadata("token_benchmark_suite")?,
+        "degradation_policy": retrieval_science::degradation_policy_json()?,
     });
     let _ = postgres::insert_observability_snapshot(db, "token_benchmark_suite", &payload).await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -1095,7 +1216,9 @@ pub async fn run_text_compare(
             },
             "mean_hybrid_savings_factor_vs_naive": mean_hybrid_savings_factor,
             "runs": runs,
-        }
+        },
+        "retrieval_science": retrieval_science::suite_metadata("text_compare")?,
+        "degradation_policy": retrieval_science::degradation_policy_json()?,
     });
     let _ = postgres::insert_observability_snapshot(db, "text_compare", &payload).await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -1197,7 +1320,8 @@ pub async fn run_hostile(cfg: &AppConfig, args: &VerifyHostileArgs) -> Result<()
             "hostile_verification": {
                 "scenario": scenario,
                 "probes": probes,
-            }
+            },
+            "degradation_policy": retrieval_science::degradation_policy_json()?,
         }))?
     );
 
@@ -1894,6 +2018,14 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
     }
 }
 
+fn load_accuracy_suite(path: &Path) -> Result<AccuracySuiteManifest> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read accuracy suite manifest {}", path.display()))?;
+    let file: AccuracySuiteFile =
+        toml::from_str(&content).context("failed to parse accuracy suite manifest")?;
+    Ok(file.suite)
+}
+
 fn collect_visible_projects(payload: &Value) -> Vec<String> {
     payload["visible_projects"]
         .as_array()
@@ -1981,11 +2113,12 @@ fn precision_ratio(items: &Value, predicate: impl Fn(&Value) -> bool) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        TextCompareCase, collect_visible_namespaces, count_foreign_namespace_hits,
-        item_belongs_to_namespace, item_belongs_to_project, item_matches_text_compare_case,
-        percentile_sample, precision_ratio, render_context_pack_prompt,
-        render_filtered_context_prompt, safe_lossy_prefix,
+        TextCompareCase, collect_visible_namespaces, count_foreign_hits,
+        count_foreign_namespace_hits, item_belongs_to_namespace, item_belongs_to_project,
+        item_matches_text_compare_case, percentile_sample, precision_ratio,
+        render_context_pack_prompt, render_filtered_context_prompt, safe_lossy_prefix,
     };
+    use proptest::prelude::*;
     use serde_json::json;
 
     #[test]
@@ -2130,5 +2263,77 @@ mod tests {
         });
         let prompt = render_filtered_context_prompt(&payload, false, false, false, false);
         assert!(!prompt.contains("[alpha] src/lib.rs :: needle"));
+    }
+
+    fn synthetic_payload(
+        project_specs: &[(usize, u8)],
+        namespace_specs: &[(usize, u8)],
+    ) -> serde_json::Value {
+        let mut exact_documents = Vec::new();
+        let mut symbol_hits = Vec::new();
+        let mut lexical_chunks = Vec::new();
+        let mut semantic_chunks = Vec::new();
+        for (section, project_case) in project_specs {
+            let item = match project_case {
+                0 => json!({"project_code":"alpha"}),
+                1 => json!({"project_code":"beta"}),
+                2 => json!({"provenance":{"source_project":"alpha"}}),
+                _ => json!({"provenance":{"source_project":"beta"}}),
+            };
+            match section % 4 {
+                0 => exact_documents.push(item),
+                1 => symbol_hits.push(item),
+                2 => lexical_chunks.push(item),
+                _ => semantic_chunks.push(item),
+            }
+        }
+        for (section, namespace_case) in namespace_specs {
+            let item = match namespace_case {
+                0 => json!({"namespace_code":"default"}),
+                1 => json!({"namespace_code":"review"}),
+                2 => json!({"provenance":{"namespace_code":"default"}}),
+                _ => json!({"provenance":{"namespace_code":"review"}}),
+            };
+            match section % 4 {
+                0 => exact_documents.push(item),
+                1 => symbol_hits.push(item),
+                2 => lexical_chunks.push(item),
+                _ => semantic_chunks.push(item),
+            }
+        }
+        json!({
+            "retrieval": {
+                "exact_documents": exact_documents,
+                "symbol_hits": symbol_hits,
+                "lexical_chunks": lexical_chunks,
+                "semantic_chunks": semantic_chunks,
+            }
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn foreign_project_hits_match_manual_fail_closed_count(
+            specs in prop::collection::vec((0usize..4, 0u8..4), 0..32)
+        ) {
+            let payload = synthetic_payload(&specs, &[]);
+            let expected = specs
+                .iter()
+                .filter(|(_, project_case)| !matches!(project_case, 0 | 2))
+                .count();
+            prop_assert_eq!(count_foreign_hits(&payload, "alpha"), expected);
+        }
+
+        #[test]
+        fn foreign_namespace_hits_match_manual_fail_closed_count(
+            specs in prop::collection::vec((0usize..4, 0u8..4), 0..32)
+        ) {
+            let payload = synthetic_payload(&[], &specs);
+            let expected = specs
+                .iter()
+                .filter(|(_, namespace_case)| !matches!(namespace_case, 0 | 2))
+                .count();
+            prop_assert_eq!(count_foreign_namespace_hits(&payload, "default"), expected);
+        }
     }
 }

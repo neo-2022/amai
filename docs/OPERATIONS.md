@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 07:07 MSK
-Ручная сверка guide/docs: 2026-03-23 07:07 MSK
+modified_at: 2026-03-23 08:12 MSK
+Ручная сверка guide/docs: 2026-03-23 08:12 MSK
 
 # Operations
 
@@ -291,6 +291,11 @@ cd /home/art/agent-memory-index
 Практический смысл:
 - `chat_start_restore` нужен как короткий первичный injection pack;
 - `working_state_restore` нужен как более широкий raw слой для аудита и машинного восстановления.
+- `working_state_restore` теперь execution-aware:
+  - `next_step_state` всегда показывает, что следующий шаг пока только `planned`;
+  - `recent_actions[].execution_state` разводит `attempted / succeeded / superseded / stale`;
+  - `state_lineage` хранит authoritative event, supporting event ids и truth ranking;
+  - при битом `session_id` restore-path теперь fail-closed и не смешивает несколько пустых сессий в один bundle.
 
 Если передан `--question`, helper сам должен:
 - распознать `прошлый / текущий чат`;
@@ -799,14 +804,21 @@ cargo run --release -- verify benchmark \
 cargo run --release -- verify accuracy \
   --project project_alpha \
   --related-project project_beta \
-  --namespace review
+  --namespace review \
+  --manifest config/red_team_retrieval_isolation.toml
 ```
 
 Этот proof:
 - проверяет `local_strict` на отсутствие cross-project leakage;
 - проверяет отсутствие cross-namespace leakage внутри одного и того же проекта;
+- гоняет hostile mixed query из versioned red-team manifest;
 - мерит `exact_precision`, `lexical_precision`, `symbol_precision`, `semantic_precision`;
-- сохраняет snapshot `retrieval_accuracy`.
+- сохраняет snapshot `retrieval_accuracy`;
+- теперь пишет в snapshot:
+  - `formal_invariants`;
+  - `retrieval_science`;
+  - `degradation_policy`;
+  - versioned suite metadata из `config/red_team_retrieval_isolation.toml`.
 
 ## Load proof
 
@@ -830,7 +842,8 @@ cargo run --release -- verify load \
 Этот proof:
 - мерит concurrent hot-load contour;
 - выдаёт `qps`, `error_rate`, `p50/p95/p99/max`;
-- сохраняет snapshot `retrieval_load_hot`.
+- сохраняет snapshot `retrieval_load_hot`;
+- теперь тоже stamp-ит `retrieval_science` и `degradation_policy`, чтобы результат был воспроизводимым и machine-readable.
 
 Текущий репозиторный guard:
 - `qps > 35000`

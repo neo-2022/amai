@@ -1,4 +1,5 @@
 use crate::postgres::{self, NamespaceRecord, ObservabilitySnapshotRecord, ProjectRecord};
+use crate::retrieval_science;
 use crate::token_budget;
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -313,6 +314,18 @@ fn compose_restore_bundle(
         .find(|event| !is_meta_continuity_event(event))
         .unwrap_or(&events[0].payload["working_state_event"]);
     let latest = latest_event;
+    let authoritative_event = events
+        .iter()
+        .map(|snapshot| &snapshot.payload["working_state_event"])
+        .find(|event| {
+            event["event_kind"].as_str() == Some("continuity_handoff")
+                && !is_meta_continuity_event(event)
+        })
+        .unwrap_or(latest_event);
+    let authoritative_event_id = authoritative_event["event_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let session_id = latest["session_id"].as_str().unwrap_or_default();
     let latest_recorded_at = latest["recorded_at_epoch_ms"]
         .as_u64()
@@ -325,14 +338,8 @@ fn compose_restore_bundle(
         .as_str()
         .unwrap_or("ещё нет данных")
         .to_string();
-    if let Some(handoff) = events
-        .iter()
-        .map(|snapshot| &snapshot.payload["working_state_event"])
-        .find(|event| {
-            event["event_kind"].as_str() == Some("continuity_handoff")
-                && !is_meta_continuity_event(event)
-        })
-    {
+    if authoritative_event["event_kind"].as_str() == Some("continuity_handoff") {
+        let handoff = authoritative_event;
         if let Some(value) = handoff["headline"]
             .as_str()
             .filter(|value| !value.is_empty())
@@ -357,6 +364,7 @@ fn compose_restore_bundle(
     let mut last_command = None::<String>;
     let mut last_results_summary = None::<String>;
     let mut recent_actions = Vec::new();
+    let now_epoch_ms = now_epoch_ms().unwrap_or(latest_recorded_at);
 
     for snapshot in events.iter().take(MAX_RECENT_ACTIONS) {
         let event = &snapshot.payload["working_state_event"];
@@ -389,16 +397,27 @@ fn compose_restore_bundle(
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned);
         }
+        let action_state = classify_action_state(
+            event,
+            &authoritative_event_id,
+            latest_recorded_at,
+            now_epoch_ms,
+        );
         recent_actions.push(json!({
+            "event_id": event["event_id"],
             "event_kind": event["event_kind"],
+            "source_kind": event["source_kind"],
             "headline": event["headline"],
             "summary": event["summary"],
             "recorded_at_epoch_ms": event["recorded_at_epoch_ms"],
+            "local_path": event["local_path"],
+            "execution_state": action_state,
+            "authoritative": event["event_id"].as_str() == Some(authoritative_event_id.as_str()),
         }));
     }
 
     let restore_confidence = if events.len() >= 4 && latest_recorded_at > 0 {
-        if now_epoch_ms().unwrap_or(latest_recorded_at) - latest_recorded_at <= 15 * 60 * 1000 {
+        if now_epoch_ms - latest_recorded_at <= 15 * 60 * 1000 {
             "high"
         } else {
             "medium"
@@ -406,19 +425,39 @@ fn compose_restore_bundle(
     } else {
         "preliminary"
     };
+    let execution_catalog = retrieval_science::execution_state_catalog_json().unwrap_or_else(|_| {
+        json!({
+            "execution_state_model_version": "execution-state-v1",
+            "lineage_model_version": "lineage-v1",
+            "states": ["planned", "attempted", "succeeded", "superseded", "stale"],
+            "truth_ranking": ["continuity_handoff", "working_state_restore", "live_context_pack"]
+        })
+    });
+    let lineage_supporting_event_ids = recent_actions
+        .iter()
+        .filter_map(|item| item["event_id"].as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    let action_state_counts = collect_action_state_counts(&recent_actions);
+    let restore_freshness_state =
+        if now_epoch_ms.saturating_sub(latest_recorded_at) > 15 * 60 * 1000 {
+            "stale"
+        } else {
+            "fresh"
+        };
 
     json!({
         "working_state_restore": {
             "project": project,
             "namespace": namespace,
-            "captured_at_epoch_ms": now_epoch_ms().unwrap_or(latest_recorded_at),
+            "captured_at_epoch_ms": now_epoch_ms,
             "agent_scope": latest["agent_scope"].as_str().unwrap_or("shared"),
             "thread_id": latest["thread_id"].as_str().unwrap_or_default(),
             "session_id": session_id,
-            "session_age_ms": now_epoch_ms().unwrap_or(latest_recorded_at).saturating_sub(latest_recorded_at),
+            "session_age_ms": now_epoch_ms.saturating_sub(latest_recorded_at),
             "events_count": events.len(),
             "current_goal": current_goal,
             "next_step": next_step,
+            "next_step_state": "planned",
             "current_hypothesis": current_hypothesis,
             "open_questions": open_questions,
             "rejected_hypotheses": rejected_hypotheses,
@@ -430,6 +469,17 @@ fn compose_restore_bundle(
             "last_command": last_command,
             "last_results_summary": last_results_summary,
             "restore_confidence": restore_confidence,
+            "restore_freshness_state": restore_freshness_state,
+            "execution_catalog": execution_catalog,
+            "action_state_counts": action_state_counts,
+            "state_lineage": {
+                "authoritative_event_id": authoritative_event["event_id"],
+                "authoritative_event_kind": authoritative_event["event_kind"],
+                "authoritative_source_kind": authoritative_event["source_kind"],
+                "authoritative_local_path": authoritative_event["local_path"],
+                "supporting_event_ids": lineage_supporting_event_ids,
+                "truth_ranking": execution_catalog["truth_ranking"].clone(),
+            },
             "is_preliminary": events.len() < 3,
         }
     })
@@ -512,6 +562,9 @@ fn select_relevant_events(
         .as_str()
         .unwrap_or_default()
         .to_string();
+    if latest_session_id.is_empty() {
+        return scoped.into_iter().take(1).collect();
+    }
     scoped
         .into_iter()
         .filter(|snapshot| {
@@ -519,6 +572,41 @@ fn select_relevant_events(
                 == Some(latest_session_id.as_str())
         })
         .collect()
+}
+
+fn classify_action_state(
+    event: &Value,
+    authoritative_event_id: &str,
+    latest_recorded_at: u64,
+    now_epoch_ms: u64,
+) -> &'static str {
+    let recorded_at = event["recorded_at_epoch_ms"].as_u64().unwrap_or_default();
+    if !authoritative_event_id.is_empty()
+        && event["event_id"].as_str() == Some(authoritative_event_id)
+        && event["event_kind"].as_str() == Some("continuity_handoff")
+    {
+        "succeeded"
+    } else if event["event_kind"].as_str() == Some("continuity_handoff") {
+        "superseded"
+    } else if now_epoch_ms.saturating_sub(recorded_at.max(latest_recorded_at)) > 15 * 60 * 1000 {
+        "stale"
+    } else {
+        "attempted"
+    }
+}
+
+fn collect_action_state_counts(actions: &[Value]) -> Value {
+    let mut counts = serde_json::Map::new();
+    for action in actions {
+        let state = action["execution_state"].as_str().unwrap_or("unknown");
+        let next = counts
+            .get(state)
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .saturating_add(1);
+        counts.insert(state.to_string(), json!(next));
+    }
+    Value::Object(counts)
 }
 
 async fn resolve_session_id(
@@ -1153,6 +1241,43 @@ mod tests {
     }
 
     #[test]
+    fn select_relevant_events_fail_closed_when_latest_session_id_missing() {
+        let missing = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::primary",
+            session_id: "",
+            event_kind: "retrieval_context_pack",
+            headline: "latest-without-session",
+            next_step_hint: "",
+            summary: "",
+            offset: 5,
+        });
+        let older = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::primary",
+            session_id: "",
+            event_kind: "retrieval_context_pack",
+            headline: "older-without-session",
+            next_step_hint: "",
+            summary: "",
+            offset: 4,
+        });
+        let selected = select_relevant_events(
+            vec![missing.clone(), older],
+            "art",
+            "continuity",
+            "art::primary",
+        );
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0].payload["working_state_event"]["headline"],
+            json!("latest-without-session")
+        );
+    }
+
+    #[test]
     fn compose_restore_bundle_ignores_meta_continuity_handoff() {
         let meta = fake_snapshot_with_kind(FakeSnapshotSpec {
             project_code: "art",
@@ -1187,6 +1312,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compose_restore_bundle_tracks_execution_states_and_lineage() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let latest_handoff = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Authoritative handoff",
+            next_step_hint: "Ship the next change.",
+            summary: "Materialized authoritative result.",
+            offset: base,
+        });
+        let older_handoff = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "continuity_handoff",
+            headline: "Older handoff",
+            next_step_hint: "Do older thing.",
+            summary: "Superseded result.",
+            offset: base - 1,
+        });
+        let retrieval = fake_snapshot_with_kind(FakeSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-a",
+            event_kind: "retrieval_context_pack",
+            headline: "Рабочий запрос: current context",
+            next_step_hint: "Inspect file.",
+            summary: "Attempted retrieval.",
+            offset: base - 2,
+        });
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[latest_handoff, older_handoff, retrieval],
+        );
+        let restore = &bundle["working_state_restore"];
+        assert_eq!(restore["next_step_state"], json!("planned"));
+        assert_eq!(
+            restore["state_lineage"]["authoritative_event_kind"],
+            json!("continuity_handoff")
+        );
+        assert_eq!(restore["action_state_counts"]["succeeded"], json!(1));
+        assert_eq!(restore["action_state_counts"]["superseded"], json!(1));
+        assert_eq!(
+            restore["recent_actions"][0]["execution_state"],
+            json!("succeeded")
+        );
+        assert_eq!(
+            restore["recent_actions"][1]["execution_state"],
+            json!("superseded")
+        );
+        assert_eq!(
+            restore["recent_actions"][2]["execution_state"],
+            json!("attempted")
+        );
+    }
+
     fn fake_snapshot(
         project_code: &str,
         namespace_code: &str,
@@ -1214,6 +1402,7 @@ mod tests {
             snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
             payload: json!({
                 "working_state_event": {
+                    "event_id": format!("{}-{}", spec.headline, spec.offset),
                     "project": {
                         "code": spec.project_code,
                     },
@@ -1223,9 +1412,11 @@ mod tests {
                     "agent_scope": spec.agent_scope,
                     "session_id": spec.session_id,
                     "event_kind": spec.event_kind,
+                    "source_kind": "test",
                     "headline": spec.headline,
                     "next_step_hint": spec.next_step_hint,
                     "summary": spec.summary,
+                    "local_path": "/tmp/test",
                     "recorded_at_epoch_ms": spec.offset,
                 }
             }),

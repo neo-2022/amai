@@ -3,6 +3,7 @@ use crate::config::AppConfig;
 use crate::indexer;
 use crate::postgres;
 use crate::retrieval::{self, ContextPackStats};
+use crate::retrieval_science;
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -424,7 +425,9 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                 "cleanup_actions_count": cleanup_actions_count,
             },
             "indexed_repos": indexed_repos.iter().map(indexed_repo_to_json).collect::<Vec<_>>(),
-        }
+        },
+        "retrieval_science": retrieval_science::suite_metadata("cold_path_benchmark")?,
+        "degradation_policy": retrieval_science::degradation_policy_json()?,
     });
 
     write_outputs(&output_dir, &summary, &cold_samples, &hot_samples)?;

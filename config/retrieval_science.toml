@@ -1,0 +1,90 @@
+modified_at = "2026-03-23 07:40 MSK"
+"Ручная сверка guide/docs" = "2026-03-23 07:40 MSK"
+
+[science]
+methodology_version = "retrieval-science-v1"
+scoring_rules_version = "retrieval-scoring-v1"
+degradation_policy_version = "retrieval-degradation-v1"
+execution_state_model_version = "execution-state-v1"
+lineage_model_version = "lineage-v1"
+same_input_same_verdict_required = true
+machine_variance_policy = "Latency and throughput may vary by machine, but scope correctness, scoring rules and verdict semantics must stay stable for the same input contour."
+truth_ranking = [
+  "continuity_handoff",
+  "working_state_restore",
+  "live_context_pack",
+  "continuity_thread_index",
+  "continuity_rendered_transcript",
+]
+fail_closed_classes = [
+  "cross_project_scope",
+  "cross_namespace_scope",
+  "cross_agent_scope",
+  "corrupt_scope_metadata",
+  "partial_refresh",
+]
+graceful_fallback_classes = [
+  "qdrant_unavailable",
+  "stale_cache",
+  "partial_thread_index",
+  "empty_embeddings",
+  "working_state_conflict",
+  "stale_handoff",
+]
+execution_states = ["planned", "attempted", "succeeded", "superseded", "stale"]
+
+[science.suites.retrieval_benchmark_hot]
+suite_version = "retrieval-benchmark-hot-v1"
+dataset_version = "caller-scoped-runtime-v1"
+query_suite_version = "single-query-runtime-v1"
+manifest_path = "cli: verify benchmark --disable-cache=false"
+reproducibility_contract = "Same input query, limits and cache mode must produce the same verdict class on the same indexed state."
+
+[science.suites.retrieval_benchmark_cold]
+suite_version = "retrieval-benchmark-cold-v1"
+dataset_version = "caller-scoped-runtime-v1"
+query_suite_version = "single-query-runtime-v1"
+manifest_path = "cli: verify benchmark --disable-cache=true"
+reproducibility_contract = "Same input query, limits and cache mode must produce the same verdict class on the same indexed state."
+
+[science.suites.retrieval_load_hot]
+suite_version = "retrieval-load-hot-v1"
+dataset_version = "caller-scoped-hot-cache-v1"
+query_suite_version = "single-query-load-v1"
+manifest_path = "cli: verify load --disable-cache=false"
+reproducibility_contract = "Scope correctness must stay identical across workers; only latency and wall-clock throughput may vary by machine."
+
+[science.suites.retrieval_load_cold]
+suite_version = "retrieval-load-cold-v1"
+dataset_version = "caller-scoped-cold-cache-v1"
+query_suite_version = "single-query-load-v1"
+manifest_path = "cli: verify load --disable-cache=true"
+reproducibility_contract = "Scope correctness must stay identical across workers; only latency and wall-clock throughput may vary by machine."
+
+[science.suites.retrieval_accuracy]
+suite_version = "retrieval-accuracy-isolation-v2"
+dataset_version = "fixtures-project-alpha-beta-v1"
+query_suite_version = "red-team-retrieval-isolation-v1"
+manifest_path = "config/red_team_retrieval_isolation.toml"
+reproducibility_contract = "Cross-project and cross-namespace leakage must stay zero; precision checks must remain exact on the fixed fixture contour."
+
+[science.suites.cold_path_benchmark]
+suite_version = "cold-path-benchmark-v2"
+dataset_version = "local-real-repos-manifest-v2"
+query_suite_version = "cold-query-slices-v2"
+manifest_path = "config/cold_benchmark_manifest.toml"
+reproducibility_contract = "The same manifest must produce the same verdict class and the same measured correctness contour, with machine-dependent latency variance called out explicitly."
+
+[science.suites.token_benchmark_suite]
+suite_version = "token-benchmark-suite-v1"
+dataset_version = "caller-scoped-token-v1"
+query_suite_version = "token-query-list-v1"
+manifest_path = "cli: verify token-benchmark-suite"
+reproducibility_contract = "Savings math must stay deterministic for the same retrieval payload and tokenizer."
+
+[science.suites.text_compare]
+suite_version = "text-compare-v1"
+dataset_version = "text-compare-cases-v1"
+query_suite_version = "text-compare-cases-v1"
+manifest_path = "fixtures/text_compare_cases.jsonl"
+reproducibility_contract = "The same cases file must produce the same hit/head-hit verdicts for the same indexed state."

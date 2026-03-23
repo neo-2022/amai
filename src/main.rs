@@ -29,6 +29,7 @@ mod postgres;
 mod profiles;
 mod qdrant;
 mod retrieval;
+mod retrieval_science;
 mod s3;
 mod status;
 mod syntax;
