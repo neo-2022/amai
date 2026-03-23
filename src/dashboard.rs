@@ -1787,7 +1787,10 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
 }
 
 fn build_top_cards(snapshot: &Value) -> Vec<Value> {
-    vec![live_latency_compare_card(snapshot)]
+    vec![
+        live_latency_compare_card(snapshot),
+        working_state_live_card(snapshot),
+    ]
 }
 
 fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
@@ -3403,12 +3406,12 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
 
     json!({
         "kind": "live_compare",
-        "title": "Как Amai отвечает сейчас",
-        "title_tooltip": "Это живое сравнение двух пользовательских режимов: повторный запрос по уже прогретому кэшу и первый запрос без прогрева. Здесь нет benchmark-снимков — только текущая сессия.",
+        "title": "Как Amai отвечает на live retrieval сейчас",
+        "title_tooltip": "Это живое сравнение только двух retrieval-режимов: повторный запрос по уже прогретому кэшу и первый запрос без прогрева. Continuity, handoff, working-state, observability proof и benchmark-снимки сюда не входят.",
         "status": overall_status,
         "status_label": status_label(overall_status),
-        "source_label": "Источник: живая выборка текущей сессии, обновляется при новых запросах. Benchmark-данные сюда не подмешиваются.",
-        "note": "Сверху показана медиана, то есть обычный уровень ответа в каждом режиме. Ниже — одна общая таблица, чтобы сравнить повторный и первый запрос без дублирования отдельных карточек.",
+        "source_label": "Источник: живая retrieval-выборка текущей сессии из token_budget live lane, обновляется при новых context-pack запросах. Benchmark-данные сюда не подмешиваются.",
+        "note": "Сверху показана медиана, то есть обычный уровень ответа в каждом retrieval-режиме. Это не карточка про всю работу проекта: continuity, handoff, observe/proof и другие линии Amai живут отдельно.",
         "metrics": [
             {
                 "label": "Повторный запрос",
@@ -3466,6 +3469,129 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
     })
 }
 
+fn working_state_live_card(snapshot: &Value) -> Value {
+    let restore = &snapshot["latest_working_state_restore"]["working_state_restore"];
+    if !restore.is_object() {
+        return card_with_rows(
+            "На чём Amai реально работает сейчас",
+            "ещё нет данных".to_string(),
+            "Working-state / continuity lane пока не дал последнего restore snapshot, поэтому панель ещё не может показать текущую рабочую линию.".to_string(),
+            "unknown",
+            Some("Источник: latest_working_state_restore.working_state_restore".to_string()),
+            Some("Этот блок показывает не latency retrieval, а текущую рабочую линию Amai: цель, следующий шаг, последнюю команду и активные файлы.".to_string()),
+            vec![],
+        );
+    }
+
+    let current_goal =
+        compact_dashboard_text(restore["current_goal"].as_str(), 72, "ещё нет данных");
+    let next_step = compact_dashboard_text(restore["next_step"].as_str(), 108, "ещё нет данных");
+    let scope = format!(
+        "{} / {} / {}",
+        restore["project"]["code"]
+            .as_str()
+            .unwrap_or("ещё нет данных"),
+        restore["namespace"]["code"]
+            .as_str()
+            .unwrap_or("ещё нет данных"),
+        restore["agent_scope"].as_str().unwrap_or("shared"),
+    );
+    let session_age_ms = restore["session_age_ms"].as_u64().map(|value| value as f64);
+    let events_count = restore["events_count"].as_u64();
+    let last_command =
+        compact_dashboard_text(restore["last_command"].as_str(), 72, "ещё нет данных");
+    let last_results = compact_dashboard_text(
+        restore["last_results_summary"].as_str(),
+        108,
+        "ещё нет данных",
+    );
+    let recent_queries = restore["recent_queries"]
+        .as_array()
+        .map(|items| items.len() as u64)
+        .unwrap_or(0);
+    let active_files = restore["active_files"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let active_files_count = active_files.len() as u64;
+    let active_files_preview = active_files
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|path| {
+            Path::new(path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(path)
+                .to_string()
+        })
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let restore_confidence = restore["restore_confidence"]
+        .as_str()
+        .unwrap_or("preliminary");
+    let status = match restore_confidence {
+        "high" | "medium" => "pass",
+        _ if events_count.unwrap_or(0) > 0 => "alert",
+        _ => "unknown",
+    };
+
+    card_with_rows(
+        "На чём Amai реально работает сейчас",
+        current_goal,
+        format!(
+            "Это working-state / continuity lane Amai, а не latency retrieval. Следующий обязательный шаг: {}.",
+            next_step
+        ),
+        status,
+        Some(source_label(
+            "Источник: latest_working_state_restore.working_state_restore. Этот блок питается continuity / working-state, а не token_budget live retrieval",
+            restore["captured_at_epoch_ms"].as_u64(),
+        )),
+        Some("Показывает текущую рабочую линию Amai: цель, следующий шаг, последнюю команду и активные файлы. Именно здесь видно реальную проектную работу, которая не обязана проходить через live retrieval.".to_string()),
+        vec![
+            metric_row(
+                "Scope",
+                scope,
+                Some("Project / namespace / agent scope, внутри которого Amai сейчас держит рабочую линию."),
+            ),
+            metric_row(
+                "Сессия",
+                format!(
+                    "{} • {} событий",
+                    format_ms(snapshot, session_age_ms),
+                    format_u64(events_count)
+                ),
+                Some("Возраст текущей непрерывной рабочей сессии и сколько событий working-state уже вошло в restore snapshot."),
+            ),
+            metric_row(
+                "Последняя команда",
+                last_command,
+                Some("Какая последняя команда или действие оставили этот working-state след."),
+            ),
+            metric_row(
+                "Последний результат",
+                last_results,
+                Some("Короткое human-readable summary того, что Amai считает последним materialized результатом."),
+            ),
+            metric_row(
+                "Активные файлы",
+                if active_files_preview.is_empty() {
+                    format_u64(Some(active_files_count))
+                } else {
+                    format!("{} • {}", format_u64(Some(active_files_count)), active_files_preview)
+                },
+                Some("Сколько файлов Amai считает активными сейчас и какие первые несколько он видит в рабочей линии."),
+            ),
+            metric_row(
+                "Recent queries",
+                format_u64(Some(recent_queries)),
+                Some("Сколько недавних retrieval-запросов вошло в working-state restore. Здесь может быть 0, если работа шла через continuity/proof, а не через live retrieval."),
+            ),
+        ],
+    )
+}
+
 fn compare_table_card(
     title: &str,
     note: String,
@@ -3506,6 +3632,22 @@ fn compare_table_row(label: &str, tooltip: &str, values: Vec<String>) -> Value {
 
 fn compare_pair(target: String, current: String) -> Vec<String> {
     vec![target, current]
+}
+
+fn compact_dashboard_text(value: Option<&str>, max_chars: usize, fallback: &str) -> String {
+    let text = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback);
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    let truncated = text
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    format!("{truncated}…")
 }
 
 fn card_with_rows(
@@ -4645,8 +4787,8 @@ fn human_elapsed_ms(value_ms: u64) -> String {
 mod tests {
     use super::{
         benchmark_qdrant_live_card, browser_base_url, build_benchmark_cards, build_hero_cards,
-        build_machine_cards, format_ms, format_time_compare_pair, human_elapsed_ms,
-        live_latency_compare_card, monitoring_url, worst_status,
+        build_machine_cards, build_top_cards, format_ms, format_time_compare_pair,
+        human_elapsed_ms, live_latency_compare_card, monitoring_url, worst_status,
     };
     use serde_json::json;
 
@@ -4991,6 +5133,107 @@ mod tests {
         let card = live_latency_compare_card(&snapshot);
         assert_eq!(card["status"].as_str(), Some("pass"));
         assert_eq!(card["status_label"].as_str(), Some("в норме"));
+    }
+
+    #[test]
+    fn top_cards_split_live_retrieval_from_real_workline() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 1.0,
+                        "target_p99_ms": 2.0,
+                        "target_max_ms": 5.0,
+                        "target_sample_count": 100000
+                    },
+                    "cold_live_table": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 4.0,
+                        "target_p99_ms": 6.0,
+                        "target_max_ms": 10.0,
+                        "target_sample_count": 10000
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "latency_slices": [
+                            {
+                                "state": "hot",
+                                "sample_count": 100001,
+                                "p50_latency_ms": 0.4,
+                                "p95_latency_ms": 0.7,
+                                "p99_latency_ms": 1.2,
+                                "max_latency_ms": 2.5
+                            },
+                            {
+                                "state": "cold",
+                                "sample_count": 10001,
+                                "p50_latency_ms": 1.2,
+                                "p95_latency_ms": 2.1,
+                                "p99_latency_ms": 3.4,
+                                "max_latency_ms": 5.2
+                            }
+                        ]
+                    }
+                }
+            },
+            "latest_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 1774239281880u64,
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_age_ms": 15u64,
+                    "events_count": 3u64,
+                    "current_goal": "Amai observability guardrail proof materialized",
+                    "next_step": "Вывести guardrail verdict в dashboard/service layer.",
+                    "last_command": "continuity handoff",
+                    "last_results_summary": "Зафиксирован handoff для art :: continuity",
+                    "active_files": [
+                        "/home/art/agent-memory-index/src/observe.rs",
+                        "/home/art/agent-memory-index/src/dashboard.rs"
+                    ],
+                    "recent_queries": [],
+                    "restore_confidence": "preliminary"
+                }
+            }
+        });
+
+        let cards = build_top_cards(&snapshot);
+        assert_eq!(cards.len(), 2);
+        assert_eq!(
+            cards[0]["title"].as_str(),
+            Some("Как Amai отвечает на live retrieval сейчас")
+        );
+        assert_eq!(
+            cards[1]["title"].as_str(),
+            Some("На чём Amai реально работает сейчас")
+        );
+        assert!(
+            cards[1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("working-state / continuity lane")
+        );
     }
 
     #[test]
