@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 21:42 MSK
-Ручная сверка guide/docs: 2026-03-23 21:42 MSK
+modified_at: 2026-03-23 21:49 MSK
+Ручная сверка guide/docs: 2026-03-23 21:49 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1323,6 +1323,7 @@ HDF5-датасеты, которые уже зафиксированы как �
 ./scripts/proof_token_benchmark.sh
 ./scripts/proof_cold_benchmark.sh
 ./scripts/proof_context_decision_trace.sh
+./scripts/proof_working_state_decision_trace.sh
 ./scripts/proof_observability.sh
 ./scripts/proof_mcp.sh
 ./scripts/proof_onboarding.sh
@@ -1338,6 +1339,10 @@ HDF5-датасеты, которые уже зафиксированы как �
 
 `./scripts/proof_context_decision_trace.sh` теперь отдельно проверяет, что обычный
 `context pack` возвращает machine-readable `decision_trace`, а не только raw retrieval arrays.
+
+`./scripts/proof_working_state_decision_trace.sh` проверяет следующий product path:
+живой `context pack` должен дойти до `latest_working_state_restore` и принести туда
+`latest_decision_trace / recent_decision_traces`, а не потеряться между retrieval и restore.
 
 Для отдельного DB-level proof именно по observability guardrails:
 

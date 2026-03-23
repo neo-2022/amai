@@ -19,6 +19,7 @@ const MAX_RECENT_QUERIES: usize = 6;
 const MAX_ACTIVE_FILES: usize = 8;
 const MAX_OPEN_QUESTIONS: usize = 6;
 const MAX_MATERIALIZED_NOTES: usize = 6;
+const MAX_RECENT_DECISION_TRACES: usize = 3;
 
 pub async fn record_handoff_event(
     db: &Client,
@@ -182,6 +183,7 @@ pub async fn record_context_pack_event(db: &Client, payload: &Value) -> Result<(
             "context_pack_id": node["context_pack_id"].as_str().unwrap_or_default(),
             "retrieval_mode": node["effective_retrieval_mode"].as_str().unwrap_or_default(),
             "latency_ms": node["retrieval_runtime"]["total_ms"].clone(),
+            "decision_trace": node["decision_trace"].clone(),
             "workspace_graph": node["workspace_graph"].clone(),
         }
     });
@@ -287,6 +289,20 @@ pub fn print_restore_bundle_human(restore: &Value) {
         &node["materialized_notes"],
         MAX_MATERIALIZED_NOTES,
     );
+    if let Some(trace) = node["latest_decision_trace"].as_object() {
+        let included = trace["included"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item["strategy"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "ничего не включено".to_string());
+        println!("- Последнее объяснение retrieval: включено через {included}");
+    }
     if let Some(summary) = workspace_graph::human_summary(&node["workspace_graph"]) {
         println!("- Структурный граф рабочей области: {summary}");
     }
@@ -369,6 +385,7 @@ fn compose_restore_bundle(
     let mut last_command = None::<String>;
     let mut last_results_summary = None::<String>;
     let mut recent_actions = Vec::new();
+    let mut recent_decision_traces = Vec::new();
     let mut workspace_graph_inputs = Vec::new();
     let now_epoch_ms = now_epoch_ms().unwrap_or(latest_recorded_at);
 
@@ -402,6 +419,11 @@ fn compose_restore_bundle(
                 .as_str()
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned);
+        }
+        if recent_decision_traces.len() < MAX_RECENT_DECISION_TRACES
+            && let Some(trace) = summarize_decision_trace(event)
+        {
+            recent_decision_traces.push(trace);
         }
         let action_state = classify_action_state(
             event,
@@ -483,6 +505,10 @@ fn compose_restore_bundle(
             "fresh"
         };
     let merged_workspace_graph = workspace_graph::merge_workspace_graphs(&workspace_graph_inputs);
+    let latest_decision_trace = recent_decision_traces
+        .first()
+        .cloned()
+        .unwrap_or(Value::Null);
 
     json!({
         "working_state_restore": {
@@ -507,6 +533,8 @@ fn compose_restore_bundle(
             "recent_actions": recent_actions,
             "last_command": last_command,
             "last_results_summary": last_results_summary,
+            "latest_decision_trace": latest_decision_trace,
+            "recent_decision_traces": recent_decision_traces,
             "restore_confidence": restore_confidence,
             "restore_freshness_state": restore_freshness_state,
             "execution_catalog": execution_catalog,
@@ -973,6 +1001,54 @@ fn lineage_relation(execution_state: &str) -> &'static str {
         "stale" => "stale_support_for",
         _ => "supports",
     }
+}
+
+fn summarize_decision_trace(event: &Value) -> Option<Value> {
+    let trace = event["decision_trace"].as_object()?;
+    let included = trace
+        .get("included")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(4)
+                .map(|item| {
+                    json!({
+                        "strategy": item["strategy"],
+                        "count": item["count"],
+                        "reason": item["reason"],
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let not_included = trace
+        .get("not_included")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(4)
+                .map(|item| {
+                    json!({
+                        "strategy": item["strategy"],
+                        "reason": item["reason"],
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(json!({
+        "event_id": event["event_id"],
+        "headline": event["headline"],
+        "query": event["query"],
+        "recorded_at_epoch_ms": event["recorded_at_epoch_ms"],
+        "scope": trace.get("scope").cloned().unwrap_or(Value::Null),
+        "selection_priority": trace.get("selection_priority").cloned().unwrap_or(Value::Null),
+        "included": included,
+        "not_included": not_included,
+        "semantic_guard": trace.get("semantic_guard").cloned().unwrap_or(Value::Null),
+    }))
 }
 
 async fn resolve_session_id(
@@ -1882,6 +1958,64 @@ mod tests {
         assert_eq!(graph["summary"]["node_counts"]["file"], json!(1));
         assert_eq!(graph["summary"]["node_counts"]["symbol"], json!(1));
         assert_eq!(graph["summary"]["edge_count"], json!(2));
+    }
+
+    #[test]
+    fn compose_restore_bundle_carries_recent_decision_trace_summary() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let retrieval = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "retrieval-decision",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "event_kind": "retrieval_context_pack",
+                    "source_kind": "context_pack",
+                    "headline": "Рабочий запрос: current context",
+                    "summary": "Attempted retrieval.",
+                    "query": "shared_runtime_marker",
+                    "recorded_at_epoch_ms": base,
+                    "decision_trace": {
+                        "scope": {
+                            "project_code": "art",
+                            "namespace_code": "continuity",
+                            "effective_retrieval_mode": "local_strict"
+                        },
+                        "selection_priority": ["exact_documents", "lexical_chunks"],
+                        "included": [
+                            {"strategy":"exact_documents","count":1,"reason":"Exact hit"}
+                        ],
+                        "not_included": [
+                            {"strategy":"semantic_chunks","reason":"abstained"}
+                        ],
+                        "semantic_guard": {"abstained": true}
+                    }
+                }
+            }),
+            created_at_epoch_ms: base,
+        };
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[retrieval],
+        );
+        let restore = &bundle["working_state_restore"];
+        assert_eq!(
+            restore["latest_decision_trace"]["scope"]["effective_retrieval_mode"],
+            json!("local_strict")
+        );
+        assert_eq!(
+            restore["latest_decision_trace"]["included"][0]["strategy"],
+            json!("exact_documents")
+        );
+        assert_eq!(
+            restore["recent_decision_traces"].as_array().map(Vec::len),
+            Some(1)
+        );
     }
 
     #[test]

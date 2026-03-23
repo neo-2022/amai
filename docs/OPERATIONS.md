@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 21:42 MSK
-Ручная сверка guide/docs: 2026-03-23 21:42 MSK
+modified_at: 2026-03-23 21:49 MSK
+Ручная сверка guide/docs: 2026-03-23 21:49 MSK
 
 # Operations
 
@@ -570,6 +570,17 @@ cargo run -- context pack \
 ```bash
 ./scripts/proof_context_decision_trace.sh
 ```
+
+Следующий связанный proof уже проверяет, что этот explainability-layer не обрывается
+на raw payload и доходит до restore-path:
+
+```bash
+./scripts/proof_working_state_decision_trace.sh
+```
+
+После живого `context pack` он смотрит `observe snapshot` и требует, чтобы
+`latest_working_state_restore.working_state_restore` уже содержал
+`latest_decision_trace` и `recent_decision_traces`.
 
 ## MCP server
 
