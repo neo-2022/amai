@@ -268,12 +268,17 @@ fn rust_call_reference(node: Node<'_>, bytes: &[u8]) -> Option<Value> {
     } else {
         None
     };
+    let owner_context = rust_symbol_owner_context(node, bytes);
     Some(json!({
         "kind": node.kind(),
         "call_style": call_style,
         "callee_name": callee_name,
         "callee_path": callee_path,
         "receiver_text": receiver_text,
+        "enclosing_owner_kind": owner_context.as_ref().map(|owner| owner.owner_kind.clone()),
+        "enclosing_owner_name": owner_context.as_ref().map(|owner| owner.owner_name.clone()),
+        "enclosing_owner_path": owner_context.as_ref().map(|owner| owner.owner_path.clone()),
+        "enclosing_trait_name": owner_context.as_ref().and_then(|owner| owner.trait_name.clone()),
         "generic": is_generic,
         "start_line": (node.start_position().row + 1) as i32,
         "end_line": (node.end_position().row + 1) as i32,
@@ -288,12 +293,17 @@ fn rust_macro_reference(node: Node<'_>, bytes: &[u8]) -> Option<Value> {
         "scoped_identifier" => "macro_scoped_identifier",
         _ => return None,
     };
+    let owner_context = rust_symbol_owner_context(node, bytes);
     Some(json!({
         "kind": node.kind(),
         "call_style": call_style,
         "callee_name": rust_callee_name(macro_node, bytes),
         "callee_path": trimmed_text(macro_node, bytes),
         "receiver_text": Value::Null,
+        "enclosing_owner_kind": owner_context.as_ref().map(|owner| owner.owner_kind.clone()),
+        "enclosing_owner_name": owner_context.as_ref().map(|owner| owner.owner_name.clone()),
+        "enclosing_owner_path": owner_context.as_ref().map(|owner| owner.owner_path.clone()),
+        "enclosing_trait_name": owner_context.as_ref().and_then(|owner| owner.trait_name.clone()),
         "generic": false,
         "start_line": (node.start_position().row + 1) as i32,
         "end_line": (node.end_position().row + 1) as i32,
@@ -666,5 +676,41 @@ impl Beta {
         assert_eq!(method.metadata["owner_kind"], json!("impl_item"));
         assert_eq!(method.metadata["owner_name"], json!("Beta"));
         assert_eq!(method.metadata["owner_path"], json!("Beta"));
+    }
+
+    #[test]
+    fn rust_analysis_attaches_enclosing_owner_to_self_calls() {
+        let cfg = test_config();
+        let analysis = analyze(
+            &cfg,
+            "rust",
+            r#"
+pub struct Beta;
+
+impl Beta {
+    fn helper(&self) -> Self {
+        Self
+    }
+
+    pub fn make(&self) -> Self {
+        self.helper()
+    }
+}
+"#,
+        )
+        .expect("syntax analysis");
+        let call = analysis
+            .call_references
+            .as_array()
+            .and_then(|calls| {
+                calls
+                    .iter()
+                    .find(|call| call["call_style"] == json!("field_expression"))
+            })
+            .expect("self call");
+        assert_eq!(call["receiver_text"], json!("self"));
+        assert_eq!(call["enclosing_owner_kind"], json!("impl_item"));
+        assert_eq!(call["enclosing_owner_name"], json!("Beta"));
+        assert_eq!(call["enclosing_owner_path"], json!("Beta"));
     }
 }

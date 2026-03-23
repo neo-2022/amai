@@ -734,6 +734,10 @@ fn populate_call_nodes(file: &mut FileAggregate, nodes: &Value) {
                     "callee_name": item["callee_name"].clone(),
                     "callee_path": item["callee_path"].clone(),
                     "receiver_text": item["receiver_text"].clone(),
+                    "enclosing_owner_kind": item["enclosing_owner_kind"].clone(),
+                    "enclosing_owner_name": item["enclosing_owner_name"].clone(),
+                    "enclosing_owner_path": item["enclosing_owner_path"].clone(),
+                    "enclosing_trait_name": item["enclosing_trait_name"].clone(),
                     "generic": item["generic"].clone(),
                     "label": label,
                     "text": item["text"].clone(),
@@ -1066,6 +1070,7 @@ fn resolve_call(
     imported_files: Option<&BTreeSet<ScopedPathKey>>,
 ) -> Option<ReferenceResolution> {
     let call_style = call["call_style"].as_str()?;
+    let local_owner_name = call["enclosing_owner_name"].as_str();
     match call_style {
         "scoped_identifier" | "macro_scoped_identifier" => {
             resolve_rust_path_target(source_file, call["callee_path"].as_str()?, lookup).or_else(
@@ -1075,6 +1080,7 @@ fn resolve_call(
                         call["callee_path"].as_str()?,
                         lookup,
                         imported_files,
+                        local_owner_name,
                     )
                 },
             )
@@ -1085,6 +1091,17 @@ fn resolve_call(
             lookup,
             imported_files,
         ),
+        "field_expression"
+            if call["receiver_text"].as_str() == Some("self") && local_owner_name.is_some() =>
+        {
+            resolve_rust_owned_symbol_name_target(
+                source_file,
+                local_owner_name?,
+                call["callee_name"].as_str()?,
+                lookup,
+                None,
+            )
+        }
         _ => None,
     }
 }
@@ -1128,14 +1145,20 @@ fn resolve_rust_owner_symbol_path_target(
     path: &str,
     lookup: &GraphLookup,
     imported_files: Option<&BTreeSet<ScopedPathKey>>,
+    local_owner_name: Option<&str>,
 ) -> Option<ReferenceResolution> {
     let (_, segments) = rust_reference_base_and_segments(&source_file.relative_path, path)?;
     let [owner_name, symbol_name] = segments.as_slice() else {
         return None;
     };
+    let effective_owner_name = if owner_name == "Self" {
+        local_owner_name?
+    } else {
+        owner_name.as_str()
+    };
     resolve_rust_owned_symbol_name_target(
         source_file,
-        owner_name,
+        effective_owner_name,
         symbol_name,
         lookup,
         imported_files,
@@ -2334,6 +2357,170 @@ mod tests {
         );
     }
 
+    #[test]
+    fn context_pack_workspace_graph_resolves_self_field_calls_inside_impl() {
+        let context_pack_id = Uuid::parse_str("00000000-0000-0000-0000-000000000658").unwrap();
+        let graph = build_context_pack_workspace_graph(
+            &context_pack_id,
+            "self.helper",
+            "local_strict",
+            "scope-1",
+            &json!([{
+                "project_code": "project_alpha",
+                "namespace_code": "default"
+            }]),
+            &[DocumentHit {
+                project_code: "project_alpha".to_string(),
+                namespace_code: "default".to_string(),
+                repo_root: "/repo".to_string(),
+                relative_path: "src/alpha.rs".to_string(),
+                language: Some("rust".to_string()),
+                source_kind: "git_tracked".to_string(),
+                git_commit_sha: Some("abc".to_string()),
+                score: 10.0,
+                snippet: "self.helper()".to_string(),
+            }],
+            &[],
+            &[],
+            &[],
+            &[DocumentStructureRecord {
+                project_code: "project_alpha".to_string(),
+                namespace_code: "default".to_string(),
+                repo_root: "/repo".to_string(),
+                relative_path: "src/alpha.rs".to_string(),
+                language: Some("rust".to_string()),
+                source_kind: "git_tracked".to_string(),
+                git_commit_sha: Some("abc".to_string()),
+                structure: json!([
+                    {
+                        "kind": "function_item",
+                        "name": "helper",
+                        "start_line": 4,
+                        "end_line": 6
+                    },
+                    {
+                        "kind": "function_item",
+                        "name": "helper",
+                        "start_line": 9,
+                        "end_line": 11
+                    },
+                    {
+                        "kind": "function_item",
+                        "name": "make",
+                        "start_line": 13,
+                        "end_line": 15
+                    }
+                ]),
+                imports: json!([]),
+                exports: json!([]),
+                metadata: json!({
+                    "call_references": [{
+                        "kind": "call_expression",
+                        "call_style": "field_expression",
+                        "callee_name": "helper",
+                        "callee_path": "self.helper",
+                        "receiver_text": "self",
+                        "enclosing_owner_kind": "impl_item",
+                        "enclosing_owner_name": "Beta",
+                        "enclosing_owner_path": "Beta",
+                        "enclosing_trait_name": null,
+                        "generic": false,
+                        "start_line": 14,
+                        "end_line": 14,
+                        "text": "self.helper()"
+                    }]
+                }),
+            }],
+            &[
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "helper".to_string(),
+                    kind: "function_item".to_string(),
+                    start_line: 4,
+                    end_line: 6,
+                    start_byte: 17,
+                    end_byte: 62,
+                    metadata: json!({
+                        "language":"rust",
+                        "node_kind":"function_item",
+                        "owner_kind":"impl_item",
+                        "owner_name":"Beta",
+                        "owner_path":"Beta",
+                        "text":"fn helper(&self) -> Self { Self }"
+                    }),
+                },
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "helper".to_string(),
+                    kind: "function_item".to_string(),
+                    start_line: 9,
+                    end_line: 11,
+                    start_byte: 63,
+                    end_byte: 92,
+                    metadata: json!({
+                        "language":"rust",
+                        "node_kind":"function_item",
+                        "text":"pub fn helper() -> Beta { Beta }"
+                    }),
+                },
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "make".to_string(),
+                    kind: "function_item".to_string(),
+                    start_line: 13,
+                    end_line: 15,
+                    start_byte: 93,
+                    end_byte: 140,
+                    metadata: json!({
+                        "language":"rust",
+                        "node_kind":"function_item",
+                        "owner_kind":"impl_item",
+                        "owner_name":"Beta",
+                        "owner_path":"Beta",
+                        "text":"pub fn make(&self) -> Self { self.helper() }"
+                    }),
+                },
+            ],
+        )
+        .expect("graph");
+        let edges = graph["edges"].as_array().expect("edges");
+        assert!(
+            !edges
+                .iter()
+                .any(|edge| edge["relation"] == json!("calls_file"))
+        );
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("calls_symbol")
+                && edge["to_node_id"] == json!("symbol:project_alpha:default:src/alpha.rs:helper:4")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("resolves_call_file")
+                && edge["to_node_id"] == json!("file:project_alpha:default:src/alpha.rs")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("resolves_call_symbol")
+                && edge["to_node_id"] == json!("symbol:project_alpha:default:src/alpha.rs:helper:4")
+        }));
+    }
+
     proptest! {
         #[test]
         fn plain_symbol_resolution_stays_fail_closed_under_candidate_ambiguity(
@@ -2459,7 +2646,7 @@ mod tests {
     fn merge_workspace_graphs_deduplicates_nodes_and_keeps_context_pack_lineage() {
         let merged = merge_workspace_graphs(&[
             json!({
-                "workspace_graph_model_version": "workspace-graph-v4",
+                "workspace_graph_model_version": "workspace-graph-v5",
                 "artifact_lineage_model_version": "artifact-lineage-v1",
                 "lineage_model_version": "lineage-v2",
                 "truth_ranking": ["continuity_handoff"],
@@ -2474,7 +2661,7 @@ mod tests {
                 ]
             }),
             json!({
-                "workspace_graph_model_version": "workspace-graph-v4",
+                "workspace_graph_model_version": "workspace-graph-v5",
                 "artifact_lineage_model_version": "artifact-lineage-v1",
                 "lineage_model_version": "lineage-v2",
                 "truth_ranking": ["continuity_handoff"],
