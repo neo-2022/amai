@@ -499,6 +499,8 @@ async fn prepare_context_pack(
     );
     let workspace_documents =
         postgres::list_document_structures_for_namespace_paths(db, &workspace_requests).await?;
+    let workspace_symbols =
+        postgres::list_document_symbols_for_namespace_paths(db, &workspace_requests).await?;
     let workspace_graph = workspace_graph::build_context_pack_workspace_graph(
         &context_pack_id,
         &args.query,
@@ -510,6 +512,7 @@ async fn prepare_context_pack(
         &chunks,
         &semantic_chunks,
         &workspace_documents,
+        &workspace_symbols,
     )?;
     let provenance_minimum = json!([
         "source_project",
