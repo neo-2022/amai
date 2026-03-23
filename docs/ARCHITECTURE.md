@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 02:18 MSK
-Ручная сверка guide/docs: 2026-03-24 02:18 MSK
+modified_at: 2026-03-24 02:45 MSK
+Ручная сверка guide/docs: 2026-03-24 02:45 MSK
 
 # Architecture
 
@@ -203,6 +203,8 @@ Code structure plane:
   - создаёт controlled cross-project relation edge.
 - `index project`
   - индексирует файлы в PostgreSQL;
+  - canonicalize-ит входной index root до физического пути, чтобы `relative_path` всегда
+    считался от того же canonical repo root, который уже живёт в `projects`;
   - извлекает symbols/chunks через прямые Rust grammar crates поверх `tree-sitter`;
   - пишет code chunk vectors в Qdrant;
   - пишет exact cache в SQLite.
@@ -211,6 +213,9 @@ Code structure plane:
   - строит visible project set через relation graph;
   - для каждого видимого проекта дополнительно разрешает только тот же `namespace` code, который запросил агент;
   - делает exact document lookup в PostgreSQL;
+  - для extensionless filename-запроса может честно матчить basename без расширения
+    (`CHECKLIST_00_MASTER_ART_REGART` -> `CHECKLIST_00_MASTER_ART_REGART.md`), но только внутри
+    того же видимого контура и без cross-project guess;
   - делает symbol lookup в PostgreSQL;
   - делает lexical chunk lookup в PostgreSQL;
   - сначала делает semantic chunk recall в Qdrant;

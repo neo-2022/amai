@@ -23,7 +23,7 @@ namespace = "cold_benchmark"
 repo_type = "mixed"
 size_class = "large_monorepo"
 limit_files = 2500
-skip_embeddings = false
+skip_embeddings = true
 default_retrieval_mode = "local_strict"
 
 [[repos]]
@@ -34,7 +34,7 @@ namespace = "cold_benchmark"
 repo_type = "code_heavy"
 size_class = "medium_production"
 limit_files = 800
-skip_embeddings = false
+skip_embeddings = true
 default_retrieval_mode = "local_strict"
 
 [[repos]]
@@ -45,7 +45,7 @@ namespace = "cold_benchmark"
 repo_type = "mixed"
 size_class = "medium_repo"
 limit_files = 700
-skip_embeddings = false
+skip_embeddings = true
 default_retrieval_mode = "local_strict"
 
 [[repos]]
@@ -56,7 +56,7 @@ namespace = "cold_benchmark"
 repo_type = "mixed"
 size_class = "small_repo"
 limit_files = 700
-skip_embeddings = false
+skip_embeddings = true
 default_retrieval_mode = "local_strict"
 
 [[cases]]

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 02:18 MSK
-Ручная сверка guide/docs: 2026-03-24 02:18 MSK
+modified_at: 2026-03-24 02:45 MSK
+Ручная сверка guide/docs: 2026-03-24 02:45 MSK
 
 # Operations
 
@@ -522,8 +522,12 @@ cargo run -- project register \
 
 Правило для этого шага:
 - `repo_root` будет сохранён только в canonical absolute form;
+- тот же canonical physical root потом должен использоваться и в `index project`, чтобы `relative_path`
+  не превращался в почти абсолютный path с `..`;
 - если тот же физический корень уже зарегистрирован под другим `project code`, команда обязана завершиться ошибкой;
 - использовать alias-path вроде `../Art` вместо уже зарегистрированного `/home/art/Art` запрещено: это не новый проект, а конфликт регистрации.
+- для filename-запроса без расширения exact document lookup теперь может честно вернуть тот же basename
+  с реальным расширением, но только внутри того же `project + namespace` scope.
 
 ## Ensure a workspace inside the project
 

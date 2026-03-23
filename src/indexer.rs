@@ -87,6 +87,7 @@ pub async fn index_project(
     args: &crate::cli::IndexProjectArgs,
 ) -> Result<IndexingStats> {
     let started = Instant::now();
+    let index_root = canonicalize_existing_dir(&args.path)?;
     let project = postgres::get_project_by_code(db, &args.code).await?;
     let namespace = postgres::ensure_namespace(
         db,
@@ -99,7 +100,7 @@ pub async fn index_project(
     postgres::delete_namespace_documents(db, namespace.namespace_id).await?;
 
     let git_commit_sha = resolve_git_commit(&project.repo_root).await.ok();
-    let files = collect_files(&args.path, args.limit_files, args.paths_file.as_deref())?;
+    let files = collect_files(&index_root, args.limit_files, args.paths_file.as_deref())?;
     let qdrant_client = if args.skip_embeddings {
         None
     } else {
@@ -230,6 +231,19 @@ pub async fn index_project(
         parser_coverage_ratio,
         language_breakdown: json!(language_breakdown),
     })
+}
+
+fn canonicalize_existing_dir(path: &Path) -> Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize index root {}", path.display()))?;
+    if !canonical.is_dir() {
+        return Err(anyhow!(
+            "index root is not a directory after canonicalization: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
 }
 
 fn build_code_embedder(cfg: &AppConfig) -> Result<TextEmbedding> {
@@ -687,7 +701,10 @@ fn hex_sha256(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_explicit_files, compute_parser_coverage_ratio, should_index_path};
+    use super::{
+        canonicalize_existing_dir, collect_explicit_files, compute_parser_coverage_ratio,
+        should_index_path,
+    };
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -727,6 +744,23 @@ mod tests {
             root,
             Path::new("/repo/fixtures/project_alpha/src/lib.rs")
         ));
+    }
+
+    #[test]
+    fn canonicalize_existing_dir_resolves_relative_segments() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("amai-indexer-canonical-root-{unique}"));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("create nested");
+        let raw = nested.join("..").join("nested").join(".");
+
+        let canonical = canonicalize_existing_dir(&raw).expect("canonical root");
+        assert_eq!(canonical, nested);
+
+        fs::remove_dir_all(&root).expect("cleanup");
     }
 
     #[test]

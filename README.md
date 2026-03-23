@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 02:18 MSK
-Ручная сверка guide/docs: 2026-03-24 02:18 MSK
+modified_at: 2026-03-24 02:45 MSK
+Ручная сверка guide/docs: 2026-03-24 02:45 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -833,6 +833,7 @@ cargo run -- deployment explain --target kubernetes_server
 Это главный закон проекта:
 - новый `repo_root` считается отдельным проектом;
 - `repo_root` перед записью всегда canonicalize-ится до абсолютного пути без `.` и `..`;
+- тот же canonical root используется и при самом `index project`, чтобы во внутренние `relative_path` не утекали ложные префиксы вида `/repo/../repo/...`;
 - если тот же самый физический корень уже зарегистрирован под другим `project code`, новая alias-регистрация блокируется fail-closed, а не создаёт второй проект;
 - смешивать проекты по умолчанию нельзя;
 - чтение другого проекта разрешается только по явным relation/policy правилам.
@@ -846,6 +847,12 @@ cargo run -- deployment explain --target kubernetes_server
 2. symbols и структура кода;
 3. semantic поиск;
 4. сборка готового `context pack` с указанием источника каждого фрагмента.
+
+Для exact document lookup это теперь значит ещё и одну честную поблажку:
+- если человек спрашивает имя файла без расширения, например `CHECKLIST_00_MASTER_ART_REGART`,
+  `Amai` может вернуть `CHECKLIST_00_MASTER_ART_REGART.md`;
+- но только как extensionless basename match внутри того же видимого контура, а не как свободную
+  догадку по похожему имени из другого проекта.
 
 ### 3. Контекст даётся не всем куском проекта
 
@@ -1259,6 +1266,8 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 - `project register` хранит `repo_root` только в canonical absolute form;
 - строки вроде `../Art`, `/srv/amai/.` и `/repo/subdir/..` не считаются разными проектами, если они указывают на один и тот же физический корень;
 - если такой корень уже занят другим `project code`, `Amai` честно остановит регистрацию с ошибкой, а не создаст скрытый alias.
+- тот же canonical physical root потом используется и во время `index project`, чтобы exact-path retrieval
+  оставался действительно relative к repo root, а не к случайной форме входного пути.
 
 ## Benchmark matrix
 
@@ -1565,6 +1574,9 @@ cargo run --release -- verify degradation
 Этот runner:
 - сначала materialize-ит repo-pool так, чтобы `expected_paths` указывали только на реально существующие exact relative paths;
 - для локальных репозиториев использует канонические `project code`, чтобы один и тот же repo не жил в benchmark-пуле под alias и под обычным именем одновременно;
+- перед live indexing canonicalize-ит `repo_root` ещё раз, чтобы внешний repo из manifest не оставлял
+  в индексе path-хвосты с `..` и не ломал честный exact-path score;
+- если case-set для локального repo не требует semantic path и держит `limit_semantic_chunks = 0`, manifest может и должен честно ставить `skip_embeddings = true`, чтобы cold contour не платил лишнюю цену за vector layer там, где этот конкретный набор проверок его всё равно не использует;
 - сам индексирует указанные repo из manifest;
 - считает отдельно `cold` и `hot shadow`;
 - держит фиксированный набор эталонов для `Cold P50 / P95 / P99 / Max`, `precision / recall / hit rate`, `sample_count`, `repo_count`, `query_slice_count`, `duration`, `leakage` и `error rate`;

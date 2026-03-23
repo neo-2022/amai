@@ -622,7 +622,14 @@ fn resolve_repos(repo_root: &Path, repos: &[ColdBenchmarkRepo]) -> Result<Vec<Re
     repos
         .iter()
         .map(|repo| {
-            let resolved_root = resolve_relative_path(repo_root, &repo.repo_root);
+            let resolved_root = resolve_relative_path(repo_root, &repo.repo_root)
+                .canonicalize()
+                .with_context(|| {
+                    format!(
+                        "failed to canonicalize cold benchmark repo_root {}",
+                        resolve_relative_path(repo_root, &repo.repo_root).display()
+                    )
+                })?;
             if !resolved_root.exists() {
                 return Err(anyhow!(
                     "cold benchmark repo_root does not exist: {}",
@@ -1942,7 +1949,9 @@ mod tests {
     use crate::cold_benchmark::item_matches_case;
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn evaluate_case_uses_expected_paths_terms_and_symbols() {
@@ -2032,6 +2041,37 @@ mod tests {
         })
         .expect("verdict");
         assert_eq!(verdict.class_key, "hit_wrong_target");
+    }
+
+    #[test]
+    fn resolve_repos_canonicalizes_relative_repo_root_segments() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("amai-cold-manifest-root-{unique}"));
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+
+        let runtimes = super::resolve_repos(
+            &root,
+            &[ColdBenchmarkRepo {
+                code: "demo".to_string(),
+                display_name: "Demo".to_string(),
+                repo_root: PathBuf::from("repo/../repo"),
+                namespace: "cold_benchmark".to_string(),
+                repo_type: "mixed".to_string(),
+                size_class: "small".to_string(),
+                limit_files: None,
+                skip_embeddings: true,
+                default_retrieval_mode: "local_strict".to_string(),
+            }],
+        )
+        .expect("resolve repos");
+
+        assert_eq!(runtimes[0].resolved_root, repo);
+
+        fs::remove_dir_all(&root).expect("cleanup");
     }
 
     #[test]

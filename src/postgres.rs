@@ -648,7 +648,7 @@ pub async fn search_documents_for_namespace(
               AND d.namespace_id = $2
               AND d.search_vector @@ websearch_to_tsquery('simple', $3)
             ORDER BY score DESC, d.relative_path
-            LIMIT $4
+            LIMIT $6
             "#,
             &[&project_id, &namespace_id, &query, &limit],
         )
@@ -676,13 +676,16 @@ pub async fn search_documents_exact_for_namespace(
     query: &str,
     limit: i64,
 ) -> Result<Vec<DocumentHit>> {
+    let basename_query = exact_match_basename(query);
+    let allow_extensionless_basename_match = !basename_query.contains('.');
     let rows = client
         .query(
             r#"
             WITH normalized AS (
                 SELECT
                     $3::text AS full_query,
-                    regexp_replace($3::text, '^.*/', '') AS basename_query
+                    $4::text AS basename_query,
+                    $5::boolean AS allow_extensionless_basename_match
             )
             SELECT
                 p.code,
@@ -695,6 +698,12 @@ pub async fn search_documents_exact_for_namespace(
                 CASE
                     WHEN d.relative_path = normalized.full_query THEN 2000.0
                     WHEN regexp_replace(d.relative_path, '^.*/', '') = normalized.basename_query THEN 1500.0
+                    WHEN normalized.allow_extensionless_basename_match
+                         AND regexp_replace(
+                            regexp_replace(d.relative_path, '^.*/', ''),
+                            '\.[^.]+$',
+                            ''
+                         ) = normalized.basename_query THEN 1400.0
                     ELSE 0.0
                 END::real AS score,
                 LEFT(d.content, 1600)
@@ -707,11 +716,26 @@ pub async fn search_documents_exact_for_namespace(
               AND (
                 d.relative_path = normalized.full_query
                 OR regexp_replace(d.relative_path, '^.*/', '') = normalized.basename_query
+                OR (
+                    normalized.allow_extensionless_basename_match
+                    AND regexp_replace(
+                        regexp_replace(d.relative_path, '^.*/', ''),
+                        '\.[^.]+$',
+                        ''
+                    ) = normalized.basename_query
+                )
               )
             ORDER BY score DESC, length(d.relative_path), d.relative_path
-            LIMIT $4
+            LIMIT $6
             "#,
-            &[&project_id, &namespace_id, &query, &limit],
+            &[
+                &project_id,
+                &namespace_id,
+                &query,
+                &basename_query,
+                &allow_extensionless_basename_match,
+                &limit,
+            ],
         )
         .await?;
     Ok(rows
@@ -728,6 +752,10 @@ pub async fn search_documents_exact_for_namespace(
             snippet: row.get(8),
         })
         .collect())
+}
+
+fn exact_match_basename(query: &str) -> String {
+    query.rsplit('/').next().unwrap_or(query).to_string()
 }
 
 pub async fn search_symbols_for_namespace(
@@ -1980,8 +2008,9 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ObservabilityInsertMeta, canonical_repo_root_string, observability_conflict_error,
-        observability_source_class, prepare_observability_payload, validate_observability_update,
+        ObservabilityInsertMeta, canonical_repo_root_string, exact_match_basename,
+        observability_conflict_error, observability_source_class, prepare_observability_payload,
+        validate_observability_update,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -2255,5 +2284,17 @@ mod tests {
         let error = canonical_repo_root_string(&missing.display().to_string())
             .expect_err("missing path must fail");
         assert!(error.to_string().contains("failed to resolve repo_root"));
+    }
+
+    #[test]
+    fn exact_match_basename_strips_parent_segments() {
+        assert_eq!(
+            exact_match_basename("docs/source/checklists/CHECKLIST_00_MASTER_ART_REGART"),
+            "CHECKLIST_00_MASTER_ART_REGART"
+        );
+        assert_eq!(
+            exact_match_basename("scripts/tools/amai_art_continuity_startup.sh"),
+            "amai_art_continuity_startup.sh"
+        );
     }
 }
