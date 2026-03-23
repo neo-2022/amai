@@ -14,6 +14,9 @@ printf '%s\n' "$startup_output" | jq -e '.continuity_startup.canonical_eval.prob
 printf '%s\n' "$startup_output" | jq -e '.continuity_startup.canonical_eval.probes[1].name == "chat_start_restore_recovered_useful"' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.continuity_startup.canonical_eval.probes[2].name == "working_state_restore_recovered_useful"' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.prompt_text | contains("CHAT_START_RESTORE")' >/dev/null
+printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.included_reasons_summary != null' >/dev/null
+printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.excluded_reasons_summary != null' >/dev/null
+printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.prompt_text | contains("Почему вошёл последний контекст:")' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.working_state_restore.state_lineage.authoritative_event_id != ""' >/dev/null
 
 echo "proof_art_continuity_startup: PASS"

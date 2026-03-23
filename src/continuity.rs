@@ -1146,6 +1146,13 @@ fn build_continuity_answer_payload(
         answer_text,
     )?;
     let canonical_eval = build_continuity_canonical_eval(std::slice::from_ref(&probe))?;
+    let restore_node = restore.map(|value| &value["working_state_restore"]);
+    let included_reasons_summary = restore_node.and_then(|value| {
+        continuity_decision_trace_summary(Some(&value["latest_decision_trace"]), "included")
+    });
+    let excluded_reasons_summary = restore_node.and_then(|value| {
+        continuity_decision_trace_summary(Some(&value["latest_decision_trace"]), "not_included")
+    });
     Ok(json!({
         "continuity_answer": {
             "project": {
@@ -1169,6 +1176,8 @@ fn build_continuity_answer_payload(
                 "next_step": handoff_summary["next_step"].as_str().unwrap_or("ещё нет данных"),
             },
             "restore_present": restore.is_some(),
+            "included_reasons_summary": included_reasons_summary,
+            "excluded_reasons_summary": excluded_reasons_summary,
             "chat_lookup": {
                 "found": chat_tail.is_some(),
                 "thread_id": chat_tail.map(|value| value.thread_id.as_str()),
@@ -1438,6 +1447,41 @@ fn answer_mentions_temporal_match(answer_text: &str) -> bool {
     .any(|needle| answer_text.contains(needle))
 }
 
+fn continuity_strategy_label(strategy: &str) -> &str {
+    match strategy {
+        "exact_documents" => "точные совпадения",
+        "symbol_hits" => "совпадения по символам",
+        "lexical_chunks" => "текстовые фрагменты",
+        "semantic_chunks" => "смысловые фрагменты",
+        _ => strategy,
+    }
+}
+
+fn continuity_decision_trace_summary(trace: Option<&Value>, key: &str) -> Option<String> {
+    let items = trace?.get(key)?.as_array()?;
+    let parts = items
+        .iter()
+        .take(3)
+        .filter_map(|item| {
+            let reason = item["reason"].as_str()?.trim();
+            if reason.is_empty() {
+                return None;
+            }
+            let strategy = continuity_strategy_label(item["strategy"].as_str().unwrap_or_default());
+            let count = item["count"].as_u64();
+            Some(match count {
+                Some(value) if value > 0 => format!("{strategy} ({value}) — {reason}"),
+                _ => format!("{strategy} — {reason}"),
+            })
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(collapse_answer_text(&parts.join(" • "), 260))
+    }
+}
+
 fn render_direct_answer(
     handoff_summary: &Value,
     restore: Option<&Value>,
@@ -1516,6 +1560,18 @@ fn render_direct_answer(
         }
         if let Some(summary) = summarize_string_list(&restore_node["active_files"], 3) {
             lines.push(format!("Активные файлы: {summary}"));
+        }
+        if let Some(summary) = continuity_decision_trace_summary(
+            Some(&restore_node["latest_decision_trace"]),
+            "included",
+        ) {
+            lines.push(format!("Почему вошёл текущий контекст: {summary}"));
+        }
+        if let Some(summary) = continuity_decision_trace_summary(
+            Some(&restore_node["latest_decision_trace"]),
+            "not_included",
+        ) {
+            lines.push(format!("Почему часть не вошла: {summary}"));
         }
         if restore_node["restore_confidence"].as_str() == Some("preliminary") {
             lines.push(
@@ -2118,6 +2174,12 @@ fn build_chat_start_restore(
         restore_node.and_then(|value| summarize_string_list(&value["open_questions"], 3));
     let workspace_graph_summary =
         restore_node.and_then(|value| workspace_graph::human_summary(&value["workspace_graph"]));
+    let included_reasons_summary = restore_node.and_then(|value| {
+        continuity_decision_trace_summary(Some(&value["latest_decision_trace"]), "included")
+    });
+    let excluded_reasons_summary = restore_node.and_then(|value| {
+        continuity_decision_trace_summary(Some(&value["latest_decision_trace"]), "not_included")
+    });
     let active_files = restore_node
         .and_then(|value| value["active_files"].as_array())
         .map(|items| {
@@ -2172,6 +2234,8 @@ fn build_chat_start_restore(
             "active_files_summary": active_files_summary,
             "open_questions_summary": open_questions_summary,
             "workspace_graph_summary": workspace_graph_summary,
+            "included_reasons_summary": included_reasons_summary,
+            "excluded_reasons_summary": excluded_reasons_summary,
             "active_files": active_files,
             "open_questions": open_questions,
             "prompt_text": render_chat_start_prompt(
@@ -2213,6 +2277,12 @@ fn render_chat_start_prompt(
         restore_node.and_then(|value| summarize_string_list(&value["open_questions"], 3));
     let workspace_graph_summary =
         restore_node.and_then(|value| workspace_graph::human_summary(&value["workspace_graph"]));
+    let included_reasons_summary = restore_node.and_then(|value| {
+        continuity_decision_trace_summary(Some(&value["latest_decision_trace"]), "included")
+    });
+    let excluded_reasons_summary = restore_node.and_then(|value| {
+        continuity_decision_trace_summary(Some(&value["latest_decision_trace"]), "not_included")
+    });
     let restore_confidence = restore_node
         .and_then(|value| value["restore_confidence"].as_str())
         .unwrap_or("preliminary");
@@ -2237,6 +2307,12 @@ fn render_chat_start_prompt(
     }
     if let Some(value) = workspace_graph_summary {
         lines.push(format!("Структурный граф рабочей области: {value}"));
+    }
+    if let Some(value) = included_reasons_summary {
+        lines.push(format!("Почему вошёл последний контекст: {value}"));
+    }
+    if let Some(value) = excluded_reasons_summary {
+        lines.push(format!("Почему часть не вошла: {value}"));
     }
     if let Some(value) = open_questions_summary {
         lines.push(format!("Открытые вопросы: {value}"));
@@ -2290,6 +2366,18 @@ fn print_chat_start_restore_human(value: &Value) {
         .filter(|value| !value.is_empty())
     {
         println!("- Структурный граф рабочей области: {value}");
+    }
+    if let Some(value) = node["included_reasons_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Почему вошёл последний контекст: {value}");
+    }
+    if let Some(value) = node["excluded_reasons_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Почему часть не вошла: {value}");
     }
     if let Some(value) = node["open_questions_summary"]
         .as_str()
@@ -3339,12 +3427,31 @@ mod tests {
             "headline": "Temporal lookup materialized",
             "next_step": "Проверить lookup по точному времени на реальном новом чате."
         });
-        let answer = render_direct_answer(&handoff, None, None, "last_chat", None, 1);
+        let restore = json!({
+            "working_state_restore": {
+                "materialized_notes": ["temporal lookup materialized"],
+                "recent_actions": [],
+                "active_files": ["src/continuity.rs"],
+                "restore_confidence": "high",
+                "latest_decision_trace": {
+                    "included": [{
+                        "strategy": "exact_documents",
+                        "count": 1,
+                        "reason": "Нашлись точные совпадения по continuity."
+                    }],
+                    "not_included": [{
+                        "strategy": "semantic_chunks",
+                        "reason": "Semantic layer честно abstained и не добавил фрагменты."
+                    }]
+                }
+            }
+        });
+        let answer = render_direct_answer(&handoff, Some(&restore), None, "last_chat", None, 1);
         let payload = build_continuity_answer_payload(
             &project,
             &namespace,
             &handoff,
-            None,
+            Some(&restore),
             None,
             "last_chat",
             Some("на чем остановились"),
@@ -3364,6 +3471,15 @@ mod tests {
         assert_eq!(
             payload["retrieval_science"]["suite_key"].as_str(),
             Some("continuity_answer")
+        );
+        assert_eq!(
+            payload["continuity_answer"]["included_reasons_summary"].as_str(),
+            Some("точные совпадения (1) — Нашлись точные совпадения по continuity.")
+        );
+        assert!(
+            payload["continuity_answer"]["answer_text"]
+                .as_str()
+                .is_some_and(|value| value.contains("Почему вошёл текущий контекст:"))
         );
     }
 
@@ -3512,6 +3628,17 @@ mod tests {
                 "recent_actions": [],
                 "active_files": [],
                 "open_questions": [],
+                "latest_decision_trace": {
+                    "included": [{
+                        "strategy": "exact_documents",
+                        "count": 1,
+                        "reason": "Нашлись точные совпадения по continuity."
+                    }],
+                    "not_included": [{
+                        "strategy": "semantic_chunks",
+                        "reason": "Semantic layer честно abstained и не добавил фрагменты."
+                    }]
+                },
                 "workspace_graph": json!({
                     "summary": {"file_count": 0, "structure_item_count": 0, "symbol_count": 0, "chunk_count": 0, "import_count": 0, "export_count": 0, "call_count": 0, "edge_count": 0}
                 }),
@@ -3536,6 +3663,15 @@ mod tests {
         assert_eq!(
             payload["retrieval_science"]["suite_key"].as_str(),
             Some("continuity_restore")
+        );
+        assert_eq!(
+            payload["chat_start_restore"]["included_reasons_summary"].as_str(),
+            Some("точные совпадения (1) — Нашлись точные совпадения по continuity.")
+        );
+        assert!(
+            payload["chat_start_restore"]["prompt_text"]
+                .as_str()
+                .is_some_and(|value| value.contains("Почему вошёл последний контекст:"))
         );
     }
 
@@ -3581,6 +3717,17 @@ mod tests {
                 "recent_actions": [],
                 "active_files": [],
                 "open_questions": [],
+                "latest_decision_trace": {
+                    "included": [{
+                        "strategy": "exact_documents",
+                        "count": 1,
+                        "reason": "Нашлись точные совпадения по continuity."
+                    }],
+                    "not_included": [{
+                        "strategy": "semantic_chunks",
+                        "reason": "Semantic layer честно abstained и не добавил фрагменты."
+                    }]
+                },
                 "workspace_graph": json!({
                     "summary": {"file_count": 0, "structure_item_count": 0, "symbol_count": 0, "chunk_count": 0, "import_count": 0, "export_count": 0, "call_count": 0, "edge_count": 0}
                 }),
@@ -3610,6 +3757,10 @@ mod tests {
         assert_eq!(
             payload["retrieval_science"]["suite_key"].as_str(),
             Some("continuity_startup")
+        );
+        assert_eq!(
+            payload["chat_start_restore"]["included_reasons_summary"].as_str(),
+            Some("точные совпадения (1) — Нашлись точные совпадения по continuity.")
         );
     }
 

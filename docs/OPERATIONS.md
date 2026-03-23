@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 21:56 MSK
-Ручная сверка guide/docs: 2026-03-23 21:56 MSK
+modified_at: 2026-03-23 22:06 MSK
+Ручная сверка guide/docs: 2026-03-23 22:06 MSK
 
 # Operations
 
@@ -311,6 +311,14 @@ cd /home/art/agent-memory-index
 `degradation_policy`. Это нужно затем, чтобы machine-readable recovery можно было проверять
 не только по сырым полям, но и по каноническим verdict-классам.
 
+Теперь этот же recovery-path дополнительно поднимает короткие explainability-summary:
+- `chat_start_restore.included_reasons_summary`
+- `chat_start_restore.excluded_reasons_summary`
+
+А `continuity answer --json` даёт те же summary рядом с готовым ответом, чтобы было видно
+не только `что восстановили`, но и `почему этот контекст вошёл` и
+`почему часть retrieval-слоёв ничего не добавила`.
+
 `continuity startup --json` теперь даёт тот же класс проверяемого machine-readable слоя:
 верхний `continuity_startup.canonical_eval`, рядом `chat_start_restore`,
 `working_state_restore`, `retrieval_science` и `degradation_policy`.
@@ -581,6 +589,18 @@ cargo run -- context pack \
 После живого `context pack` он смотрит `observe snapshot` и требует, чтобы
 `latest_working_state_restore.working_state_restore` уже содержал
 `latest_decision_trace` и `recent_decision_traces`.
+
+Следующий user-facing слой поверх этого теперь тоже закрыт proof-контуром:
+- `scripts/proof_art_continuity_startup.sh`
+- `scripts/proof_art_continuity_restore.sh`
+- `scripts/proof_art_continuity_answer.sh`
+
+Они уже требуют, чтобы explainability дошла до:
+- `chat_start_restore.included_reasons_summary`
+- `chat_start_restore.excluded_reasons_summary`
+- `continuity_answer.included_reasons_summary`
+- `continuity_answer.excluded_reasons_summary`
+- и до human-readable строк `Почему вошёл...` / `Почему часть не вошла...`
 
 ## MCP server
 

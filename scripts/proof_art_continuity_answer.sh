@@ -15,6 +15,9 @@ printf '%s\n' "$last_output" | jq -e '.retrieval_science.suite_key == "continuit
 printf '%s\n' "$last_output" | jq -e '.continuity_answer.intent == "last_chat"' >/dev/null
 printf '%s\n' "$last_output" | jq -e '.continuity_answer.canonical_eval.verdict_counts.recovered_useful == 1' >/dev/null
 printf '%s\n' "$last_output" | jq -e '.continuity_answer.canonical_eval.probes[0].name == "continuity_answer_recovered_useful"' >/dev/null
+printf '%s\n' "$last_output" | jq -e '.continuity_answer.included_reasons_summary != null' >/dev/null
+printf '%s\n' "$last_output" | jq -e '.continuity_answer.excluded_reasons_summary != null' >/dev/null
+printf '%s\n' "$last_output" | jq -e '.continuity_answer.answer_text | contains("Почему вошёл текущий контекст:")' >/dev/null
 
 previous_output="$(cargo run --quiet -- continuity answer \
   --project art \

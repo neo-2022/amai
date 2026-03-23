@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 21:56 MSK
-Ручная сверка guide/docs: 2026-03-23 21:56 MSK
+modified_at: 2026-03-23 22:06 MSK
+Ручная сверка guide/docs: 2026-03-23 22:06 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -307,15 +307,25 @@ cargo run --quiet -- verify continuity --project art --namespace continuity
   - печатает уже готовый короткий ответ для continuity-вопросов вроде `на чём остановились`;
   - это read-only путь без нового handoff;
   - если добавить `--json`, тот же one-shot product path возвращает machine-readable payload с `canonical_eval`, `retrieval_science` и честным verdict-классом для конкретного ответа (`recovered_useful` или fail-closed `hit_correct_target`);
+  - если в текущем `working_state_restore` уже есть свежий `latest_decision_trace`, тот же ответ теперь прямо показывает:
+    - почему вошёл текущий контекст;
+    - почему часть retrieval-слоёв ничего не добавила;
+    - и в `--json` кладёт это в `included_reasons_summary` / `excluded_reasons_summary`, чтобы explainability была видна не только в dashboard;
   - если добавить `--include-previous-chat-messages`, он ещё поднимет хвост предыдущего чата и последние сообщения;
 - `continuity startup`
   - печатает human-readable стартовую сводку для нового чата;
   - и сразу добавляет `Chat-start restore pack`, который уже нужно считать восстановленным рабочим контекстом для первого содержательного ответа;
   - теперь в этом выводе печатается и готовый `prompt_text`, чтобы новый чат получал не только summary, но и прямой compact restore для первого ответа;
+  - тот же `Chat-start restore pack` теперь ещё и прямо объясняет:
+    - почему вошёл последний контекст;
+    - почему часть retrieval-слоёв в последний раз ничего не добавила;
   - если добавить `--json`, тот же startup path теперь отдаёт `continuity_startup.canonical_eval`, `chat_start_restore`, `working_state_restore`, `retrieval_science` и `degradation_policy`, чтобы startup recovery можно было проверять machine-readable слоем, а не только глазами;
 - `continuity restore`
   - печатает raw restore-bundle JSON целиком;
   - теперь в этом JSON есть не только `working_state_restore`, но и отдельный `chat_start_restore` с готовым `prompt_text`;
+  - в этом же `chat_start_restore` теперь лежат и короткие explainability-summary:
+    - `included_reasons_summary`
+    - `excluded_reasons_summary`;
   - и тот же product path теперь сразу несёт `continuity_restore.canonical_eval`, `retrieval_science` и `degradation_policy`, чтобы machine-readable recovery было видно не только по сырому содержимому, но и по verdict-слою;
   - внутри `working_state_restore` теперь есть ещё и execution-aware слой:
     - `next_step_state = planned`;
