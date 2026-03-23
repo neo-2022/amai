@@ -162,7 +162,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     .shell {
       max-width: 1900px;
       margin: 0 auto;
-      padding: 18px 20px 40px;
+      padding: 12px 20px 40px;
     }
 
     .hero {
@@ -183,13 +183,13 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     .hero-main {
-      padding: 14px 16px 14px;
+      padding: 10px 14px 12px;
       position: relative;
       overflow: visible;
       display: flex;
       flex-direction: column;
       justify-content: flex-start;
-      gap: 10px;
+      gap: 8px;
       min-height: 0;
     }
 
@@ -204,11 +204,11 @@ pub fn render_html(refresh_ms: u64) -> String {
       display: flex;
       align-items: flex-start;
       width: 100%;
-      margin: -8px 0 0 -8px;
+      margin: -4px 0 0 -4px;
     }
 
     .brand-lockup {
-      width: min(100%, 1120px);
+      width: min(100%, 860px);
       height: auto;
       display: block;
       filter: drop-shadow(0 14px 28px rgba(11, 16, 32, 0.10));
@@ -3003,31 +3003,21 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             format_signed_count(session_saved),
             if session_events > 0 {
                 format!(
-                    "Сессия здесь = непрерывная работа без паузы дольше 30 минут. Новая сессия начинается после паузы дольше 30 минут. Длительность: {}. Строго verified live для этого KPI: {} из {} событий текущей сессии. Проверенная реальная экономия по ним: {}. {}",
+                    "Текущая сессия — это непрерывная работа без паузы дольше 30 минут. Длительность: {}. В главный итог уже вошли {} из {} живых запросов. Проверенная экономия по ним: {}. {}",
                     elapsed_since_epoch_label(session_started, session_ended),
                     format_u64(Some(session_events)),
                     format_u64(Some(session_events_total)),
                     format_percent(session_percent),
                     recovery_sentence(session_recovery)
                 ) + &format!(
-                    " До более строгого полезного ответа без лишнего доуточнения уже дотянулись: {} событий, {} от всей выборки, экономия по ним: {}.",
-                    format_u64(Some(session_answer_count)),
+                    " Уже есть {}, где Amai дошёл до более полного ответа без лишнего уточнения. Это {} от всей выборки, экономия по ним: {}.",
+                    format_count_with_word(session_answer_count, "случай", "случая", "случаев"),
                     format_percent(session_answer_rate),
                     format_percent(session_answer_percent)
                 ) + &format!(" {}", verified_vs_excluded_sentence(current_session))
-                    + &format!(
-                        " {} {}",
-                        raw_savings_sentence(
-                            session_raw_baseline,
-                            session_raw_delivered,
-                            session_raw_percent
-                        ),
-                        client_budget_disclaimer()
-                    )
             } else if session_events_total > 0 {
                 format!(
-                    "В этой сессии уже есть Amai-запросы: {}. Но строго verified live для главного KPI пока: 0 из {}. Поэтому главный KPI по сессии ещё не накоплен.",
-                    format_u64(Some(session_events_total)),
+                    "В этой сессии уже есть Amai-запросы: {}. Но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому главный итог по сессии ещё не накоплен.",
                     format_u64(Some(session_events_total)),
                 ) + &format!(
                     " {} {}",
@@ -3043,19 +3033,19 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             },
             savings_status(session_saved, session_events, session_events_total),
             None,
-            Some("Эта карточка отвечает на вопрос, сколько токенов Amai сэкономил в текущей непрерывной сессии работы. Сессия здесь начинается заново после паузы дольше 30 минут и считает только strict verified live retrieval-события без потери качества. Raw contour ниже показан отдельно только для объяснения и не является тем же KPI.".to_string()),
+            Some("Эта карточка показывает, сколько токенов Amai сэкономил в текущем непрерывном заходе работы. Новый заход начинается после паузы дольше 30 минут. В главный итог попадают только те живые запросы, которые уже подтвердились как полезные без потери качества. Нижние строки нужны, чтобы показать разницу между главным итогом и всем живым потоком.".to_string()),
             current_session_lane_rows(current_session),
         );
     if session_events_total > 0 && session_events == 0 {
         session_card = with_status_tooltip(
             session_card,
-            "Статус пока не может считаться нормальным по следующим причинам:\n- В этой сессии уже были живые retrieval-запросы.\n- Но пока ни один из них ещё не подтвердился как полезный без потери качества.\n- Как только появится первый такой случай, главный KPI этой карточки начнёт считаться.",
+            "Статус пока не может считаться нормальным по следующим причинам:\n- В этой сессии уже были живые запросы.\n- Но пока ни один из них ещё не подтвердился как полезный без потери качества.\n- Как только появится первый такой случай, главный итог этой карточки начнёт считаться.",
         );
     } else if session_events > 0 && session_saved.unwrap_or_default() < 0 {
         session_card = with_status_tooltip(
             session_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- В strict verified live части текущей сессии экономия сейчас отрицательная: {}.\n- Это значит, что доставленный retrieval payload оказался тяжелее baseline.\n- Сырой live contour ниже показан отдельно и не отменяет этот verified verdict.",
+                "Статус требует внимания по следующим причинам:\n- В подтверждённой части текущей сессии экономия сейчас отрицательная: {}.\n- Это значит, что в уже проверенных случаях контекст от Amai вышел тяжелее обычного пути без Amai.\n- Нижние строки со всем живым потоком показаны отдельно и не отменяют этот итог.",
                 format_signed_count(session_saved)
             ),
         );
@@ -3066,7 +3056,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         format_signed_count(rolling_saved),
         if rolling_events > 0 {
             format!(
-                "Это текущее скользящее окно профиля {}. Период: {}. Строго verified live для этого KPI: {} из {} событий окна. Проверенная реальная экономия: {}. {}",
+                "Это текущее рабочее окно профиля {} за {}. В главный итог окна уже вошли {} из {} живых запросов. Проверенная экономия: {}. {}",
                 rolling_window_label,
                 elapsed_since_epoch_label(rolling_started, rolling_ended),
                 format_u64(Some(rolling_events)),
@@ -3074,36 +3064,35 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                 format_percent(rolling_percent),
                 recovery_sentence(rolling_recovery)
             ) + &format!(
-                " До более строгого полезного ответа без лишнего доуточнения уже дошли: {} событий, {} от окна, экономия по ним: {}.",
-                format_u64(Some(rolling_answer_count)),
+                " Уже есть {}, где Amai дошёл до более полного ответа без лишнего уточнения. Это {} от окна, экономия по ним: {}.",
+                format_count_with_word(rolling_answer_count, "случай", "случая", "случаев"),
                 format_percent(rolling_answer_rate),
                 format_percent(rolling_answer_percent)
             )
         } else if rolling_events_total > 0 {
             format!(
-                "В текущем рабочем окне уже есть Amai-запросы: {}. Но строго verified live для главного KPI пока: 0 из {}. Поэтому реальную экономию за окно пока рано считать устойчивой.",
-                format_u64(Some(rolling_events_total)),
+                "В текущем рабочем окне уже есть Amai-запросы: {}. Но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому итог по окну пока рано считать устойчивым.",
                 format_u64(Some(rolling_events_total))
             )
         } else {
-            "В текущем рабочем окне Amai ещё не накопил учтённых запросов, поэтому здесь пока нет живой verified статистики.".to_string()
+            "В текущем рабочем окне Amai ещё не накопил учтённых запросов, поэтому здесь пока нет подтверждённой живой статистики.".to_string()
         },
         savings_status(rolling_saved, rolling_events, rolling_events_total),
         Some(format!(
-            "Эта карточка показывает не одну сессию, а текущее скользящее рабочее окно профиля {}. Окно может захватывать несколько сессий подряд и нужно для недавнего тренда, а не только для последнего непрерывного захода. В главный KPI здесь тоже попадают только strict verified live retrieval-события без потери качества.",
+            "Эта карточка показывает не одну сессию, а текущее скользящее рабочее окно профиля {}. Окно может захватывать несколько заходов работы подряд и нужно для недавнего тренда, а не только для последнего непрерывного сеанса. В главный итог здесь тоже попадают только те живые запросы, которые уже подтвердились как полезные без потери качества.",
             rolling_window_label
         )),
     );
     if rolling_events_total > 0 && rolling_events == 0 {
         rolling_card = with_status_tooltip(
             rolling_card,
-            "Статус пока не может считаться нормальным по следующим причинам:\n- В текущем рабочем окне уже есть живые retrieval-события.\n- Но пока ни один случай ещё не подтвердился как полезный без потери качества.\n- Поэтому окно ещё копит подтверждённую выборку.",
+            "Статус пока не может считаться нормальным по следующим причинам:\n- В текущем рабочем окне уже есть живые запросы.\n- Но пока ни один случай ещё не подтвердился как полезный без потери качества.\n- Поэтому окно ещё копит подтверждённую выборку.",
         );
     } else if rolling_events > 0 && rolling_saved.unwrap_or_default() < 0 {
         rolling_card = with_status_tooltip(
             rolling_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- В strict verified live части рабочего окна экономия сейчас отрицательная: {}.\n- Это значит, что подтверждённый retrieval payload в окне оказался тяжелее baseline.",
+                "Статус требует внимания по следующим причинам:\n- В подтверждённой части рабочего окна экономия сейчас отрицательная: {}.\n- Это значит, что в уже проверенных случаях контекст от Amai вышел тяжелее обычного пути без Amai.",
                 format_signed_count(rolling_saved)
             ),
         );
@@ -3114,40 +3103,44 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             format_signed_count(lifetime_saved),
             if lifetime_events > 0 {
                 format!(
-                    "Это итог с первого записанного Amai retrieval-события в этой установке. Период: {}. Строго verified live для этого KPI: {} из {} событий всей истории записи. Проверенная реальная экономия: {}. {}",
+                    "Это накопительный итог с первого записанного запроса Amai в этой установке за {}. В главный итог уже вошли {} из {} живых запросов. Проверенная экономия: {}. {}",
                     elapsed_since_epoch_label(lifetime_started, lifetime_ended),
                     format_u64(Some(lifetime_events)),
                     format_u64(Some(lifetime_events_total)),
                     format_percent(lifetime_percent),
                     recovery_sentence(lifetime_recovery)
                 ) + &format!(
-                    " До более строгого полезного ответа без лишнего доуточнения за всё время дошли: {} событий, {} от всей выборки, экономия по ним: {}.",
-                    format_u64(Some(lifetime_answer_count)),
+                    " Уже есть {}, где Amai дошёл до более полного ответа без лишнего уточнения. Это {} от всей выборки, экономия по ним: {}.",
+                    format_count_with_word(
+                        lifetime_answer_count,
+                        "случай",
+                        "случая",
+                        "случаев"
+                    ),
                     format_percent(lifetime_answer_rate),
                     format_percent(lifetime_answer_percent)
                 )
             } else if lifetime_events_total > 0 {
                 format!(
-                    "После установки уже накоплены Amai-запросы: {}. Но строго verified live для главного KPI пока: 0 из {}. Поэтому главный KPI пока не считается надёжным.",
+                    "После установки уже накоплены Amai-запросы: {}. Но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому главный итог пока не считается надёжным.",
                     format_u64(Some(lifetime_events_total)),
-                    format_u64(Some(lifetime_events_total))
                 )
             } else {
                 "После установки Amai ещё не накопил учтённых запросов, поэтому здесь пока нет итоговой живой статистики.".to_string()
             },
             savings_status(lifetime_saved, lifetime_events, lifetime_events_total),
-            Some("Эта карточка показывает накопительный итог с первого записанного retrieval-события в текущей установке Amai. Это не процент от лимита чата и не вся история всех внешних клиентов навсегда. В главный lifetime KPI попадают только strict verified live retrieval-события без потери качества; benchmark, proof и другой инженерный трафик в него не смешиваются.".to_string()),
+            Some("Эта карточка показывает накопительный итог с первого записанного запроса Amai в текущей установке. Это не процент от лимита чата и не вся история всех внешних клиентов навсегда. В главный итог попадают только те живые запросы, которые уже подтвердились как полезные без потери качества; проверочные прогоны и другой инженерный трафик сюда не подмешиваются.".to_string()),
         );
     if lifetime_events_total > 0 && lifetime_events == 0 {
         lifetime_card = with_status_tooltip(
             lifetime_card,
-            "Статус пока не может считаться нормальным по следующим причинам:\n- История уже содержит живые retrieval-события.\n- Но пока ещё нет ни одного подтверждённого случая без потери качества.\n- Поэтому накопительный KPI ещё не может считаться надёжным.",
+            "Статус пока не может считаться нормальным по следующим причинам:\n- В истории уже есть живые запросы.\n- Но пока ещё нет ни одного подтверждённого случая без потери качества.\n- Поэтому накопительный итог ещё не может считаться надёжным.",
         );
     } else if lifetime_events > 0 && lifetime_saved.unwrap_or_default() < 0 {
         lifetime_card = with_status_tooltip(
             lifetime_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- В strict verified live части всей истории экономия сейчас отрицательная: {}.\n- Это значит, что подтверждённый retrieval payload по lifetime contour пока тяжелее baseline.",
+                "Статус требует внимания по следующим причинам:\n- В подтверждённой части всей истории экономия сейчас отрицательная: {}.\n- Это значит, что в уже проверенных случаях контекст от Amai пока выходит тяжелее обычного пути без Amai.",
                 format_signed_count(lifetime_saved)
             ),
         );
@@ -4175,7 +4168,7 @@ fn build_links(base_url: &str) -> Vec<Value> {
                 "note": if prometheus_available {
                     "Глубокие live-метрики уже доступны."
                 } else {
-                    "Monitoring profile сейчас не поднят. Сначала запустите ./scripts/monitoring_up.sh."
+                    "Мониторинг сейчас не поднят. Сначала запустите ./scripts/monitoring_up.sh."
                 }
             },
             {
@@ -4183,12 +4176,12 @@ fn build_links(base_url: &str) -> Vec<Value> {
                 "url": if grafana_available { Value::from(monitoring_url(base_url, &grafana_port)) } else { Value::Null },
                 "note": if grafana_available {
                     if grafana_default_password {
-                        format!("Готовый инженерный dashboard уже доступен. Логин: {}. Пароль сейчас стандартный из .env: admin_change_me. Лучше сменить его в AMI_GRAFANA_ADMIN_PASSWORD.", grafana_admin_user)
+                        format!("Готовая инженерная панель уже доступна. Логин: {}. Пароль пока стандартный из .env: admin_change_me. Лучше сменить его в AMI_GRAFANA_ADMIN_PASSWORD.", grafana_admin_user)
                     } else {
-                        format!("Готовый инженерный dashboard уже доступен. Логин: {}. Текущий пароль задан в .env через AMI_GRAFANA_ADMIN_PASSWORD.", grafana_admin_user)
+                        format!("Готовая инженерная панель уже доступна. Логин: {}. Текущий пароль задан в .env через AMI_GRAFANA_ADMIN_PASSWORD.", grafana_admin_user)
                     }
                 } else {
-                    "Grafana поднимается вместе с monitoring profile. Сначала запустите ./scripts/monitoring_up.sh.".to_string()
+                    "Grafana поднимается вместе с мониторингом. Сначала запустите ./scripts/monitoring_up.sh.".to_string()
                 }
             }
         ]
@@ -4374,7 +4367,7 @@ fn working_state_live_card(snapshot: &Value) -> Value {
                 Some("Показывает, чем Amai действительно занят сейчас: какая цель активна, какой следующий шаг он держит, какая команда была последней и какие файлы остаются в работе. Это не замер скорости ответа, а снимок текущей рабочей линии.".to_string()),
                 vec![],
             ),
-            "Статус пока не может считаться нормальным по следующим причинам:\n- Последний working-state restore snapshot ещё не появился.\n- Без этого снимка панель не видит текущую рабочую линию Amai.",
+            "Статус пока не может считаться нормальным по следующим причинам:\n- Последний рабочий снимок ещё не появился.\n- Без этого снимка панель не видит текущую рабочую линию Amai.",
         );
     }
 
@@ -4425,6 +4418,13 @@ fn working_state_live_card(snapshot: &Value) -> Value {
     let restore_confidence = restore["restore_confidence"]
         .as_str()
         .unwrap_or("preliminary");
+    let restore_confidence_human = match restore_confidence {
+        "high" => "высокая",
+        "medium" => "средняя",
+        "preliminary" => "предварительная",
+        "low" => "низкая",
+        other => other,
+    };
     let status = match restore_confidence {
         "high" | "medium" => "pass",
         _ if events_count.unwrap_or(0) > 0 => "alert",
@@ -4435,39 +4435,44 @@ fn working_state_live_card(snapshot: &Value) -> Value {
         "Текущая работа",
         current_goal,
         format!(
-            "Это не карточка про скорость ответа. Следующий обязательный шаг: {}.",
+            "Сейчас Amai ведёт такую работу. Следующий обязательный шаг: {}.",
             next_step
         ),
         status,
         Some(source_label(
-            "Источник: latest_working_state_restore.working_state_restore. Этот блок питается continuity / working-state, а не token_budget live retrieval",
+            "Источник: latest_working_state_restore.working_state_restore. Этот блок питается рабочей линией Amai, а не счётчиком токенов.",
             restore["captured_at_epoch_ms"].as_u64(),
         )),
         Some("Показывает, чем Amai действительно занят сейчас: какая цель активна, какой следующий шаг остаётся обязательным, какая команда была последней и какие файлы ещё в работе. Это не замер скорости ответа, а снимок текущей рабочей линии.".to_string()),
         vec![
             metric_row(
-                "Scope",
+                "Область",
                 scope,
-                Some("Project / namespace / agent scope, внутри которого Amai сейчас держит рабочую линию."),
+                Some("В каком проекте, разделе и рабочем контуре Amai сейчас держит эту линию работы."),
             ),
             metric_row(
                 "Сессия",
                 format!(
-                    "{} • {} событий",
+                    "{} • {}",
                     format_ms(snapshot, session_age_ms),
-                    format_u64(events_count)
+                    format_count_with_word(
+                        events_count.unwrap_or(0),
+                        "событие",
+                        "события",
+                        "событий"
+                    )
                 ),
-                Some("Возраст текущей непрерывной рабочей сессии и сколько событий working-state уже вошло в restore snapshot."),
+                Some("Возраст текущего непрерывного захода работы и сколько событий уже вошло в этот рабочий снимок."),
             ),
             metric_row(
                 "Последняя команда",
                 last_command,
-                Some("Какая последняя команда или действие оставили этот working-state след."),
+                Some("Какое последнее действие оставило этот рабочий след."),
             ),
             metric_row(
                 "Последний результат",
                 last_results,
-                Some("Короткое human-readable summary того, что Amai считает последним materialized результатом."),
+                Some("Короткое человеческое описание того, что Amai считает последним реально полученным результатом."),
             ),
             metric_row(
                 "Активные файлы",
@@ -4476,25 +4481,25 @@ fn working_state_live_card(snapshot: &Value) -> Value {
                 } else {
                     format!("{} • {}", format_u64(Some(active_files_count)), active_files_preview)
                 },
-                Some("Сколько файлов Amai считает активными сейчас и какие первые несколько он видит в рабочей линии."),
+                Some("Сколько файлов Amai считает активными сейчас и какие первые несколько он видит в этой линии работы."),
             ),
             metric_row(
-                "Recent queries",
+                "Недавние запросы",
                 format_u64(Some(recent_queries)),
-                Some("Сколько недавних retrieval-запросов вошло в working-state restore. Здесь может быть 0, если работа шла через continuity/proof, а не через live retrieval."),
+                Some("Сколько недавних запросов вошло в рабочий снимок. Здесь может быть 0, если работа шла через continuity, проверочные прогоны или другой не-потоковый путь."),
             ),
         ],
     );
     if status != "pass" {
         let tooltip = if status == "alert" {
             format!(
-                "Статус требует внимания по следующим причинам:\n- Restore confidence сейчас = {}.\n- Рабочая линия уже содержит {} событий, но уверенность снимка пока недостаточна, чтобы считать её устойчивой.\n- Следующий обязательный шаг сейчас: {}.",
-                restore_confidence,
-                format_u64(events_count),
+                "Статус требует внимания по следующим причинам:\n- Уверенность в этом рабочем снимке пока {}.\n- Рабочая линия уже содержит {}, но снимок ещё недостаточно устойчив.\n- Следующий обязательный шаг сейчас: {}.",
+                restore_confidence_human,
+                format_count_with_word(events_count.unwrap_or(0), "событие", "события", "событий"),
                 next_step
             )
         } else {
-            "Статус пока не может считаться нормальным по следующим причинам:\n- Рабочая линия ещё не накопила достаточного restore snapshot.\n- Пока панель видит только предварительный или пустой рабочий след.".to_string()
+            "Статус пока не может считаться нормальным по следующим причинам:\n- Рабочая линия ещё не накопила достаточно надёжный рабочий снимок.\n- Пока панель видит только предварительный или почти пустой след текущей работы.".to_string()
         };
         card = with_status_tooltip(card, &tooltip);
     }
@@ -5073,17 +5078,19 @@ fn recovery_sentence(median_recovery_tokens: Option<f64>) -> String {
 fn current_session_lane_rows(summary: &Value) -> Vec<Value> {
     vec![
         metric_row(
-            "Verified lane",
+            "Главный итог",
             token_lane_summary(
                 summary["verified_baseline_tokens"].as_u64(),
                 summary["verified_delivered_tokens"].as_u64(),
                 summary["verified_recovery_tokens"].as_u64(),
                 summary["verified_effective_saved_tokens"].as_i64(),
             ),
-            Some("Главный KPI этой карточки: только verified live-события без потери качества."),
+            Some(
+                "Здесь считаются только те живые запросы, где польза Amai уже подтвердилась без потери качества.",
+            ),
         ),
         metric_row(
-            "Raw live lane",
+            "Весь живой поток",
             token_lane_summary(
                 summary["total_naive_tokens"].as_u64(),
                 summary["total_context_tokens"].as_u64(),
@@ -5091,18 +5098,23 @@ fn current_session_lane_rows(summary: &Value) -> Vec<Value> {
                 summary["total_effective_saved_tokens"].as_i64(),
             ),
             Some(
-                "Весь live contour без quality gate. Нужен как explain-lane, а не как главный KPI.",
+                "Здесь показаны все живые запросы подряд, даже если они ещё не вошли в главный итог.",
             ),
         ),
         metric_row(
-            "Outside verified",
+            "Пока вне главного итога",
             format!(
-                "{} событий, delta {}",
-                summary["excluded_events_count"].as_u64().unwrap_or(0),
+                "{}, разница {}",
+                format_count_with_word(
+                    summary["excluded_events_count"].as_u64().unwrap_or(0),
+                    "событие",
+                    "события",
+                    "событий"
+                ),
                 format_signed_count(summary["excluded_effective_saved_tokens"].as_i64())
             ),
             Some(
-                "События, которые пока не вошли в verified KPI: им ещё не хватило quality gate или они synthetic/debug.",
+                "Сколько событий ещё не вошло в главный итог и на какую разницу по токенам они сейчас влияют.",
             ),
         ),
     ]
@@ -5115,16 +5127,15 @@ fn raw_savings_sentence(
 ) -> String {
     match (baseline_tokens, delivered_tokens) {
         (Some(baseline), Some(delivered)) => format!(
-            "Сырой live contour пока показывает baseline {} токенов против реально доставленных {}{}.",
+            "По всему живому потоку этой сессии пока видно так: без Amai было бы {} токенов, от Amai пришло {}{}.",
             format_u64(Some(baseline)),
             format_u64(Some(delivered)),
             savings_percent
-                .map(|value| format!(", preliminary delta {}", format_percent(Some(value))))
+                .map(|value| format!(", предварительная разница {}", format_percent(Some(value))))
                 .unwrap_or_default()
         ),
         _ => {
-            "Сырой live contour для этой сессии ещё не накопил понятную пару baseline vs delivered."
-                .to_string()
+            "По всему живому потоку этой сессии пока ещё не накопилась понятная пара «без Amai / с Amai».".to_string()
         }
     }
 }
@@ -5143,16 +5154,16 @@ fn verified_vs_excluded_sentence(summary: &Value) -> String {
 
     let verified_lane = match (verified_baseline, verified_delivered, verified_recovery) {
         (Some(baseline), Some(delivered), Some(recovery)) => format!(
-            "Главный verified KPI сейчас считает только {} quality-gated событий: baseline {}, delivered {}, recovery {}, честный delta {}.",
-            format_u64(Some(verified_events)),
+            "В главный итог уже вошли {}: без Amai было бы {}, от Amai пришло {}, на уточнения ушло {}, итоговая разница {}.",
+            format_count_with_word(verified_events, "событие", "события", "событий"),
             format_u64(Some(baseline)),
             format_u64(Some(delivered)),
             format_u64(Some(recovery)),
             format_signed_count(verified_saved)
         ),
         _ => format!(
-            "Главный verified KPI сейчас считает только {} quality-gated событий.",
-            format_u64(Some(verified_events))
+            "В главный итог уже вошли {}.",
+            format_count_with_word(verified_events, "событие", "события", "событий")
         ),
     };
     if excluded_events == 0 {
@@ -5160,23 +5171,23 @@ fn verified_vs_excluded_sentence(summary: &Value) -> String {
     }
     let excluded_lane = match (excluded_baseline, excluded_delivered, excluded_recovery) {
         (Some(baseline), Some(delivered), Some(recovery)) => format!(
-            "Вне verified KPI пока остаются {} событий: baseline {}, delivered {}, recovery {}, delta {}.",
-            format_u64(Some(excluded_events)),
+            "Пока вне главного итога остаются {}: без Amai было бы {}, от Amai пришло {}, на уточнения ушло {}, итоговая разница {}.",
+            format_count_with_word(excluded_events, "событие", "события", "событий"),
             format_u64(Some(baseline)),
             format_u64(Some(delivered)),
             format_u64(Some(recovery)),
             format_signed_count(excluded_saved)
         ),
         _ => format!(
-            "Вне verified KPI пока остаются {} событий.",
-            format_u64(Some(excluded_events))
+            "Пока вне главного итога остаются {}.",
+            format_count_with_word(excluded_events, "событие", "события", "событий")
         ),
     };
     format!("{verified_lane} {excluded_lane}")
 }
 
 fn client_budget_disclaimer() -> &'static str {
-    "Это не процент от лимита клиента/чата: карточка считает только retrieval payload Amai против baseline, а не все токены thread-а."
+    "Это не процент от лимита этого чата. Здесь считается только размер контекста, который Amai приносит в ответ, а не все токены разговора целиком."
 }
 
 fn token_lane_summary(
@@ -5187,7 +5198,7 @@ fn token_lane_summary(
 ) -> String {
     match (baseline_tokens, delivered_tokens, recovery_tokens) {
         (Some(baseline), Some(delivered), Some(recovery)) => format!(
-            "{} -> {} -> {} => {}",
+            "без Amai {}, от Amai {}, уточнения {}, итог {}",
             format_u64(Some(baseline)),
             format_u64(Some(delivered)),
             format_u64(Some(recovery)),
@@ -5707,6 +5718,21 @@ fn format_signed_count(value: Option<i64>) -> String {
     value
         .map(|number| number.to_string())
         .unwrap_or_else(|| "ещё нет данных".to_string())
+}
+
+fn format_count_with_word(value: u64, one: &str, few: &str, many: &str) -> String {
+    let last_two = value % 100;
+    let last_one = value % 10;
+    let word = if (11..=14).contains(&last_two) {
+        many
+    } else {
+        match last_one {
+            1 => one,
+            2..=4 => few,
+            _ => many,
+        }
+    };
+    format!("{value} {word}")
 }
 
 fn format_f64_count(value: Option<f64>) -> String {
@@ -6234,13 +6260,13 @@ mod tests {
             cards[1]["status_tooltip"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("Restore confidence")
+                .contains("Уверенность в этом рабочем снимке пока")
         );
         assert!(
             cards[1]["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("не карточка про скорость ответа")
+                .contains("Сейчас Amai ведёт такую работу")
         );
     }
 
@@ -6269,13 +6295,13 @@ mod tests {
 
         let cards = build_hero_cards(&snapshot);
         let note = cards[0]["note"].as_str().unwrap_or_default();
-        assert!(note.contains("baseline"));
-        assert!(note.contains("реально доставленных"));
-        assert!(note.contains("Это не процент от лимита клиента/чата"));
+        assert!(note.contains("ни один случай ещё не подтвердился"));
+        assert!(note.contains("без Amai было бы"));
+        assert!(note.contains("Это не процент от лимита этого чата"));
         let rows = cards[0]["rows"].as_array().expect("rows");
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0]["label"].as_str(), Some("Verified lane"));
-        assert_eq!(rows[1]["label"].as_str(), Some("Raw live lane"));
+        assert_eq!(rows[0]["label"].as_str(), Some("Главный итог"));
+        assert_eq!(rows[1]["label"].as_str(), Some("Весь живой поток"));
     }
 
     #[test]
@@ -6344,14 +6370,14 @@ mod tests {
         assert_eq!(
             cards[0]["title_tooltip"].as_str(),
             Some(
-                "Эта карточка отвечает на вопрос, сколько токенов Amai сэкономил в текущей непрерывной сессии работы. Сессия здесь начинается заново после паузы дольше 30 минут и считает только strict verified live retrieval-события без потери качества. Raw contour ниже показан отдельно только для объяснения и не является тем же KPI."
+                "Эта карточка показывает, сколько токенов Amai сэкономил в текущем непрерывном заходе работы. Новый заход начинается после паузы дольше 30 минут. В главный итог попадают только те живые запросы, которые уже подтвердились как полезные без потери качества. Нижние строки нужны, чтобы показать разницу между главным итогом и всем живым потоком."
             )
         );
         assert!(cards[1]["title_tooltip"].as_str().is_some_and(|value| {
             value.contains("не одну сессию, а текущее скользящее рабочее окно")
         }));
         assert!(cards[2]["title_tooltip"].as_str().is_some_and(|value| {
-            value.contains("накопительный итог с первого записанного retrieval-события")
+            value.contains("накопительный итог с первого записанного запроса Amai")
         }));
         assert!(
             cards[1]["note"]
@@ -6425,7 +6451,7 @@ mod tests {
             cards[0]["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("строго verified live для главного KPI пока: 0 из 1")
+                .contains("ни один случай ещё не подтвердился")
         );
     }
 
