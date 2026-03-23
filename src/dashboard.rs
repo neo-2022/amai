@@ -513,7 +513,8 @@ pub fn render_html(refresh_ms: u64) -> String {
       left: 0;
       min-width: 220px;
       max-width: min(360px, calc(100vw - 24px));
-      padding: 10px 12px;
+      padding: 12px 14px;
+      padding-right: 42px;
       border-radius: 12px;
       background: rgba(8, 13, 17, 0.96);
       color: #f7fafc;
@@ -524,6 +525,8 @@ pub fn render_html(refresh_ms: u64) -> String {
       white-space: normal;
       box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
       pointer-events: none;
+      user-select: text;
+      -webkit-user-select: text;
       opacity: 0;
       transform: translateY(4px);
       transition: opacity 0.14s ease, transform 0.14s ease;
@@ -533,6 +536,60 @@ pub fn render_html(refresh_ms: u64) -> String {
     .tooltip-layer.visible {
       opacity: 1;
       transform: translateY(0);
+      pointer-events: auto;
+    }
+
+    .tooltip-layer-content {
+      display: block;
+    }
+
+    .tooltip-copy-btn {
+      appearance: none;
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      border: none;
+      border-radius: 999px;
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(121, 210, 197, 0.10);
+      color: #9ae7dc;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+      cursor: pointer;
+      opacity: 0;
+      transform: translateY(-2px);
+      pointer-events: none;
+      transition: opacity 0.14s ease, background 0.14s ease, transform 0.14s ease;
+    }
+
+    .tooltip-copy-btn.visible {
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+
+    .tooltip-copy-btn:hover,
+    .tooltip-copy-btn:focus-visible {
+      background: rgba(121, 210, 197, 0.20);
+      outline: none;
+    }
+
+    .tooltip-layer .link-inline {
+      display: inline-flex;
+      flex-wrap: wrap;
+    }
+
+    .tooltip-layer .link-inline a,
+    .tooltip-layer .inline-path,
+    .tooltip-layer .inline-copyable {
+      color: #9ae7dc;
     }
 
     .compare-card {
@@ -1100,14 +1157,28 @@ pub fn render_html(refresh_ms: u64) -> String {
       <div class="cards" id="glossary-cards"></div>
     </section>
   </div>
-  <div id="tooltip-layer" class="tooltip-layer" hidden></div>
+  <div id="tooltip-layer" class="tooltip-layer" hidden>
+    <button
+      id="tooltip-copy-btn"
+      class="tooltip-copy-btn"
+      type="button"
+      hidden
+      aria-label="Скопировать выделение"
+      title="Скопировать выделение"
+    >⧉</button>
+    <div id="tooltip-layer-content" class="tooltip-layer-content"></div>
+  </div>
 
   <script>
     const REFRESH_MS = __REFRESH_MS__;
     const errorBanner = document.getElementById("error-banner");
     const tooltipLayer = document.getElementById("tooltip-layer");
+    const tooltipLayerContent = document.getElementById("tooltip-layer-content");
+    const tooltipCopyBtn = document.getElementById("tooltip-copy-btn");
     const INTERACTION_HOLD_SELECTOR = [
       ".has-tooltip:hover",
+      ".tooltip-layer.visible:hover",
+      ".tooltip-layer.visible:focus-within",
       ".side-block:hover",
       ".metric-card:hover",
       ".service-card:hover",
@@ -1121,6 +1192,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     let refreshInFlight = false;
     let interactionHoldUntil = 0;
     let activeTooltipTarget = null;
+    let tooltipSelectionValue = "";
 
     function statusClass(status) {
       return ["pass", "alert", "critical", "waiting", "unknown"].includes(status) ? status : "unknown";
@@ -1171,7 +1243,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       return button;
     }
 
-    function createInlineCopyableText(label, copyValue, href = null) {
+    function createInlineCopyableText(label, copyValue, href = null, showCopyButton = true) {
       const wrap = document.createElement("span");
       wrap.className = "link-inline";
       if (href) {
@@ -1185,7 +1257,9 @@ pub fn render_html(refresh_ms: u64) -> String {
         wrap.appendChild(link);
       } else {
         wrap.appendChild(textNode("span", "inline-copyable", label));
-        wrap.appendChild(createCopyButton(copyValue));
+        if (showCopyButton) {
+          wrap.appendChild(createCopyButton(copyValue));
+        }
       }
       return wrap;
     }
@@ -1197,7 +1271,8 @@ pub fn render_html(refresh_ms: u64) -> String {
       return null;
     }
 
-    function appendInlineNoteFragment(container, fragment) {
+    function appendInlineNoteFragment(container, fragment, options = {}) {
+      const inlineCopyButtons = options.inlineCopyButtons !== false;
       const urlMatch = fragment.match(/https?:\/\/[^\s]+/);
       if (urlMatch) {
         const [matched] = urlMatch;
@@ -1205,10 +1280,10 @@ pub fn render_html(refresh_ms: u64) -> String {
         if (index > 0) {
           container.appendChild(document.createTextNode(fragment.slice(0, index)));
         }
-        container.appendChild(createInlineCopyableText(matched, matched, matched));
+        container.appendChild(createInlineCopyableText(matched, matched, matched, inlineCopyButtons));
         const tail = fragment.slice(index + matched.length);
         if (tail) {
-          appendInlineNoteFragment(container, tail);
+          appendInlineNoteFragment(container, tail, options);
         }
         return;
       }
@@ -1222,9 +1297,9 @@ pub fn render_html(refresh_ms: u64) -> String {
         }
         const helpRoute = helpRouteForEnvVar(matched);
         if (helpRoute) {
-          container.appendChild(createInlineCopyableText(matched, matched, helpRoute));
+          container.appendChild(createInlineCopyableText(matched, matched, helpRoute, inlineCopyButtons));
         } else {
-          const envWrap = createInlineCopyableText(matched, matched);
+          const envWrap = createInlineCopyableText(matched, matched, null, inlineCopyButtons);
           const inlineEnv = envWrap.querySelector(".inline-copyable");
           if (inlineEnv) {
             inlineEnv.classList.add("inline-path");
@@ -1233,7 +1308,7 @@ pub fn render_html(refresh_ms: u64) -> String {
         }
         const tail = fragment.slice(index + matched.length);
         if (tail) {
-          appendInlineNoteFragment(container, tail);
+          appendInlineNoteFragment(container, tail, options);
         }
         return;
       }
@@ -1245,7 +1320,7 @@ pub fn render_html(refresh_ms: u64) -> String {
         if (index > 0) {
           container.appendChild(document.createTextNode(fragment.slice(0, index)));
         }
-        const pathWrap = createInlineCopyableText(matched, matched);
+        const pathWrap = createInlineCopyableText(matched, matched, null, inlineCopyButtons);
         const inlinePath = pathWrap.querySelector(".inline-copyable");
         if (inlinePath) {
           inlinePath.classList.add("inline-path");
@@ -1253,12 +1328,24 @@ pub fn render_html(refresh_ms: u64) -> String {
         container.appendChild(pathWrap);
         const tail = fragment.slice(index + matched.length);
         if (tail) {
-          appendInlineNoteFragment(container, tail);
+          appendInlineNoteFragment(container, tail, options);
         }
         return;
       }
 
       container.appendChild(document.createTextNode(fragment));
+    }
+
+    function appendRichText(container, text, options = {}) {
+      const lines = String(text || "").split("\n");
+      lines.forEach((line, index) => {
+        if (index > 0) {
+          container.appendChild(document.createElement("br"));
+        }
+        if (line) {
+          appendInlineNoteFragment(container, line, options);
+        }
+      });
     }
 
     function labelWithTooltip(text, tooltip, className = "metric-label") {
@@ -1294,8 +1381,65 @@ pub fn render_html(refresh_ms: u64) -> String {
       return pill;
     }
 
+    function tooltipContainsNode(node) {
+      return Boolean(tooltipLayer && node && tooltipLayer.contains(node));
+    }
+
+    function selectionTextWithin(node) {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !node) {
+        return "";
+      }
+      const range = selection.getRangeAt(0);
+      const common = range.commonAncestorContainer;
+      if (
+        !common ||
+        !node.contains(common) ||
+        !node.contains(selection.anchorNode) ||
+        !node.contains(selection.focusNode)
+      ) {
+        return "";
+      }
+      return selection.toString().trim();
+    }
+
+    function looksLikeUrl(value) {
+      return /^(https?:\/\/|www\.)\S+$/i.test(value);
+    }
+
+    function resetTooltipCopyButton() {
+      tooltipSelectionValue = "";
+      if (!tooltipCopyBtn) {
+        return;
+      }
+      tooltipCopyBtn.hidden = true;
+      tooltipCopyBtn.classList.remove("visible");
+      tooltipCopyBtn.textContent = "⧉";
+      tooltipCopyBtn.title = "Скопировать выделение";
+      tooltipCopyBtn.setAttribute("aria-label", "Скопировать выделение");
+    }
+
+    function updateTooltipCopyButton() {
+      if (!tooltipCopyBtn) {
+        return;
+      }
+      const selected = selectionTextWithin(tooltipLayer);
+      tooltipSelectionValue = selected;
+      if (!selected) {
+        resetTooltipCopyButton();
+        return;
+      }
+      const copyTitle = looksLikeUrl(selected) ? "Скопировать ссылку" : "Скопировать выделение";
+      tooltipCopyBtn.hidden = false;
+      tooltipCopyBtn.classList.add("visible");
+      tooltipCopyBtn.textContent = "⧉";
+      tooltipCopyBtn.title = copyTitle;
+      tooltipCopyBtn.setAttribute("aria-label", copyTitle);
+      positionTooltip();
+    }
+
     function showTooltip(target) {
-      if (!tooltipLayer || !target) {
+      if (!tooltipLayer || !tooltipLayerContent || !target) {
         return;
       }
       const tip = target.getAttribute("data-tip");
@@ -1304,7 +1448,9 @@ pub fn render_html(refresh_ms: u64) -> String {
         return;
       }
       activeTooltipTarget = target;
-      tooltipLayer.textContent = tip;
+      clearNode(tooltipLayerContent);
+      appendRichText(tooltipLayerContent, tip, { inlineCopyButtons: false });
+      resetTooltipCopyButton();
       tooltipLayer.hidden = false;
       tooltipLayer.classList.add("visible");
       target.setAttribute("aria-describedby", "tooltip-layer");
@@ -1324,7 +1470,10 @@ pub fn render_html(refresh_ms: u64) -> String {
       activeTooltipTarget = null;
       tooltipLayer.classList.remove("visible");
       tooltipLayer.hidden = true;
-      tooltipLayer.textContent = "";
+      if (tooltipLayerContent) {
+        clearNode(tooltipLayerContent);
+      }
+      resetTooltipCopyButton();
     }
 
     function positionTooltip(target = activeTooltipTarget) {
@@ -1775,6 +1924,7 @@ pub fn render_html(refresh_ms: u64) -> String {
 
     document.addEventListener("pointerdown", () => extendInteractionHold(6), true);
     document.addEventListener("selectionchange", () => {
+      updateTooltipCopyButton();
       if (hasActiveSelection()) {
         extendInteractionHold(8);
       }
@@ -1792,7 +1942,8 @@ pub fn render_html(refresh_ms: u64) -> String {
     document.addEventListener("focusout", (event) => {
       const tooltipTarget =
         event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
-      if (tooltipTarget) {
+      const relatedInsideTooltip = tooltipContainsNode(event.relatedTarget);
+      if (tooltipTarget && !relatedInsideTooltip) {
         hideTooltip(tooltipTarget);
       }
     }, true);
@@ -1813,17 +1964,60 @@ pub fn render_html(refresh_ms: u64) -> String {
       }
     }, true);
     document.addEventListener("mouseout", (event) => {
+      if (tooltipContainsNode(event.target)) {
+        return;
+      }
       const tooltipTarget =
         event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
       const relatedTooltip =
         event.relatedTarget && event.relatedTarget.closest
           ? event.relatedTarget.closest(".has-tooltip")
           : null;
-      if (tooltipTarget && relatedTooltip !== tooltipTarget) {
+      const relatedInsideTooltip = tooltipContainsNode(event.relatedTarget);
+      if (tooltipTarget && relatedTooltip !== tooltipTarget && !relatedInsideTooltip) {
         hideTooltip(tooltipTarget);
       }
     }, true);
     document.addEventListener("scroll", () => positionTooltip(), true);
+
+    if (tooltipLayer) {
+      tooltipLayer.addEventListener("mouseenter", () => extendInteractionHold(8), true);
+      tooltipLayer.addEventListener("mouseleave", (event) => {
+        if (
+          tooltipContainsNode(event.relatedTarget) ||
+          (activeTooltipTarget &&
+            event.relatedTarget &&
+            activeTooltipTarget.contains(event.relatedTarget))
+        ) {
+          return;
+        }
+        hideTooltip();
+      }, true);
+    }
+
+    if (tooltipCopyBtn) {
+      tooltipCopyBtn.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+      });
+      tooltipCopyBtn.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const valueToCopy = selectionTextWithin(tooltipLayer) || tooltipSelectionValue;
+        if (!valueToCopy) {
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(valueToCopy);
+          tooltipCopyBtn.textContent = "✓";
+          tooltipCopyBtn.title = "Скопировано";
+          setTimeout(() => updateTooltipCopyButton(), 1200);
+        } catch (_) {
+          tooltipCopyBtn.textContent = "!";
+          tooltipCopyBtn.title = "Не удалось скопировать";
+          setTimeout(() => updateTooltipCopyButton(), 1200);
+        }
+      });
+    }
 
     window.addEventListener("resize", () => {
       positionTooltip();
@@ -2410,10 +2604,7 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
         hot_retrieval_card,
         cold_card,
         with_table_orientation(
-            with_extra_class(
-                accuracy_card,
-                "benchmark-span-full",
-            ),
+            with_extra_class(accuracy_card, "benchmark-span-full"),
             "transposed",
         ),
     ]
@@ -2448,7 +2639,11 @@ fn hot_retrieval_benchmark_status(hot_retrieval: &Value, thresholds: &Value) -> 
     ])
 }
 
-fn hot_load_benchmark_reasons(snapshot: &Value, hot_load: &Value, thresholds: &Value) -> Vec<String> {
+fn hot_load_benchmark_reasons(
+    snapshot: &Value,
+    hot_load: &Value,
+    thresholds: &Value,
+) -> Vec<String> {
     let mut reasons = Vec::new();
     let sample_count = hot_load["success_count"]
         .as_u64()
@@ -2470,7 +2665,9 @@ fn hot_load_benchmark_reasons(snapshot: &Value, hot_load: &Value, thresholds: &V
         thresholds["load"]["hot_error_rate"]["target"].as_f64(),
         format_percent(hot_load["error_rate"].as_f64()),
         format_zero_or_at_most_percent(
-            thresholds["load"]["hot_error_rate"].get("target").and_then(Value::as_f64),
+            thresholds["load"]["hot_error_rate"]
+                .get("target")
+                .and_then(Value::as_f64),
         ),
     ) {
         reasons.push(reason);
@@ -2658,10 +2855,14 @@ fn cold_benchmark_reasons(snapshot: &Value, cold_contour: &Value) -> Vec<String>
     if let Some(reason) = failing_metric_reason_at_most_or_equal(
         "Error rate",
         summary["error_rate"].as_f64().map(|value| value * 100.0),
-        profile["max_error_rate"].as_f64().map(|value| value * 100.0),
+        profile["max_error_rate"]
+            .as_f64()
+            .map(|value| value * 100.0),
         format_percent(summary["error_rate"].as_f64()),
         format_zero_or_at_most_percent(
-            profile["max_error_rate"].as_f64().map(|value| value * 100.0),
+            profile["max_error_rate"]
+                .as_f64()
+                .map(|value| value * 100.0),
         ),
     ) {
         reasons.push(reason);
@@ -2682,7 +2883,9 @@ fn accuracy_benchmark_reasons(accuracy: &Value, thresholds: &Value) -> Vec<Strin
     }
     if let Some(reason) = failing_metric_reason_at_least_or_equal(
         "Symbol precision",
-        accuracy["symbol_precision"].as_f64().map(|value| value * 100.0),
+        accuracy["symbol_precision"]
+            .as_f64()
+            .map(|value| value * 100.0),
         thresholds["accuracy"]["symbol_precision"]["target"]
             .as_f64()
             .map(|value| value * 100.0),
@@ -2693,7 +2896,9 @@ fn accuracy_benchmark_reasons(accuracy: &Value, thresholds: &Value) -> Vec<Strin
     }
     if let Some(reason) = failing_metric_reason_at_least_or_equal(
         "Semantic precision",
-        accuracy["semantic_precision"].as_f64().map(|value| value * 100.0),
+        accuracy["semantic_precision"]
+            .as_f64()
+            .map(|value| value * 100.0),
         thresholds["accuracy"]["semantic_precision"]["target"]
             .as_f64()
             .map(|value| value * 100.0),
@@ -3564,48 +3769,55 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
         status_for_metric_name(snapshot, "nats.jetstream_disk_usage_ratio"),
     ]);
     let mut nats_card = card_with_rows(
-            "NATS / JetStream",
-            format_ms(snapshot, snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
-            "Живой probe очереди событий и фонового work plane.".to_string(),
-            nats_status,
-            Some("Источник: живой NATS/JetStream probe, обновляется на каждом refresh dashboard".to_string()),
-            Some("NATS / JetStream — event и work plane для фоновых событий и очередей.".to_string()),
-            vec![
-                metric_row(
-                    "Эталон publish P95",
-                    format_ms(
-                        snapshot,
-                        snapshot["thresholds"]["nats"]["publish_probe_p95_ms"]["target"].as_f64(),
-                    ),
-                    Some("Целевой p95 для живого publish probe."),
+        "NATS / JetStream",
+        format_ms(snapshot, snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
+        "Живой probe очереди событий и фонового work plane.".to_string(),
+        nats_status,
+        Some(
+            "Источник: живой NATS/JetStream probe, обновляется на каждом refresh dashboard"
+                .to_string(),
+        ),
+        Some("NATS / JetStream — event и work plane для фоновых событий и очередей.".to_string()),
+        vec![
+            metric_row(
+                "Эталон publish P95",
+                format_ms(
+                    snapshot,
+                    snapshot["thresholds"]["nats"]["publish_probe_p95_ms"]["target"].as_f64(),
                 ),
-                metric_row(
-                    "Измерено publish P95",
-                    format_ms(snapshot, snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
-                    Some("Фактический p95 для живого publish probe на этом refresh."),
+                Some("Целевой p95 для живого publish probe."),
+            ),
+            metric_row(
+                "Измерено publish P95",
+                format_ms(snapshot, snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
+                Some("Фактический p95 для живого publish probe на этом refresh."),
+            ),
+            metric_row(
+                "Эталон lag",
+                format_f64_count(
+                    snapshot["thresholds"]["nats"]["consumer_lag_msgs"]["target"].as_f64(),
                 ),
-                metric_row(
-                    "Эталон lag",
-                    format_f64_count(snapshot["thresholds"]["nats"]["consumer_lag_msgs"]["target"].as_f64()),
-                    Some("Желаемый максимум непрочитанных сообщений."),
+                Some("Желаемый максимум непрочитанных сообщений."),
+            ),
+            metric_row(
+                "Измерено lag",
+                format_f64_count(snapshot["nats"]["consumer_lag_msgs"].as_f64()),
+                Some("Текущая consumer lag в JetStream."),
+            ),
+            metric_row(
+                "Эталон disk usage",
+                format_ratio_percent(
+                    snapshot["thresholds"]["nats"]["jetstream_disk_usage_ratio"]["target"].as_f64(),
                 ),
-                metric_row(
-                    "Измерено lag",
-                    format_f64_count(snapshot["nats"]["consumer_lag_msgs"].as_f64()),
-                    Some("Текущая consumer lag в JetStream."),
-                ),
-                metric_row(
-                    "Эталон disk usage",
-                    format_ratio_percent(snapshot["thresholds"]["nats"]["jetstream_disk_usage_ratio"]["target"].as_f64()),
-                    Some("Желаемая доля занятого диска JetStream."),
-                ),
-                metric_row(
-                    "Измерено disk usage",
-                    format_ratio_percent(snapshot["nats"]["jetstream_disk_usage_ratio"].as_f64()),
-                    Some("Текущая доля занятого диска JetStream."),
-                ),
-            ],
-        );
+                Some("Желаемая доля занятого диска JetStream."),
+            ),
+            metric_row(
+                "Измерено disk usage",
+                format_ratio_percent(snapshot["nats"]["jetstream_disk_usage_ratio"].as_f64()),
+                Some("Текущая доля занятого диска JetStream."),
+            ),
+        ],
+    );
     if let Some(tooltip) = status_reason_tooltip(
         nats_status,
         sla_metric_reasons(
@@ -3621,7 +3833,12 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
         nats_card = with_status_tooltip(nats_card, &tooltip);
     }
 
-    vec![postgres_card, qdrant_live_card, benchmark_qdrant_card, nats_card]
+    vec![
+        postgres_card,
+        qdrant_live_card,
+        benchmark_qdrant_card,
+        nats_card,
+    ]
 }
 
 fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
@@ -3816,7 +4033,9 @@ fn benchmark_qdrant_status_tooltip(snapshot: &Value) -> Option<String> {
             benchmark["update_queue_length"].as_f64(),
             snapshot["thresholds"]["qdrant"]["update_queue_length"]["target"].as_f64(),
             format_f64_count(benchmark["update_queue_length"].as_f64()),
-            format_f64_count(snapshot["thresholds"]["qdrant"]["update_queue_length"]["target"].as_f64()),
+            format_f64_count(
+                snapshot["thresholds"]["qdrant"]["update_queue_length"]["target"].as_f64(),
+            ),
         ) {
             reasons.push(reason);
         }
@@ -3947,8 +4166,8 @@ fn build_links(base_url: &str) -> Vec<Value> {
     let prometheus_available = tcp_port_is_open("127.0.0.1", &prometheus_port);
     let grafana_available = tcp_port_is_open("127.0.0.1", &grafana_port);
     links.push(json!({
-        "label": "Monitoring profile",
-        "note": "Prometheus и Grafana живут отдельным monitoring contour. Если профиль поднят, ссылки открываются прямо отсюда.",
+        "label": "",
+        "note": "",
         "items": [
             {
                 "label": "Prometheus",
@@ -6219,7 +6438,8 @@ mod tests {
             links[0]["items"].as_array().map(|items| items.len()),
             Some(4)
         );
-        assert_eq!(links[1]["label"].as_str(), Some("Monitoring profile"));
+        assert_eq!(links[1]["label"].as_str(), Some(""));
+        assert_eq!(links[1]["note"].as_str(), Some(""));
         assert_eq!(
             links[1]["items"].as_array().map(|items| items.len()),
             Some(2)
