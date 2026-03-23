@@ -2339,9 +2339,10 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             format_signed_count(session_saved),
             if session_events > 0 {
                 format!(
-                    "Сессия здесь = непрерывная работа без паузы дольше 30 минут. Длительность: {}. Учтено реальных Amai-запросов без потери качества: {}. Проверенная реальная экономия по ним: {}. {}",
+                    "Сессия здесь = непрерывная работа без паузы дольше 30 минут. Новая сессия начинается после паузы дольше 30 минут. Длительность: {}. Строго verified live для этого KPI: {} из {} событий текущей сессии. Проверенная реальная экономия по ним: {}. {}",
                     elapsed_since_epoch_label(session_started, session_ended),
                     format_u64(Some(session_events)),
+                    format_u64(Some(session_events_total)),
                     format_percent(session_percent),
                     recovery_sentence(session_recovery)
                 ) + &format!(
@@ -2361,8 +2362,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                     )
             } else if session_events_total > 0 {
                 format!(
-                    "В этой сессии уже есть Amai-запросы: {}. Но они ещё не дали проверенную выборку, поэтому главный KPI по сессии пока не накоплен.",
-                    format_u64(Some(session_events_total))
+                    "В этой сессии уже есть Amai-запросы: {}. Но строго verified live для главного KPI пока: 0 из {}. Поэтому главный KPI по сессии ещё не накоплен.",
+                    format_u64(Some(session_events_total)),
+                    format_u64(Some(session_events_total)),
                 ) + &format!(
                     " {} {}",
                     raw_savings_sentence(
@@ -2377,18 +2379,19 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             },
             savings_status(session_saved, session_events, session_events_total),
             None,
-            Some("Главный KPI этой карточки считает только verified live-события без потери качества. Raw contour ниже нужен как отдельная explain-lane и не должен читаться как тот же самый KPI.".to_string()),
+            Some("Эта карточка отвечает на вопрос, сколько токенов Amai сэкономил в текущей непрерывной сессии работы. Сессия здесь начинается заново после паузы дольше 30 минут и считает только strict verified live retrieval-события без потери качества. Raw contour ниже показан отдельно только для объяснения и не является тем же KPI.".to_string()),
             current_session_lane_rows(current_session),
         ),
-        card(
+        card_with_tooltip(
             "Экономия токенов за рабочее окно",
             format_signed_count(rolling_saved),
             if rolling_events > 0 {
                 format!(
-                    "Это текущее скользящее окно профиля {}. Период: {}. Учтено реальных Amai-запросов без потери качества: {}. Проверенная реальная экономия: {}. {}",
+                    "Это текущее скользящее окно профиля {}. Период: {}. Строго verified live для этого KPI: {} из {} событий окна. Проверенная реальная экономия: {}. {}",
                     rolling_window_label,
                     elapsed_since_epoch_label(rolling_started, rolling_ended),
                     format_u64(Some(rolling_events)),
+                    format_u64(Some(rolling_events_total)),
                     format_percent(rolling_percent),
                     recovery_sentence(rolling_recovery)
                 ) + &format!(
@@ -2399,22 +2402,25 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                 )
             } else if rolling_events_total > 0 {
                 format!(
-                    "В текущем рабочем окне уже есть Amai-запросы: {}. Но проверенная выборка ещё не собрана, поэтому реальную экономию за окно пока рано считать устойчивой.",
+                    "В текущем рабочем окне уже есть Amai-запросы: {}. Но строго verified live для главного KPI пока: 0 из {}. Поэтому реальную экономию за окно пока рано считать устойчивой.",
+                    format_u64(Some(rolling_events_total)),
                     format_u64(Some(rolling_events_total))
                 )
             } else {
                 "В текущем рабочем окне Amai ещё не накопил учтённых запросов, поэтому здесь пока нет живой verified статистики.".to_string()
             },
             savings_status(rolling_saved, rolling_events, rolling_events_total),
+            Some(format!("Эта карточка показывает не одну сессию, а текущее скользящее рабочее окно профиля {}. Окно может захватывать несколько сессий подряд и нужно для недавнего тренда, а не только для последнего непрерывного захода. В главный KPI здесь тоже попадают только strict verified live retrieval-события без потери качества.", rolling_window_label)),
         ),
-        card(
+        card_with_tooltip(
             "Экономия токенов за всё время записи",
             format_signed_count(lifetime_saved),
             if lifetime_events > 0 {
                 format!(
-                    "Это итог с первого проверенного Amai-запроса в этой установке. Период: {}. Учтено реальных Amai-запросов без потери качества: {}. Проверенная реальная экономия: {}. {}",
+                    "Это итог с первого записанного Amai retrieval-события в этой установке. Период: {}. Строго verified live для этого KPI: {} из {} событий всей истории записи. Проверенная реальная экономия: {}. {}",
                     elapsed_since_epoch_label(lifetime_started, lifetime_ended),
                     format_u64(Some(lifetime_events)),
+                    format_u64(Some(lifetime_events_total)),
                     format_percent(lifetime_percent),
                     recovery_sentence(lifetime_recovery)
                 ) + &format!(
@@ -2425,13 +2431,15 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                 )
             } else if lifetime_events_total > 0 {
                 format!(
-                    "После установки уже накоплены Amai-запросы: {}. Но проверенная выборка ещё не собрана, поэтому главный KPI пока не считается надёжным.",
+                    "После установки уже накоплены Amai-запросы: {}. Но строго verified live для главного KPI пока: 0 из {}. Поэтому главный KPI пока не считается надёжным.",
+                    format_u64(Some(lifetime_events_total)),
                     format_u64(Some(lifetime_events_total))
                 )
             } else {
                 "После установки Amai ещё не накопил учтённых запросов, поэтому здесь пока нет итоговой живой статистики.".to_string()
             },
             savings_status(lifetime_saved, lifetime_events, lifetime_events_total),
+            Some("Эта карточка показывает накопительный итог с первого записанного retrieval-события в текущей установке Amai. Это не процент от лимита чата и не вся история всех внешних клиентов навсегда. В главный lifetime KPI попадают только strict verified live retrieval-события без потери качества; benchmark, proof и другой инженерный трафик в него не смешиваются.".to_string()),
         ),
     ]
 }
@@ -3367,6 +3375,16 @@ fn load_install_state(repo_root: &Path) -> Result<Option<InstallState>> {
 
 fn card(title: &str, value: String, note: String, status: &str) -> Value {
     card_with_rows(title, value, note, status, None, None, Vec::new())
+}
+
+fn card_with_tooltip(
+    title: &str,
+    value: String,
+    note: String,
+    status: &str,
+    title_tooltip: Option<String>,
+) -> Value {
+    card_with_rows(title, value, note, status, None, title_tooltip, Vec::new())
 }
 
 fn with_extra_class(mut card: Value, extra_class: &str) -> Value {
@@ -5268,6 +5286,94 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0]["label"].as_str(), Some("Verified lane"));
         assert_eq!(rows[1]["label"].as_str(), Some("Raw live lane"));
+    }
+
+    #[test]
+    fn hero_cards_explain_scope_and_strict_verified_fraction() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "events_total": 4,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 120,
+                        "verified_effective_savings_pct": 25.0,
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 25.0,
+                        "answer_like_counted_events": 1,
+                        "verified_answer_like_savings_pct": 25.0,
+                        "verified_baseline_tokens": 200,
+                        "verified_delivered_tokens": 80,
+                        "verified_recovery_tokens": 0,
+                        "excluded_events_count": 3,
+                        "excluded_effective_saved_tokens": 50,
+                        "excluded_baseline_tokens": 400,
+                        "excluded_delivered_tokens": 350,
+                        "excluded_recovery_tokens": 0,
+                        "total_naive_tokens": 600,
+                        "total_context_tokens": 430,
+                        "effective_savings_pct": 28.33,
+                        "total_effective_saved_tokens": 170,
+                        "total_recovery_tokens": 0
+                    },
+                    "rolling_window": {
+                        "events_total": 12,
+                        "counted_events": 6,
+                        "verified_effective_saved_tokens": 38622,
+                        "verified_effective_savings_pct": 83.29,
+                        "started_at_epoch_ms": 10,
+                        "ended_at_epoch_ms": 20,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 33.33,
+                        "answer_like_counted_events": 6,
+                        "verified_answer_like_savings_pct": 83.29
+                    },
+                    "lifetime": {
+                        "events_total": 56,
+                        "counted_events": 22,
+                        "verified_effective_saved_tokens": 4824306,
+                        "verified_effective_savings_pct": 99.14,
+                        "started_at_epoch_ms": 100,
+                        "ended_at_epoch_ms": 200,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 39.29,
+                        "answer_like_counted_events": 22,
+                        "verified_answer_like_savings_pct": 99.14
+                    },
+                    "profile": {
+                        "display_name": "Обычная рабочая машина"
+                    }
+                }
+            }
+        });
+
+        let cards = build_hero_cards(&snapshot);
+        assert_eq!(
+            cards[0]["title_tooltip"].as_str(),
+            Some(
+                "Эта карточка отвечает на вопрос, сколько токенов Amai сэкономил в текущей непрерывной сессии работы. Сессия здесь начинается заново после паузы дольше 30 минут и считает только strict verified live retrieval-события без потери качества. Raw contour ниже показан отдельно только для объяснения и не является тем же KPI."
+            )
+        );
+        assert!(cards[1]["title_tooltip"].as_str().is_some_and(|value| {
+            value.contains("не одну сессию, а текущее скользящее рабочее окно")
+        }));
+        assert!(cards[2]["title_tooltip"].as_str().is_some_and(|value| {
+            value.contains("накопительный итог с первого записанного retrieval-события")
+        }));
+        assert!(
+            cards[1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("6 из 12")
+        );
+        assert!(
+            cards[2]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("22 из 56")
+        );
     }
 
     #[test]
