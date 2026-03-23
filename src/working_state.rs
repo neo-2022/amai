@@ -428,7 +428,7 @@ fn compose_restore_bundle(
     let execution_catalog = retrieval_science::execution_state_catalog_json().unwrap_or_else(|_| {
         json!({
             "execution_state_model_version": "execution-state-v1",
-            "lineage_model_version": "lineage-v1",
+            "lineage_model_version": "lineage-v2",
             "states": ["planned", "attempted", "succeeded", "superseded", "stale"],
             "truth_ranking": ["continuity_handoff", "working_state_restore", "live_context_pack"]
         })
@@ -436,6 +436,35 @@ fn compose_restore_bundle(
     let lineage_supporting_event_ids = recent_actions
         .iter()
         .filter_map(|item| item["event_id"].as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    let lineage_nodes = recent_actions
+        .iter()
+        .filter_map(|item| {
+            let event_id = item["event_id"].as_str()?;
+            Some(json!({
+                "node_id": event_id,
+                "event_kind": item["event_kind"],
+                "source_kind": item["source_kind"],
+                "headline": item["headline"],
+                "execution_state": item["execution_state"],
+                "authoritative": item["authoritative"],
+                "recorded_at_epoch_ms": item["recorded_at_epoch_ms"],
+            }))
+        })
+        .collect::<Vec<_>>();
+    let lineage_edges = recent_actions
+        .iter()
+        .filter_map(|item| {
+            let event_id = item["event_id"].as_str()?;
+            if event_id == authoritative_event_id {
+                return None;
+            }
+            Some(json!({
+                "from_event_id": event_id,
+                "to_event_id": authoritative_event_id,
+                "relation": lineage_relation(item["execution_state"].as_str().unwrap_or("unknown")),
+            }))
+        })
         .collect::<Vec<_>>();
     let action_state_counts = collect_action_state_counts(&recent_actions);
     let restore_freshness_state =
@@ -473,12 +502,15 @@ fn compose_restore_bundle(
             "execution_catalog": execution_catalog,
             "action_state_counts": action_state_counts,
             "state_lineage": {
+                "lineage_model_version": execution_catalog["lineage_model_version"].clone(),
                 "authoritative_event_id": authoritative_event["event_id"],
                 "authoritative_event_kind": authoritative_event["event_kind"],
                 "authoritative_source_kind": authoritative_event["source_kind"],
                 "authoritative_local_path": authoritative_event["local_path"],
                 "supporting_event_ids": lineage_supporting_event_ids,
                 "truth_ranking": execution_catalog["truth_ranking"].clone(),
+                "nodes": lineage_nodes,
+                "edges": lineage_edges,
             },
             "is_preliminary": events.len() < 3,
         }
@@ -922,6 +954,14 @@ fn collect_action_state_counts(actions: &[Value]) -> Value {
         counts.insert(state.to_string(), json!(next));
     }
     Value::Object(counts)
+}
+
+fn lineage_relation(execution_state: &str) -> &'static str {
+    match execution_state {
+        "superseded" => "superseded_by",
+        "stale" => "stale_support_for",
+        _ => "supports",
+    }
 }
 
 async fn resolve_session_id(
@@ -1431,6 +1471,7 @@ fn now_epoch_ms() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -1710,6 +1751,10 @@ mod tests {
             restore["state_lineage"]["authoritative_event_kind"],
             json!("continuity_handoff")
         );
+        assert_eq!(
+            restore["state_lineage"]["lineage_model_version"],
+            json!("lineage-v2")
+        );
         assert_eq!(restore["action_state_counts"]["succeeded"], json!(1));
         assert_eq!(restore["action_state_counts"]["superseded"], json!(1));
         assert_eq!(
@@ -1724,6 +1769,20 @@ mod tests {
             restore["recent_actions"][2]["execution_state"],
             json!("attempted")
         );
+        let edges = restore["state_lineage"]["edges"].as_array().expect("edges");
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().any(|edge| {
+            edge["from_event_id"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("Older handoff-"))
+                && edge["relation"] == json!("superseded_by")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge["from_event_id"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("Рабочий запрос: current context-"))
+                && edge["relation"] == json!("supports")
+        }));
     }
 
     #[test]
@@ -1754,6 +1813,127 @@ mod tests {
             scenario["class_key"].as_str() == Some("stale_handoff")
                 && scenario["details"]["restore_freshness_state"] == json!("stale")
         }));
+    }
+
+    proptest! {
+        #[test]
+        fn select_relevant_events_keeps_only_latest_exact_scope_session(
+            shared_count in 0usize..6,
+            foreign_count in 0usize..6,
+            older_exact_same_session in 0usize..6,
+            older_exact_other_session in 0usize..6,
+        ) {
+            let mut snapshots = Vec::new();
+            let mut offset = 10_000_i64;
+            snapshots.push(fake_snapshot("art", "continuity", "art::primary", "session-a", "latest-exact", offset));
+            offset -= 1;
+            for index in 0..older_exact_same_session {
+                snapshots.push(fake_snapshot("art", "continuity", "art::primary", "session-a", &format!("exact-same-{index}"), offset));
+                offset -= 1;
+            }
+            for index in 0..older_exact_other_session {
+                snapshots.push(fake_snapshot("art", "continuity", "art::primary", "session-b", &format!("exact-other-{index}"), offset));
+                offset -= 1;
+            }
+            for index in 0..shared_count {
+                snapshots.push(fake_snapshot("art", "continuity", "shared", "session-shared", &format!("shared-{index}"), offset));
+                offset -= 1;
+            }
+            for index in 0..foreign_count {
+                snapshots.push(fake_snapshot("art", "continuity", "art::secondary", "session-foreign", &format!("foreign-{index}"), offset));
+                offset -= 1;
+            }
+
+            let selected = select_relevant_events(snapshots, "art", "continuity", "art::primary");
+            prop_assert!(!selected.is_empty());
+            let all_exact_scope = selected.iter().all(|snapshot| {
+                let event = &snapshot.payload["working_state_event"];
+                event["project"]["code"].as_str() == Some("art")
+                    && event["namespace"]["code"].as_str() == Some("continuity")
+                    && event["agent_scope"].as_str() == Some("art::primary")
+                    && event["session_id"].as_str() == Some("session-a")
+            });
+            prop_assert!(all_exact_scope);
+        }
+
+        #[test]
+        fn select_relevant_events_falls_back_to_shared_scope_without_mixing_foreign(
+            shared_count in 0usize..8,
+            foreign_count in 0usize..8,
+        ) {
+            let mut snapshots = Vec::new();
+            let mut offset = 20_000_i64;
+            snapshots.push(fake_snapshot("art", "continuity", "shared", "session-shared", "latest-shared", offset));
+            offset -= 1;
+            for index in 0..shared_count {
+                snapshots.push(fake_snapshot("art", "continuity", "shared", "session-shared", &format!("shared-{index}"), offset));
+                offset -= 1;
+            }
+            for index in 0..foreign_count {
+                snapshots.push(fake_snapshot("art", "continuity", "art::secondary", "session-foreign", &format!("foreign-{index}"), offset));
+                offset -= 1;
+            }
+
+            let selected = select_relevant_events(snapshots, "art", "continuity", "art::primary");
+            prop_assert!(!selected.is_empty());
+            let all_shared_scope = selected.iter().all(|snapshot| {
+                let event = &snapshot.payload["working_state_event"];
+                matches!(event["agent_scope"].as_str(), Some("shared") | None | Some(""))
+                    && event["session_id"].as_str() == Some("session-shared")
+            });
+            prop_assert!(all_shared_scope);
+        }
+
+        #[test]
+        fn select_relevant_events_fail_closes_for_foreign_or_corrupt_scope_only(
+            foreign_count in 1usize..10,
+            corrupt_project_count in 0usize..6,
+            corrupt_namespace_count in 0usize..6,
+        ) {
+            let mut snapshots = Vec::new();
+            let mut offset = 30_000_i64;
+            for index in 0..foreign_count {
+                snapshots.push(fake_snapshot("art", "continuity", "art::secondary", "session-foreign", &format!("foreign-{index}"), offset));
+                offset -= 1;
+            }
+            for index in 0..corrupt_project_count {
+                snapshots.push(fake_snapshot("art-corrupt", "continuity", "art::primary", "session-corrupt-project", &format!("corrupt-project-{index}"), offset));
+                offset -= 1;
+            }
+            for index in 0..corrupt_namespace_count {
+                snapshots.push(fake_snapshot("art", "continuity-corrupt", "art::primary", "session-corrupt-namespace", &format!("corrupt-namespace-{index}"), offset));
+                offset -= 1;
+            }
+
+            let selected = select_relevant_events(snapshots, "art", "continuity", "art::primary");
+            prop_assert!(selected.is_empty());
+        }
+
+        #[test]
+        fn select_relevant_events_with_empty_latest_session_returns_only_latest_exact(
+            older_exact_count in 0usize..8,
+            shared_count in 0usize..8,
+        ) {
+            let mut snapshots = Vec::new();
+            let mut offset = 40_000_i64;
+            snapshots.push(fake_snapshot("art", "continuity", "art::primary", "", "latest-empty-session", offset));
+            offset -= 1;
+            for index in 0..older_exact_count {
+                snapshots.push(fake_snapshot("art", "continuity", "art::primary", "session-older", &format!("exact-{index}"), offset));
+                offset -= 1;
+            }
+            for index in 0..shared_count {
+                snapshots.push(fake_snapshot("art", "continuity", "shared", "session-shared", &format!("shared-{index}"), offset));
+                offset -= 1;
+            }
+
+            let selected = select_relevant_events(snapshots, "art", "continuity", "art::primary");
+            prop_assert_eq!(selected.len(), 1);
+            prop_assert_eq!(
+                selected[0].payload["working_state_event"]["headline"].as_str(),
+                Some("latest-empty-session")
+            );
+        }
     }
 
     fn fake_snapshot(

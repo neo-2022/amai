@@ -208,6 +208,10 @@ mod tests {
             catalog["execution_state_model_version"].as_str(),
             Some("execution-state-v1")
         );
+        assert_eq!(
+            catalog["lineage_model_version"].as_str(),
+            Some("lineage-v2")
+        );
         assert!(
             catalog["states"]
                 .as_array()

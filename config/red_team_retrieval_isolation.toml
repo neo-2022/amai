@@ -1,12 +1,12 @@
-modified_at = "2026-03-23 07:40 MSK"
-"Ручная сверка guide/docs" = "2026-03-23 07:40 MSK"
+modified_at = "2026-03-23 12:55 MSK"
+"Ручная сверка guide/docs" = "2026-03-23 12:55 MSK"
 
 [suite]
-suite_version = "red-team-retrieval-isolation-v1"
+suite_version = "red-team-retrieval-isolation-v2"
 dataset_version = "fixtures-project-alpha-beta-v1"
 query_suite_version = "red-team-retrieval-queries-v1"
-scoring_rules_version = "retrieval-isolation-scoring-v1"
-summary = "Фиксированный red-team retrieval isolation contour для project_alpha/project_beta: strict local, related shared-runtime, hostile mixed query и namespace fail-closed proof."
+scoring_rules_version = "retrieval-isolation-scoring-v2"
+summary = "Фиксированный red-team retrieval isolation contour для project_alpha/project_beta: strict local, related shared-runtime, hostile mixed query, namespace fail-closed proof и отдельные visible/hit invariants по проекту и namespace."
 strict_query = "beta_only_token"
 related_query = "shared_runtime_marker"
 namespace_query = "alpha_runtime_summary"

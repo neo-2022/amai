@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 12:10 MSK
-Ручная сверка guide/docs: 2026-03-23 12:10 MSK
+modified_at: 2026-03-23 12:34 MSK
+Ручная сверка guide/docs: 2026-03-23 12:34 MSK
 
 # Operations
 
@@ -294,7 +294,7 @@ cd /home/art/agent-memory-index
 - `working_state_restore` теперь execution-aware:
   - `next_step_state` всегда показывает, что следующий шаг пока только `planned`;
   - `recent_actions[].execution_state` разводит `attempted / succeeded / superseded / stale`;
-  - `state_lineage` хранит authoritative event, supporting event ids и truth ranking;
+  - `state_lineage` хранит `lineage_model_version = lineage-v2`, authoritative event, supporting event ids, truth ranking и явный graph-слой `nodes / edges`;
   - при битом `session_id` restore-path теперь fail-closed и не смешивает несколько пустых сессий в один bundle.
 
 Если передан `--question`, helper сам должен:
@@ -818,11 +818,12 @@ cargo run --release -- verify accuracy \
   - `formal_invariants`;
   - `retrieval_science`;
   - `degradation_policy`;
-  - versioned suite metadata из `config/red_team_retrieval_isolation.toml`.
+  - versioned suite metadata из `config/red_team_retrieval_isolation.toml`;
+  - отдельные hostile visible/hit invariants по проекту и namespace.
 
 Эти данные теперь используются ещё и как живое evidence для `degradation_model`:
 - `cross_project_scope` считается подтверждённым только если zero leakage и проходят все нужные `formal_invariants`;
-- `cross_namespace_scope` считается подтверждённым только если zero leakage и проходит `namespace_strict_fail_closed`;
+- `cross_namespace_scope` считается подтверждённым только если zero leakage и проходят namespace-invariants: `strict_local_*`, `hostile_mixed_query_*` и `namespace_strict_*`;
 - если proof неполный или snapshot отсутствует, класс честно остаётся в `unknown`, а не красится в зелёный.
 
 ## Load proof
@@ -890,7 +891,9 @@ cargo run --release -- verify degradation
 - использует те же working-state / restore / temporal / lexical fallback алгоритмы, что и product path;
 - пишет snapshot `degradation_verification`;
 - даёт `last known evidence` для `degradation_model`, поэтому эти классы больше не висят как чистый policy-only gap;
-- versioned через `science.suites.degradation_verification`, чтобы same input -> same verdict проверялся как отдельный retrieval-science contour.
+- versioned через `science.suites.degradation_verification`, чтобы same input -> same verdict проверялся как отдельный retrieval-science contour;
+- для `working_state_conflict` теперь пишет `lineage-v2` graph (`nodes / edges`), а не только плоский набор supporting event ids;
+- дополнительно опирается на property-based tests для fail-closed выбора `agent_scope / session_id` и для exact-time drift в temporal lookup.
 
 Текущий репозиторный guard:
 - `qps > 35000`

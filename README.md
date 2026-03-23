@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 12:10 MSK
-Ручная сверка guide/docs: 2026-03-23 12:10 MSK
+modified_at: 2026-03-23 12:34 MSK
+Ручная сверка guide/docs: 2026-03-23 12:34 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -311,7 +311,7 @@ scripts\install_amai.cmd --client codex
     - `next_step_state = planned`;
     - `recent_actions[].execution_state` (`attempted / succeeded / superseded / stale`);
     - `action_state_counts`;
-    - `state_lineage` с authoritative event и truth ranking.
+    - `state_lineage` с `lineage_model_version = lineage-v2`, authoritative event, truth ranking и явным graph-слоем `nodes / edges`, чтобы было видно, какой event authoritative, какие его поддерживают и какие уже superseded.
 
 Если у вас несколько параллельных агентов:
 
@@ -1297,6 +1297,7 @@ cargo run --release -- observe guardrails
 - [config/red_team_retrieval_isolation.toml](/home/art/agent-memory-index/config/red_team_retrieval_isolation.toml)
   - фиксированный red-team retrieval isolation contour для `project_alpha/project_beta`;
   - hostile mixed query;
+  - отдельные hostile visible/hit invariants по проекту и namespace;
   - versioned query suite и scoring rules для `verify accuracy`.
 
 В human dashboard это теперь видно отдельной service-card `Поведение при сбоях`.
@@ -1325,7 +1326,9 @@ cargo run --release -- verify degradation
   - `working_state_conflict`
 - пишет snapshot `degradation_verification`;
 - поднимает их из `unknown` в `pass` только после реального machine-readable proof, а не по описанию policy;
-- использует те же product-path функции для working-state, temporal fail-closed и retrieval fallback, а не отдельную декоративную логику только для теста.
+- использует те же product-path функции для working-state, temporal fail-closed и retrieval fallback, а не отдельную декоративную логику только для теста;
+- для `working_state_conflict` теперь пишет уже не плоский lineage, а `lineage-v2` graph с `nodes / edges`;
+- а proof-слой в коде дополнительно усилен property-based tests для fail-closed выбора `agent_scope / session_id` и для exact-time drift в temporal lookup.
 
 Если нужен уже не короткий smoke, а честный end-to-end cold contour на большом real-repo pool:
 

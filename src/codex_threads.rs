@@ -2255,14 +2255,15 @@ fn collapse_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ThreadTimeSliceSummary, chat_tail_at_time_from_snapshots, collapse_text,
-        compact_headline_from_text, compact_next_step_from_text,
+        EXACT_TIME_MAX_SLICE_DRIFT_S, ThreadTimeSliceSummary, chat_tail_at_time_from_snapshots,
+        collapse_text, compact_headline_from_text, compact_next_step_from_text,
         extract_chat_messages_from_rollout_text, extract_last_messages,
         nth_previous_chat_tail_from_snapshots, parse_rfc3339_epoch_s, parse_role_heading,
         rendered_transcript_summary, rollout_summary_from_path, select_messages_for_time,
-        select_tail_messages,
+        select_tail_messages, time_slice_matches_exact_time,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
+    use proptest::prelude::*;
     use serde_json::json;
     use std::fs;
     use uuid::Uuid;
@@ -2433,6 +2434,81 @@ mod tests {
         assert_eq!(selected[0].text, "вопрос");
         assert_eq!(selected[1].role, "assistant");
         assert_eq!(selected[1].text, "ответ");
+    }
+
+    proptest! {
+        #[test]
+        fn time_slice_matches_exact_time_for_any_target_inside_slice(
+            start in 1_700_000_000_i64..1_800_000_000_i64,
+            width in 0_i64..7_200_i64,
+            inside_offset in 0_i64..7_200_i64,
+        ) {
+            let width = width.max(inside_offset);
+            let slice = ThreadTimeSliceSummary {
+                started_at: String::new(),
+                ended_at: String::new(),
+                started_at_epoch_s: start,
+                ended_at_epoch_s: start + width,
+                user_anchor: String::new(),
+                assistant_anchor: String::new(),
+                summary_headline: String::new(),
+                summary_next_step: String::new(),
+            };
+            let target = start + inside_offset.min(width);
+            prop_assert!(time_slice_matches_exact_time(&slice, target));
+        }
+
+        #[test]
+        fn time_slice_matches_exact_time_for_targets_within_allowed_drift(
+            start in 1_700_000_000_i64..1_800_000_000_i64,
+            width in 1_i64..3_600_i64,
+            drift in 0_i64..10_800_i64,
+            before in any::<bool>(),
+        ) {
+            let drift = drift.min(EXACT_TIME_MAX_SLICE_DRIFT_S);
+            let slice = ThreadTimeSliceSummary {
+                started_at: String::new(),
+                ended_at: String::new(),
+                started_at_epoch_s: start,
+                ended_at_epoch_s: start + width,
+                user_anchor: String::new(),
+                assistant_anchor: String::new(),
+                summary_headline: String::new(),
+                summary_next_step: String::new(),
+            };
+            let target = if before {
+                start - drift
+            } else {
+                start + width + drift
+            };
+            prop_assert!(time_slice_matches_exact_time(&slice, target));
+        }
+
+        #[test]
+        fn time_slice_rejects_targets_beyond_exact_time_drift(
+            start in 1_700_000_000_i64..1_800_000_000_i64,
+            width in 1_i64..3_600_i64,
+            extra in 1_i64..10_800_i64,
+            before in any::<bool>(),
+        ) {
+            let slice = ThreadTimeSliceSummary {
+                started_at: String::new(),
+                ended_at: String::new(),
+                started_at_epoch_s: start,
+                ended_at_epoch_s: start + width,
+                user_anchor: String::new(),
+                assistant_anchor: String::new(),
+                summary_headline: String::new(),
+                summary_next_step: String::new(),
+            };
+            let distance = EXACT_TIME_MAX_SLICE_DRIFT_S + extra;
+            let target = if before {
+                start - distance
+            } else {
+                start + width + distance
+            };
+            prop_assert!(!time_slice_matches_exact_time(&slice, target));
+        }
     }
 
     #[test]

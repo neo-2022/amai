@@ -765,6 +765,8 @@ fn evaluate_degradation_class(
                 "strict_local_visible_projects_only",
                 "strict_local_hits_do_not_leak_projects",
                 "hostile_mixed_query_fail_closed",
+                "hostile_mixed_query_visible_projects_only",
+                "hostile_mixed_query_hits_do_not_leak_projects",
             ],
             "Последний accuracy / isolation прогон подтвердил zero leakage между проектами.",
         ),
@@ -773,7 +775,15 @@ fn evaluate_degradation_class(
             class_key,
             entry,
             "cross_namespace_leakage",
-            &["namespace_strict_fail_closed"],
+            &[
+                "strict_local_visible_namespaces_only",
+                "strict_local_hits_do_not_leak_namespaces",
+                "hostile_mixed_query_visible_namespaces_only",
+                "hostile_mixed_query_hits_do_not_leak_namespaces",
+                "namespace_strict_visible_projects_only",
+                "namespace_strict_hits_do_not_leak_namespaces",
+                "namespace_strict_fail_closed",
+            ],
             "Последний accuracy / isolation прогон подтвердил zero leakage между namespace.",
         ),
         "cross_agent_scope"
@@ -2980,6 +2990,14 @@ mod tests {
                         { "name": "strict_local_visible_projects_only", "pass": true },
                         { "name": "strict_local_hits_do_not_leak_projects", "pass": true },
                         { "name": "hostile_mixed_query_fail_closed", "pass": true },
+                        { "name": "hostile_mixed_query_visible_projects_only", "pass": true },
+                        { "name": "hostile_mixed_query_hits_do_not_leak_projects", "pass": true },
+                        { "name": "strict_local_visible_namespaces_only", "pass": true },
+                        { "name": "strict_local_hits_do_not_leak_namespaces", "pass": true },
+                        { "name": "hostile_mixed_query_visible_namespaces_only", "pass": true },
+                        { "name": "hostile_mixed_query_hits_do_not_leak_namespaces", "pass": true },
+                        { "name": "namespace_strict_visible_projects_only", "pass": true },
+                        { "name": "namespace_strict_hits_do_not_leak_namespaces", "pass": true },
                         { "name": "namespace_strict_fail_closed", "pass": true }
                     ]
                 }
@@ -3029,6 +3047,14 @@ mod tests {
                         { "name": "strict_local_visible_projects_only", "pass": true },
                         { "name": "strict_local_hits_do_not_leak_projects", "pass": true },
                         { "name": "hostile_mixed_query_fail_closed", "pass": true },
+                        { "name": "hostile_mixed_query_visible_projects_only", "pass": true },
+                        { "name": "hostile_mixed_query_hits_do_not_leak_projects", "pass": true },
+                        { "name": "strict_local_visible_namespaces_only", "pass": true },
+                        { "name": "strict_local_hits_do_not_leak_namespaces", "pass": true },
+                        { "name": "hostile_mixed_query_visible_namespaces_only", "pass": true },
+                        { "name": "hostile_mixed_query_hits_do_not_leak_namespaces", "pass": true },
+                        { "name": "namespace_strict_visible_projects_only", "pass": true },
+                        { "name": "namespace_strict_hits_do_not_leak_namespaces", "pass": true },
                         { "name": "namespace_strict_fail_closed", "pass": true }
                     ]
                 }

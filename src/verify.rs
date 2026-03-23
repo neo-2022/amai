@@ -333,9 +333,23 @@ pub async fn run_accuracy(
         .iter()
         .filter(|project| project.as_str() != args.project)
         .count();
+    let strict_visible_namespaces = collect_visible_namespaces(&strict_pack.payload);
+    let strict_visible_namespaces_unexpected = strict_visible_namespaces
+        .iter()
+        .filter(|namespace| namespace.as_str() != args.namespace)
+        .count();
     let strict_hit_leaks = count_foreign_hits(&strict_pack.payload, &args.project);
+    let strict_namespace_hit_leaks =
+        count_foreign_namespace_hits(&strict_pack.payload, &args.namespace);
     let cross_project_leakage = strict_visible_unexpected + strict_hit_leaks;
+    let strict_cross_namespace_leakage =
+        strict_visible_namespaces_unexpected + strict_namespace_hit_leaks;
     let namespace_visible = collect_visible_namespaces(&namespace_strict_pack.payload);
+    let namespace_visible_projects = collect_visible_projects(&namespace_strict_pack.payload);
+    let namespace_visible_projects_unexpected = namespace_visible_projects
+        .iter()
+        .filter(|project| project.as_str() != args.project)
+        .count();
     let namespace_visible_unexpected = namespace_visible
         .iter()
         .filter(|namespace| namespace.as_str() != suite.strict_namespace.as_str())
@@ -348,8 +362,17 @@ pub async fn run_accuracy(
         .iter()
         .filter(|project| project.as_str() != args.project)
         .count();
+    let hostile_visible_namespaces = collect_visible_namespaces(&hostile_pack.payload);
+    let hostile_visible_namespaces_unexpected = hostile_visible_namespaces
+        .iter()
+        .filter(|namespace| namespace.as_str() != args.namespace)
+        .count();
     let hostile_hit_leaks = count_foreign_hits(&hostile_pack.payload, &args.project);
+    let hostile_namespace_hit_leaks =
+        count_foreign_namespace_hits(&hostile_pack.payload, &args.namespace);
     let hostile_cross_project_leakage = hostile_visible_unexpected + hostile_hit_leaks;
+    let hostile_cross_namespace_leakage =
+        hostile_visible_namespaces_unexpected + hostile_namespace_hit_leaks;
 
     let exact_precision = precision_ratio(
         &related_pack.payload["retrieval"]["exact_documents"],
@@ -429,6 +452,54 @@ pub async fn run_accuracy(
             "pass": hostile_cross_project_leakage == 0,
         }),
         json!({
+            "name": "hostile_mixed_query_visible_projects_only",
+            "expected": args.project,
+            "observed": hostile_visible,
+            "pass": hostile_visible_unexpected == 0,
+        }),
+        json!({
+            "name": "hostile_mixed_query_hits_do_not_leak_projects",
+            "expected": 0,
+            "observed": hostile_hit_leaks,
+            "pass": hostile_hit_leaks == 0,
+        }),
+        json!({
+            "name": "strict_local_visible_namespaces_only",
+            "expected": args.namespace,
+            "observed": strict_visible_namespaces,
+            "pass": strict_visible_namespaces_unexpected == 0,
+        }),
+        json!({
+            "name": "strict_local_hits_do_not_leak_namespaces",
+            "expected": 0,
+            "observed": strict_namespace_hit_leaks,
+            "pass": strict_namespace_hit_leaks == 0,
+        }),
+        json!({
+            "name": "hostile_mixed_query_visible_namespaces_only",
+            "expected": args.namespace,
+            "observed": hostile_visible_namespaces,
+            "pass": hostile_visible_namespaces_unexpected == 0,
+        }),
+        json!({
+            "name": "hostile_mixed_query_hits_do_not_leak_namespaces",
+            "expected": 0,
+            "observed": hostile_namespace_hit_leaks,
+            "pass": hostile_namespace_hit_leaks == 0,
+        }),
+        json!({
+            "name": "namespace_strict_visible_projects_only",
+            "expected": args.project,
+            "observed": namespace_visible_projects,
+            "pass": namespace_visible_projects_unexpected == 0,
+        }),
+        json!({
+            "name": "namespace_strict_hits_do_not_leak_namespaces",
+            "expected": 0,
+            "observed": namespace_hit_leaks,
+            "pass": namespace_hit_leaks == 0,
+        }),
+        json!({
             "name": "namespace_strict_fail_closed",
             "expected": 0,
             "observed": cross_namespace_leakage,
@@ -456,6 +527,16 @@ pub async fn run_accuracy(
     if hostile_cross_project_leakage != 0 {
         return Err(anyhow!(
             "accuracy verification failed: hostile_cross_project_leakage={hostile_cross_project_leakage}"
+        ));
+    }
+    if strict_cross_namespace_leakage != 0 {
+        return Err(anyhow!(
+            "accuracy verification failed: strict_cross_namespace_leakage={strict_cross_namespace_leakage}"
+        ));
+    }
+    if hostile_cross_namespace_leakage != 0 {
+        return Err(anyhow!(
+            "accuracy verification failed: hostile_cross_namespace_leakage={hostile_cross_namespace_leakage}"
         ));
     }
     if cross_namespace_leakage != 0 {
@@ -497,13 +578,22 @@ pub async fn run_accuracy(
             "strict_visible_projects": strict_visible,
             "strict_visible_projects_unexpected": strict_visible_unexpected,
             "strict_hit_leaks": strict_hit_leaks,
+            "strict_visible_namespaces": strict_visible_namespaces,
+            "strict_visible_namespaces_unexpected": strict_visible_namespaces_unexpected,
+            "strict_namespace_hit_leaks": strict_namespace_hit_leaks,
+            "strict_cross_namespace_leakage": strict_cross_namespace_leakage,
             "hostile_mixed_query": suite.hostile_mixed_query,
             "hostile_visible_projects": hostile_visible,
             "hostile_visible_projects_unexpected": hostile_visible_unexpected,
             "hostile_hit_leaks": hostile_hit_leaks,
             "hostile_cross_project_leakage": hostile_cross_project_leakage,
+            "hostile_visible_namespaces": hostile_visible_namespaces,
+            "hostile_visible_namespaces_unexpected": hostile_visible_namespaces_unexpected,
+            "hostile_namespace_hit_leaks": hostile_namespace_hit_leaks,
+            "hostile_cross_namespace_leakage": hostile_cross_namespace_leakage,
             "cross_namespace_leakage": cross_namespace_leakage,
-            "namespace_strict_visible_projects": collect_visible_projects(&namespace_strict_pack.payload),
+            "namespace_strict_visible_projects": namespace_visible_projects,
+            "namespace_strict_visible_projects_unexpected": namespace_visible_projects_unexpected,
             "namespace_strict_visible_namespaces": namespace_visible,
             "namespace_strict_visible_namespaces_unexpected": namespace_visible_unexpected,
             "namespace_strict_hit_leaks": namespace_hit_leaks,

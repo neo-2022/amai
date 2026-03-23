@@ -1,12 +1,12 @@
-modified_at = "2026-03-23 12:10 MSK"
-"Ручная сверка guide/docs" = "2026-03-23 12:10 MSK"
+modified_at = "2026-03-23 12:55 MSK"
+"Ручная сверка guide/docs" = "2026-03-23 12:55 MSK"
 
 [science]
 methodology_version = "retrieval-science-v1"
 scoring_rules_version = "retrieval-scoring-v1"
 degradation_policy_version = "retrieval-degradation-v1"
 execution_state_model_version = "execution-state-v1"
-lineage_model_version = "lineage-v1"
+lineage_model_version = "lineage-v2"
 same_input_same_verdict_required = true
 machine_variance_policy = "Latency and throughput may vary by machine, but scope correctness, scoring rules and verdict semantics must stay stable for the same input contour."
 truth_ranking = [
@@ -161,11 +161,11 @@ manifest_path = "cli: verify load --disable-cache=true"
 reproducibility_contract = "Scope correctness must stay identical across workers; only latency and wall-clock throughput may vary by machine."
 
 [science.suites.retrieval_accuracy]
-suite_version = "retrieval-accuracy-isolation-v2"
+suite_version = "retrieval-accuracy-isolation-v3"
 dataset_version = "fixtures-project-alpha-beta-v1"
 query_suite_version = "red-team-retrieval-isolation-v1"
 manifest_path = "config/red_team_retrieval_isolation.toml"
-reproducibility_contract = "Cross-project and cross-namespace leakage must stay zero; precision checks must remain exact on the fixed fixture contour."
+reproducibility_contract = "Cross-project and cross-namespace leakage must stay zero; hostile visible/hit invariants and precision checks must remain exact on the fixed fixture contour."
 
 [science.suites.degradation_verification]
 suite_version = "degradation-verification-v2"
