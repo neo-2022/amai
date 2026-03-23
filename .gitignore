@@ -10,6 +10,14 @@ target/
 *.db
 *.db-*
 
+# Runtime state is local-only by default. Keep tracked .gitkeep files explicit.
+state/*
+!state/postgres/
+!state/qdrant/
+!state/minio/
+!state/nats/
+!state/sqlite/
+
 state/postgres/*
 !state/postgres/.gitkeep
 state/qdrant/*
@@ -20,9 +28,6 @@ state/nats/*
 !state/nats/.gitkeep
 state/sqlite/*
 !state/sqlite/.gitkeep
-state/install_state.json
-state/continuity-imports/
-state/*.pid
 
 tmp/*
 !tmp/.gitkeep
