@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 18:37 MSK
-Ручная сверка guide/docs: 2026-03-23 18:37 MSK
+modified_at: 2026-03-23 18:46 MSK
+Ручная сверка guide/docs: 2026-03-23 18:46 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -633,6 +633,9 @@ http://127.0.0.1:9464/
 - фиксирует import snapshot, чтобы потом новый старт не зависел от ручной сборки.
 - `--active-workline-file` больше не обязателен:
   если write-side handoff уже живёт в `Amai`, import берёт headline и next-step оттуда, а bootstrap/transcript слой остаётся только refresh-evidence.
+- при повторном импорте source of truth для freshness теперь не время записи snapshot в БД, а semantic время самого артефакта:
+  `imported_at_epoch_ms` / `captured_at_epoch_ms`.
+  Поздний replay старого import или handoff не должен маскироваться под свежую рабочую линию.
 
 Если у вас есть ещё и отдельный старый каталог заметок, его можно добавить явно:
 

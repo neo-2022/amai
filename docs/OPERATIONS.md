@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 18:37 MSK
-Ручная сверка guide/docs: 2026-03-23 18:37 MSK
+modified_at: 2026-03-23 18:46 MSK
+Ручная сверка guide/docs: 2026-03-23 18:46 MSK
 
 # Operations
 
@@ -140,6 +140,9 @@ cd /home/art/agent-memory-index
 - searchable continuity-layer режется до безопасного размера для `PostgreSQL tsvector` и lexical chunks;
 - observability получает отдельный snapshot `continuity_import`;
 - startup-summary потом читается не из нескольких разрозненных источников, а из `Amai`.
+- freshness для `continuity_import` и `continuity_handoff` теперь определяется по semantic времени самого артефакта
+  (`imported_at_epoch_ms` / `captured_at_epoch_ms`), а не по простому `created_at` строки в БД;
+  это защищает startup/restore от позднего replay старого import или handoff.
 - поверх обычного handoff теперь materialized ещё и `working_state` слой:
   он автозахватывается после `continuity handoff` и после `context pack`,
   а новый chat-start поднимает не только headline/next-step, но и активные файлы, последние рабочие запросы и текущую рабочую сессию.

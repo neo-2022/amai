@@ -1149,21 +1149,20 @@ async fn load_startup_context(
     let snapshots =
         postgres::list_observability_snapshots_by_kinds(db, &["continuity_import"], Some(50))
             .await?;
-    let latest = snapshots
-        .into_iter()
-        .find(|snapshot| {
-            snapshot.payload["continuity_import"]["project"]["code"].as_str()
-                == Some(project.code.as_str())
-                && snapshot.payload["continuity_import"]["namespace"]["code"].as_str()
-                    == Some(namespace.code.as_str())
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "no continuity import found for {}::{}",
-                project.code,
-                namespace.code
-            )
-        })?;
+    let latest = latest_scoped_snapshot(
+        &snapshots,
+        "continuity_import",
+        &project.code,
+        &namespace.code,
+        |_| true,
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "no continuity import found for {}::{}",
+            project.code,
+            namespace.code
+        )
+    })?;
     let continuity = latest.payload["continuity_import"].clone();
     let handoff_summary = latest_handoff_summary(db, &project, &namespace)
         .await?
@@ -1693,38 +1692,79 @@ async fn latest_handoff_summary(
     let snapshots =
         postgres::list_observability_snapshots_by_kinds(db, &["continuity_handoff"], Some(50))
             .await?;
-    Ok(snapshots
-        .into_iter()
-        .find(|snapshot| {
-            snapshot.payload["continuity_handoff"]["project"]["code"].as_str()
-                == Some(project.code.as_str())
-                && snapshot.payload["continuity_handoff"]["namespace"]["code"].as_str()
-                    == Some(namespace.code.as_str())
-                && !is_meta_continuity_handoff(
-                    snapshot.payload["continuity_handoff"]["headline"]
-                        .as_str()
-                        .unwrap_or_default(),
-                    snapshot.payload["continuity_handoff"]["next_step"]
-                        .as_str()
-                        .unwrap_or_default(),
-                    snapshot.payload["continuity_handoff"]["details"]
-                        .as_str()
-                        .unwrap_or_default(),
-                )
+    Ok(latest_scoped_snapshot(
+        &snapshots,
+        "continuity_handoff",
+        &project.code,
+        &namespace.code,
+        |root| {
+            !is_meta_continuity_handoff(
+                root["headline"].as_str().unwrap_or_default(),
+                root["next_step"].as_str().unwrap_or_default(),
+                root["details"].as_str().unwrap_or_default(),
+            )
+        },
+    )
+    .map(|snapshot| {
+        json!({
+            "headline": snapshot.payload["continuity_handoff"]["headline"]
+                .as_str()
+                .unwrap_or("ещё нет данных"),
+            "next_step": snapshot.payload["continuity_handoff"]["next_step"]
+                .as_str()
+                .unwrap_or("ещё нет данных"),
+            "local_path": snapshot.payload["continuity_handoff"]["local_path"]
+                .as_str()
+                .unwrap_or_default(),
         })
-        .map(|snapshot| {
-            json!({
-                "headline": snapshot.payload["continuity_handoff"]["headline"]
-                    .as_str()
-                    .unwrap_or("ещё нет данных"),
-                "next_step": snapshot.payload["continuity_handoff"]["next_step"]
-                    .as_str()
-                    .unwrap_or("ещё нет данных"),
-                "local_path": snapshot.payload["continuity_handoff"]["local_path"]
-                    .as_str()
-                    .unwrap_or_default(),
-            })
-        }))
+    }))
+}
+
+fn latest_scoped_snapshot<'a, F>(
+    snapshots: &'a [postgres::ObservabilitySnapshotRecord],
+    root_key: &str,
+    project_code: &str,
+    namespace_code: &str,
+    extra_filter: F,
+) -> Option<&'a postgres::ObservabilitySnapshotRecord>
+where
+    F: Fn(&Value) -> bool,
+{
+    snapshots
+        .iter()
+        .filter_map(|snapshot| {
+            let root = snapshot.payload.get(root_key)?;
+            if root["project"]["code"].as_str() != Some(project_code)
+                || root["namespace"]["code"].as_str() != Some(namespace_code)
+                || !extra_filter(root)
+            {
+                return None;
+            }
+            Some(snapshot)
+        })
+        .max_by_key(|snapshot| {
+            (
+                continuity_snapshot_semantic_epoch_ms(snapshot, root_key),
+                snapshot.created_at_epoch_ms,
+            )
+        })
+}
+
+fn continuity_snapshot_semantic_epoch_ms(
+    snapshot: &postgres::ObservabilitySnapshotRecord,
+    root_key: &str,
+) -> i64 {
+    let root = snapshot.payload.get(root_key).unwrap_or(&Value::Null);
+    root["captured_at_epoch_ms"]
+        .as_i64()
+        .or_else(|| root["imported_at_epoch_ms"].as_i64())
+        .or_else(|| {
+            root["created_at_epoch_s"]
+                .as_i64()
+                .map(|value| value * 1000)
+        })
+        .or_else(|| snapshot.payload["_observability"]["captured_at_epoch_ms"].as_i64())
+        .unwrap_or(snapshot.created_at_epoch_ms)
 }
 
 fn is_meta_continuity_handoff(headline: &str, next_step: &str, details: &str) -> bool {
@@ -2015,15 +2055,71 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_chat_start_restore, degradation_proof_scenarios, enrich_thread_index_file,
-        extract_next_step_from_text, is_meta_continuity_handoff, parse_chat_reference_spec,
+        build_chat_start_restore, continuity_snapshot_semantic_epoch_ms,
+        degradation_proof_scenarios, enrich_thread_index_file, extract_next_step_from_text,
+        is_meta_continuity_handoff, latest_scoped_snapshot, parse_chat_reference_spec,
         render_direct_answer,
     };
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
-    use crate::postgres::{NamespaceRecord, ProjectRecord};
+    use crate::postgres::{NamespaceRecord, ObservabilitySnapshotRecord, ProjectRecord};
     use serde_json::json;
     use std::fs;
+    use uuid::Uuid;
+
+    fn fake_continuity_handoff_snapshot(
+        created_at_epoch_ms: i64,
+        captured_at_epoch_ms: i64,
+        headline: &str,
+    ) -> ObservabilitySnapshotRecord {
+        ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: "continuity_handoff".to_string(),
+            created_at_epoch_ms,
+            payload: json!({
+                "_observability": {
+                    "captured_at_epoch_ms": captured_at_epoch_ms,
+                },
+                "continuity_handoff": {
+                    "project": {"code": "art"},
+                    "namespace": {"code": "continuity"},
+                    "captured_at_epoch_ms": captured_at_epoch_ms,
+                    "headline": headline,
+                    "next_step": "Next step",
+                    "details": "",
+                    "local_path": "/tmp/handoff.md"
+                }
+            }),
+        }
+    }
+
+    fn fake_continuity_import_snapshot(
+        created_at_epoch_ms: i64,
+        imported_at_epoch_ms: i64,
+        headline: &str,
+    ) -> ObservabilitySnapshotRecord {
+        ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: "continuity_import".to_string(),
+            created_at_epoch_ms,
+            payload: json!({
+                "_observability": {
+                    "captured_at_epoch_ms": imported_at_epoch_ms,
+                },
+                "continuity_import": {
+                    "project": {"code": "art"},
+                    "namespace": {"code": "continuity"},
+                    "imported_at_epoch_ms": imported_at_epoch_ms,
+                    "active_workline_summary": {
+                        "details": {
+                            "headline": headline,
+                            "next_step": "Next step"
+                        }
+                    }
+                }
+            }),
+        }
+    }
 
     #[test]
     fn render_direct_answer_prefers_concise_restore_bundle() {
@@ -2229,6 +2325,59 @@ mod tests {
                     .unwrap_or_default()
                     .contains("нет точного совпадения")
         }));
+    }
+
+    #[test]
+    fn latest_handoff_selection_prefers_semantic_capture_time_over_replay_created_at() {
+        let replayed_stale = fake_continuity_handoff_snapshot(3_000, 1_000, "Stale replay");
+        let fresh = fake_continuity_handoff_snapshot(2_000, 2_000, "Fresh handoff");
+        let snapshots = vec![replayed_stale, fresh];
+
+        let selected = latest_scoped_snapshot(
+            &snapshots,
+            "continuity_handoff",
+            "art",
+            "continuity",
+            |root| {
+                !is_meta_continuity_handoff(
+                    root["headline"].as_str().unwrap_or_default(),
+                    root["next_step"].as_str().unwrap_or_default(),
+                    root["details"].as_str().unwrap_or_default(),
+                )
+            },
+        )
+        .expect("selected handoff");
+
+        assert_eq!(
+            continuity_snapshot_semantic_epoch_ms(selected, "continuity_handoff"),
+            2_000
+        );
+        assert_eq!(
+            selected.payload["continuity_handoff"]["headline"],
+            json!("Fresh handoff")
+        );
+    }
+
+    #[test]
+    fn latest_import_selection_prefers_semantic_import_time_over_replay_created_at() {
+        let replayed_stale = fake_continuity_import_snapshot(3_000, 1_000, "Stale import");
+        let fresh = fake_continuity_import_snapshot(2_000, 2_000, "Fresh import");
+        let snapshots = vec![replayed_stale, fresh];
+
+        let selected =
+            latest_scoped_snapshot(&snapshots, "continuity_import", "art", "continuity", |_| {
+                true
+            })
+            .expect("selected import");
+
+        assert_eq!(
+            continuity_snapshot_semantic_epoch_ms(selected, "continuity_import"),
+            2_000
+        );
+        assert_eq!(
+            selected.payload["continuity_import"]["active_workline_summary"]["details"]["headline"],
+            json!("Fresh import")
+        );
     }
 
     #[test]
