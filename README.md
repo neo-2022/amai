@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 23:16 MSK
-Ручная сверка guide/docs: 2026-03-23 23:16 MSK
+modified_at: 2026-03-23 23:22 MSK
+Ручная сверка guide/docs: 2026-03-23 23:22 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -871,6 +871,16 @@ cargo run -- deployment explain --target kubernetes_server
 `observe_snapshot_summary.included_reasons_summary / excluded_reasons_summary`,
 чтобы внешний клиент видел, почему последний рабочий контекст что-то включил
 и почему часть слоёв ничего не добавила.
+
+Тот же `observe snapshot` теперь ещё и публикует `compatibility`:
+- `profile`
+- `schema_version`
+- `compatible`
+- per-service reasons
+
+А короткий MCP summary теперь явно показывает `compatibility=<profile>:ok|drift`.
+Это нужно, чтобы зелёный health-snapshot был привязан к поддерживаемому stack profile,
+а не выглядел как безконтекстная цифра.
 
 `amai_token_report` теперь тоже отдаёт наружу готовый `token_report_summary`, где уже
 собраны `scope_label`, `status`, `counted_events / events_count` и `note`.

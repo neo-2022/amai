@@ -1,7 +1,7 @@
 use crate::config::{AppConfig, discover_repo_root};
 use crate::{
-    artifact_cleanup, dashboard, external_benchmark, nats, observability_policy, postgres,
-    retrieval_science, s3, token_budget,
+    artifact_cleanup, compatibility, dashboard, external_benchmark, nats, observability_policy,
+    postgres, retrieval_science, s3, token_budget,
 };
 use anyhow::{Context, Result, anyhow};
 use axum::{
@@ -601,6 +601,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
     let benchmark_qdrant_live = collect_optional_benchmark_qdrant_live(cfg, &http).await;
     let nats_live = collect_nats_live(cfg, &http, &profile.snapshot).await?;
     let s3_live = collect_s3_live(cfg).await?;
+    let compatibility_report = compatibility::check(cfg).await?;
 
     let latest_hot =
         postgres::latest_observability_snapshot(&db, "retrieval_benchmark_hot").await?;
@@ -641,6 +642,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "benchmark_qdrant": benchmark_qdrant_live,
         "nats": nats_live,
         "s3": s3_live,
+        "compatibility": compatibility::report_json(&compatibility_report),
         "latest_index_project": latest_index,
         "latest_retrieval_hot": latest_hot,
         "latest_retrieval_cold": latest_cold,
@@ -667,6 +669,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "benchmark_qdrant": payload["benchmark_qdrant"].clone(),
         "nats": payload["nats"].clone(),
         "s3": payload["s3"].clone(),
+        "compatibility": payload["compatibility"].clone(),
         "latest_index_project": payload["latest_index_project"].clone(),
         "latest_retrieval_hot": payload["latest_retrieval_hot"].clone(),
         "latest_retrieval_cold": payload["latest_retrieval_cold"].clone(),

@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 23:16 MSK
-Ручная сверка guide/docs: 2026-03-23 23:16 MSK
+modified_at: 2026-03-23 23:22 MSK
+Ручная сверка guide/docs: 2026-03-23 23:22 MSK
 
 # MCP Integration
 
@@ -266,6 +266,14 @@ cargo build --release
 Отдельно у каждого error class теперь есть `carrier`. Это важно, потому что
 `invalid_params` может прийти и как top-level JSON-RPC error, и как `tool_is_error`
 внутри `tools/call`, а клиенту нельзя угадывать transport по тексту ошибки.
+
+Для `amai_observe_snapshot` клиент теперь получает ещё и `compatibility` слой:
+- какой `compatibility_profile` активен;
+- совместим ли текущий stack с поддерживаемым профилем;
+- по каким сервисам есть drift или его нет.
+
+Это привязывает live health snapshot к конкретному supported environment profile,
+а не оставляет health и reproducibility раздельными мирами.
 
 И prompts:
 - `amai-onboarding`

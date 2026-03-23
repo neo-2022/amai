@@ -188,6 +188,38 @@ impl CompatibilityReport {
     }
 }
 
+pub fn report_json(report: &CompatibilityReport) -> Value {
+    json!({
+        "profile": report.profile,
+        "schema_version": report.schema_version,
+        "compatible": report.compatible(),
+        "schema_meta_ok": report.schema_meta_ok,
+        "meta_reason": report.meta_reason,
+        "services": {
+            "postgres": {
+                "raw_version": report.postgres.raw_version,
+                "compatible": report.postgres.compatible,
+                "reason": report.postgres.reason,
+            },
+            "qdrant": {
+                "raw_version": report.qdrant.raw_version,
+                "compatible": report.qdrant.compatible,
+                "reason": report.qdrant.reason,
+            },
+            "nats": {
+                "raw_version": report.nats.raw_version,
+                "compatible": report.nats.compatible,
+                "reason": report.nats.reason,
+            },
+            "s3": {
+                "raw_version": report.s3.raw_version,
+                "compatible": report.s3.compatible,
+                "reason": report.s3.reason,
+            },
+        }
+    })
+}
+
 fn print_report_lines(report: &CompatibilityReport) {
     println!(
         "compatibility_profile: {} (schema_version={})",
