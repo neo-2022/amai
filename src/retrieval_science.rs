@@ -281,6 +281,19 @@ mod tests {
     }
 
     #[test]
+    fn suite_metadata_loads_continuity_startup_suite() {
+        let suite = suite_metadata("continuity_startup").expect("suite metadata");
+        assert_eq!(
+            suite["manifest_path"].as_str(),
+            Some("scripts/proof_art_continuity_startup.sh")
+        );
+        assert_eq!(
+            suite["query_suite_version"].as_str(),
+            Some("continuity-startup-v1")
+        );
+    }
+
+    #[test]
     fn degradation_policy_includes_fail_closed_classes() {
         let policy = degradation_policy_json().expect("degradation policy");
         assert!(

@@ -258,6 +258,8 @@ pub struct ContinuityStartupArgs {
     pub repo_root: Option<PathBuf>,
     #[arg(long, default_value = "continuity")]
     pub namespace: String,
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -280,8 +282,6 @@ pub struct ContinuityAnswerArgs {
     pub chat_reference: Option<String>,
     #[arg(long)]
     pub at_time_rfc3339: Option<String>,
-    #[arg(long, default_value_t = false)]
-    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
