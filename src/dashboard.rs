@@ -4566,6 +4566,16 @@ fn working_state_live_card(snapshot: &Value) -> Value {
         "low" => "низкая",
         other => other,
     };
+    let included_reasons = working_state_decision_trace_summary(
+        &restore["latest_decision_trace"],
+        "included",
+        "ещё нет объяснения",
+    );
+    let excluded_reasons = working_state_decision_trace_summary(
+        &restore["latest_decision_trace"],
+        "not_included",
+        "ещё нет объяснения",
+    );
     let status = match restore_confidence {
         "high" | "medium" => "pass",
         _ if events_count.unwrap_or(0) > 0 => "alert",
@@ -4616,6 +4626,16 @@ fn working_state_live_card(snapshot: &Value) -> Value {
                 Some("Короткое человеческое описание того, что Amai считает последним реально полученным результатом."),
             ),
             metric_row(
+                "Почему включено",
+                included_reasons,
+                Some("Через какие retrieval-слои последний полезный контекст реально вошёл в рабочую линию и почему Amai посчитал их нужными."),
+            ),
+            metric_row(
+                "Почему не вошло",
+                excluded_reasons,
+                Some("Какие retrieval-слои в последнем запросе ничего не добавили и по какой причине они были честно пропущены."),
+            ),
+            metric_row(
                 "Активные файлы",
                 if active_files_preview.is_empty() {
                     format_u64(Some(active_files_count))
@@ -4645,6 +4665,43 @@ fn working_state_live_card(snapshot: &Value) -> Value {
         card = with_status_tooltip(card, &tooltip);
     }
     card
+}
+
+fn working_state_decision_trace_summary(trace: &Value, key: &str, fallback: &str) -> String {
+    let Some(items) = trace[key].as_array() else {
+        return fallback.to_string();
+    };
+    let parts = items
+        .iter()
+        .take(3)
+        .filter_map(|item| {
+            let strategy = item["strategy"].as_str()?;
+            let reason = item["reason"].as_str().unwrap_or_default();
+            let count = item["count"].as_u64();
+            let strategy_human = match strategy {
+                "exact_documents" => "точные совпадения",
+                "symbol_hits" => "совпадения по символам",
+                "lexical_chunks" => "лексические фрагменты",
+                "semantic_chunks" => "семантические фрагменты",
+                other => other,
+            };
+            let prefix = if let Some(value) = count {
+                format!("{strategy_human} ({value})")
+            } else {
+                strategy_human.to_string()
+            };
+            Some(if reason.is_empty() {
+                prefix
+            } else {
+                format!("{prefix}: {reason}")
+            })
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        fallback.to_string()
+    } else {
+        compact_dashboard_text(Some(&parts.join(" • ")), 132, fallback)
+    }
 }
 
 fn compare_table_card(
@@ -6378,6 +6435,21 @@ mod tests {
                     "next_step": "Вывести guardrail verdict в dashboard/service layer.",
                     "last_command": "continuity handoff",
                     "last_results_summary": "Зафиксирован handoff для art :: continuity",
+                    "latest_decision_trace": {
+                        "included": [
+                            {
+                                "strategy": "exact_documents",
+                                "count": 1,
+                                "reason": "Нашлись точные document/path совпадения внутри видимого контура."
+                            }
+                        ],
+                        "not_included": [
+                            {
+                                "strategy": "semantic_chunks",
+                                "reason": "Semantic layer честно abstained и не добавил фрагменты."
+                            }
+                        ]
+                    },
                     "active_files": [
                         "/home/art/agent-memory-index/src/observe.rs",
                         "/home/art/agent-memory-index/src/dashboard.rs"
@@ -6410,6 +6482,19 @@ mod tests {
                 .unwrap_or_default()
                 .contains("Сейчас Amai ведёт такую работу")
         );
+        let rows = cards[1]["rows"].as_array().expect("rows");
+        assert!(rows.iter().any(|row| {
+            row["label"].as_str() == Some("Почему включено")
+                && row["value"]
+                    .as_str()
+                    .is_some_and(|value| value.contains("точные совпадения"))
+        }));
+        assert!(rows.iter().any(|row| {
+            row["label"].as_str() == Some("Почему не вошло")
+                && row["value"]
+                    .as_str()
+                    .is_some_and(|value| value.contains("семантические фрагменты"))
+        }));
     }
 
     #[test]
