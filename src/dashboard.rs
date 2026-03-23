@@ -1178,14 +1178,23 @@ pub fn render_html(refresh_ms: u64) -> String {
         const link = document.createElement("a");
         link.href = href;
         link.textContent = label;
-        link.target = "_blank";
-        link.rel = "noreferrer";
+        if (/^https?:\/\//.test(href)) {
+          link.target = "_blank";
+          link.rel = "noreferrer";
+        }
         wrap.appendChild(link);
       } else {
         wrap.appendChild(textNode("span", "inline-copyable", label));
         wrap.appendChild(createCopyButton(copyValue));
       }
       return wrap;
+    }
+
+    function helpRouteForEnvVar(envVarName) {
+      if (envVarName === "AMI_GRAFANA_ADMIN_PASSWORD") {
+        return "/help/grafana-password";
+      }
+      return null;
     }
 
     function appendInlineNoteFragment(container, fragment) {
@@ -1197,6 +1206,31 @@ pub fn render_html(refresh_ms: u64) -> String {
           container.appendChild(document.createTextNode(fragment.slice(0, index)));
         }
         container.appendChild(createInlineCopyableText(matched, matched, matched));
+        const tail = fragment.slice(index + matched.length);
+        if (tail) {
+          appendInlineNoteFragment(container, tail);
+        }
+        return;
+      }
+
+      const envVarMatch = fragment.match(/\bAMI_[A-Z0-9_]+\b/);
+      if (envVarMatch) {
+        const [matched] = envVarMatch;
+        const index = fragment.indexOf(matched);
+        if (index > 0) {
+          container.appendChild(document.createTextNode(fragment.slice(0, index)));
+        }
+        const helpRoute = helpRouteForEnvVar(matched);
+        if (helpRoute) {
+          container.appendChild(createInlineCopyableText(matched, matched, helpRoute));
+        } else {
+          const envWrap = createInlineCopyableText(matched, matched);
+          const inlineEnv = envWrap.querySelector(".inline-copyable");
+          if (inlineEnv) {
+            inlineEnv.classList.add("inline-path");
+          }
+          container.appendChild(envWrap);
+        }
         const tail = fragment.slice(index + matched.length);
         if (tail) {
           appendInlineNoteFragment(container, tail);
@@ -1918,15 +1952,15 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
             .unwrap_or_else(|| "ещё нет данных".to_string()),
     );
 
-    vec![
-        compare_table_card(
+    let hot_load_status = hot_load_benchmark_status(hot_load, thresholds);
+    let mut hot_load_card = compare_table_card(
             "Hot Load Benchmark / latest_retrieval_load_hot",
             format!(
                 "Контур данных: latest_retrieval_load_hot.load_verification. Scope snapshot: {hot_load_scope}. Это отдельный hot-load прогон по прогретому быстрому пути. Он не равен retrieval.hot_p95_ms и не является живой телеметрией текущей сессии. Burst QPS здесь считается как success_count / wall_clock, а не как целый счётчик за полную секунду. В последнем прогоне это {} запросов за {}.",
                 format_u64(hot_load_sample_count),
                 format_ms(snapshot, hot_load["wall_clock_ms"].as_f64()),
             ),
-            hot_load_benchmark_status(hot_load, thresholds),
+            hot_load_status,
             Some(source_label(
                 &format!(
                     "Источник: benchmark snapshot latest_retrieval_load_hot.load_verification. Scope: {hot_load_scope}. Live-данные страницы сюда не подмешиваются"
@@ -2024,13 +2058,22 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     ),
                 ),
             ],
-        ),
-        compare_table_card(
+        );
+    if let Some(tooltip) = status_reason_tooltip(
+        hot_load_status,
+        hot_load_benchmark_reasons(snapshot, hot_load, thresholds),
+        "Hot-load benchmark вышел из своей нормы, но детальные причины пока не удалось собрать.",
+    ) {
+        hot_load_card = with_status_tooltip(hot_load_card, &tooltip);
+    }
+
+    let hot_retrieval_status = hot_retrieval_benchmark_status(hot_retrieval, thresholds);
+    let mut hot_retrieval_card = compare_table_card(
             "Hot Retrieval Benchmark / latest_retrieval_hot",
             format!(
                 "Контур данных: latest_retrieval_hot.benchmark. Scope snapshot: {hot_retrieval_scope}. Это именно источник SLA-метрики retrieval.hot_p95_ms. Это не hot-load benchmark и не живая телеметрия текущей сессии."
             ),
-            hot_retrieval_benchmark_status(hot_retrieval, thresholds),
+            hot_retrieval_status,
             Some(source_label(
                 &format!(
                     "Источник: benchmark snapshot latest_retrieval_hot.benchmark. Этот snapshot напрямую кормит SLA retrieval.hot_p95_ms. Scope: {hot_retrieval_scope}"
@@ -2115,11 +2158,20 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     ),
                 ),
             ],
-        ),
-        compare_table_card(
+        );
+    if let Some(tooltip) = status_reason_tooltip(
+        hot_retrieval_status,
+        hot_retrieval_benchmark_reasons(snapshot, hot_retrieval, thresholds),
+        "Hot retrieval benchmark вышел из своей нормы, но детальные причины пока не удалось собрать.",
+    ) {
+        hot_retrieval_card = with_status_tooltip(hot_retrieval_card, &tooltip);
+    }
+
+    let cold_status = cold_contour_status(snapshot);
+    let mut cold_card = compare_table_card(
             "Cold End-to-End Benchmark / latest_cold_path_benchmark",
             "Контур данных: latest_cold_path_benchmark.cold_benchmark. Это последний честный end-to-end cold benchmark по реальным репозиториям и query slices.".to_string(),
-            cold_contour_status(snapshot),
+            cold_status,
             Some(source_label(
                 "Источник: benchmark snapshot latest_cold_path_benchmark.cold_benchmark. Live-данные страницы сюда не подмешиваются",
                 cold_contour["captured_at_epoch_ms"].as_u64(),
@@ -2287,20 +2339,27 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                     ),
                 ),
             ],
+        );
+    if let Some(tooltip) = status_reason_tooltip(
+        cold_status,
+        cold_benchmark_reasons(snapshot, cold_contour),
+        "Cold end-to-end benchmark вышел из своей нормы, но детальные причины пока не удалось собрать.",
+    ) {
+        cold_card = with_status_tooltip(cold_card, &tooltip);
+    }
+
+    let accuracy_status = worst_status(
+        status_for_metric_prefix(snapshot, "accuracy.cross_project_leakage"),
+        worst_status(
+            status_for_metric_prefix(snapshot, "accuracy.symbol_precision"),
+            status_for_metric_prefix(snapshot, "accuracy.semantic_precision"),
         ),
-        with_table_orientation(
-            with_extra_class(
-                compare_table_card(
+    );
+    let mut accuracy_card = compare_table_card(
                     "Accuracy / Isolation Verification / latest_retrieval_accuracy",
                     "Контур данных: latest_retrieval_accuracy.accuracy_verification. Этот блок не потоковый: он показывает последний сохранённый accuracy/isolation verification contour. Карточка развернута по ширине, чтобы accuracy и isolation читались рядом и не сжимали остальные benchmark-блоки."
                         .to_string(),
-                    worst_status(
-                        status_for_metric_prefix(snapshot, "accuracy.cross_project_leakage"),
-                        worst_status(
-                            status_for_metric_prefix(snapshot, "accuracy.symbol_precision"),
-                            status_for_metric_prefix(snapshot, "accuracy.semantic_precision"),
-                        ),
-                    ),
+                    accuracy_status,
                     Some(source_label(
                         "Источник: benchmark snapshot latest_retrieval_accuracy.accuracy_verification. Live-данные страницы сюда не подмешиваются",
                         accuracy["captured_at_epoch_ms"].as_u64(),
@@ -2337,7 +2396,22 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                             ),
                         ),
                     ],
-                ),
+                );
+    if let Some(tooltip) = status_reason_tooltip(
+        accuracy_status,
+        accuracy_benchmark_reasons(accuracy, thresholds),
+        "Accuracy / isolation contour вышел из своей нормы, но детальные причины пока не удалось собрать.",
+    ) {
+        accuracy_card = with_status_tooltip(accuracy_card, &tooltip);
+    }
+
+    vec![
+        hot_load_card,
+        hot_retrieval_card,
+        cold_card,
+        with_table_orientation(
+            with_extra_class(
+                accuracy_card,
                 "benchmark-span-full",
             ),
             "transposed",
@@ -2372,6 +2446,301 @@ fn hot_retrieval_benchmark_status(hot_retrieval: &Value, thresholds: &Value) -> 
             thresholds["retrieval"]["hot_benchmark_table"]["target_warmup"].as_f64(),
         ),
     ])
+}
+
+fn hot_load_benchmark_reasons(snapshot: &Value, hot_load: &Value, thresholds: &Value) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let sample_count = hot_load["success_count"]
+        .as_u64()
+        .zip(hot_load["error_count"].as_u64())
+        .map(|(success, errors)| success + errors);
+
+    if let Some(reason) = failing_metric_reason_strict_more(
+        "Burst QPS",
+        hot_load["qps"].as_f64(),
+        thresholds["load"]["hot_qps"]["target"].as_f64(),
+        format_burst_qps_table(hot_load["qps"].as_f64()),
+        format_burst_qps_threshold(thresholds["load"]["hot_qps"]["target"].as_f64(), ">"),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_at_most_or_equal(
+        "Error rate",
+        hot_load["error_rate"].as_f64(),
+        thresholds["load"]["hot_error_rate"]["target"].as_f64(),
+        format_percent(hot_load["error_rate"].as_f64()),
+        format_zero_or_at_most_percent(
+            thresholds["load"]["hot_error_rate"].get("target").and_then(Value::as_f64),
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    for (label, value_key, target_key) in [
+        ("P50", "p50_ms", "target_p50_ms"),
+        ("P95", "p95_ms", "target_p95_ms"),
+        ("P99", "p99_ms", "target_p99_ms"),
+        ("Max", "max_ms", "target_max_ms"),
+    ] {
+        if let Some(reason) = failing_metric_reason_strict_less(
+            label,
+            hot_load[value_key].as_f64(),
+            thresholds["load"]["hot_benchmark_table"][target_key].as_f64(),
+            format_ms(snapshot, hot_load[value_key].as_f64()),
+            format_time_threshold(
+                snapshot,
+                thresholds["load"]["hot_benchmark_table"][target_key].as_f64(),
+                "<",
+            ),
+        ) {
+            reasons.push(reason);
+        }
+    }
+    if let Some(reason) = failing_metric_reason_strict_more(
+        "Workers",
+        hot_load["workers"].as_f64(),
+        thresholds["load"]["hot_benchmark_table"]["target_workers"].as_f64(),
+        format_u64(hot_load["workers"].as_u64()),
+        format_threshold_at_least(
+            thresholds["load"]["hot_benchmark_table"]["target_workers"].as_f64(),
+            "",
+            0,
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_strict_more(
+        "Выборка",
+        sample_count.map(|value| value as f64),
+        thresholds["load"]["hot_benchmark_table"]["target_sample_count"].as_f64(),
+        format_u64(sample_count),
+        format_threshold_at_least(
+            thresholds["load"]["hot_benchmark_table"]["target_sample_count"].as_f64(),
+            "",
+            0,
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    reasons
+}
+
+fn hot_retrieval_benchmark_reasons(
+    snapshot: &Value,
+    hot_retrieval: &Value,
+    thresholds: &Value,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    for (label, value_key, target_key) in [
+        ("P50", "p50_ms", "target_p50_ms"),
+        ("P95", "p95_ms", "target_p95_ms"),
+        ("P99", "p99_ms", "target_p99_ms"),
+        ("Max", "max_ms", "target_max_ms"),
+    ] {
+        if let Some(reason) = failing_metric_reason_strict_less(
+            label,
+            hot_retrieval[value_key].as_f64(),
+            thresholds["retrieval"]["hot_live_table"][target_key].as_f64(),
+            format_ms(snapshot, hot_retrieval[value_key].as_f64()),
+            format_time_threshold(
+                snapshot,
+                thresholds["retrieval"]["hot_live_table"][target_key].as_f64(),
+                "<",
+            ),
+        ) {
+            reasons.push(reason);
+        }
+    }
+    if let Some(reason) = failing_metric_reason_at_least_or_equal(
+        "Итерации",
+        hot_retrieval["iterations"].as_f64(),
+        thresholds["retrieval"]["hot_benchmark_table"]["target_iterations"].as_f64(),
+        format_u64(hot_retrieval["iterations"].as_u64()),
+        format_threshold_at_least_or_equal(
+            thresholds["retrieval"]["hot_benchmark_table"]["target_iterations"].as_f64(),
+            "",
+            0,
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_at_least_or_equal(
+        "Warmup",
+        hot_retrieval["warmup"].as_f64(),
+        thresholds["retrieval"]["hot_benchmark_table"]["target_warmup"].as_f64(),
+        format_u64(hot_retrieval["warmup"].as_u64()),
+        format_threshold_at_least_or_equal(
+            thresholds["retrieval"]["hot_benchmark_table"]["target_warmup"].as_f64(),
+            "",
+            0,
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    reasons
+}
+
+fn cold_benchmark_reasons(snapshot: &Value, cold_contour: &Value) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let profile = &cold_contour["profile"];
+    let summary = &cold_contour["machine_readable_summary"];
+    for (label, value_key, target_key) in [
+        ("Cold P50", "p50", "target_p50_ms"),
+        ("Cold P95", "p95", "target_p95_ms"),
+        ("Cold P99", "p99", "target_p99_ms"),
+        ("Cold Max", "max", "target_max_ms"),
+    ] {
+        if let Some(reason) = failing_metric_reason_strict_less(
+            label,
+            summary[value_key].as_f64(),
+            profile[target_key].as_f64(),
+            format_ms(snapshot, summary[value_key].as_f64()),
+            format_time_threshold(snapshot, profile[target_key].as_f64(), "<"),
+        ) {
+            reasons.push(reason);
+        }
+    }
+    for (label, value_key, target_key) in [
+        ("Precision", "precision", "min_precision"),
+        ("Recall", "recall", "min_recall"),
+        ("Hit rate", "hit_rate", "min_target_hit_rate"),
+    ] {
+        if let Some(reason) = failing_metric_reason_at_least_or_equal(
+            label,
+            summary[value_key].as_f64().map(|value| value * 100.0),
+            profile[target_key].as_f64().map(|value| value * 100.0),
+            format_ratio_percent(summary[value_key].as_f64()),
+            format_threshold_value(
+                profile[target_key].as_f64().map(|value| value * 100.0),
+                ">=",
+                "%",
+                2,
+            ),
+        ) {
+            reasons.push(reason);
+        }
+    }
+    for (label, value_key, target_key) in [
+        ("Выборка", "sample_count", "min_sample_count"),
+        ("Repo count", "repo_count", "min_repo_count"),
+        ("Query slices", "query_slice_count", "min_query_slice_count"),
+    ] {
+        if let Some(reason) = failing_metric_reason_at_least_or_equal(
+            label,
+            summary[value_key].as_f64(),
+            profile[target_key].as_f64(),
+            format_u64(summary[value_key].as_u64()),
+            format_threshold_at_least_or_equal(profile[target_key].as_f64(), "", 0),
+        ) {
+            reasons.push(reason);
+        }
+    }
+    if let Some(reason) = failing_metric_reason_strict_less(
+        "Duration",
+        summary["duration"].as_f64(),
+        profile["max_duration_seconds"].as_f64(),
+        format_seconds(snapshot, summary["duration"].as_f64()),
+        format_threshold_rendered(
+            "<",
+            format_seconds(snapshot, profile["max_duration_seconds"].as_f64()),
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_at_most_or_equal(
+        "Leakage",
+        summary["leakage"].as_f64(),
+        profile["max_leakage"].as_f64(),
+        format_u64(summary["leakage"].as_u64()),
+        format_threshold_value(profile["max_leakage"].as_f64(), "=", "", 0),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_at_most_or_equal(
+        "Error rate",
+        summary["error_rate"].as_f64().map(|value| value * 100.0),
+        profile["max_error_rate"].as_f64().map(|value| value * 100.0),
+        format_percent(summary["error_rate"].as_f64()),
+        format_zero_or_at_most_percent(
+            profile["max_error_rate"].as_f64().map(|value| value * 100.0),
+        ),
+    ) {
+        reasons.push(reason);
+    }
+    reasons
+}
+
+fn accuracy_benchmark_reasons(accuracy: &Value, thresholds: &Value) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if let Some(reason) = failing_metric_reason_at_most_or_equal(
+        "Leakage",
+        accuracy["cross_project_leakage"].as_f64(),
+        Some(0.0),
+        format_f64_count(accuracy["cross_project_leakage"].as_f64()),
+        "0".to_string(),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_at_least_or_equal(
+        "Symbol precision",
+        accuracy["symbol_precision"].as_f64().map(|value| value * 100.0),
+        thresholds["accuracy"]["symbol_precision"]["target"]
+            .as_f64()
+            .map(|value| value * 100.0),
+        format_ratio_percent(accuracy["symbol_precision"].as_f64()),
+        format_ratio_percent(thresholds["accuracy"]["symbol_precision"]["target"].as_f64()),
+    ) {
+        reasons.push(reason);
+    }
+    if let Some(reason) = failing_metric_reason_at_least_or_equal(
+        "Semantic precision",
+        accuracy["semantic_precision"].as_f64().map(|value| value * 100.0),
+        thresholds["accuracy"]["semantic_precision"]["target"]
+            .as_f64()
+            .map(|value| value * 100.0),
+        format_ratio_percent(accuracy["semantic_precision"].as_f64()),
+        format_ratio_percent(thresholds["accuracy"]["semantic_precision"]["target"].as_f64()),
+    ) {
+        reasons.push(reason);
+    }
+    reasons
+}
+
+fn sla_metric_reasons(snapshot: &Value, metrics: &[&str]) -> Vec<String> {
+    let mut reasons = Vec::new();
+    for metric in metrics {
+        if let Some(check) = snapshot["sla"]["checks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|check| check["metric"].as_str() == Some(*metric))
+        {
+            if check["status"].as_str() != Some("pass") {
+                reasons.push(humanize_check(snapshot, check));
+            }
+        } else {
+            reasons.push(format!("Для метрики {metric} пока нет свежего SLA-среза."));
+        }
+    }
+    reasons
+}
+
+fn live_latency_compare_status_tooltip(
+    overall_status: &str,
+    hot_assessment: &LiveLatencySliceAssessment,
+    cold_assessment: &LiveLatencySliceAssessment,
+) -> Option<String> {
+    let mut reasons = Vec::new();
+    if hot_assessment.status != "pass" {
+        reasons.push(format!("Повторный запрос: {}", hot_assessment.note));
+    }
+    if cold_assessment.status != "pass" {
+        reasons.push(format!("Первый запрос: {}", cold_assessment.note));
+    }
+    status_reason_tooltip(
+        overall_status,
+        reasons,
+        "Живой срез ещё не даёт устойчивой картины по обоим пользовательским режимам.",
+    )
 }
 
 fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
@@ -2475,7 +2844,15 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if session_events_total > 0 && session_events == 0 {
         session_card = with_status_tooltip(
             session_card,
-            "Это не ошибка. В этой сессии уже были живые retrieval-запросы, но пока ни один из них ещё не подтвердился как полезный без потери качества. Как только появится первый такой случай, главный KPI этой карточки начнёт считаться.",
+            "Статус пока не может считаться нормальным по следующим причинам:\n- В этой сессии уже были живые retrieval-запросы.\n- Но пока ни один из них ещё не подтвердился как полезный без потери качества.\n- Как только появится первый такой случай, главный KPI этой карточки начнёт считаться.",
+        );
+    } else if session_events > 0 && session_saved.unwrap_or_default() < 0 {
+        session_card = with_status_tooltip(
+            session_card,
+            &format!(
+                "Статус требует внимания по следующим причинам:\n- В strict verified live части текущей сессии экономия сейчас отрицательная: {}.\n- Это значит, что доставленный retrieval payload оказался тяжелее baseline.\n- Сырой live contour ниже показан отдельно и не отменяет этот verified verdict.",
+                format_signed_count(session_saved)
+            ),
         );
     }
 
@@ -2515,7 +2892,15 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if rolling_events_total > 0 && rolling_events == 0 {
         rolling_card = with_status_tooltip(
             rolling_card,
-            "Это не ошибка. В текущем рабочем окне уже есть живые retrieval-события, но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому окно ещё копит подтверждённую выборку.",
+            "Статус пока не может считаться нормальным по следующим причинам:\n- В текущем рабочем окне уже есть живые retrieval-события.\n- Но пока ни один случай ещё не подтвердился как полезный без потери качества.\n- Поэтому окно ещё копит подтверждённую выборку.",
+        );
+    } else if rolling_events > 0 && rolling_saved.unwrap_or_default() < 0 {
+        rolling_card = with_status_tooltip(
+            rolling_card,
+            &format!(
+                "Статус требует внимания по следующим причинам:\n- В strict verified live части рабочего окна экономия сейчас отрицательная: {}.\n- Это значит, что подтверждённый retrieval payload в окне оказался тяжелее baseline.",
+                format_signed_count(rolling_saved)
+            ),
         );
     }
 
@@ -2551,7 +2936,15 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if lifetime_events_total > 0 && lifetime_events == 0 {
         lifetime_card = with_status_tooltip(
             lifetime_card,
-            "Это не ошибка. История уже содержит живые retrieval-события, но пока ещё нет ни одного подтверждённого случая без потери качества. Поэтому накопительный KPI ещё не может считаться надёжным.",
+            "Статус пока не может считаться нормальным по следующим причинам:\n- История уже содержит живые retrieval-события.\n- Но пока ещё нет ни одного подтверждённого случая без потери качества.\n- Поэтому накопительный KPI ещё не может считаться надёжным.",
+        );
+    } else if lifetime_events > 0 && lifetime_saved.unwrap_or_default() < 0 {
+        lifetime_card = with_status_tooltip(
+            lifetime_card,
+            &format!(
+                "Статус требует внимания по следующим причинам:\n- В strict verified live части всей истории экономия сейчас отрицательная: {}.\n- Это значит, что подтверждённый retrieval payload по lifetime contour пока тяжелее baseline.",
+                format_signed_count(lifetime_saved)
+            ),
         );
     }
 
@@ -2700,11 +3093,14 @@ fn build_machine_cards(
         ));
         cards.extend(build_accelerator_cards(&machine.accelerators));
     } else {
-        cards.push(card(
-            "Машина",
-            "ещё нет данных".to_string(),
-            "Сводку по железу пока не удалось собрать автоматически.".to_string(),
-            "unknown",
+        cards.push(with_status_tooltip(
+            card(
+                "Машина",
+                "ещё нет данных".to_string(),
+                "Сводку по железу пока не удалось собрать автоматически.".to_string(),
+                "unknown",
+            ),
+            "Статус пока не может считаться нормальным по следующим причинам:\n- Автоматический сбор machine summary пока не дал результат.\n- Поэтому панель не может показать текущий профиль железа.",
         ));
     }
 
@@ -2736,11 +3132,14 @@ fn build_machine_cards(
         ));
     } else {
         cards.push(with_extra_class(
-            card(
-                "Установка",
-                "ещё не найдена".to_string(),
-                "state/install_state.json пока не найден, поэтому панель не видит последнюю user-facing установку.".to_string(),
-                "unknown",
+            with_status_tooltip(
+                card(
+                    "Установка",
+                    "ещё не найдена".to_string(),
+                    "state/install_state.json пока не найден, поэтому панель не видит последнюю user-facing установку.".to_string(),
+                    "unknown",
+                ),
+                "Статус пока не может считаться нормальным по следующим причинам:\n- Файл state/install_state.json пока не найден.\n- Без него панель не видит последнюю пользовательскую установку этого клиента.",
             ),
             "machine-compact",
         ));
@@ -2811,7 +3210,7 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
         ));
     }
 
-    card_with_rows(
+    let mut card = card_with_rows(
         "Локальный мусор и retention",
         value,
         note,
@@ -2867,7 +3266,15 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
                 Some("Сколько cleanup-target directories сейчас участвует в policy-driven контуре."),
             ),
         ],
-    )
+    );
+    if let Some(tooltip) = status_reason_tooltip(
+        artifact_cleanup_status(snapshot),
+        artifact_cleanup_warning(snapshot).into_iter().collect(),
+        "Cleanup contour видит локальный rebuildable хвост, который уже требует внимания.",
+    ) {
+        card = with_status_tooltip(card, &tooltip);
+    }
+    card
 }
 
 fn build_accelerator_cards(accelerators: &[AcceleratorSummary]) -> Vec<Value> {
@@ -3020,17 +3427,17 @@ fn build_accelerator_cards(accelerators: &[AcceleratorSummary]) -> Vec<Value> {
 }
 
 fn build_service_cards(snapshot: &Value) -> Vec<Value> {
-    vec![
-        card_with_rows(
+    let postgres_status = combine_statuses(&[
+        status_for_metric_name(snapshot, "postgres.query_probe_p95_ms"),
+        status_for_metric_name(snapshot, "postgres.connection_usage_ratio"),
+        status_for_metric_name(snapshot, "postgres.replica_lag_seconds"),
+        status_for_metric_name(snapshot, "postgres.deadlocks_total"),
+    ]);
+    let mut postgres_card = card_with_rows(
             "PostgreSQL",
             format_ms(snapshot, snapshot["postgres"]["query_probe_p95_ms"].as_f64()),
             "Живой probe базы метаданных, policy, проектов и continuity-снимков.".to_string(),
-            combine_statuses(&[
-                status_for_metric_name(snapshot, "postgres.query_probe_p95_ms"),
-                status_for_metric_name(snapshot, "postgres.connection_usage_ratio"),
-                status_for_metric_name(snapshot, "postgres.replica_lag_seconds"),
-                status_for_metric_name(snapshot, "postgres.deadlocks_total"),
-            ]),
+            postgres_status,
             Some("Источник: живой PostgreSQL probe, обновляется на каждом refresh dashboard".to_string()),
             Some("PostgreSQL probe — это короткий живой замер базы метаданных, а не исторический benchmark.".to_string()),
             vec![
@@ -3069,15 +3476,32 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Скорость записи журнала WAL между snapshot-ами."),
                 ),
             ],
+        );
+    if let Some(tooltip) = status_reason_tooltip(
+        postgres_status,
+        sla_metric_reasons(
+            snapshot,
+            &[
+                "postgres.query_probe_p95_ms",
+                "postgres.connection_usage_ratio",
+                "postgres.replica_lag_seconds",
+                "postgres.deadlocks_total",
+            ],
         ),
-        card_with_rows(
+        "Живой PostgreSQL probe вышел из своей нормы.",
+    ) {
+        postgres_card = with_status_tooltip(postgres_card, &tooltip);
+    }
+
+    let qdrant_live_status = combine_statuses(&[
+        status_for_metric_name(snapshot, "qdrant.index_optimize_queue"),
+        status_for_metric_name(snapshot, "qdrant.update_queue_length"),
+    ]);
+    let mut qdrant_live_card = card_with_rows(
             "Qdrant Amai live",
             format_optional(snapshot["qdrant"]["memory_resident_bytes"].as_f64(), human_bytes),
             "Живые системные показатели векторного слоя. Здесь показаны только действительно живые системные числа, а не исторический search-benchmark.".to_string(),
-            combine_statuses(&[
-                status_for_metric_name(snapshot, "qdrant.index_optimize_queue"),
-                status_for_metric_name(snapshot, "qdrant.update_queue_length"),
-            ]),
+            qdrant_live_status,
             Some("Источник: live Qdrant /metrics Amai, обновляется на каждом refresh dashboard".to_string()),
             Some("Qdrant — векторный слой. Он помогает recall, но не является source of truth для continuity или кода.".to_string()),
             vec![
@@ -3117,17 +3541,33 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Сколько сегментов сейчас держит Qdrant. Много мелких сегментов может быть признаком будущей оптимизации."),
                 ),
             ],
+        );
+    if let Some(tooltip) = status_reason_tooltip(
+        qdrant_live_status,
+        sla_metric_reasons(
+            snapshot,
+            &["qdrant.index_optimize_queue", "qdrant.update_queue_length"],
         ),
-        benchmark_qdrant_live_card(snapshot),
-        card_with_rows(
+        "Живой контур Qdrant вышел из своей нормы.",
+    ) {
+        qdrant_live_card = with_status_tooltip(qdrant_live_card, &tooltip);
+    }
+
+    let mut benchmark_qdrant_card = benchmark_qdrant_live_card(snapshot);
+    if let Some(tooltip) = benchmark_qdrant_status_tooltip(snapshot) {
+        benchmark_qdrant_card = with_status_tooltip(benchmark_qdrant_card, &tooltip);
+    }
+
+    let nats_status = combine_statuses(&[
+        status_for_metric_name(snapshot, "nats.publish_probe_p95_ms"),
+        status_for_metric_name(snapshot, "nats.consumer_lag_msgs"),
+        status_for_metric_name(snapshot, "nats.jetstream_disk_usage_ratio"),
+    ]);
+    let mut nats_card = card_with_rows(
             "NATS / JetStream",
             format_ms(snapshot, snapshot["nats"]["publish_probe_p95_ms"].as_f64()),
             "Живой probe очереди событий и фонового work plane.".to_string(),
-            combine_statuses(&[
-                status_for_metric_name(snapshot, "nats.publish_probe_p95_ms"),
-                status_for_metric_name(snapshot, "nats.consumer_lag_msgs"),
-                status_for_metric_name(snapshot, "nats.jetstream_disk_usage_ratio"),
-            ]),
+            nats_status,
             Some("Источник: живой NATS/JetStream probe, обновляется на каждом refresh dashboard".to_string()),
             Some("NATS / JetStream — event и work plane для фоновых событий и очередей.".to_string()),
             vec![
@@ -3165,8 +3605,23 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                     Some("Текущая доля занятого диска JetStream."),
                 ),
             ],
+        );
+    if let Some(tooltip) = status_reason_tooltip(
+        nats_status,
+        sla_metric_reasons(
+            snapshot,
+            &[
+                "nats.publish_probe_p95_ms",
+                "nats.consumer_lag_msgs",
+                "nats.jetstream_disk_usage_ratio",
+            ],
         ),
-    ]
+        "Живой контур NATS / JetStream вышел из своей нормы.",
+    ) {
+        nats_card = with_status_tooltip(nats_card, &tooltip);
+    }
+
+    vec![postgres_card, qdrant_live_card, benchmark_qdrant_card, nats_card]
 }
 
 fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
@@ -3310,6 +3765,67 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
         "title_tooltip": Some("Это отдельный инстанс Qdrant для внешнего benchmark-прогона. Он не должен смешиваться с основным Qdrant Amai.".to_string()),
         "rows": rows,
     })
+}
+
+fn benchmark_qdrant_status_tooltip(snapshot: &Value) -> Option<String> {
+    let benchmark = &snapshot["benchmark_qdrant"];
+    let configured = benchmark["configured"].as_bool().unwrap_or(false);
+    let available = benchmark["available"].as_bool().unwrap_or(false);
+    let active = benchmark["active"].as_bool().unwrap_or(false);
+    let from_last_success = benchmark["from_last_success"].as_bool().unwrap_or(false);
+    let status = if !configured {
+        "unknown"
+    } else if !active || !available {
+        "alert"
+    } else {
+        combine_statuses(&[
+            status_at_most_or_equal(
+                benchmark["index_optimize_queue"].as_f64(),
+                snapshot["thresholds"]["qdrant"]["optimize_queue"]["target"].as_f64(),
+            ),
+            status_at_most_or_equal(
+                benchmark["update_queue_length"].as_f64(),
+                snapshot["thresholds"]["qdrant"]["update_queue_length"]["target"].as_f64(),
+            ),
+        ])
+    };
+    let mut reasons = Vec::new();
+    if !configured {
+        reasons.push("Отдельный benchmark-Qdrant ещё не настроен.".to_string());
+    }
+    if configured && !active {
+        reasons.push("Внешний benchmark сейчас не запущен, поэтому карточка живёт по последнему срезу, а не по текущему потоку.".to_string());
+    }
+    if configured && !available && from_last_success {
+        reasons.push("Живой benchmark-Qdrant сейчас недоступен, поэтому панель держится на последнем успешном срезе.".to_string());
+    } else if configured && !available {
+        reasons.push("Живой benchmark-Qdrant сейчас недоступен.".to_string());
+    }
+    if active && available {
+        if let Some(reason) = failing_metric_reason_at_most_or_equal(
+            "Optimize queue",
+            benchmark["index_optimize_queue"].as_f64(),
+            snapshot["thresholds"]["qdrant"]["optimize_queue"]["target"].as_f64(),
+            format_f64_count(benchmark["index_optimize_queue"].as_f64()),
+            format_f64_count(snapshot["thresholds"]["qdrant"]["optimize_queue"]["target"].as_f64()),
+        ) {
+            reasons.push(reason);
+        }
+        if let Some(reason) = failing_metric_reason_at_most_or_equal(
+            "Update queue",
+            benchmark["update_queue_length"].as_f64(),
+            snapshot["thresholds"]["qdrant"]["update_queue_length"]["target"].as_f64(),
+            format_f64_count(benchmark["update_queue_length"].as_f64()),
+            format_f64_count(snapshot["thresholds"]["qdrant"]["update_queue_length"]["target"].as_f64()),
+        ) {
+            reasons.push(reason);
+        }
+    }
+    status_reason_tooltip(
+        status,
+        reasons,
+        "Контур внешнего benchmark-Qdrant сейчас не выглядит устойчивым.",
+    )
 }
 
 fn build_warnings(snapshot: &Value) -> Vec<String> {
@@ -3562,6 +4078,11 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
         "title_tooltip": "Показывает, как быстро Amai отвечает прямо сейчас в двух обычных ситуациях: когда похожий запрос уже был и когда запрос идёт впервые. Верхние числа — это обычное время ответа в этих двух случаях. Это не сводка по всей работе Amai: сюда не входят сохранённые проверки, служебные прогоны и другие отдельные рабочие линии.",
         "status": overall_status,
         "status_label": status_label(overall_status),
+        "status_tooltip": live_latency_compare_status_tooltip(
+            overall_status,
+            &hot_assessment,
+            &cold_assessment,
+        ),
         "source_label": "Источник: живая retrieval-выборка текущей сессии из token_budget live lane, обновляется при новых context-pack запросах. Benchmark-данные сюда не подмешиваются.",
         "note": "",
         "metrics": [
@@ -3624,14 +4145,17 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
 fn working_state_live_card(snapshot: &Value) -> Value {
     let restore = &snapshot["latest_working_state_restore"]["working_state_restore"];
     if !restore.is_object() {
-        return card_with_rows(
-            "Текущая работа",
-            "ещё нет данных".to_string(),
-            "Пока ещё нет последнего рабочего снимка, поэтому панель не может показать текущую линию работы Amai.".to_string(),
-            "unknown",
-            Some("Источник: latest_working_state_restore.working_state_restore".to_string()),
-            Some("Показывает, чем Amai действительно занят сейчас: какая цель активна, какой следующий шаг он держит, какая команда была последней и какие файлы остаются в работе. Это не замер скорости ответа, а снимок текущей рабочей линии.".to_string()),
-            vec![],
+        return with_status_tooltip(
+            card_with_rows(
+                "Текущая работа",
+                "ещё нет данных".to_string(),
+                "Пока ещё нет последнего рабочего снимка, поэтому панель не может показать текущую линию работы Amai.".to_string(),
+                "unknown",
+                Some("Источник: latest_working_state_restore.working_state_restore".to_string()),
+                Some("Показывает, чем Amai действительно занят сейчас: какая цель активна, какой следующий шаг он держит, какая команда была последней и какие файлы остаются в работе. Это не замер скорости ответа, а снимок текущей рабочей линии.".to_string()),
+                vec![],
+            ),
+            "Статус пока не может считаться нормальным по следующим причинам:\n- Последний working-state restore snapshot ещё не появился.\n- Без этого снимка панель не видит текущую рабочую линию Amai.",
         );
     }
 
@@ -3688,7 +4212,7 @@ fn working_state_live_card(snapshot: &Value) -> Value {
         _ => "unknown",
     };
 
-    card_with_rows(
+    let mut card = card_with_rows(
         "Текущая работа",
         current_goal,
         format!(
@@ -3741,7 +4265,21 @@ fn working_state_live_card(snapshot: &Value) -> Value {
                 Some("Сколько недавних retrieval-запросов вошло в working-state restore. Здесь может быть 0, если работа шла через continuity/proof, а не через live retrieval."),
             ),
         ],
-    )
+    );
+    if status != "pass" {
+        let tooltip = if status == "alert" {
+            format!(
+                "Статус требует внимания по следующим причинам:\n- Restore confidence сейчас = {}.\n- Рабочая линия уже содержит {} событий, но уверенность снимка пока недостаточна, чтобы считать её устойчивой.\n- Следующий обязательный шаг сейчас: {}.",
+                restore_confidence,
+                format_u64(events_count),
+                next_step
+            )
+        } else {
+            "Статус пока не может считаться нормальным по следующим причинам:\n- Рабочая линия ещё не накопила достаточного restore snapshot.\n- Пока панель видит только предварительный или пустой рабочий след.".to_string()
+        };
+        card = with_status_tooltip(card, &tooltip);
+    }
+    card
 }
 
 fn compare_table_card(
@@ -3759,6 +4297,7 @@ fn compare_table_card(
         "note": note,
         "status": status,
         "status_label": status_label(status),
+        "status_tooltip": Value::Null,
         "source_label": source_label,
         "title_tooltip": title_tooltip,
         "headline_value": headline_value,
@@ -3837,6 +4376,95 @@ fn prefixed_metric_label(prefix: &str, metric: &str) -> String {
         metric.to_string()
     } else {
         format!("{prefix} {metric}")
+    }
+}
+
+fn status_reason_tooltip(status: &str, reasons: Vec<String>, fallback: &str) -> Option<String> {
+    if status == "pass" {
+        return None;
+    }
+    let intro = match status {
+        "critical" => "Статус стал критичным по следующим причинам:",
+        "alert" => "Статус требует внимания по следующим причинам:",
+        "waiting" => "Статус пока не может считаться нормальным по следующим причинам:",
+        _ => "Статус пока не может считаться нормальным по следующим причинам:",
+    };
+    if reasons.is_empty() {
+        Some(format!("{intro}\n- {fallback}"))
+    } else {
+        Some(format!("{intro}\n- {}", reasons.join("\n- ")))
+    }
+}
+
+fn failing_metric_reason_strict_less(
+    label: &str,
+    current: Option<f64>,
+    target: Option<f64>,
+    current_value: String,
+    target_value: String,
+) -> Option<String> {
+    match (current, target) {
+        (Some(current), Some(target)) if current < target => None,
+        (Some(_), Some(_)) => Some(format!(
+            "{label} вышел за эталон: сейчас {current_value}, цель {target_value}."
+        )),
+        _ => Some(format!(
+            "{label} пока нельзя оценить: не хватает текущего значения или эталона."
+        )),
+    }
+}
+
+fn failing_metric_reason_strict_more(
+    label: &str,
+    current: Option<f64>,
+    target: Option<f64>,
+    current_value: String,
+    target_value: String,
+) -> Option<String> {
+    match (current, target) {
+        (Some(current), Some(target)) if current > target => None,
+        (Some(_), Some(_)) => Some(format!(
+            "{label} ниже эталона: сейчас {current_value}, цель {target_value}."
+        )),
+        _ => Some(format!(
+            "{label} пока нельзя оценить: не хватает текущего значения или эталона."
+        )),
+    }
+}
+
+fn failing_metric_reason_at_most_or_equal(
+    label: &str,
+    current: Option<f64>,
+    target: Option<f64>,
+    current_value: String,
+    target_value: String,
+) -> Option<String> {
+    match (current, target) {
+        (Some(current), Some(target)) if current <= target => None,
+        (Some(_), Some(_)) => Some(format!(
+            "{label} вышел за допустимую границу: сейчас {current_value}, цель {target_value}."
+        )),
+        _ => Some(format!(
+            "{label} пока нельзя оценить: не хватает текущего значения или эталона."
+        )),
+    }
+}
+
+fn failing_metric_reason_at_least_or_equal(
+    label: &str,
+    current: Option<f64>,
+    target: Option<f64>,
+    current_value: String,
+    target_value: String,
+) -> Option<String> {
+    match (current, target) {
+        (Some(current), Some(target)) if current >= target => None,
+        (Some(_), Some(_)) => Some(format!(
+            "{label} ниже минимально допустимого уровня: сейчас {current_value}, цель {target_value}."
+        )),
+        _ => Some(format!(
+            "{label} пока нельзя оценить: не хватает текущего значения или эталона."
+        )),
     }
 }
 
@@ -5378,6 +6006,18 @@ mod tests {
         assert_eq!(cards[0]["title"].as_str(), Some("Скорость ответа"));
         assert_eq!(cards[1]["title"].as_str(), Some("Текущая работа"));
         assert!(
+            cards[0]["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+        );
+        assert!(
+            cards[1]["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Restore confidence")
+        );
+        assert!(
             cards[1]["note"]
                 .as_str()
                 .unwrap_or_default()
@@ -5560,7 +6200,7 @@ mod tests {
             cards[0]["status_tooltip"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("Это не ошибка.")
+                .contains("ни один из них ещё не подтвердился")
         );
         assert!(
             cards[0]["note"]
