@@ -2585,18 +2585,14 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 compare_table_row(
                     "Duration",
                     if cold_live_running {
-                        "Сколько уже длится текущий живой прогон. Пока это не финальное время завершённого benchmark."
+                        "Сколько чистого benchmark-времени уже накоплено по завершённым cold-case. Это та же метрика, которая станет финальной `Duration` после завершения прогона."
                     } else {
                         "Сколько длился полный последний cold benchmark."
                     },
                     format_seconds_compare_pair(
                         snapshot,
                         cold_contour["profile"]["max_duration_seconds"].as_f64(),
-                        if cold_live_running {
-                            live_elapsed_seconds
-                        } else {
-                            cold_contour["machine_readable_summary"]["duration"].as_f64()
-                        },
+                        cold_contour["machine_readable_summary"]["duration"].as_f64(),
                         "<",
                     ),
                 ),
@@ -7203,10 +7199,12 @@ mod tests {
     #[test]
     fn cold_benchmark_card_switches_to_live_progress_when_run_is_active() {
         let snapshot = json!({
+            "captured_at_epoch_ms": 120_000u64,
             "cold_path_benchmark_progress": {
                 "cold_benchmark_progress": {
                     "state": "running",
                     "captured_at_epoch_ms": 10,
+                    "started_at_epoch_ms": 0,
                     "phase": "running",
                     "progress": {
                         "completed_case_count": 128,
@@ -7238,7 +7236,7 @@ mod tests {
                         "sample_count": 128,
                         "repo_count": 32,
                         "query_slice_count": 64,
-                        "duration": 312.0,
+                        "duration": 9.5,
                         "run_wall_clock_duration": 312.0,
                         "leakage": 0,
                         "error_rate": 0.0
@@ -7373,8 +7371,16 @@ mod tests {
             Some("128 из 442")
         );
         assert_eq!(
+            cold_card["table"]["rows"][1]["values"][1].as_str(),
+            Some("120 s")
+        );
+        assert_eq!(
             cold_card["table"]["rows"][3]["values"][1].as_str(),
             Some("1.777 ms")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][12]["values"][1].as_str(),
+            Some("9.5 s")
         );
         assert!(
             cold_card["status_tooltip"]
