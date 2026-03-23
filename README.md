@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 18:09 MSK
-Ручная сверка guide/docs: 2026-03-23 18:09 MSK
+modified_at: 2026-03-23 18:37 MSK
+Ручная сверка guide/docs: 2026-03-23 18:37 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1151,6 +1151,18 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 - заменяется ли старое значение новым при update;
 - не течёт ли память между agent scopes;
 - не течёт ли archival memory между проектами.
+- дополнительно раскладывает результат в один канонический `canonical_eval` слой:
+  - `hit_correct_target`
+  - `hit_wrong_target`
+  - `stale_target`
+  - `under_retrieved`
+  - `over_included`
+  - `recovered_useful`
+  - `not_useful`
+- этот слой теперь живёт не внутри одной матрицы, а в общем shared-контуре:
+  - catalog и versioning — `config/retrieval_science.toml`
+  - canonical verdict semantics — `src/eval_verdict.rs`
+  - `proof_memory_task_matrix.sh` гоняет матрицу два раза подряд, чтобы повторный прогон не ломался на continuity/idempotency path.
 
 Что это даёт простыми словами:
 - `list`

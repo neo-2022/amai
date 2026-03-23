@@ -20,12 +20,15 @@ pub struct RetrievalSciencePolicy {
     pub lineage_model_version: String,
     pub workspace_graph_model_version: String,
     pub artifact_lineage_model_version: String,
+    pub eval_verdict_model_version: String,
     pub same_input_same_verdict_required: bool,
     pub machine_variance_policy: String,
     pub truth_ranking: Vec<String>,
     pub fail_closed_classes: Vec<String>,
     pub graceful_fallback_classes: Vec<String>,
     pub execution_states: Vec<String>,
+    #[serde(default)]
+    pub eval_verdict_classes: BTreeMap<String, EvalVerdictClass>,
     #[serde(default)]
     pub degradation_matrix: BTreeMap<String, DegradationMatrixEntry>,
     #[serde(default)]
@@ -50,6 +53,12 @@ pub struct DegradationMatrixEntry {
     pub user_signal: String,
     pub evidence_source: String,
     pub runbook: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EvalVerdictClass {
+    pub title: String,
+    pub summary: String,
 }
 
 static POLICY: OnceLock<Result<RetrievalSciencePolicy, String>> = OnceLock::new();
@@ -164,6 +173,34 @@ pub fn execution_state_catalog_json() -> Result<Value> {
     }))
 }
 
+pub fn eval_verdict_catalog_json() -> Result<Value> {
+    let policy = load_policy()?;
+    let classes = policy
+        .eval_verdict_classes
+        .iter()
+        .map(|(class_key, entry)| {
+            json!({
+                "class_key": class_key,
+                "title": entry.title,
+                "summary": entry.summary,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "eval_verdict_model_version": policy.eval_verdict_model_version,
+        "classes": classes,
+    }))
+}
+
+pub fn validate_eval_verdict_class(class_key: &str) -> Result<()> {
+    let policy = load_policy()?;
+    if policy.eval_verdict_classes.contains_key(class_key) {
+        Ok(())
+    } else {
+        Err(anyhow!("unknown eval verdict class: {class_key}"))
+    }
+}
+
 pub fn workspace_graph_catalog_json() -> Result<Value> {
     let policy = load_policy()?;
     Ok(json!({
@@ -177,8 +214,9 @@ pub fn workspace_graph_catalog_json() -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        degradation_matrix_json, degradation_policy_json, execution_state_catalog_json,
-        suite_metadata, workspace_graph_catalog_json,
+        degradation_matrix_json, degradation_policy_json, eval_verdict_catalog_json,
+        execution_state_catalog_json, suite_metadata, validate_eval_verdict_class,
+        workspace_graph_catalog_json,
     };
 
     #[test]
@@ -246,6 +284,32 @@ mod tests {
             catalog["artifact_lineage_model_version"].as_str(),
             Some("artifact-lineage-v1")
         );
+    }
+
+    #[test]
+    fn eval_verdict_catalog_exposes_requested_classes() {
+        let catalog = eval_verdict_catalog_json().expect("eval verdict catalog");
+        assert_eq!(
+            catalog["eval_verdict_model_version"].as_str(),
+            Some("memory-eval-verdict-v1")
+        );
+        let classes = catalog["classes"].as_array().expect("classes");
+        assert!(
+            classes
+                .iter()
+                .any(|entry| entry["class_key"].as_str() == Some("hit_correct_target"))
+        );
+        assert!(
+            classes
+                .iter()
+                .any(|entry| entry["class_key"].as_str() == Some("recovered_useful"))
+        );
+    }
+
+    #[test]
+    fn validate_eval_verdict_class_rejects_unknown_class() {
+        validate_eval_verdict_class("hit_correct_target").expect("known class");
+        assert!(validate_eval_verdict_class("made_up").is_err());
     }
 
     #[test]

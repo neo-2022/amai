@@ -1,7 +1,9 @@
 use crate::bootstrap;
 use crate::cli::VerifyMemoryMatrixArgs;
 use crate::config::AppConfig;
+use crate::eval_verdict::{self, EvalPattern, EvalSignals};
 use crate::postgres;
+use crate::retrieval_science;
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -42,6 +44,7 @@ struct MatrixTask {
     order: u32,
     class: MemoryTaskClass,
     layer: MemoryLayer,
+    eval_pattern: EvalPattern,
     display_name: String,
     kind: MemoryTaskKind,
     project: String,
@@ -262,6 +265,7 @@ async fn run_matrix_inner(
             "matrix": args.matrix,
             "display_name": matrix.display_name,
             "summary": matrix.summary,
+            "retrieval_science": retrieval_science::suite_metadata("memory_task_matrix")?,
             "source": {
                 "display_name": source.display_name,
                 "summary": source.summary,
@@ -278,6 +282,9 @@ async fn run_matrix_inner(
             "gate_failures": gate_failures,
             "class_breakdown": class_breakdown,
             "layer_breakdown": layer_breakdown,
+            "canonical_eval": eval_verdict::summarize_eval_layer(
+                task_results.iter().map(|task| task.eval_verdict_class.as_str())
+            )?,
             "tasks": task_results.iter().map(TaskResult::as_json).collect::<Vec<_>>(),
         }
     });
@@ -361,6 +368,10 @@ async fn run_task(
         0.0
     };
     let success = answer_ok && penalty_points == 0;
+    let eval = eval_verdict::derive_eval_verdict(
+        task.eval_pattern,
+        &EvalSignals::from_details(&details, task.expected_answer.is_some()),
+    )?;
     Ok(TaskResult {
         code: task_code.to_string(),
         class: task.class,
@@ -373,6 +384,8 @@ async fn run_task(
         expected_operation_count: task.expected_operation_count,
         actual_operation_count,
         penalty_points,
+        eval_verdict_class: eval.class_key,
+        eval_reason: eval.reason,
         details,
     })
 }
@@ -413,6 +426,9 @@ async fn run_core_read_task(
     );
     Ok(json!({
         "answer_ok": answer_ok,
+        "expected_present": answer_ok,
+        "unexpected_present": false,
+        "recovered_state": true,
         "actual_operation_count": 3,
         "expected_answer": task.expected_answer,
         "materialized_notes": restore["working_state_restore"]["materialized_notes"].clone(),
@@ -456,6 +472,9 @@ async fn run_core_write_task(
     );
     Ok(json!({
         "answer_ok": answer_ok,
+        "expected_present": answer_ok,
+        "unexpected_present": false,
+        "recovered_state": true,
         "actual_operation_count": 3,
         "expected_answer": task.expected_answer,
         "prompt_text_excerpt": first_chars(restore["chat_start_restore"]["prompt_text"].as_str().unwrap_or_default(), 220),
@@ -512,13 +531,18 @@ async fn run_core_update_task(
         .as_str()
         .unwrap_or_default()
         .to_string();
-    let answer_ok = current_goal.contains(task.expected_answer.as_deref().unwrap_or_default())
-        && task
-            .unexpected_answer
-            .as_deref()
-            .is_none_or(|unexpected| !current_goal.contains(unexpected));
+    let expected_present =
+        current_goal.contains(task.expected_answer.as_deref().unwrap_or_default());
+    let unexpected_present = task
+        .unexpected_answer
+        .as_deref()
+        .is_some_and(|unexpected| current_goal.contains(unexpected));
+    let answer_ok = expected_present && !unexpected_present;
     Ok(json!({
         "answer_ok": answer_ok,
+        "expected_present": expected_present,
+        "unexpected_present": unexpected_present,
+        "recovered_state": true,
         "actual_operation_count": 4,
         "expected_answer": task.expected_answer,
         "unexpected_answer": task.unexpected_answer,
@@ -570,9 +594,14 @@ async fn run_core_scope_isolation_task(
         .expected_error_contains
         .as_deref()
         .unwrap_or("no working-state restore bundle found");
-    let answer_ok = owner_ok && isolated.contains(expected_error);
+    let fail_closed_ok = isolated.contains(expected_error);
+    let answer_ok = owner_ok && fail_closed_ok;
     Ok(json!({
         "answer_ok": answer_ok,
+        "expected_present": owner_ok,
+        "unexpected_present": false,
+        "boundary_clean": fail_closed_ok,
+        "fail_closed_ok": fail_closed_ok,
         "actual_operation_count": 4,
         "owner_scope": owner_scope,
         "isolated_scope": isolated_scope,
@@ -608,6 +637,9 @@ async fn run_archival_read_task(
     );
     Ok(json!({
         "answer_ok": answer_ok,
+        "expected_present": answer_ok,
+        "unexpected_present": false,
+        "recovered_state": false,
         "actual_operation_count": 2,
         "expected_answer": task.expected_answer,
         "visible_projects": response["visible_projects"].clone(),
@@ -641,6 +673,9 @@ async fn run_archival_write_task(
     );
     Ok(json!({
         "answer_ok": answer_ok,
+        "expected_present": answer_ok,
+        "unexpected_present": false,
+        "recovered_state": false,
         "actual_operation_count": 2,
         "expected_answer": task.expected_answer,
         "retrieval_runtime_ms": response["retrieval_runtime"]["total_ms"].clone(),
@@ -677,13 +712,17 @@ async fn run_archival_update_task(
     )
     .await?;
     let expected = task.expected_answer.as_deref().unwrap_or_default();
-    let answer_ok = value_contains(&response, expected)
-        && task
-            .unexpected_answer
-            .as_deref()
-            .is_none_or(|unexpected| !value_contains(&response, unexpected));
+    let expected_present = value_contains(&response, expected);
+    let unexpected_present = task
+        .unexpected_answer
+        .as_deref()
+        .is_some_and(|unexpected| value_contains(&response, unexpected));
+    let answer_ok = expected_present && !unexpected_present;
     Ok(json!({
         "answer_ok": answer_ok,
+        "expected_present": expected_present,
+        "unexpected_present": unexpected_present,
+        "recovered_state": true,
         "actual_operation_count": 3,
         "expected_answer": task.expected_answer,
         "unexpected_answer": task.unexpected_answer,
@@ -734,9 +773,14 @@ async fn run_archival_project_isolation_task(
         .as_deref()
         .is_some_and(|unexpected| value_contains(&response, unexpected));
     let visible_projects = collect_visible_projects(&response["visible_projects"]);
-    let answer_ok = !leaked && !visible_projects.iter().any(|item| item == project);
+    let boundary_clean = !leaked && !visible_projects.iter().any(|item| item == project);
+    let answer_ok = boundary_clean;
     Ok(json!({
         "answer_ok": answer_ok,
+        "expected_present": false,
+        "unexpected_present": leaked,
+        "boundary_clean": boundary_clean,
+        "fail_closed_ok": boundary_clean,
         "actual_operation_count": 3,
         "unexpected_answer": task.unexpected_answer,
         "visible_projects": visible_projects,
@@ -1050,6 +1094,8 @@ struct TaskResult {
     expected_operation_count: usize,
     actual_operation_count: usize,
     penalty_points: u64,
+    eval_verdict_class: String,
+    eval_reason: String,
     details: Value,
 }
 
@@ -1067,6 +1113,8 @@ impl TaskResult {
             "expected_operation_count": self.expected_operation_count,
             "actual_operation_count": self.actual_operation_count,
             "penalty_points": self.penalty_points,
+            "eval_verdict_class": self.eval_verdict_class,
+            "eval_reason": self.eval_reason,
             "details": self.details,
         })
     }
@@ -1074,7 +1122,10 @@ impl TaskResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemoryLayer, MemoryTaskClass, load_registry};
+    use super::{MatrixTask, MemoryLayer, MemoryTaskClass, load_registry};
+    use crate::eval_verdict::EvalPattern;
+    use crate::eval_verdict::{EvalSignals, derive_eval_verdict};
+    use serde_json::json;
 
     #[test]
     fn registry_loads_with_required_matrix() {
@@ -1098,5 +1149,81 @@ mod tests {
         assert!(has_core);
         assert!(has_archival);
         assert!(has_isolation);
+    }
+
+    fn fake_task(eval_pattern: EvalPattern) -> MatrixTask {
+        MatrixTask {
+            order: 1,
+            class: MemoryTaskClass::Read,
+            layer: MemoryLayer::Core,
+            eval_pattern,
+            display_name: "fake".to_string(),
+            kind: super::MemoryTaskKind::CoreRead,
+            project: "fake".to_string(),
+            project_display_name: None,
+            namespace: "fake".to_string(),
+            related_project: None,
+            related_project_display_name: None,
+            related_namespace: None,
+            question: None,
+            headline: None,
+            next_step: None,
+            updated_headline: None,
+            updated_next_step: None,
+            expected_answer: Some("expected".to_string()),
+            unexpected_answer: Some("stale".to_string()),
+            expected_error_contains: None,
+            expected_operation_count: 1,
+            agent_scope: None,
+            isolated_agent_scope: None,
+            bootstrap_lines: Vec::new(),
+            details_lines: Vec::new(),
+            updated_bootstrap_lines: Vec::new(),
+            updated_details_lines: Vec::new(),
+            related_bootstrap_lines: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn recovery_pattern_marks_stale_and_overincluded_distinctly() {
+        let task = fake_task(EvalPattern::RecoveryTarget);
+        let stale = derive_eval_verdict(
+            task.eval_pattern,
+            &EvalSignals::from_details(
+                &json!({"expected_present": false, "unexpected_present": true}),
+                task.expected_answer.is_some(),
+            ),
+        )
+        .expect("verdict");
+        assert_eq!(stale.class_key, "stale_target");
+
+        let noisy = derive_eval_verdict(
+            task.eval_pattern,
+            &EvalSignals::from_details(
+                &json!({"expected_present": true, "unexpected_present": true}),
+                task.expected_answer.is_some(),
+            ),
+        )
+        .expect("verdict");
+        assert_eq!(noisy.class_key, "over_included");
+    }
+
+    #[test]
+    fn isolation_pattern_marks_clean_boundary_as_correct_target() {
+        let task = fake_task(EvalPattern::IsolationBoundary);
+        let verdict = derive_eval_verdict(
+            task.eval_pattern,
+            &EvalSignals::from_details(
+                &json!({
+                    "expected_present": true,
+                    "unexpected_present": false,
+                    "boundary_clean": true,
+                    "fail_closed_ok": true
+                }),
+                task.expected_answer.is_some(),
+            ),
+        )
+        .expect("verdict");
+        assert_eq!(verdict.class_key, "hit_correct_target");
     }
 }

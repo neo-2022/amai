@@ -1,5 +1,5 @@
-modified_at = "2026-03-23 17:50 MSK"
-"Ручная сверка guide/docs" = "2026-03-23 17:50 MSK"
+modified_at = "2026-03-23 18:21 MSK"
+"Ручная сверка guide/docs" = "2026-03-23 18:21 MSK"
 
 [science]
 methodology_version = "retrieval-science-v1"
@@ -9,6 +9,7 @@ execution_state_model_version = "execution-state-v1"
 lineage_model_version = "lineage-v2"
 workspace_graph_model_version = "workspace-graph-v10"
 artifact_lineage_model_version = "artifact-lineage-v1"
+eval_verdict_model_version = "memory-eval-verdict-v1"
 same_input_same_verdict_required = true
 machine_variance_policy = "Latency and throughput may vary by machine, but scope correctness, scoring rules and verdict semantics must stay stable for the same input contour."
 truth_ranking = [
@@ -34,6 +35,34 @@ graceful_fallback_classes = [
   "stale_handoff",
 ]
 execution_states = ["planned", "attempted", "succeeded", "superseded", "stale"]
+
+[science.eval_verdict_classes.hit_correct_target]
+title = "Попали в нужную цель"
+summary = "Amai принёс именно тот факт или контекст, который нужен задаче, без конфликтующего лишнего содержимого."
+
+[science.eval_verdict_classes.hit_wrong_target]
+title = "Попали не в ту цель"
+summary = "Amai вернул чужой, конфликтующий или запрещённый контекст вместо нужной цели."
+
+[science.eval_verdict_classes.stale_target]
+title = "Притащили устаревшую цель"
+summary = "Amai вернул старую или уже заменённую версию факта вместо текущей authoritative версии."
+
+[science.eval_verdict_classes.under_retrieved]
+title = "Недодали контекст"
+summary = "Нужная цель не подтянулась вовсе или ответ оказался слишком пустым для полезного восстановления."
+
+[science.eval_verdict_classes.over_included]
+title = "Притащили лишнее"
+summary = "В ответе есть нужная цель, но вместе с ней приехал лишний или конфликтующий контекст."
+
+[science.eval_verdict_classes.recovered_useful]
+title = "Полезно восстановили"
+summary = "Amai не просто попал в цель, а восстановил рабочее состояние или актуальный следующий шаг в полезном для агента виде."
+
+[science.eval_verdict_classes.not_useful]
+title = "Пользы не дали"
+summary = "Ответ не дал достаточно полезного результата и не тянет ни на один из более точных положительных verdict-классов."
 
 [science.degradation_matrix.cross_project_scope]
 title = "Чужой проект"
@@ -189,6 +218,13 @@ dataset_version = "caller-scoped-token-v1"
 query_suite_version = "token-query-list-v1"
 manifest_path = "cli: verify token-benchmark-suite"
 reproducibility_contract = "Savings math must stay deterministic for the same retrieval payload and tokenizer."
+
+[science.suites.memory_task_matrix]
+suite_version = "memory-task-matrix-v2"
+dataset_version = "memory-task-fixtures-v2"
+query_suite_version = "memory-task-cases-v2"
+manifest_path = "config/memory_task_matrix.toml"
+reproducibility_contract = "The same memory task cases on the same indexed state must produce the same canonical eval verdict classes, even when latency differs by machine."
 
 [science.suites.text_compare]
 suite_version = "text-compare-v1"

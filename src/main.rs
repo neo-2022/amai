@@ -14,6 +14,7 @@ mod dashboard;
 mod degradation_proof;
 mod deployment;
 mod edge_cache;
+mod eval_verdict;
 mod external_benchmark;
 mod external_benchmark_conversion;
 mod hardware_telemetry;

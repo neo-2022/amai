@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 18:09 MSK
-Ручная сверка guide/docs: 2026-03-23 18:09 MSK
+modified_at: 2026-03-23 18:37 MSK
+Ручная сверка guide/docs: 2026-03-23 18:37 MSK
 
 # Operations
 
@@ -1222,6 +1222,27 @@ cargo run -- verify memory-matrix --matrix letta_memory_local
 - `p50/p95/max latency`
 - `class_breakdown`
 - `layer_breakdown`
+- `canonical_eval.verdict_counts`
+- per-task `eval_verdict_class`
+- per-task `eval_reason`
+
+Канонический eval-слой теперь versioned и machine-readable:
+- source of truth: `config/retrieval_science.toml`
+- canonical verdict logic: `src/eval_verdict.rs`
+- model version: `memory-eval-verdict-v1`
+- verdict-классы:
+  - `hit_correct_target`
+  - `hit_wrong_target`
+  - `stale_target`
+  - `under_retrieved`
+  - `over_included`
+  - `recovered_useful`
+  - `not_useful`
+
+Proof теперь проверяет не только happy-path, но и повторяемость:
+- `./scripts/proof_memory_task_matrix.sh`
+  - запускает `verify memory-matrix` два раза подряд;
+  - подтверждает, что повторный прогон не ломает continuity-handoff и не даёт idempotency drift на `.amai-continuity/live-handoff/HANDOFF.md`.
 
 Это полезно тем, что `Amai` теперь можно проверять не только словами “у нас есть память”, а реальным локальным экзаменом:
 - умеет ли память читать;

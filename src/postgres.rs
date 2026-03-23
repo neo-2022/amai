@@ -1115,16 +1115,10 @@ pub async fn replace_document_index(
     symbols: &[SymbolRecord],
     chunks: &[ChunkRecord],
 ) -> Result<Uuid> {
-    let document_id = Uuid::new_v4();
+    let inserted_document_id = Uuid::new_v4();
     let transaction = client.transaction().await?;
-    transaction
-        .execute(
-            "DELETE FROM ami.code_documents WHERE namespace_id = $1 AND relative_path = $2",
-            &[&document.namespace_id, &document.relative_path],
-        )
-        .await?;
-    transaction
-        .execute(
+    let document_row = transaction
+        .query_one(
             r#"
             INSERT INTO ami.code_documents(
                 document_id, project_id, namespace_id, repo_root, absolute_path, relative_path,
@@ -1136,9 +1130,28 @@ pub async fn replace_document_index(
                 $7, $8, $9, $10, $11, $12,
                 $13, $14, $15, $16, $17, $18, $19
             )
+            ON CONFLICT (namespace_id, relative_path) DO UPDATE
+            SET project_id = EXCLUDED.project_id,
+                repo_root = EXCLUDED.repo_root,
+                absolute_path = EXCLUDED.absolute_path,
+                language = EXCLUDED.language,
+                source_kind = EXCLUDED.source_kind,
+                git_commit_sha = EXCLUDED.git_commit_sha,
+                file_sha256 = EXCLUDED.file_sha256,
+                line_count = EXCLUDED.line_count,
+                byte_count = EXCLUDED.byte_count,
+                content = EXCLUDED.content,
+                metrics = EXCLUDED.metrics,
+                structure = EXCLUDED.structure,
+                imports = EXCLUDED.imports,
+                exports = EXCLUDED.exports,
+                diagnostics = EXCLUDED.diagnostics,
+                metadata = EXCLUDED.metadata,
+                indexed_at = now()
+            RETURNING document_id
             "#,
             &[
-                &document_id,
+                &inserted_document_id,
                 &document.project_id,
                 &document.namespace_id,
                 &document.repo_root,
@@ -1158,6 +1171,19 @@ pub async fn replace_document_index(
                 &document.diagnostics,
                 &document.metadata,
             ],
+        )
+        .await?;
+    let document_id: Uuid = document_row.get(0);
+    transaction
+        .execute(
+            "DELETE FROM ami.code_symbols WHERE document_id = $1",
+            &[&document_id],
+        )
+        .await?;
+    transaction
+        .execute(
+            "DELETE FROM ami.code_chunks WHERE document_id = $1",
+            &[&document_id],
         )
         .await?;
 
