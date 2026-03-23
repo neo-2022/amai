@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 16:53 MSK
-Ручная сверка guide/docs: 2026-03-23 16:53 MSK
+modified_at: 2026-03-23 17:07 MSK
+Ручная сверка guide/docs: 2026-03-23 17:07 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -312,7 +312,7 @@ scripts\install_amai.cmd --client codex
     - `recent_actions[].execution_state` (`attempted / succeeded / superseded / stale`);
     - `action_state_counts`;
     - `state_lineage` с `lineage_model_version = lineage-v2`, authoritative event, truth ranking и явным graph-слоем `nodes / edges`, чтобы было видно, какой event authoritative, какие его поддерживают и какие уже superseded.
-    - `workspace_graph` с `workspace_graph_model_version = workspace-graph-v6` и `artifact_lineage_model_version = artifact-lineage-v1`, где recent retrieval теперь materialize-ится как graph `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref / call_ref`, а resolved relations `imports_file / re_exports_file / imports_symbol / re_exports_symbol / resolves_file / resolves_symbol / calls_file / calls_symbol / resolves_call_file / resolves_call_symbol` уже учитывают owner-aware Rust symbol lookup для provable случаев вроде `Type::new`, `Self::helper()`, `self.helper()` и trait-qualified forms вида `<Type as Trait>::make`, не переходя к небезопасному type inference;
+    - `workspace_graph` с `workspace_graph_model_version = workspace-graph-v7` и `artifact_lineage_model_version = artifact-lineage-v1`, где recent retrieval теперь materialize-ится как graph `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref / call_ref`, а resolved relations `imports_file / re_exports_file / imports_symbol / re_exports_symbol / resolves_file / resolves_symbol / calls_file / calls_symbol / resolves_call_file / resolves_call_symbol` уже учитывают owner-aware Rust symbol lookup для provable случаев вроде `Type::new`, `Self::helper()`, `self.helper()`, trait-qualified forms вида `<Type as Trait>::make` и тех же trait-qualified forms через доказанный imported alias, не переходя к небезопасному type inference;
     - fail-closed semantics для plain-symbol и owner-aware resolution дополнительно зажаты property-based tests: неоднозначный кандидат в любом candidate-file или более одного уникального candidate-file обязаны приводить к `None`, а не к “лучшему предположению”.
     - тот же `workspace_graph_summary` теперь поднимается и в `chat_start_restore`, и в human-readable startup/restore вывод, если в текущей линии уже были свежие retrieval-context события.
 
