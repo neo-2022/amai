@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:25 MSK
-Ручная сверка guide/docs: 2026-03-23 22:25 MSK
+modified_at: 2026-03-23 22:32 MSK
+Ручная сверка guide/docs: 2026-03-23 22:32 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -866,6 +866,11 @@ cargo run -- deployment explain --target kubernetes_server
 - token benchmark;
 - token report;
 - observability snapshot.
+
+`amai_observe_snapshot` теперь отдаёт наружу не только общий SLA-срез, но и
+`observe_snapshot_summary.included_reasons_summary / excluded_reasons_summary`,
+чтобы внешний клиент видел, почему последний рабочий контекст что-то включил
+и почему часть слоёв ничего не добавила.
 
 Понятный walkthrough для подключения:
 - [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)

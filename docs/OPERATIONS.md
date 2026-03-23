@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:25 MSK
-Ручная сверка guide/docs: 2026-03-23 22:25 MSK
+modified_at: 2026-03-23 22:32 MSK
+Ручная сверка guide/docs: 2026-03-23 22:32 MSK
 
 # Operations
 
@@ -633,6 +633,9 @@ cargo run -- mcp serve
 - поднимает `.env`;
 - не заставляет клиента дублировать внутренние credentials;
 - стартует `amai mcp serve` как stdio MCP server.
+- `amai_observe_snapshot` теперь отдаёт наружу не только SLA summary, но и
+  `observe_snapshot_summary.included_reasons_summary / excluded_reasons_summary`,
+  чтобы клиентский слой видел причины включения и невключения последнего контекста.
 
 ## MCP client config
 

@@ -813,15 +813,93 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
 async fn tool_observe_snapshot(cfg: &AppConfig) -> Result<Value> {
     compatibility::assert_supported(cfg).await?;
     let snapshot = observe::collect_snapshot_preview(cfg).await?;
-    let summary = &snapshot["sla"]["summary"];
-    let text = format!(
+    let summary = observe_snapshot_summary(&snapshot);
+    let mut text = format!(
         "observe snapshot :: pass={} alert={} critical={} unknown={}",
-        summary["pass"].as_u64().unwrap_or_default(),
-        summary["alert"].as_u64().unwrap_or_default(),
-        summary["critical"].as_u64().unwrap_or_default(),
-        summary["unknown"].as_u64().unwrap_or_default(),
+        summary.pass, summary.alert, summary.critical, summary.unknown,
     );
-    Ok(tool_result(text, json!({ "snapshot": snapshot })))
+    if let Some(value) = &summary.included_reasons_summary {
+        text.push_str(&format!(" included={value}"));
+    }
+    if let Some(value) = &summary.excluded_reasons_summary {
+        text.push_str(&format!(" excluded={value}"));
+    }
+    Ok(tool_result(
+        text,
+        json!({
+            "snapshot": snapshot,
+            "observe_snapshot_summary": {
+                "included_reasons_summary": summary.included_reasons_summary,
+                "excluded_reasons_summary": summary.excluded_reasons_summary,
+            }
+        }),
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObserveSnapshotSummary {
+    pass: u64,
+    alert: u64,
+    critical: u64,
+    unknown: u64,
+    included_reasons_summary: Option<String>,
+    excluded_reasons_summary: Option<String>,
+}
+
+fn observe_snapshot_summary(snapshot: &Value) -> ObserveSnapshotSummary {
+    let sla = &snapshot["sla"]["summary"];
+    ObserveSnapshotSummary {
+        pass: sla["pass"].as_u64().unwrap_or_default(),
+        alert: sla["alert"].as_u64().unwrap_or_default(),
+        critical: sla["critical"].as_u64().unwrap_or_default(),
+        unknown: sla["unknown"].as_u64().unwrap_or_default(),
+        included_reasons_summary: observe_snapshot_reason_summary(
+            snapshot,
+            "included_reasons_summary",
+            "included",
+        ),
+        excluded_reasons_summary: observe_snapshot_reason_summary(
+            snapshot,
+            "excluded_reasons_summary",
+            "not_included",
+        ),
+    }
+}
+
+fn observe_snapshot_reason_summary(
+    snapshot: &Value,
+    summary_key: &str,
+    trace_key: &str,
+) -> Option<String> {
+    let restore = &snapshot["latest_working_state_restore"]["working_state_restore"];
+    if let Some(value) = restore[summary_key]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        return Some(value.to_string());
+    }
+    let items = restore["latest_decision_trace"][trace_key].as_array()?;
+    let parts = items
+        .iter()
+        .take(3)
+        .filter_map(|item| {
+            let reason = item["reason"].as_str()?.trim();
+            if reason.is_empty() {
+                return None;
+            }
+            let strategy = item["strategy"].as_str().unwrap_or("unknown");
+            let count = item["count"].as_u64();
+            Some(match count {
+                Some(value) if value > 0 => format!("{strategy} ({value}) — {reason}"),
+                _ => format!("{strategy} — {reason}"),
+            })
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" • "))
+    }
 }
 
 async fn tool_warm_cache(cfg: &AppConfig, args: WarmCacheToolArgs) -> Result<Value> {
@@ -1787,7 +1865,8 @@ fn default_warm_limit() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{McpConfigArgs, render_client_config};
+    use super::{McpConfigArgs, observe_snapshot_summary, render_client_config};
+    use serde_json::json;
     use std::path::PathBuf;
 
     #[test]
@@ -1875,5 +1954,49 @@ mod tests {
             .expect("args must be array");
         assert_eq!(args[0], "ops@example-host");
         assert_eq!(args[1], "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh");
+    }
+
+    #[test]
+    fn observe_snapshot_summary_uses_reason_summaries_and_trace_fallback() {
+        let snapshot = json!({
+            "sla": {
+                "summary": {
+                    "pass": 19,
+                    "alert": 0,
+                    "critical": 0,
+                    "unknown": 0
+                }
+            },
+            "latest_working_state_restore": {
+                "working_state_restore": {
+                    "included_reasons_summary": "exact_documents (1) — Exact layer matched the visible document.",
+                    "latest_decision_trace": {
+                        "included": [{
+                            "strategy": "lexical_chunks",
+                            "count": 2,
+                            "reason": "fallback should not win"
+                        }],
+                        "not_included": [{
+                            "strategy": "semantic_chunks",
+                            "reason": "Semantic layer abstained."
+                        }]
+                    }
+                }
+            }
+        });
+
+        let summary = observe_snapshot_summary(&snapshot);
+        assert_eq!(summary.pass, 19);
+        assert_eq!(summary.alert, 0);
+        assert_eq!(summary.critical, 0);
+        assert_eq!(summary.unknown, 0);
+        assert_eq!(
+            summary.included_reasons_summary.as_deref(),
+            Some("exact_documents (1) — Exact layer matched the visible document.")
+        );
+        assert_eq!(
+            summary.excluded_reasons_summary.as_deref(),
+            Some("semantic_chunks — Semantic layer abstained.")
+        );
     }
 }
