@@ -152,6 +152,7 @@ pub enum VerifyCommand {
     McpMatrix(Box<VerifyMcpMatrixArgs>),
     MemoryMatrix(Box<VerifyMemoryMatrixArgs>),
     Accuracy(VerifyAccuracyArgs),
+    Degradation(VerifyDegradationArgs),
     Load(Box<VerifyLoadArgs>),
     Hostile(VerifyHostileArgs),
     Mcp(Box<VerifyMcpArgs>),
@@ -507,6 +508,12 @@ pub struct VerifyLoadArgs {
     pub max_error_rate: Option<f64>,
     #[arg(long, default_value_t = false)]
     pub record_live_context: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct VerifyDegradationArgs {
+    #[arg(long, default_value = "all")]
+    pub scenario: String,
 }
 
 #[derive(Debug, Clone, Args)]

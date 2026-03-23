@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 11:20 MSK
-Ручная сверка guide/docs: 2026-03-23 11:20 MSK
+modified_at: 2026-03-23 11:37 MSK
+Ручная сверка guide/docs: 2026-03-23 11:37 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1305,6 +1305,17 @@ cargo run --release -- observe guardrails
 - сколько классов уже подтверждены свежим machine-readable proof;
 - сколько пока остаются только policy и честно помечены как evidence gap;
 - какой порядок истины действует, если несколько слоёв спорят друг с другом.
+
+Чтобы не держать часть этих классов только как policy, теперь есть и отдельный proof path:
+
+```bash
+cargo run --release -- verify degradation
+```
+
+Он:
+- прогоняет synthetic working-state probes для `cross_agent_scope`, `stale_handoff` и `working_state_conflict`;
+- пишет snapshot `degradation_verification`;
+- поднимает их из `unknown` в `pass` только после реального machine-readable proof, а не по описанию policy.
 
 Если нужен уже не короткий smoke, а честный end-to-end cold contour на большом real-repo pool:
 

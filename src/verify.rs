@@ -2,6 +2,7 @@ use crate::bootstrap;
 use crate::cli::{
     ContextPackArgs, VerifyAccuracyArgs, VerifyBenchmarkArgs, VerifyHostileArgs, VerifyLoadArgs,
     VerifyTextCompareArgs, VerifyTokenBenchmarkArgs, VerifyTokenBenchmarkSuiteArgs,
+    VerifyDegradationArgs,
 };
 use crate::compatibility;
 use crate::config::AppConfig;
@@ -10,6 +11,7 @@ use crate::postgres;
 use crate::retrieval;
 use crate::retrieval_science;
 use crate::token_budget;
+use crate::working_state;
 use anyhow::{Context, Result, anyhow};
 use ignore::WalkBuilder;
 use serde::Deserialize;
@@ -516,6 +518,68 @@ pub async fn run_accuracy(
         "degradation_policy": retrieval_science::degradation_policy_json()?
     });
     let _ = postgres::insert_observability_snapshot(db, "retrieval_accuracy", &payload).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+pub async fn run_degradation(
+    _cfg: &AppConfig,
+    db: &mut Client,
+    args: &VerifyDegradationArgs,
+) -> Result<()> {
+    let scenario = args.scenario.as_str();
+    if scenario != "all" {
+        return Err(anyhow!(
+            "unsupported degradation scenario: {scenario}; use all"
+        ));
+    }
+
+    let captured_at_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as u64;
+    let verification_run_id = Uuid::new_v4();
+    let proof = working_state::degradation_proof_report(captured_at_epoch_ms)?;
+    let scenarios = proof["degradation_verification"]["scenarios"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let pass = scenarios
+        .iter()
+        .filter(|item| item["status"].as_str() == Some("pass"))
+        .count() as u64;
+    let critical = scenarios
+        .iter()
+        .filter(|item| item["status"].as_str() == Some("critical"))
+        .count() as u64;
+    let unknown = scenarios
+        .iter()
+        .filter(|item| item["status"].as_str() == Some("unknown"))
+        .count() as u64;
+
+    let payload = json!({
+        "_observability": {
+            "source_event_id": verification_run_id,
+            "source_kind": "degradation_verification_run",
+            "scope_project_code": "system",
+            "scope_namespace_code": "degradation",
+            "captured_at_epoch_ms": captured_at_epoch_ms
+        },
+        "degradation_verification": {
+            "verification_run_id": verification_run_id,
+            "scenario": scenario,
+            "captured_at_epoch_ms": captured_at_epoch_ms,
+            "summary": {
+                "pass": pass,
+                "critical": critical,
+                "unknown": unknown
+            },
+            "scenarios": scenarios
+        },
+        "retrieval_science": retrieval_science::suite_metadata("degradation_verification")?,
+        "degradation_policy": retrieval_science::degradation_policy_json()?,
+    });
+    let _ = postgres::insert_observability_snapshot(db, "degradation_verification", &payload).await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }

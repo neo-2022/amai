@@ -619,6 +619,8 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         postgres::latest_observability_snapshot(&db, "cold_path_benchmark").await?;
     let latest_working_state_restore =
         postgres::latest_observability_snapshot(&db, "working_state_restore").await?;
+    let latest_degradation_verification =
+        postgres::latest_observability_snapshot(&db, "degradation_verification").await?;
     let token_budget_report = token_budget::collect_default_report(&db).await?;
     let repo_root = discover_repo_root(None)?;
     let artifact_cleanup_summary = artifact_cleanup::read_latest_summary(&repo_root)?
@@ -650,6 +652,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_token_benchmark": latest_token_benchmark,
         "latest_cold_path_benchmark": latest_cold_path_benchmark,
         "latest_working_state_restore": latest_working_state_restore,
+        "latest_degradation_verification": latest_degradation_verification,
         "token_budget_report": token_budget_report,
         "artifact_cleanup": artifact_cleanup_summary["artifact_cleanup"].clone(),
     });
@@ -675,6 +678,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_token_benchmark": payload["latest_token_benchmark"].clone(),
         "latest_cold_path_benchmark": payload["latest_cold_path_benchmark"].clone(),
         "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
+        "latest_degradation_verification": payload["latest_degradation_verification"].clone(),
         "token_budget_report": payload["token_budget_report"].clone(),
         "artifact_cleanup": payload["artifact_cleanup"].clone(),
         "degradation_model": degradation_model,
@@ -772,6 +776,9 @@ fn evaluate_degradation_class(
             &["namespace_strict_fail_closed"],
             "Последний accuracy / isolation прогон подтвердил zero leakage между namespace.",
         ),
+        "cross_agent_scope" | "stale_handoff" | "working_state_conflict" => {
+            evaluate_degradation_verification_class(payload, class_key, entry)
+        }
         _ => evaluate_policy_gap_class(payload, class_key, entry),
     }
 }
@@ -927,6 +934,35 @@ fn evaluate_policy_gap_class(
         None,
         None,
         true,
+    )
+}
+
+fn evaluate_degradation_verification_class(
+    payload: &Value,
+    class_key: &str,
+    entry: &retrieval_science::DegradationMatrixEntry,
+) -> Value {
+    let verification = &payload["latest_degradation_verification"]["degradation_verification"];
+    if !verification.is_object() {
+        return evaluate_policy_gap_class(payload, class_key, entry);
+    }
+    let scenario = verification["scenarios"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["class_key"].as_str() == Some(class_key));
+    let Some(scenario) = scenario else {
+        return evaluate_policy_gap_class(payload, class_key, entry);
+    };
+
+    degradation_class_value(
+        class_key,
+        entry,
+        scenario["status"].as_str().unwrap_or("unknown"),
+        scenario["reason"].as_str().unwrap_or("ещё нет деталей"),
+        Some("degradation_verification"),
+        verification["captured_at_epoch_ms"].as_u64(),
+        scenario["status"].as_str() != Some("pass"),
     )
 }
 
@@ -2971,6 +3007,67 @@ mod tests {
             json!("working_state_restore")
         );
         assert_eq!(stale_handoff["evidence_gap"], json!(true));
+    }
+
+    #[test]
+    fn degradation_model_promotes_classes_after_degradation_verification() {
+        let payload = json!({
+            "latest_retrieval_accuracy": {
+                "accuracy_verification": {
+                    "captured_at_epoch_ms": 100,
+                    "cross_project_leakage": 0,
+                    "cross_namespace_leakage": 0,
+                    "formal_invariants": [
+                        { "name": "strict_local_visible_projects_only", "pass": true },
+                        { "name": "strict_local_hits_do_not_leak_projects", "pass": true },
+                        { "name": "hostile_mixed_query_fail_closed", "pass": true },
+                        { "name": "namespace_strict_fail_closed", "pass": true }
+                    ]
+                }
+            },
+            "latest_working_state_restore": {
+                "working_state_restore": {
+                    "captured_at_epoch_ms": 200,
+                    "restore_freshness_state": "fresh",
+                    "restore_confidence": "medium"
+                }
+            },
+            "latest_degradation_verification": {
+                "degradation_verification": {
+                    "captured_at_epoch_ms": 300,
+                    "scenarios": [
+                        {
+                            "class_key": "cross_agent_scope",
+                            "status": "pass",
+                            "reason": "cross agent proof passed"
+                        },
+                        {
+                            "class_key": "stale_handoff",
+                            "status": "pass",
+                            "reason": "stale handoff proof passed"
+                        },
+                        {
+                            "class_key": "working_state_conflict",
+                            "status": "pass",
+                            "reason": "conflict proof passed"
+                        }
+                    ]
+                }
+            }
+        });
+
+        let model = build_degradation_model(&payload).expect("degradation model");
+        assert_eq!(model["summary"]["pass"], json!(5));
+        assert_eq!(model["summary"]["unknown"], json!(6));
+
+        let classes = model["classes"].as_array().expect("classes");
+        let cross_agent = classes
+            .iter()
+            .find(|item| item["class_key"].as_str() == Some("cross_agent_scope"))
+            .expect("cross_agent_scope");
+        assert_eq!(cross_agent["status"], json!("pass"));
+        assert_eq!(cross_agent["last_evidence_kind"], json!("degradation_verification"));
+        assert_eq!(cross_agent["evidence_gap"], json!(false));
     }
 
     #[test]

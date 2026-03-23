@@ -337,6 +337,12 @@ async fn main() -> Result<()> {
                 let mut db = postgres::connect_admin(&cfg).await?;
                 verify::run_accuracy(&cfg, &mut db, &args).await?;
             }
+            VerifyCommand::Degradation(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                let mut db = postgres::connect_admin(&cfg).await?;
+                verify::run_degradation(&cfg, &mut db, &args).await?;
+            }
             VerifyCommand::Load(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

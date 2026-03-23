@@ -485,6 +485,197 @@ fn compose_restore_bundle(
     })
 }
 
+pub fn degradation_proof_report(captured_at_epoch_ms: u64) -> Result<Value> {
+    let base = captured_at_epoch_ms as i64;
+    let exact = synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+        project_code: "art",
+        namespace_code: "continuity",
+        agent_scope: "art::primary",
+        session_id: "session-a",
+        event_kind: "retrieval_context_pack",
+        headline: "exact-scope",
+        next_step_hint: "",
+        summary: "",
+        offset: base,
+    });
+    let foreign = synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+        project_code: "art",
+        namespace_code: "continuity",
+        agent_scope: "art::secondary",
+        session_id: "session-b",
+        event_kind: "retrieval_context_pack",
+        headline: "foreign-scope",
+        next_step_hint: "",
+        summary: "",
+        offset: base - 1,
+    });
+    let exact_selected = select_relevant_events(
+        vec![exact.clone(), foreign.clone()],
+        "art",
+        "continuity",
+        "art::primary",
+    );
+    let foreign_only_selected =
+        select_relevant_events(vec![foreign], "art", "continuity", "art::primary");
+    let cross_agent_pass = exact_selected.len() == 1
+        && exact_selected[0].payload["working_state_event"]["headline"] == json!("exact-scope")
+        && foreign_only_selected.is_empty();
+
+    let stale_events = vec![
+        synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-stale",
+            event_kind: "continuity_handoff",
+            headline: "Stale authoritative handoff",
+            next_step_hint: "Refresh continuity.",
+            summary: "Old but authoritative handoff.",
+            offset: base - 16 * 60 * 1000,
+        }),
+        synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-stale",
+            event_kind: "continuity_handoff",
+            headline: "Older stale handoff",
+            next_step_hint: "Do older stale thing.",
+            summary: "Older stale handoff.",
+            offset: base - 16 * 60 * 1000 - 1,
+        }),
+        synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-stale",
+            event_kind: "retrieval_context_pack",
+            headline: "Stale retrieval",
+            next_step_hint: "Inspect stale state.",
+            summary: "Stale retrieval.",
+            offset: base - 16 * 60 * 1000 - 2,
+        }),
+        synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-stale",
+            event_kind: "retrieval_context_pack",
+            headline: "Older retrieval",
+            next_step_hint: "Inspect older state.",
+            summary: "Older retrieval.",
+            offset: base - 16 * 60 * 1000 - 3,
+        }),
+    ];
+    let stale_bundle = compose_restore_bundle(
+        &json!({"code":"art"}),
+        &json!({"code":"continuity"}),
+        &stale_events,
+    );
+    let stale_restore = &stale_bundle["working_state_restore"];
+    let stale_handoff_pass = stale_restore["restore_freshness_state"] == json!("stale")
+        && stale_restore["current_goal"] == json!("Stale authoritative handoff");
+
+    let conflict_events = vec![
+        synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-conflict",
+            event_kind: "continuity_handoff",
+            headline: "Authoritative handoff",
+            next_step_hint: "Ship the next change.",
+            summary: "Materialized authoritative result.",
+            offset: base,
+        }),
+        synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-conflict",
+            event_kind: "continuity_handoff",
+            headline: "Older handoff",
+            next_step_hint: "Do older thing.",
+            summary: "Superseded result.",
+            offset: base - 1,
+        }),
+        synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-conflict",
+            event_kind: "retrieval_context_pack",
+            headline: "Рабочий запрос: current context",
+            next_step_hint: "Inspect file.",
+            summary: "Attempted retrieval.",
+            offset: base - 2,
+        }),
+    ];
+    let conflict_bundle = compose_restore_bundle(
+        &json!({"code":"art"}),
+        &json!({"code":"continuity"}),
+        &conflict_events,
+    );
+    let conflict_restore = &conflict_bundle["working_state_restore"];
+    let working_state_conflict_pass =
+        conflict_restore["state_lineage"]["authoritative_event_kind"] == json!("continuity_handoff")
+            && conflict_restore["action_state_counts"]["succeeded"] == json!(1)
+            && conflict_restore["action_state_counts"]["superseded"] == json!(1)
+            && conflict_restore["action_state_counts"]["attempted"] == json!(1);
+
+    let scenarios = vec![
+        json!({
+            "class_key": "cross_agent_scope",
+            "title": "Чужой рабочий контур агента",
+            "status": if cross_agent_pass { "pass" } else { "critical" },
+            "reason": if cross_agent_pass {
+                "select_relevant_events выбирает exact agent_scope и fail-closed отбрасывает чужой scope без shared fallback."
+            } else {
+                "working-state selection смешал чужой agent_scope или не отфильтровал foreign-only scope."
+            },
+            "details": {
+                "exact_scope_selected_count": exact_selected.len(),
+                "foreign_only_selected_count": foreign_only_selected.len(),
+            }
+        }),
+        json!({
+            "class_key": "stale_handoff",
+            "title": "Устаревший handoff",
+            "status": if stale_handoff_pass { "pass" } else { "critical" },
+            "reason": if stale_handoff_pass {
+                "compose_restore_bundle честно помечает устаревший handoff как stale и сохраняет authoritative lineage."
+            } else {
+                "restore bundle не пометил старый handoff как stale."
+            },
+            "details": {
+                "restore_freshness_state": stale_restore["restore_freshness_state"].clone(),
+                "current_goal": stale_restore["current_goal"].clone(),
+            }
+        }),
+        json!({
+            "class_key": "working_state_conflict",
+            "title": "Конфликт рабочего состояния",
+            "status": if working_state_conflict_pass { "pass" } else { "critical" },
+            "reason": if working_state_conflict_pass {
+                "restore bundle не скрывает конфликт: сохраняет authoritative lineage и явные execution states succeeded/superseded/attempted."
+            } else {
+                "restore bundle потерял lineage или скрыл conflict execution states."
+            },
+            "details": {
+                "action_state_counts": conflict_restore["action_state_counts"].clone(),
+                "state_lineage": conflict_restore["state_lineage"].clone(),
+            }
+        }),
+    ];
+
+    Ok(json!({
+        "degradation_verification": {
+            "captured_at_epoch_ms": captured_at_epoch_ms,
+            "scenarios": scenarios,
+        }
+    }))
+}
+
 fn is_meta_continuity_event(event: &Value) -> bool {
     if event["event_kind"].as_str() != Some("continuity_handoff") {
         return false;
@@ -654,6 +845,42 @@ fn current_agent_scope_for(project_code: &str, namespace_code: &str) -> String {
         }
     }
     format!("{project_code}::{namespace_code}::default")
+}
+
+struct SyntheticSnapshotSpec<'a> {
+    project_code: &'a str,
+    namespace_code: &'a str,
+    agent_scope: &'a str,
+    session_id: &'a str,
+    event_kind: &'a str,
+    headline: &'a str,
+    next_step_hint: &'a str,
+    summary: &'a str,
+    offset: i64,
+}
+
+fn synthetic_snapshot_with_kind(spec: SyntheticSnapshotSpec<'_>) -> ObservabilitySnapshotRecord {
+    ObservabilitySnapshotRecord {
+        snapshot_id: Uuid::new_v4(),
+        snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+        payload: json!({
+            "working_state_event": {
+                "event_id": format!("{}-{}", spec.headline, spec.offset),
+                "project": { "code": spec.project_code },
+                "namespace": { "code": spec.namespace_code },
+                "agent_scope": spec.agent_scope,
+                "session_id": spec.session_id,
+                "event_kind": spec.event_kind,
+                "source_kind": "synthetic_degradation_proof",
+                "headline": spec.headline,
+                "next_step_hint": spec.next_step_hint,
+                "summary": spec.summary,
+                "local_path": "/tmp/degradation-proof",
+                "recorded_at_epoch_ms": spec.offset,
+            }
+        }),
+        created_at_epoch_ms: spec.offset,
+    }
 }
 
 fn current_thread_id() -> Option<String> {
@@ -1373,6 +1600,26 @@ mod tests {
             restore["recent_actions"][2]["execution_state"],
             json!("attempted")
         );
+    }
+
+    #[test]
+    fn degradation_proof_report_marks_core_working_state_scenarios_pass() {
+        let report = degradation_proof_report(now_epoch_ms().unwrap_or(2_000_000)).expect("report");
+        let scenarios = report["degradation_verification"]["scenarios"]
+            .as_array()
+            .expect("scenarios");
+        assert_eq!(scenarios.len(), 3);
+        assert!(scenarios
+            .iter()
+            .all(|scenario| scenario["status"].as_str() == Some("pass")));
+        assert!(scenarios.iter().any(|scenario| {
+            scenario["class_key"].as_str() == Some("cross_agent_scope")
+                && scenario["details"]["foreign_only_selected_count"] == json!(0)
+        }));
+        assert!(scenarios.iter().any(|scenario| {
+            scenario["class_key"].as_str() == Some("stale_handoff")
+                && scenario["details"]["restore_freshness_state"] == json!("stale")
+        }));
     }
 
     fn fake_snapshot(

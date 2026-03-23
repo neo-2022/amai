@@ -167,6 +167,13 @@ query_suite_version = "red-team-retrieval-isolation-v1"
 manifest_path = "config/red_team_retrieval_isolation.toml"
 reproducibility_contract = "Cross-project and cross-namespace leakage must stay zero; precision checks must remain exact on the fixed fixture contour."
 
+[science.suites.degradation_verification]
+suite_version = "degradation-verification-v1"
+dataset_version = "synthetic-working-state-fail-closed-v1"
+query_suite_version = "degradation-scenarios-v1"
+manifest_path = "built-in synthetic degradation probes"
+reproducibility_contract = "The same synthetic degradation probes must produce the same pass/fail verdicts for cross-agent scope, stale handoff and working-state conflict handling."
+
 [science.suites.cold_path_benchmark]
 suite_version = "cold-path-benchmark-v2"
 dataset_version = "local-real-repos-manifest-v2"

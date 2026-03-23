@@ -181,6 +181,15 @@ mod tests {
     }
 
     #[test]
+    fn suite_metadata_loads_degradation_verification_suite() {
+        let suite = suite_metadata("degradation_verification").expect("suite metadata");
+        assert_eq!(
+            suite["dataset_version"].as_str(),
+            Some("synthetic-working-state-fail-closed-v1")
+        );
+    }
+
+    #[test]
     fn degradation_policy_includes_fail_closed_classes() {
         let policy = degradation_policy_json().expect("degradation policy");
         assert!(
