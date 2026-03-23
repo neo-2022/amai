@@ -1,11 +1,13 @@
 use crate::chat_question;
 use crate::cli::{
     ContinuityAnswerArgs, ContinuityHandoffArgs, ContinuityImportArgs, ContinuityStartupArgs,
-    ContinuityThreadIndexEnrichArgs,
+    ContinuityThreadIndexEnrichArgs, VerifyContinuityArgs,
 };
 use crate::codex_threads;
 use crate::config::AppConfig;
+use crate::eval_verdict::{self, EvalPattern, EvalSignals};
 use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, ProjectRecord};
+use crate::retrieval_science;
 use crate::s3;
 use crate::working_state;
 use crate::workspace_graph;
@@ -81,6 +83,14 @@ struct ContinuityStartupContext {
     continuity: Value,
     handoff_summary: Value,
     restore: Option<Value>,
+}
+
+#[derive(Debug)]
+struct ContinuityEvalProbe {
+    name: &'static str,
+    verdict_class: String,
+    verdict_reason: String,
+    details: Value,
 }
 
 pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<()> {
@@ -600,6 +610,130 @@ pub async fn print_restore(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
     Ok(())
 }
 
+pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> Result<()> {
+    let db = postgres::connect_admin(cfg).await?;
+    let startup_args = ContinuityStartupArgs {
+        project: args.project.clone(),
+        repo_root: args.repo_root.clone(),
+        namespace: args.namespace.clone(),
+    };
+    let context = load_startup_context(&db, &startup_args).await?;
+    let direct_handoff_summary =
+        latest_handoff_summary(&db, &context.project, &context.namespace).await?;
+    let chat_start_restore = build_chat_start_restore(
+        &context.project,
+        &context.namespace,
+        &context.continuity,
+        &context.handoff_summary,
+        context.restore.as_ref(),
+    );
+    let chat_start_node = &chat_start_restore["chat_start_restore"];
+    let working_state_restore = context
+        .restore
+        .as_ref()
+        .and_then(|value| value.get("working_state_restore"))
+        .cloned();
+    let handoff_summary_present = direct_handoff_summary
+        .as_ref()
+        .and_then(|value| value["headline"].as_str())
+        .is_some_and(|value| !value.trim().is_empty() && value != "ещё нет данных");
+    let working_state_restore_present = working_state_restore.is_some();
+    let chat_start_prompt_present = chat_start_node["prompt_text"]
+        .as_str()
+        .is_some_and(|value| !value.trim().is_empty());
+
+    let mut probes = vec![
+        build_continuity_eval_probe(
+            "handoff_summary_present",
+            json!({
+                "expected_present": handoff_summary_present,
+                "unexpected_present": false,
+                "source": if direct_handoff_summary.is_some() { "continuity_handoff" } else { "continuity_import_fallback" },
+                "headline": context.handoff_summary["headline"].as_str().unwrap_or(""),
+            }),
+        )?,
+        build_continuity_eval_probe(
+            "working_state_restore_present",
+            json!({
+                "expected_present": working_state_restore_present,
+                "unexpected_present": false,
+                "restore_confidence": working_state_restore
+                    .as_ref()
+                    .and_then(|value| value["restore_confidence"].as_str())
+                    .unwrap_or("missing"),
+                "current_goal": working_state_restore
+                    .as_ref()
+                    .and_then(|value| value["current_goal"].as_str())
+                    .unwrap_or(""),
+            }),
+        )?,
+        build_continuity_eval_probe(
+            "chat_start_prompt_present",
+            json!({
+                "expected_present": chat_start_prompt_present,
+                "unexpected_present": false,
+                "prompt_length": chat_start_node["prompt_text"]
+                    .as_str()
+                    .map(|value| value.chars().count())
+                    .unwrap_or(0),
+            }),
+        )?,
+    ];
+    probes.extend(continuity_replay_guard_probes()?);
+    let canonical_eval = build_continuity_canonical_eval(&probes)?;
+    let failing_probes = probes
+        .iter()
+        .filter(|probe| probe.verdict_class != "recovered_useful")
+        .map(|probe| format!("{}={}", probe.name, probe.verdict_class))
+        .collect::<Vec<_>>();
+    if !failing_probes.is_empty() {
+        return Err(anyhow!(
+            "continuity verification failed: {}",
+            failing_probes.join(", ")
+        ));
+    }
+
+    let verification_run_id = Uuid::new_v4();
+    let captured_at_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as u64;
+    let payload = json!({
+        "_observability": {
+            "source_event_id": verification_run_id,
+            "source_kind": "continuity_verification_run",
+            "scope_project_code": context.project.code,
+            "scope_namespace_code": context.namespace.code,
+            "captured_at_epoch_ms": captured_at_epoch_ms
+        },
+        "continuity_verification": {
+            "verification_run_id": verification_run_id,
+            "captured_at_epoch_ms": captured_at_epoch_ms,
+            "project": {
+                "code": context.project.code,
+                "display_name": context.project.display_name,
+                "repo_root": context.project.repo_root,
+            },
+            "namespace": {
+                "code": context.namespace.code,
+                "display_name": context.namespace.display_name,
+            },
+            "handoff_summary_source": if direct_handoff_summary.is_some() { "continuity_handoff" } else { "continuity_import_fallback" },
+            "handoff_summary": context.handoff_summary,
+            "working_state_restore_present": working_state_restore_present,
+            "working_state_restore": working_state_restore,
+            "chat_start_restore": chat_start_node,
+            "canonical_eval": canonical_eval
+        },
+        "retrieval_science": retrieval_science::suite_metadata("continuity_verification")?,
+        "degradation_policy": retrieval_science::degradation_policy_json()?,
+    });
+    let _ =
+        postgres::insert_observability_snapshot(&db, "continuity_verification", &payload).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
 pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Result<()> {
     let db = postgres::connect_admin(cfg).await?;
     let project = resolve_project(&db, &args.startup).await?;
@@ -1077,6 +1211,112 @@ pub fn degradation_proof_scenarios() -> Result<Vec<Value>> {
                 "answer": partial_thread_answer,
             }
         }),
+    ])
+}
+
+fn build_continuity_eval_probe(name: &'static str, details: Value) -> Result<ContinuityEvalProbe> {
+    let signals = EvalSignals::from_details(&details, true);
+    let verdict = eval_verdict::derive_eval_verdict(EvalPattern::RecoveryTarget, &signals)?;
+    Ok(ContinuityEvalProbe {
+        name,
+        verdict_class: verdict.class_key,
+        verdict_reason: verdict.reason,
+        details,
+    })
+}
+
+fn build_continuity_canonical_eval(probes: &[ContinuityEvalProbe]) -> Result<Value> {
+    let mut summary = eval_verdict::summarize_eval_layer(
+        probes.iter().map(|probe| probe.verdict_class.as_str()),
+    )?;
+    summary["probes"] = json!(
+        probes
+            .iter()
+            .map(|probe| {
+                json!({
+                    "name": probe.name,
+                    "eval_verdict_class": probe.verdict_class,
+                    "eval_reason": probe.verdict_reason,
+                    "details": probe.details,
+                })
+            })
+            .collect::<Vec<_>>()
+    );
+    Ok(summary)
+}
+
+fn continuity_replay_guard_probes() -> Result<Vec<ContinuityEvalProbe>> {
+    let replayed_stale = fake_continuity_handoff_snapshot(3_000, 1_000, "Stale replay");
+    let fresh = fake_continuity_handoff_snapshot(2_000, 2_000, "Fresh handoff");
+    let handoff_snapshots = vec![replayed_stale, fresh];
+    let selected_handoff = latest_scoped_snapshot(
+        &handoff_snapshots,
+        "continuity_handoff",
+        "art",
+        "continuity",
+        |root| {
+            !is_meta_continuity_handoff(
+                root["headline"].as_str().unwrap_or_default(),
+                root["next_step"].as_str().unwrap_or_default(),
+                root["details"].as_str().unwrap_or_default(),
+            )
+        },
+    )
+    .ok_or_else(|| anyhow!("synthetic continuity handoff replay proof selected nothing"))?;
+    let handoff_replay_rejected = selected_handoff.payload["continuity_handoff"]["headline"]
+        .as_str()
+        == Some("Fresh handoff")
+        && continuity_snapshot_semantic_epoch_ms(selected_handoff, "continuity_handoff") == 2_000;
+
+    let replayed_stale = fake_continuity_import_snapshot(3_000, 1_000, "Stale import");
+    let fresh = fake_continuity_import_snapshot(2_000, 2_000, "Fresh import");
+    let import_snapshots = vec![replayed_stale, fresh];
+    let selected_import = latest_scoped_snapshot(
+        &import_snapshots,
+        "continuity_import",
+        "art",
+        "continuity",
+        |_| true,
+    )
+    .ok_or_else(|| anyhow!("synthetic continuity import replay proof selected nothing"))?;
+    let import_replay_rejected = selected_import.payload["continuity_import"]["active_workline_summary"]["details"]["headline"]
+        .as_str()
+        == Some("Fresh import")
+        && continuity_snapshot_semantic_epoch_ms(selected_import, "continuity_import") == 2_000;
+
+    Ok(vec![
+        build_continuity_eval_probe(
+            "handoff_replay_rejected",
+            json!({
+                "expected_present": handoff_replay_rejected,
+                "unexpected_present": !handoff_replay_rejected,
+                "selected_headline": selected_handoff.payload["continuity_handoff"]["headline"]
+                    .as_str()
+                    .unwrap_or(""),
+                "selected_semantic_epoch_ms": continuity_snapshot_semantic_epoch_ms(
+                    selected_handoff,
+                    "continuity_handoff"
+                ),
+                "expected_headline": "Fresh handoff",
+                "expected_semantic_epoch_ms": 2_000,
+            }),
+        )?,
+        build_continuity_eval_probe(
+            "import_replay_rejected",
+            json!({
+                "expected_present": import_replay_rejected,
+                "unexpected_present": !import_replay_rejected,
+                "selected_headline": selected_import.payload["continuity_import"]["active_workline_summary"]["details"]["headline"]
+                    .as_str()
+                    .unwrap_or(""),
+                "selected_semantic_epoch_ms": continuity_snapshot_semantic_epoch_ms(
+                    selected_import,
+                    "continuity_import"
+                ),
+                "expected_headline": "Fresh import",
+                "expected_semantic_epoch_ms": 2_000,
+            }),
+        )?,
     ])
 }
 
@@ -1991,6 +2231,60 @@ fn resolve_output_path(path: &Path) -> Result<PathBuf> {
     Ok(cwd.join(path))
 }
 
+fn fake_continuity_handoff_snapshot(
+    created_at_epoch_ms: i64,
+    captured_at_epoch_ms: i64,
+    headline: &str,
+) -> postgres::ObservabilitySnapshotRecord {
+    postgres::ObservabilitySnapshotRecord {
+        snapshot_id: Uuid::new_v4(),
+        snapshot_kind: "continuity_handoff".to_string(),
+        created_at_epoch_ms,
+        payload: json!({
+            "_observability": {
+                "captured_at_epoch_ms": captured_at_epoch_ms,
+            },
+            "continuity_handoff": {
+                "project": {"code": "art"},
+                "namespace": {"code": "continuity"},
+                "captured_at_epoch_ms": captured_at_epoch_ms,
+                "headline": headline,
+                "next_step": "Next step",
+                "details": "",
+                "local_path": "/tmp/handoff.md"
+            }
+        }),
+    }
+}
+
+fn fake_continuity_import_snapshot(
+    created_at_epoch_ms: i64,
+    imported_at_epoch_ms: i64,
+    headline: &str,
+) -> postgres::ObservabilitySnapshotRecord {
+    postgres::ObservabilitySnapshotRecord {
+        snapshot_id: Uuid::new_v4(),
+        snapshot_kind: "continuity_import".to_string(),
+        created_at_epoch_ms,
+        payload: json!({
+            "_observability": {
+                "captured_at_epoch_ms": imported_at_epoch_ms,
+            },
+            "continuity_import": {
+                "project": {"code": "art"},
+                "namespace": {"code": "continuity"},
+                "imported_at_epoch_ms": imported_at_epoch_ms,
+                "active_workline_summary": {
+                    "details": {
+                        "headline": headline,
+                        "next_step": "Next step"
+                    }
+                }
+            }
+        }),
+    }
+}
+
 fn canonical_string(path: &Path) -> Result<String> {
     Ok(canonical_path(path)?.display().to_string())
 }
@@ -2055,71 +2349,17 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_chat_start_restore, continuity_snapshot_semantic_epoch_ms,
-        degradation_proof_scenarios, enrich_thread_index_file, extract_next_step_from_text,
-        is_meta_continuity_handoff, latest_scoped_snapshot, parse_chat_reference_spec,
-        render_direct_answer,
+        build_chat_start_restore, build_continuity_canonical_eval, continuity_replay_guard_probes,
+        continuity_snapshot_semantic_epoch_ms, degradation_proof_scenarios,
+        enrich_thread_index_file, extract_next_step_from_text, fake_continuity_handoff_snapshot,
+        fake_continuity_import_snapshot, is_meta_continuity_handoff, latest_scoped_snapshot,
+        parse_chat_reference_spec, render_direct_answer,
     };
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
-    use crate::postgres::{NamespaceRecord, ObservabilitySnapshotRecord, ProjectRecord};
+    use crate::postgres::{NamespaceRecord, ProjectRecord};
     use serde_json::json;
     use std::fs;
-    use uuid::Uuid;
-
-    fn fake_continuity_handoff_snapshot(
-        created_at_epoch_ms: i64,
-        captured_at_epoch_ms: i64,
-        headline: &str,
-    ) -> ObservabilitySnapshotRecord {
-        ObservabilitySnapshotRecord {
-            snapshot_id: Uuid::new_v4(),
-            snapshot_kind: "continuity_handoff".to_string(),
-            created_at_epoch_ms,
-            payload: json!({
-                "_observability": {
-                    "captured_at_epoch_ms": captured_at_epoch_ms,
-                },
-                "continuity_handoff": {
-                    "project": {"code": "art"},
-                    "namespace": {"code": "continuity"},
-                    "captured_at_epoch_ms": captured_at_epoch_ms,
-                    "headline": headline,
-                    "next_step": "Next step",
-                    "details": "",
-                    "local_path": "/tmp/handoff.md"
-                }
-            }),
-        }
-    }
-
-    fn fake_continuity_import_snapshot(
-        created_at_epoch_ms: i64,
-        imported_at_epoch_ms: i64,
-        headline: &str,
-    ) -> ObservabilitySnapshotRecord {
-        ObservabilitySnapshotRecord {
-            snapshot_id: Uuid::new_v4(),
-            snapshot_kind: "continuity_import".to_string(),
-            created_at_epoch_ms,
-            payload: json!({
-                "_observability": {
-                    "captured_at_epoch_ms": imported_at_epoch_ms,
-                },
-                "continuity_import": {
-                    "project": {"code": "art"},
-                    "namespace": {"code": "continuity"},
-                    "imported_at_epoch_ms": imported_at_epoch_ms,
-                    "active_workline_summary": {
-                        "details": {
-                            "headline": headline,
-                            "next_step": "Next step"
-                        }
-                    }
-                }
-            }),
-        }
-    }
 
     #[test]
     fn render_direct_answer_prefers_concise_restore_bundle() {
@@ -2377,6 +2617,22 @@ mod tests {
         assert_eq!(
             selected.payload["continuity_import"]["active_workline_summary"]["details"]["headline"],
             json!("Fresh import")
+        );
+    }
+
+    #[test]
+    fn continuity_replay_guard_probes_are_recovered_useful() {
+        let probes = continuity_replay_guard_probes().expect("probes");
+        assert_eq!(probes.len(), 2);
+        assert!(
+            probes
+                .iter()
+                .all(|probe| probe.verdict_class == "recovered_useful")
+        );
+        let summary = build_continuity_canonical_eval(&probes).expect("summary");
+        assert_eq!(
+            summary["verdict_counts"]["recovered_useful"].as_u64(),
+            Some(2)
         );
     }
 

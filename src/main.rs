@@ -334,6 +334,11 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 memory_task_matrix::run_matrix(&cfg, &args).await?;
             }
+            VerifyCommand::Continuity(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                continuity::verify_continuity(&cfg, &args).await?;
+            }
             VerifyCommand::Accuracy(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

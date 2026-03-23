@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 19:20 MSK
-Ручная сверка guide/docs: 2026-03-23 19:20 MSK
+modified_at: 2026-03-23 19:52 MSK
+Ручная сверка guide/docs: 2026-03-23 19:52 MSK
 
 # Operations
 
@@ -132,6 +132,7 @@ cd /home/art/agent-memory-index
 cd /home/art/agent-memory-index
 ./scripts/continuity_startup.sh --project project_alpha --namespace continuity
 ./scripts/continuity_restore.sh --project project_alpha --namespace continuity
+cargo run --quiet -- verify continuity --project project_alpha --namespace continuity
 ```
 
 Что это materialize-ит:
@@ -143,6 +144,10 @@ cd /home/art/agent-memory-index
 - freshness для `continuity_import` и `continuity_handoff` теперь определяется по semantic времени самого артефакта
   (`imported_at_epoch_ms` / `captured_at_epoch_ms`), а не по простому `created_at` строки в БД;
   это защищает startup/restore от позднего replay старого import или handoff.
+- поверх этого теперь есть ещё и отдельный proof path `verify continuity`:
+  - он не просто печатает startup/restore, а пишет benchmark-class snapshot `continuity_verification`;
+  - внутри него лежит `canonical_eval` с тем же общим verdict vocabulary;
+  - direct recovery contour считается полезным только если одновременно подтверждены свежий handoff, живой `working_state_restore`, непустой `chat_start_restore.prompt_text` и оба replay-guard probe.
 - поверх обычного handoff теперь materialized ещё и `working_state` слой:
   он автозахватывается после `continuity handoff` и после `context pack`,
   а новый chat-start поднимает не только headline/next-step, но и активные файлы, последние рабочие запросы и текущую рабочую сессию.
@@ -1186,6 +1191,9 @@ cargo run -- verify mcp-matrix --matrix mcp_universe_local --project project_alp
 - обычные MCP happy-path задачи считаются как `hit_correct_target`;
 - hostile fail-closed задачи считаются не как “просто ошибка”, а как корректно сохранённая граница, то есть тоже `hit_correct_target` для isolation-boundary pattern;
 - `continuity_restore_success` считается как `recovered_useful`, потому что контур реально восстановил рабочее состояние, а не просто вернул произвольный успешный ответ.
+- тот же recovery vocabulary теперь существует и вне MCP:
+  - `verify continuity` пишет `continuity_verification.canonical_eval`;
+  - на каноническом Art proof-контуре это сейчас `5 x recovered_useful`, потому что recovery-path восстанавливает handoff, working state, prompt и fail-closed защищён от replay stale import/handoff.
 
 На текущем каноническом proof-контуре это даёт:
 - `live_mcpbench_local` -> `11 x hit_correct_target`
@@ -1264,6 +1272,13 @@ cargo run -- verify memory-matrix --matrix letta_memory_local
   - `over_included`
   - `recovered_useful`
   - `not_useful`
+- direct continuity recovery теперь тоже использует этот vocabulary:
+  - `handoff_summary_present`
+  - `working_state_restore_present`
+  - `chat_start_prompt_present`
+  - `handoff_replay_rejected`
+  - `import_replay_rejected`
+  - хороший recovery path обязан давать `recovered_useful`, а replay-регресс обязан опускаться до `stale_target`, а не маскироваться под success.
 
 Proof теперь проверяет не только happy-path, но и повторяемость:
 - `./scripts/proof_memory_task_matrix.sh`

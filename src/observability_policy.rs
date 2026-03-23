@@ -168,6 +168,7 @@ pub fn is_benchmark_snapshot_kind(snapshot_kind: &str) -> bool {
             | "retrieval_load_hot"
             | "retrieval_load_cold"
             | "retrieval_accuracy"
+            | "continuity_verification"
             | "cold_path_benchmark"
             | "token_benchmark"
             | "token_benchmark_suite"
@@ -216,6 +217,7 @@ mod tests {
         assert!(rule.immutable_snapshot);
         assert!(rule.ttl_hours.is_some());
         assert!(is_benchmark_snapshot_kind("retrieval_benchmark_hot"));
+        assert!(is_benchmark_snapshot_kind("continuity_verification"));
     }
 
     #[test]

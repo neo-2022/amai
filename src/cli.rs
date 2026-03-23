@@ -151,6 +151,7 @@ pub enum VerifyCommand {
     TextCompare(Box<VerifyTextCompareArgs>),
     McpMatrix(Box<VerifyMcpMatrixArgs>),
     MemoryMatrix(Box<VerifyMemoryMatrixArgs>),
+    Continuity(Box<VerifyContinuityArgs>),
     Accuracy(VerifyAccuracyArgs),
     Degradation(VerifyDegradationArgs),
     Load(Box<VerifyLoadArgs>),
@@ -652,6 +653,16 @@ pub struct VerifyMemoryMatrixArgs {
     pub min_mean_score: Option<f64>,
     #[arg(long)]
     pub max_p95_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct VerifyContinuityArgs {
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub repo_root: Option<PathBuf>,
+    #[arg(long, default_value = "continuity")]
+    pub namespace: String,
 }
 
 #[derive(Debug, Clone, Args)]

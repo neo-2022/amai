@@ -1,5 +1,5 @@
-modified_at = "2026-03-23 18:21 MSK"
-"Ручная сверка guide/docs" = "2026-03-23 18:21 MSK"
+modified_at = "2026-03-23 19:52 MSK"
+"Ручная сверка guide/docs" = "2026-03-23 19:52 MSK"
 
 [science]
 methodology_version = "retrieval-science-v1"
@@ -204,6 +204,13 @@ dataset_version = "synthetic-degradation-matrix-v2"
 query_suite_version = "degradation-scenarios-v2"
 manifest_path = "built-in synthetic degradation probes"
 reproducibility_contract = "The same synthetic degradation probes must produce the same pass/fail verdicts for scope corruption, partial continuity refresh, temporal gap handling, vector-layer fallback, cache expiry handling and working-state lineage handling."
+
+[science.suites.continuity_verification]
+suite_version = "continuity-verification-v1"
+dataset_version = "continuity-verification-v1"
+query_suite_version = "continuity-verification-v1"
+manifest_path = "scripts/proof_art_continuity_migration.sh"
+reproducibility_contract = "The same continuity import, handoff and restore contour must produce the same direct continuity recovery verdict classes and replay freshness decisions."
 
 [science.suites.cold_path_benchmark]
 suite_version = "cold-path-benchmark-v2"

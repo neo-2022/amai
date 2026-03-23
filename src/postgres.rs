@@ -1818,6 +1818,7 @@ fn observability_source_class(snapshot_kind: &str, payload: &Value) -> &'static 
         | "retrieval_load_hot"
         | "retrieval_load_cold"
         | "retrieval_accuracy"
+        | "continuity_verification"
         | "cold_path_benchmark"
         | "token_benchmark"
         | "token_benchmark_suite"
@@ -1986,6 +1987,10 @@ mod tests {
         });
         assert_eq!(
             observability_source_class("retrieval_load_hot", &payload),
+            "benchmark"
+        );
+        assert_eq!(
+            observability_source_class("continuity_verification", &json!({})),
             "benchmark"
         );
     }
