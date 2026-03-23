@@ -243,6 +243,24 @@ UPDATE ami.observability_snapshots
 SET source_kind = snapshot_kind
 WHERE source_kind IS NULL;
 
+UPDATE ami.observability_snapshots AS snapshots
+SET
+    source_event_id = snapshots.payload #>> '{working_state_event,event_id}',
+    event_key = snapshots.payload #>> '{working_state_event,event_id}'
+WHERE snapshots.snapshot_kind = 'working_state_event'
+AND COALESCE(snapshots.payload #>> '{working_state_event,event_id}', '') <> ''
+AND (
+    snapshots.source_event_id IS DISTINCT FROM snapshots.payload #>> '{working_state_event,event_id}'
+    OR snapshots.event_key IS DISTINCT FROM snapshots.payload #>> '{working_state_event,event_id}'
+)
+AND NOT EXISTS (
+    SELECT 1
+    FROM ami.observability_snapshots AS other
+    WHERE other.snapshot_kind = snapshots.snapshot_kind
+      AND other.snapshot_id <> snapshots.snapshot_id
+      AND other.event_key = snapshots.payload #>> '{working_state_event,event_id}'
+);
+
 UPDATE ami.observability_snapshots
 SET source_class = CASE
     WHEN payload->'load_verification'->>'record_live_context' = 'true'
@@ -320,6 +338,7 @@ BEGIN
         NULLIF(NEW.source_event_id, ''),
         NULLIF(NEW.payload #>> '{_observability,source_event_id}', ''),
         NULLIF(NEW.payload #>> '{token_budget_event,event_id}', ''),
+        NULLIF(NEW.payload #>> '{working_state_event,event_id}', ''),
         NULLIF(NEW.payload #>> '{working_state_event,context_pack_id}', ''),
         NULLIF(NEW.payload #>> '{context_pack_id}', '')
     );

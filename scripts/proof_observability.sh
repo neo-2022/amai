@@ -43,6 +43,8 @@ export AMI_PROMETHEUS_SCRAPE_TARGET="host.docker.internal:${observe_port}"
 
 step "build release binary"
 cargo build --release --quiet
+step "prove observability guardrails"
+cargo run --release --quiet -- observe guardrails
 rm -f tmp/observe-exporter.log
 step "start observe exporter on ${AMI_OBSERVE_BIND}"
 ./scripts/run_observe_exporter.sh > tmp/observe-exporter.log 2>&1 &

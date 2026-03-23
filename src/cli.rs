@@ -161,6 +161,7 @@ pub enum VerifyCommand {
 pub enum ObserveCommand {
     Snapshot,
     SlaCheck,
+    Guardrails,
     TokenReport(ObserveTokenReportArgs),
     CleanupSnapshots(ObserveCleanupSnapshotsArgs),
     CleanupArtifacts(ObserveCleanupArtifactsArgs),

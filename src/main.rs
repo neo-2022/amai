@@ -362,6 +362,11 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 observe::run_sla_check(&cfg).await?;
             }
+            ObserveCommand::Guardrails => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                observe::print_guardrails(&cfg).await?;
+            }
             ObserveCommand::TokenReport(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

@@ -11,13 +11,15 @@ use axum::{
     response::{Html, IntoResponse},
     routing::get,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio_postgres::Client;
+use uuid::Uuid;
 
 #[derive(Clone)]
 struct ObserveState {
@@ -182,6 +184,26 @@ pub async fn run_sla_check(cfg: &AppConfig) -> Result<()> {
     Ok(())
 }
 
+pub async fn print_guardrails(cfg: &AppConfig) -> Result<()> {
+    maybe_cleanup_local_artifacts().await?;
+    let db = postgres::connect_admin(cfg).await?;
+    postgres::bootstrap_schema(&db, cfg).await?;
+    let prefix = format!("observe-guardrail-{}", Uuid::new_v4());
+    let result = collect_guardrail_report(&db, &prefix).await;
+    let cleanup_result = cleanup_guardrail_rows(&db, &prefix).await;
+    match (result, cleanup_result) {
+        (Ok(report), Ok(())) => {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(error), Err(cleanup_error)) => Err(anyhow!(
+            "{error:#}\nsecondary cleanup failure: {cleanup_error:#}"
+        )),
+    }
+}
+
 pub async fn print_retention_cleanup(
     cfg: &AppConfig,
     apply: bool,
@@ -263,6 +285,283 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
     axum::serve(listener, app)
         .await
         .context("observe exporter stopped unexpectedly")
+}
+
+#[derive(Debug, Serialize)]
+struct GuardrailCheck {
+    name: &'static str,
+    status: &'static str,
+    details: Value,
+}
+
+async fn collect_guardrail_report(db: &Client, prefix: &str) -> Result<Value> {
+    let mut checks = Vec::new();
+    checks.push(prove_direct_sql_working_state_event_id(db, prefix).await?);
+    checks.push(prove_direct_sql_benchmark_contamination_block(db, prefix).await?);
+    checks.push(prove_idempotent_replay_counter(db, prefix).await?);
+    checks.push(prove_newer_divergent_payload_is_anti_replay(db, prefix).await?);
+    checks.push(prove_immutable_snapshot_update_is_blocked(db, prefix).await?);
+    Ok(json!({
+        "status": "pass",
+        "guardrails": checks,
+    }))
+}
+
+async fn cleanup_guardrail_rows(db: &Client, prefix: &str) -> Result<()> {
+    let like = format!("{prefix}%");
+    db.execute(
+        r#"
+        DELETE FROM ami.observability_snapshots
+        WHERE event_key LIKE $1
+           OR COALESCE(source_event_id, '') LIKE $1
+        "#,
+        &[&like],
+    )
+    .await
+    .context("failed to cleanup observability guardrail proof rows")?;
+    Ok(())
+}
+
+async fn prove_direct_sql_working_state_event_id(
+    db: &Client,
+    prefix: &str,
+) -> Result<GuardrailCheck> {
+    let event_id = format!("{prefix}-working-state");
+    let payload = json!({
+        "working_state_event": {
+            "event_id": event_id,
+            "context_pack_id": format!("{prefix}-legacy-context-pack"),
+            "source_kind": "context_pack",
+            "project": {
+                "code": "amai"
+            },
+            "namespace": {
+                "code": "default"
+            },
+            "recorded_at_epoch_ms": 101
+        }
+    });
+    let row = db
+        .query_one(
+            r#"
+            INSERT INTO ami.observability_snapshots(snapshot_kind, payload)
+            VALUES ($1, $2)
+            RETURNING snapshot_id, event_key, source_event_id
+            "#,
+            &[&"working_state_event", &payload],
+        )
+        .await
+        .context("failed to insert direct-SQL working_state proof row")?;
+    let snapshot_id: Uuid = row.get(0);
+    let event_key: String = row.get(1);
+    let source_event_id: Option<String> = row.get(2);
+    if event_key != event_id || source_event_id.as_deref() != Some(event_id.as_str()) {
+        return Err(anyhow!(
+            "working_state direct SQL proof expected event_id={} but stored event_key={} source_event_id={:?}",
+            event_id,
+            event_key,
+            source_event_id
+        ));
+    }
+    Ok(GuardrailCheck {
+        name: "direct_sql_working_state_event_id",
+        status: "pass",
+        details: json!({
+            "snapshot_id": snapshot_id,
+            "event_key": event_key,
+            "source_event_id": source_event_id,
+        }),
+    })
+}
+
+async fn prove_direct_sql_benchmark_contamination_block(
+    db: &Client,
+    prefix: &str,
+) -> Result<GuardrailCheck> {
+    let event_id = format!("{prefix}-contamination");
+    let payload = json!({
+        "_observability": {
+            "source_event_id": event_id
+        },
+        "load_verification": {
+            "project": "amai",
+            "namespace": "default",
+            "captured_at_epoch_ms": 202,
+            "record_live_context": true,
+            "publish_benchmark_snapshot": false
+        }
+    });
+    let error = db
+        .execute(
+            r#"
+            INSERT INTO ami.observability_snapshots(snapshot_kind, payload)
+            VALUES ($1, $2)
+            "#,
+            &[&"retrieval_load_hot", &payload],
+        )
+        .await
+        .expect_err("contaminated benchmark insert must fail");
+    let message = postgres_error_message(&error);
+    if !message.contains("benchmark lane contamination blocked") {
+        return Err(anyhow!(
+            "unexpected benchmark contamination error: {message}"
+        ));
+    }
+    Ok(GuardrailCheck {
+        name: "direct_sql_benchmark_contamination_block",
+        status: "pass",
+        details: json!({
+            "error": message,
+        }),
+    })
+}
+
+fn postgres_error_message(error: &tokio_postgres::Error) -> String {
+    if let Some(db_error) = error.as_db_error() {
+        let mut message = db_error.message().to_string();
+        if let Some(detail) = db_error.detail() {
+            message.push_str(&format!(" | detail: {detail}"));
+        }
+        if let Some(hint) = db_error.hint() {
+            message.push_str(&format!(" | hint: {hint}"));
+        }
+        return message;
+    }
+    error.to_string()
+}
+
+async fn prove_idempotent_replay_counter(db: &Client, prefix: &str) -> Result<GuardrailCheck> {
+    let event_id = format!("{prefix}-replay");
+    let payload = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "benchmark_run"
+        },
+        "benchmark": {
+            "project": "project_alpha",
+            "namespace": "default",
+            "captured_at_epoch_ms": 303,
+            "p95_ms": 0.5
+        }
+    });
+    let first_snapshot_id =
+        postgres::insert_observability_snapshot(db, "retrieval_benchmark_hot", &payload).await?;
+    let replay_snapshot_id =
+        postgres::insert_observability_snapshot(db, "retrieval_benchmark_hot", &payload).await?;
+    let row = db
+        .query_one(
+            r#"
+            SELECT replay_count
+            FROM ami.observability_snapshots
+            WHERE snapshot_id = $1
+            "#,
+            &[&first_snapshot_id],
+        )
+        .await
+        .context("failed to fetch replay_count for observability proof row")?;
+    let replay_count: i64 = row.get(0);
+    if replay_snapshot_id != first_snapshot_id || replay_count != 1 {
+        return Err(anyhow!(
+            "idempotent replay proof expected same snapshot_id with replay_count=1, got first={} replay={} replay_count={}",
+            first_snapshot_id,
+            replay_snapshot_id,
+            replay_count
+        ));
+    }
+    Ok(GuardrailCheck {
+        name: "idempotent_replay_counter",
+        status: "pass",
+        details: json!({
+            "snapshot_id": first_snapshot_id,
+            "replay_count": replay_count,
+        }),
+    })
+}
+
+async fn prove_newer_divergent_payload_is_anti_replay(
+    db: &Client,
+    prefix: &str,
+) -> Result<GuardrailCheck> {
+    let event_id = format!("{prefix}-anti-replay");
+    let older = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "benchmark_run"
+        },
+        "benchmark": {
+            "project": "project_alpha",
+            "namespace": "default",
+            "captured_at_epoch_ms": 404,
+            "p95_ms": 0.4
+        }
+    });
+    let newer = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "benchmark_run"
+        },
+        "benchmark": {
+            "project": "project_alpha",
+            "namespace": "default",
+            "captured_at_epoch_ms": 405,
+            "p95_ms": 0.9
+        }
+    });
+    let snapshot_id =
+        postgres::insert_observability_snapshot(db, "retrieval_benchmark_hot", &older).await?;
+    let error = postgres::insert_observability_snapshot(db, "retrieval_benchmark_hot", &newer)
+        .await
+        .expect_err("newer divergent payload must trigger anti-replay");
+    let message = format!("{error:#}");
+    if !message.contains("observability anti-replay blocked newer divergent payload") {
+        return Err(anyhow!("unexpected anti-replay error: {message}"));
+    }
+    Ok(GuardrailCheck {
+        name: "newer_divergent_payload_is_anti_replay",
+        status: "pass",
+        details: json!({
+            "snapshot_id": snapshot_id,
+            "error": message,
+        }),
+    })
+}
+
+async fn prove_immutable_snapshot_update_is_blocked(
+    db: &Client,
+    prefix: &str,
+) -> Result<GuardrailCheck> {
+    let event_id = format!("{prefix}-immutable");
+    let original = json!({
+        "_observability": {
+            "source_event_id": event_id,
+            "source_kind": "benchmark_run"
+        },
+        "benchmark": {
+            "project": "project_alpha",
+            "namespace": "default",
+            "captured_at_epoch_ms": 505,
+            "p95_ms": 0.6
+        }
+    });
+    let mut updated = original.clone();
+    updated["benchmark"]["p95_ms"] = json!(1.2);
+    let snapshot_id =
+        postgres::insert_observability_snapshot(db, "retrieval_benchmark_hot", &original).await?;
+    let error = postgres::update_observability_snapshot_payload(db, &snapshot_id, &updated)
+        .await
+        .expect_err("immutable benchmark snapshot update must fail");
+    let message = format!("{error:#}");
+    if !message.contains("observability snapshot is immutable and cannot be updated") {
+        return Err(anyhow!("unexpected immutable update error: {message}"));
+    }
+    Ok(GuardrailCheck {
+        name: "immutable_snapshot_update_is_blocked",
+        status: "pass",
+        details: json!({
+            "snapshot_id": snapshot_id,
+            "error": message,
+        }),
+    })
 }
 
 pub fn human_dashboard_base_url(bind: &str) -> String {

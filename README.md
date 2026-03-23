@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 06:45 MSK
-Ручная сверка guide/docs: 2026-03-23 06:45 MSK
+modified_at: 2026-03-23 07:07 MSK
+Ручная сверка guide/docs: 2026-03-23 07:07 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1270,6 +1270,12 @@ HDF5-датасеты, которые уже зафиксированы как �
 ./scripts/proof_stress_scale.sh
 ./scripts/proof_text_compare.sh
 ./scripts/proof_text_compare_real_projects.sh
+```
+
+Для отдельного DB-level proof именно по observability guardrails:
+
+```bash
+cargo run --release -- observe guardrails
 ```
 
 Если нужен уже не короткий smoke, а честный end-to-end cold contour на большом real-repo pool:

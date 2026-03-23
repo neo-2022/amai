@@ -1,5 +1,5 @@
-modified_at: 2026-03-22 00:18 MSK
-Ручная сверка guide/docs: 2026-03-22 00:18 MSK
+modified_at: 2026-03-23 07:07 MSK
+Ручная сверка guide/docs: 2026-03-23 07:07 MSK
 
 # Tests
 
@@ -44,6 +44,7 @@ modified_at: 2026-03-22 00:18 MSK
 - `cargo run -- verify mcp ...`
 - `cargo run -- verify memory-matrix --matrix letta_memory_local ...`
 - `cargo run -- verify hostile ...`
+- `cargo run --release -- observe guardrails`
 - `cargo run -- benchmark list`
 - `cargo run -- benchmark coverage`
 - `cargo run -- benchmark explain --benchmark live_mcpbench`

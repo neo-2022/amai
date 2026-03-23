@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 06:45 MSK
-Ручная сверка guide/docs: 2026-03-23 06:45 MSK
+modified_at: 2026-03-23 07:07 MSK
+Ручная сверка guide/docs: 2026-03-23 07:07 MSK
 
 # Operations
 
@@ -1467,12 +1467,14 @@ cargo run -- index project \
 Или напрямую:
 
 ```bash
+cargo run --release -- observe guardrails
 cargo run --release -- observe snapshot
 cargo run --release -- observe sla-check
 cargo run --release -- observe cleanup-snapshots --limit 200
 ```
 
 Что это даёт:
+- DB-level negative proof для anti-replay, idempotent replay counter, immutable benchmark snapshot и contamination block;
 - live snapshot по `PostgreSQL`, `Qdrant`, `NATS`, `S3-compatible storage`;
 - последние `index_project` и `retrieval_benchmark` snapshots;
 - последние `retrieval_accuracy` и `retrieval_load_hot` snapshots;
