@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:59 MSK
-Ручная сверка guide/docs: 2026-03-23 22:59 MSK
+modified_at: 2026-03-23 23:04 MSK
+Ручная сверка guide/docs: 2026-03-23 23:04 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -901,6 +901,13 @@ preview, а не только raw count.
 `compact_projects`, `cache_hits`, `exact_documents`, `symbol_hits`,
 `lexical_chunks` и `semantic_chunks`. Это позволяет внешнему клиенту понять,
 что именно реально прогрелось, а не видеть только финальное количество проектов.
+
+Кроме самих tools, `initialize` теперь отдаёт versioned `amai_protocol_manifest`.
+В нём зафиксированы:
+- версия MCP contract layer;
+- базовые safety laws;
+- prompt contracts;
+- per-tool `summary_field`, который внешний клиент может ожидать в structured output.
 
 Понятный walkthrough для подключения:
 - [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)

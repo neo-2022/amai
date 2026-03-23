@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:59 MSK
-Ручная сверка guide/docs: 2026-03-23 22:59 MSK
+modified_at: 2026-03-23 23:04 MSK
+Ручная сверка guide/docs: 2026-03-23 23:04 MSK
 
 # MCP Integration
 
@@ -250,6 +250,13 @@ cargo build --release
 `сколько проектов прогрето`. Он показывает preview проектов и totals по
 `cache_hit / exact / symbol / lexical / semantic`, а в structured output это же
 лежит отдельно в `warm_cache_summary`.
+
+Отдельно `initialize` теперь отдаёт `amai_protocol_manifest`. Это нужно, чтобы
+клиент при первом handshake видел не только список tools/prompts, но и:
+- contract version;
+- базовые safety laws;
+- per-tool `summary_field`, который должен появляться в structured output;
+- назначение MCP prompts.
 
 И prompts:
 - `amai-onboarding`

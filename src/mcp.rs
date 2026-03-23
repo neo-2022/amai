@@ -595,6 +595,7 @@ async fn handle_request(cfg: &AppConfig, incoming: Value) -> Result<Value> {
                     "prompts": { "listChanged": false },
                 },
                 "instructions": server_instructions(),
+                "amai_protocol_manifest": protocol_manifest(),
             }
         }),
         "ping" => json!({
@@ -1229,6 +1230,58 @@ fn server_instructions() -> String {
         "Use amai_observe_snapshot when you need live stack health and SLA evidence.",
     ]
     .join(" ")
+}
+
+fn protocol_manifest() -> Value {
+    json!({
+        "version": "mcp-contract-v1",
+        "default_scope_rule": "project_scoped_fail_closed",
+        "default_retrieval_mode": "local_strict",
+        "tool_contracts": {
+            "amai_list_projects": {
+                "summary_field": "projects_summary",
+                "short_summary_contract": "registered project count plus compact code preview",
+            },
+            "amai_list_namespaces": {
+                "summary_field": "namespaces_summary",
+                "short_summary_contract": "namespace count plus compact namespace=mode preview",
+            },
+            "amai_context_pack": {
+                "summary_field": "context_pack_summary",
+                "short_summary_contract": "layer totals plus included/excluded retrieval reasons",
+            },
+            "amai_token_benchmark": {
+                "summary_field": "token_benchmark_summary",
+                "short_summary_contract": "naive-vs-context token comparison with savings totals",
+            },
+            "amai_token_report": {
+                "summary_field": "token_report_summary",
+                "short_summary_contract": "scope, status, counted-events semantics and saved tokens",
+            },
+            "amai_observe_snapshot": {
+                "summary_field": "observe_snapshot_summary",
+                "short_summary_contract": "live SLA totals plus latest included/excluded retrieval reasons",
+            },
+            "amai_warm_cache": {
+                "summary_field": "warm_cache_summary",
+                "short_summary_contract": "project preview plus cache-hit and retrieval-layer totals",
+            },
+        },
+        "prompt_contracts": {
+            "amai-onboarding": {
+                "purpose": "safe onboarding without mixing projects",
+            },
+            "amai-context-pack": {
+                "purpose": "project-scoped retrieval guidance for context-pack requests",
+            },
+        },
+        "safety_laws": [
+            "project isolation comes before retrieval breadth",
+            "lexical and exact evidence outrank semantic guesses",
+            "semantic retrieval must stay inside project scope unless policy explicitly allows more",
+            "empty fail-closed retrieval is better than noisy cross-project context",
+        ],
+    })
 }
 
 fn tool_definitions() -> Vec<Value> {
@@ -2132,9 +2185,9 @@ fn default_warm_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        McpConfigArgs, context_pack_summary, observe_snapshot_summary, render_client_config,
-        summarize_codes, summarize_namespace_modes, token_benchmark_summary, token_report_summary,
-        warm_cache_summary,
+        McpConfigArgs, context_pack_summary, observe_snapshot_summary, protocol_manifest,
+        render_client_config, summarize_codes, summarize_namespace_modes, token_benchmark_summary,
+        token_report_summary, warm_cache_summary,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -2390,6 +2443,28 @@ mod tests {
         assert_eq!(summary.symbol_hits, 1);
         assert_eq!(summary.lexical_chunks, 5);
         assert_eq!(summary.semantic_chunks, 4);
+    }
+
+    #[test]
+    fn protocol_manifest_lists_summary_contracts() {
+        let manifest = protocol_manifest();
+        assert_eq!(manifest["version"].as_str(), Some("mcp-contract-v1"));
+        assert_eq!(
+            manifest["tool_contracts"]["amai_context_pack"]["summary_field"].as_str(),
+            Some("context_pack_summary")
+        );
+        assert_eq!(
+            manifest["tool_contracts"]["amai_warm_cache"]["summary_field"].as_str(),
+            Some("warm_cache_summary")
+        );
+        assert_eq!(
+            manifest["prompt_contracts"]["amai-onboarding"]["purpose"].as_str(),
+            Some("safe onboarding without mixing projects")
+        );
+        let safety_laws = manifest["safety_laws"]
+            .as_array()
+            .expect("safety laws array");
+        assert!(!safety_laws.is_empty());
     }
 
     #[test]

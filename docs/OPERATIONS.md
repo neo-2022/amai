@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:59 MSK
-Ручная сверка guide/docs: 2026-03-23 22:59 MSK
+modified_at: 2026-03-23 23:04 MSK
+Ручная сверка guide/docs: 2026-03-23 23:04 MSK
 
 # Operations
 
@@ -649,6 +649,9 @@ cargo run -- mcp serve
 - `amai_warm_cache` теперь тоже отдаёт наружу `warm_cache_summary`, где уже
   собраны `compact_projects`, `cache_hits`, `exact_documents`, `symbol_hits`,
   `lexical_chunks` и `semantic_chunks`, а не только итоговый count warmed projects.
+- `initialize` теперь тоже отдаёт `amai_protocol_manifest`:
+  versioned contract layer с `default_scope_rule`, `default_retrieval_mode`,
+  `tool_contracts`, `prompt_contracts` и `safety_laws`.
 
 ## MCP client config
 
