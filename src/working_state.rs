@@ -485,7 +485,7 @@ fn compose_restore_bundle(
     })
 }
 
-pub fn degradation_proof_report(captured_at_epoch_ms: u64) -> Result<Value> {
+pub fn degradation_proof_scenarios(captured_at_epoch_ms: u64) -> Result<Vec<Value>> {
     let base = captured_at_epoch_ms as i64;
     let exact = synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
         project_code: "art",
@@ -520,6 +520,95 @@ pub fn degradation_proof_report(captured_at_epoch_ms: u64) -> Result<Value> {
     let cross_agent_pass = exact_selected.len() == 1
         && exact_selected[0].payload["working_state_event"]["headline"] == json!("exact-scope")
         && foreign_only_selected.is_empty();
+
+    let corrupt_project_selected = select_relevant_events(
+        vec![synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+            project_code: "art-corrupt",
+            namespace_code: "continuity",
+            agent_scope: "art::primary",
+            session_id: "session-corrupt-project",
+            event_kind: "retrieval_context_pack",
+            headline: "corrupt-project",
+            next_step_hint: "",
+            summary: "",
+            offset: base - 4,
+        })],
+        "art",
+        "continuity",
+        "art::primary",
+    );
+    let corrupt_namespace_selected = select_relevant_events(
+        vec![synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity-corrupt",
+            agent_scope: "art::primary",
+            session_id: "session-corrupt-namespace",
+            event_kind: "retrieval_context_pack",
+            headline: "corrupt-namespace",
+            next_step_hint: "",
+            summary: "",
+            offset: base - 5,
+        })],
+        "art",
+        "continuity",
+        "art::primary",
+    );
+    let corrupt_scope_selected = select_relevant_events(
+        vec![synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::pr1mary?",
+            session_id: "session-corrupt-scope",
+            event_kind: "retrieval_context_pack",
+            headline: "corrupt-scope",
+            next_step_hint: "",
+            summary: "",
+            offset: base - 6,
+        })],
+        "art",
+        "continuity",
+        "art::primary",
+    );
+    let corrupt_scope_metadata_pass = corrupt_project_selected.is_empty()
+        && corrupt_namespace_selected.is_empty()
+        && corrupt_scope_selected.is_empty();
+
+    let partial_refresh_events = vec![
+        synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-partial-refresh",
+            event_kind: "continuity_handoff",
+            headline: "Partial refresh handoff",
+            next_step_hint: "Finish continuity refresh.",
+            summary: "Only the newest handoff landed so far.",
+            offset: base - 60_000,
+        }),
+        synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
+            project_code: "art",
+            namespace_code: "continuity",
+            agent_scope: "art::continuity::default",
+            session_id: "session-partial-refresh",
+            event_kind: "retrieval_context_pack",
+            headline: "Partial refresh retrieval",
+            next_step_hint: "Inspect refresh gap.",
+            summary: "Only one supporting retrieval event is available.",
+            offset: base - 60_001,
+        }),
+    ];
+    let partial_refresh_bundle = compose_restore_bundle(
+        &json!({"code":"art"}),
+        &json!({"code":"continuity"}),
+        &partial_refresh_events,
+    );
+    let partial_refresh_restore = &partial_refresh_bundle["working_state_restore"];
+    let partial_refresh_pass = partial_refresh_restore["restore_confidence"]
+        == json!("preliminary")
+        && partial_refresh_restore["is_preliminary"] == json!(true)
+        && partial_refresh_restore["current_goal"] == json!("Partial refresh handoff")
+        && partial_refresh_restore["state_lineage"]["authoritative_event_kind"]
+            == json!("continuity_handoff");
 
     let stale_events = vec![
         synthetic_snapshot_with_kind(SyntheticSnapshotSpec {
@@ -617,13 +706,13 @@ pub fn degradation_proof_report(captured_at_epoch_ms: u64) -> Result<Value> {
         &conflict_events,
     );
     let conflict_restore = &conflict_bundle["working_state_restore"];
-    let working_state_conflict_pass =
-        conflict_restore["state_lineage"]["authoritative_event_kind"] == json!("continuity_handoff")
-            && conflict_restore["action_state_counts"]["succeeded"] == json!(1)
-            && conflict_restore["action_state_counts"]["superseded"] == json!(1)
-            && conflict_restore["action_state_counts"]["attempted"] == json!(1);
+    let working_state_conflict_pass = conflict_restore["state_lineage"]["authoritative_event_kind"]
+        == json!("continuity_handoff")
+        && conflict_restore["action_state_counts"]["succeeded"] == json!(1)
+        && conflict_restore["action_state_counts"]["superseded"] == json!(1)
+        && conflict_restore["action_state_counts"]["attempted"] == json!(1);
 
-    let scenarios = vec![
+    Ok(vec![
         json!({
             "class_key": "cross_agent_scope",
             "title": "Чужой рабочий контур агента",
@@ -636,6 +725,37 @@ pub fn degradation_proof_report(captured_at_epoch_ms: u64) -> Result<Value> {
             "details": {
                 "exact_scope_selected_count": exact_selected.len(),
                 "foreign_only_selected_count": foreign_only_selected.len(),
+            }
+        }),
+        json!({
+            "class_key": "corrupt_scope_metadata",
+            "title": "Битые scope-метаданные",
+            "status": if corrupt_scope_metadata_pass { "pass" } else { "critical" },
+            "reason": if corrupt_scope_metadata_pass {
+                "working-state selection держит exact project/namespace/agent scope и fail-closed отбрасывает битые scope-метаданные без nearest-scope угадывания."
+            } else {
+                "working-state selection принял битые project/namespace/agent scope-метаданные вместо безопасного пустого результата."
+            },
+            "details": {
+                "corrupt_project_selected_count": corrupt_project_selected.len(),
+                "corrupt_namespace_selected_count": corrupt_namespace_selected.len(),
+                "corrupt_agent_scope_selected_count": corrupt_scope_selected.len(),
+            }
+        }),
+        json!({
+            "class_key": "partial_refresh",
+            "title": "Неполный refresh",
+            "status": if partial_refresh_pass { "pass" } else { "critical" },
+            "reason": if partial_refresh_pass {
+                "build_restore_bundle не маскирует неполный refresh под свежий: оставляет restore_confidence = preliminary и явный authoritative lineage."
+            } else {
+                "restore bundle замаскировал неполный refresh под полноценный свежий restore."
+            },
+            "details": {
+                "events_count": partial_refresh_restore["events_count"].clone(),
+                "restore_confidence": partial_refresh_restore["restore_confidence"].clone(),
+                "is_preliminary": partial_refresh_restore["is_preliminary"].clone(),
+                "current_goal": partial_refresh_restore["current_goal"].clone(),
             }
         }),
         json!({
@@ -666,8 +786,12 @@ pub fn degradation_proof_report(captured_at_epoch_ms: u64) -> Result<Value> {
                 "state_lineage": conflict_restore["state_lineage"].clone(),
             }
         }),
-    ];
+    ])
+}
 
+#[cfg(test)]
+pub fn degradation_proof_report(captured_at_epoch_ms: u64) -> Result<Value> {
+    let scenarios = degradation_proof_scenarios(captured_at_epoch_ms)?;
     Ok(json!({
         "degradation_verification": {
             "captured_at_epoch_ms": captured_at_epoch_ms,
@@ -1608,13 +1732,23 @@ mod tests {
         let scenarios = report["degradation_verification"]["scenarios"]
             .as_array()
             .expect("scenarios");
-        assert_eq!(scenarios.len(), 3);
-        assert!(scenarios
-            .iter()
-            .all(|scenario| scenario["status"].as_str() == Some("pass")));
+        assert_eq!(scenarios.len(), 5);
+        assert!(
+            scenarios
+                .iter()
+                .all(|scenario| scenario["status"].as_str() == Some("pass"))
+        );
         assert!(scenarios.iter().any(|scenario| {
             scenario["class_key"].as_str() == Some("cross_agent_scope")
                 && scenario["details"]["foreign_only_selected_count"] == json!(0)
+        }));
+        assert!(scenarios.iter().any(|scenario| {
+            scenario["class_key"].as_str() == Some("corrupt_scope_metadata")
+                && scenario["details"]["corrupt_project_selected_count"] == json!(0)
+        }));
+        assert!(scenarios.iter().any(|scenario| {
+            scenario["class_key"].as_str() == Some("partial_refresh")
+                && scenario["details"]["restore_confidence"] == json!("preliminary")
         }));
         assert!(scenarios.iter().any(|scenario| {
             scenario["class_key"].as_str() == Some("stale_handoff")

@@ -1,17 +1,17 @@
 use crate::bootstrap;
 use crate::cli::{
-    ContextPackArgs, VerifyAccuracyArgs, VerifyBenchmarkArgs, VerifyHostileArgs, VerifyLoadArgs,
-    VerifyTextCompareArgs, VerifyTokenBenchmarkArgs, VerifyTokenBenchmarkSuiteArgs,
-    VerifyDegradationArgs,
+    ContextPackArgs, VerifyAccuracyArgs, VerifyBenchmarkArgs, VerifyDegradationArgs,
+    VerifyHostileArgs, VerifyLoadArgs, VerifyTextCompareArgs, VerifyTokenBenchmarkArgs,
+    VerifyTokenBenchmarkSuiteArgs,
 };
 use crate::compatibility;
 use crate::config::AppConfig;
+use crate::degradation_proof;
 use crate::language;
 use crate::postgres;
 use crate::retrieval;
 use crate::retrieval_science;
 use crate::token_budget;
-use crate::working_state;
 use anyhow::{Context, Result, anyhow};
 use ignore::WalkBuilder;
 use serde::Deserialize;
@@ -523,7 +523,7 @@ pub async fn run_accuracy(
 }
 
 pub async fn run_degradation(
-    _cfg: &AppConfig,
+    cfg: &AppConfig,
     db: &mut Client,
     args: &VerifyDegradationArgs,
 ) -> Result<()> {
@@ -539,7 +539,7 @@ pub async fn run_degradation(
         .context("system clock before unix epoch")?
         .as_millis() as u64;
     let verification_run_id = Uuid::new_v4();
-    let proof = working_state::degradation_proof_report(captured_at_epoch_ms)?;
+    let proof = degradation_proof::build_report(captured_at_epoch_ms, cfg.local_fast_cache_ttl_ms)?;
     let scenarios = proof["degradation_verification"]["scenarios"]
         .as_array()
         .cloned()
@@ -579,7 +579,8 @@ pub async fn run_degradation(
         "retrieval_science": retrieval_science::suite_metadata("degradation_verification")?,
         "degradation_policy": retrieval_science::degradation_policy_json()?,
     });
-    let _ = postgres::insert_observability_snapshot(db, "degradation_verification", &payload).await?;
+    let _ =
+        postgres::insert_observability_snapshot(db, "degradation_verification", &payload).await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }

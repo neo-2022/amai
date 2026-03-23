@@ -983,6 +983,102 @@ fn render_direct_answer(
     lines.join("\n")
 }
 
+pub fn degradation_proof_scenarios() -> Result<Vec<Value>> {
+    let handoff = json!({
+        "headline": "Partial refresh line",
+        "next_step": "Finish continuity refresh."
+    });
+    let partial_refresh_answer =
+        render_direct_answer(&handoff, None, None, "previous_chat", None, 2);
+    let partial_refresh_pass = partial_refresh_answer
+        .contains("На чём закончился прошлый чат: для такого смещения назад нет известного чата.")
+        && partial_refresh_answer
+            .contains("Текущая активная линия проекта сейчас: Partial refresh line")
+        && partial_refresh_answer
+            .contains("Ближайший обязательный следующий шаг: Finish continuity refresh.");
+
+    let partial_thread_snapshots = vec![postgres::ObservabilitySnapshotRecord {
+        snapshot_id: Uuid::new_v4(),
+        snapshot_kind: "continuity_thread_index".to_string(),
+        created_at_epoch_ms: 1_744_087_814_000,
+        payload: json!({
+            "continuity_thread_index": {
+                "project": {"code": "art"},
+                "namespace": {"code": "continuity"},
+                "thread_id": "thread-wide",
+                "title": "длинный thread",
+                "started_at": "2026-03-18T11:00:00+03:00",
+                "ended_at": "2026-03-21T12:00:00+03:00",
+                "created_at_epoch_s": 1742284800,
+                "updated_at_epoch_s": 1742557200,
+                "time_slices": [
+                    {
+                        "started_at": "2026-03-21T02:25:33.619Z",
+                        "ended_at": "2026-03-21T02:27:31.157Z",
+                        "started_at_epoch_s": 1742523933,
+                        "ended_at_epoch_s": 1742524051,
+                        "user_anchor": "шумный вопрос",
+                        "assistant_anchor": "шумный ответ",
+                        "summary_headline": "слишком далёкий смысловой срез",
+                        "summary_next_step": ""
+                    }
+                ]
+            }
+        }),
+    }];
+    let target_time = "2026-03-18T12:00:00+03:00";
+    let partial_thread_tail = codex_threads::chat_tail_at_time_from_snapshots(
+        &partial_thread_snapshots,
+        "art",
+        "continuity",
+        target_time,
+        2,
+    )?;
+    let partial_thread_answer = render_direct_answer(
+        &handoff,
+        None,
+        partial_thread_tail.as_ref(),
+        "chat_at_time",
+        Some(target_time),
+        1,
+    );
+    let partial_thread_index_pass = partial_thread_tail.is_none()
+        && partial_thread_answer.contains(
+            "Что было в чате на этот момент: для этого момента нет точного совпадения в известных чатах.",
+        )
+        && partial_thread_answer.contains(target_time);
+
+    Ok(vec![
+        json!({
+            "class_key": "partial_refresh",
+            "title": "Неполный refresh",
+            "status": if partial_refresh_pass { "pass" } else { "critical" },
+            "reason": if partial_refresh_pass {
+                "continuity answer не маскирует неполный refresh под найденный previous chat и честно сообщает, что такого смещения назад пока нет."
+            } else {
+                "continuity answer подменил неполный refresh выдуманным previous-chat ответом."
+            },
+            "details": {
+                "answer": partial_refresh_answer,
+            }
+        }),
+        json!({
+            "class_key": "partial_thread_index",
+            "title": "Неполный thread index",
+            "status": if partial_thread_index_pass { "pass" } else { "critical" },
+            "reason": if partial_thread_index_pass {
+                "temporal lookup fail-closed отбрасывает слишком далёкий time-slice и честно пишет, что точного совпадения нет."
+            } else {
+                "temporal lookup подменил неполный thread index случайным соседним chat slice."
+            },
+            "details": {
+                "target_time": target_time,
+                "answer": partial_thread_answer,
+            }
+        }),
+    ])
+}
+
 fn select_chat_tail_label(
     chat_tail: &codex_threads::ChatTail,
     answer_headline: &str,
@@ -1904,8 +2000,9 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_chat_start_restore, enrich_thread_index_file, extract_next_step_from_text,
-        is_meta_continuity_handoff, parse_chat_reference_spec, render_direct_answer,
+        build_chat_start_restore, degradation_proof_scenarios, enrich_thread_index_file,
+        extract_next_step_from_text, is_meta_continuity_handoff, parse_chat_reference_spec,
+        render_direct_answer,
     };
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
@@ -2099,6 +2196,24 @@ mod tests {
         assert!(
             answer.contains("Ближайший обязательный следующий шаг: Current project next step.")
         );
+    }
+
+    #[test]
+    fn degradation_proof_scenarios_cover_temporal_gap_classes() {
+        let scenarios = degradation_proof_scenarios().expect("degradation proof scenarios");
+        assert_eq!(scenarios.len(), 2);
+        assert!(
+            scenarios
+                .iter()
+                .all(|scenario| scenario["status"].as_str() == Some("pass"))
+        );
+        assert!(scenarios.iter().any(|scenario| {
+            scenario["class_key"].as_str() == Some("partial_thread_index")
+                && scenario["details"]["answer"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("нет точного совпадения")
+        }));
     }
 
     #[test]

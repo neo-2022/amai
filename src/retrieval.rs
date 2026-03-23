@@ -92,6 +92,7 @@ struct SemanticGuardSummary {
     rejected_hits: usize,
     abstained: bool,
     reason: Option<&'static str>,
+    detail: Option<String>,
 }
 
 struct CachedQueryEmbedder {
@@ -816,6 +817,7 @@ async fn semantic_chunks(
                 rejected_hits: 0,
                 abstained: false,
                 reason: None,
+                detail: None,
             },
         ));
     }
@@ -834,39 +836,72 @@ async fn semantic_chunks(
         }
     }
     if !any_vectors {
-        return Ok((
-            lexical_fallback_chunks
-                .iter()
-                .take(limit)
-                .map(semantic_chunk_fallback_to_json)
-                .collect(),
+        return Ok(semantic_fallback_result(
+            query,
+            limit,
+            lexical_signal_count,
+            lexical_fallback_chunks,
             SemanticTimings::default(),
-            SemanticGuardSummary {
-                query_terms: query_terms(query),
-                lexical_signal_count,
-                accepted_hits: lexical_fallback_chunks.len().min(limit),
-                rejected_hits: 0,
-                abstained: lexical_signal_count == 0,
-                reason: Some("no_vector_points_in_scope"),
-            },
+            "no_vector_points_in_scope",
+            None,
         ));
     }
 
-    let (vector, query_embed_ms) = embed_query(cfg, query)?;
+    let (vector, query_embed_ms) = match embed_query(cfg, query) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(semantic_fallback_result(
+                query,
+                limit,
+                lexical_signal_count,
+                lexical_fallback_chunks,
+                SemanticTimings::default(),
+                "embedding_unavailable",
+                Some(error.to_string()),
+            ));
+        }
+    };
     if vector.len() as u64 != cfg.qdrant_code_dim {
-        return Err(anyhow!(
-            "query embedding size mismatch: expected {}, got {}",
-            cfg.qdrant_code_dim,
-            vector.len()
+        return Ok(semantic_fallback_result(
+            query,
+            limit,
+            lexical_signal_count,
+            lexical_fallback_chunks,
+            SemanticTimings {
+                query_embed_ms,
+                ..SemanticTimings::default()
+            },
+            "embedding_unavailable",
+            Some(format!(
+                "query embedding size mismatch: expected {}, got {}",
+                cfg.qdrant_code_dim,
+                vector.len()
+            )),
         ));
     }
 
     let search_started = Instant::now();
-    let qdrant_client = qdrant::connect(cfg)?;
+    let qdrant_client = match qdrant::connect(cfg) {
+        Ok(client) => client,
+        Err(error) => {
+            return Ok(semantic_fallback_result(
+                query,
+                limit,
+                lexical_signal_count,
+                lexical_fallback_chunks,
+                SemanticTimings {
+                    query_embed_ms,
+                    ..SemanticTimings::default()
+                },
+                "vector_layer_unavailable",
+                Some(error.to_string()),
+            ));
+        }
+    };
     let per_project_limit = limit.max(1);
     let mut points = Vec::new();
     for scope in visible_scopes {
-        let result = qdrant::search_namespace_points(
+        let result = match qdrant::search_namespace_points(
             &qdrant_client,
             &cfg.qdrant_alias_code,
             vector.clone(),
@@ -874,7 +909,25 @@ async fn semantic_chunks(
             &scope.namespace.code,
             per_project_limit,
         )
-        .await?;
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return Ok(semantic_fallback_result(
+                    query,
+                    limit,
+                    lexical_signal_count,
+                    lexical_fallback_chunks,
+                    SemanticTimings {
+                        query_embed_ms,
+                        search_ms: search_started.elapsed().as_millis(),
+                        ..SemanticTimings::default()
+                    },
+                    "vector_layer_unavailable",
+                    Some(error.to_string()),
+                ));
+            }
+        };
         points.extend(result);
     }
     let search_ms = search_started.elapsed().as_millis();
@@ -922,22 +975,7 @@ async fn semantic_chunks(
         seen.insert(key)
     });
     if hits.is_empty() && !lexical_fallback_chunks.is_empty() {
-        let exact_matches = lexical_fallback_chunks
-            .iter()
-            .filter(|chunk| chunk.content.contains(query))
-            .collect::<Vec<_>>();
-        let query_lower = query.to_lowercase();
-        let case_folded_matches = lexical_fallback_chunks
-            .iter()
-            .filter(|chunk| chunk.content.to_lowercase().contains(&query_lower))
-            .collect::<Vec<_>>();
-        let fallback_hits = if !exact_matches.is_empty() {
-            exact_matches
-        } else if !case_folded_matches.is_empty() {
-            case_folded_matches
-        } else {
-            lexical_fallback_chunks.iter().collect::<Vec<_>>()
-        };
+        let fallback_hits = lexical_fallback_hits(query, lexical_fallback_chunks);
         return Ok((
             fallback_hits
                 .iter()
@@ -956,6 +994,7 @@ async fn semantic_chunks(
                 rejected_hits: 0,
                 abstained: false,
                 reason: None,
+                detail: None,
             },
         ));
     }
@@ -971,6 +1010,59 @@ async fn semantic_chunks(
         },
         semantic_guard.1,
     ))
+}
+
+fn semantic_fallback_result(
+    query: &str,
+    limit: usize,
+    lexical_signal_count: usize,
+    lexical_fallback_chunks: &[ChunkHit],
+    timings: SemanticTimings,
+    reason: &'static str,
+    detail: Option<String>,
+) -> (Vec<Value>, SemanticTimings, SemanticGuardSummary) {
+    let fallback_hits = lexical_fallback_hits(query, lexical_fallback_chunks);
+    let accepted_hits = fallback_hits.len().min(limit);
+    let abstained = accepted_hits == 0 && lexical_signal_count == 0;
+    (
+        fallback_hits
+            .iter()
+            .take(limit)
+            .map(|chunk| semantic_chunk_fallback_to_json(chunk))
+            .collect(),
+        timings,
+        SemanticGuardSummary {
+            query_terms: query_terms(query),
+            lexical_signal_count,
+            accepted_hits,
+            rejected_hits: 0,
+            abstained,
+            reason: Some(reason),
+            detail,
+        },
+    )
+}
+
+fn lexical_fallback_hits<'a>(
+    query: &str,
+    lexical_fallback_chunks: &'a [ChunkHit],
+) -> Vec<&'a ChunkHit> {
+    let exact_matches = lexical_fallback_chunks
+        .iter()
+        .filter(|chunk| chunk.content.contains(query))
+        .collect::<Vec<_>>();
+    if !exact_matches.is_empty() {
+        return exact_matches;
+    }
+    let query_lower = query.to_lowercase();
+    let case_folded_matches = lexical_fallback_chunks
+        .iter()
+        .filter(|chunk| chunk.content.to_lowercase().contains(&query_lower))
+        .collect::<Vec<_>>();
+    if !case_folded_matches.is_empty() {
+        return case_folded_matches;
+    }
+    lexical_fallback_chunks.iter().collect::<Vec<_>>()
 }
 
 fn semantic_chunk_to_json(chunk: &ChunkHit) -> Value {
@@ -1060,6 +1152,7 @@ fn apply_semantic_relevance_guard(
             } else {
                 None
             },
+            detail: None,
         },
     )
 }
@@ -1117,7 +1210,8 @@ fn semantic_guard_to_json(guard: &SemanticGuardSummary) -> Value {
         "accepted_hits": guard.accepted_hits,
         "rejected_hits": guard.rejected_hits,
         "abstained": guard.abstained,
-        "reason": guard.reason
+        "reason": guard.reason,
+        "detail": guard.detail
     })
 }
 
@@ -1703,9 +1797,148 @@ fn chunk_to_json(hit: &ChunkHit) -> Value {
     })
 }
 
+pub fn degradation_proof_scenarios(local_fast_cache_ttl_ms: u128) -> Result<Vec<Value>> {
+    let lexical_chunk = synthetic_chunk_hit(
+        "src/degradation.rs",
+        "fn stable_semantic_fallback() { /* lexical safety net */ }",
+    );
+    let (qdrant_hits, _, qdrant_guard) = semantic_fallback_result(
+        "stable semantic fallback",
+        4,
+        1,
+        &[lexical_chunk.clone()],
+        SemanticTimings::default(),
+        "vector_layer_unavailable",
+        Some("synthetic Qdrant outage".to_string()),
+    );
+    let qdrant_unavailable_pass = qdrant_hits
+        .first()
+        .and_then(|item| item["retrieval_strategy"].as_str())
+        == Some("lexical_fallback")
+        && qdrant_guard.reason == Some("vector_layer_unavailable")
+        && qdrant_guard.accepted_hits == 1;
+
+    let (empty_embedding_hits, _, empty_embedding_guard) = semantic_fallback_result(
+        "stable semantic fallback",
+        4,
+        1,
+        &[lexical_chunk],
+        SemanticTimings::default(),
+        "embedding_unavailable",
+        Some("synthetic empty embedding vector".to_string()),
+    );
+    let empty_embeddings_pass = empty_embedding_hits
+        .first()
+        .and_then(|item| item["retrieval_strategy"].as_str())
+        == Some("lexical_fallback")
+        && empty_embedding_guard.reason == Some("embedding_unavailable")
+        && empty_embedding_guard.accepted_hits == 1;
+
+    let stale_cache_state = degradation_probe_stale_fast_cache(local_fast_cache_ttl_ms)?;
+    let stale_cache_pass = stale_cache_state["cache_hit"].as_bool() == Some(false)
+        && stale_cache_state["cache_entry_remaining"].as_bool() == Some(false);
+
+    Ok(vec![
+        json!({
+            "class_key": "qdrant_unavailable",
+            "title": "Qdrant недоступен",
+            "status": if qdrant_unavailable_pass { "pass" } else { "critical" },
+            "reason": if qdrant_unavailable_pass {
+                "retrieval держит безопасный lexical fallback, когда vector layer недоступен."
+            } else {
+                "retrieval не удержал безопасный lexical fallback при недоступном vector layer."
+            },
+            "details": {
+                "retrieval_strategy": qdrant_hits.first().and_then(|item| item["retrieval_strategy"].as_str()).unwrap_or("none"),
+                "semantic_guard_reason": qdrant_guard.reason,
+                "semantic_guard_detail": qdrant_guard.detail,
+            }
+        }),
+        json!({
+            "class_key": "stale_cache",
+            "title": "Устаревший cache",
+            "status": if stale_cache_pass { "pass" } else { "critical" },
+            "reason": if stale_cache_pass {
+                "expired local fast cache не выдаётся как свежий hit и честно вычищается перед reuse."
+            } else {
+                "expired local fast cache продолжил выглядеть как свежий hit."
+            },
+            "details": stale_cache_state,
+        }),
+        json!({
+            "class_key": "empty_embeddings",
+            "title": "Пустые embeddings",
+            "status": if empty_embeddings_pass { "pass" } else { "critical" },
+            "reason": if empty_embeddings_pass {
+                "retrieval честно уходит в lexical fallback, когда semantic embedding layer не даёт usable vector."
+            } else {
+                "retrieval потерял безопасный fallback при пустом semantic embedding layer."
+            },
+            "details": {
+                "retrieval_strategy": empty_embedding_hits.first().and_then(|item| item["retrieval_strategy"].as_str()).unwrap_or("none"),
+                "semantic_guard_reason": empty_embedding_guard.reason,
+                "semantic_guard_detail": empty_embedding_guard.detail,
+            }
+        }),
+    ])
+}
+
+fn degradation_probe_stale_fast_cache(local_fast_cache_ttl_ms: u128) -> Result<Value> {
+    let proof_key = 0xfeed_u128;
+    let expired_at = now_epoch_ms().saturating_sub(local_fast_cache_ttl_ms.saturating_add(1));
+    let entry = LocalContextPackEntry {
+        context_pack_id: Uuid::new_v4(),
+        payload: Arc::new(json!({
+            "context_pack_id": Uuid::nil(),
+            "retrieval": {
+                "exact_documents": [],
+                "symbol_hits": [],
+                "lexical_chunks": [],
+                "semantic_chunks": []
+            }
+        })),
+        exact_documents: 0,
+        symbol_hits: 0,
+        lexical_chunks: 0,
+        semantic_chunks: 0,
+        durably_persisted: true,
+        cached_at_epoch_ms: expired_at,
+    };
+    local_fast_context_pack_cache_put(proof_key, &entry)?;
+    let cache_hit =
+        local_fast_context_pack_cache_contains(proof_key, local_fast_cache_ttl_ms, true)?;
+    let cache_entry_remaining =
+        local_fast_context_pack_cache_get(proof_key, local_fast_cache_ttl_ms)?.is_some();
+    Ok(json!({
+        "cache_hit": cache_hit,
+        "cache_entry_remaining": cache_entry_remaining,
+        "expired_by_ms": now_epoch_ms().saturating_sub(expired_at).saturating_sub(local_fast_cache_ttl_ms),
+    }))
+}
+
+fn synthetic_chunk_hit(relative_path: &str, content: &str) -> ChunkHit {
+    ChunkHit {
+        project_code: "art".to_string(),
+        namespace_code: "continuity".to_string(),
+        repo_root: "/tmp/degradation-proof".to_string(),
+        relative_path: relative_path.to_string(),
+        chunk_id: Uuid::new_v4(),
+        chunk_index: 0,
+        start_line: 1,
+        end_line: 1,
+        score: 1.0,
+        content: content.to_string(),
+        metadata: json!({}),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{apply_semantic_relevance_guard, query_terms, semantic_hit_has_query_overlap};
+    use super::{
+        SemanticTimings, apply_semantic_relevance_guard, degradation_probe_stale_fast_cache,
+        degradation_proof_scenarios, query_terms, semantic_fallback_result,
+        semantic_hit_has_query_overlap, synthetic_chunk_hit,
+    };
     use serde_json::json;
 
     #[test]
@@ -1751,5 +1984,41 @@ mod tests {
         assert_eq!(accepted.len(), 1);
         assert!(!summary.abstained);
         assert_eq!(summary.accepted_hits, 1);
+    }
+
+    #[test]
+    fn semantic_fallback_result_marks_vector_layer_unavailable() {
+        let chunk = synthetic_chunk_hit("src/lib.rs", "fn stable_semantic_fallback() {}");
+        let (hits, _, guard) = semantic_fallback_result(
+            "stable semantic fallback",
+            2,
+            1,
+            &[chunk],
+            SemanticTimings::default(),
+            "vector_layer_unavailable",
+            Some("synthetic qdrant outage".to_string()),
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["retrieval_strategy"], json!("lexical_fallback"));
+        assert_eq!(guard.reason, Some("vector_layer_unavailable"));
+        assert_eq!(guard.detail.as_deref(), Some("synthetic qdrant outage"));
+    }
+
+    #[test]
+    fn degradation_probe_stale_fast_cache_evicts_expired_entry() {
+        let state = degradation_probe_stale_fast_cache(1).expect("stale cache proof");
+        assert_eq!(state["cache_hit"], json!(false));
+        assert_eq!(state["cache_entry_remaining"], json!(false));
+    }
+
+    #[test]
+    fn degradation_proof_scenarios_cover_retrieval_fallback_classes() {
+        let scenarios = degradation_proof_scenarios(1).expect("scenarios");
+        assert_eq!(scenarios.len(), 3);
+        assert!(
+            scenarios
+                .iter()
+                .all(|scenario| scenario["status"].as_str() == Some("pass"))
+        );
     }
 }

@@ -185,7 +185,7 @@ mod tests {
         let suite = suite_metadata("degradation_verification").expect("suite metadata");
         assert_eq!(
             suite["dataset_version"].as_str(),
-            Some("synthetic-working-state-fail-closed-v1")
+            Some("synthetic-degradation-matrix-v2")
         );
     }
 

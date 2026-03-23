@@ -1,5 +1,5 @@
-modified_at = "2026-03-23 15:32 MSK"
-"Ручная сверка guide/docs" = "2026-03-23 15:32 MSK"
+modified_at = "2026-03-23 12:10 MSK"
+"Ручная сверка guide/docs" = "2026-03-23 12:10 MSK"
 
 [science]
 methodology_version = "retrieval-science-v1"
@@ -168,11 +168,11 @@ manifest_path = "config/red_team_retrieval_isolation.toml"
 reproducibility_contract = "Cross-project and cross-namespace leakage must stay zero; precision checks must remain exact on the fixed fixture contour."
 
 [science.suites.degradation_verification]
-suite_version = "degradation-verification-v1"
-dataset_version = "synthetic-working-state-fail-closed-v1"
-query_suite_version = "degradation-scenarios-v1"
+suite_version = "degradation-verification-v2"
+dataset_version = "synthetic-degradation-matrix-v2"
+query_suite_version = "degradation-scenarios-v2"
 manifest_path = "built-in synthetic degradation probes"
-reproducibility_contract = "The same synthetic degradation probes must produce the same pass/fail verdicts for cross-agent scope, stale handoff and working-state conflict handling."
+reproducibility_contract = "The same synthetic degradation probes must produce the same pass/fail verdicts for scope corruption, partial continuity refresh, temporal gap handling, vector-layer fallback, cache expiry handling and working-state lineage handling."
 
 [science.suites.cold_path_benchmark]
 suite_version = "cold-path-benchmark-v2"

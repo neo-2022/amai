@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 11:37 MSK
-Ручная сверка guide/docs: 2026-03-23 11:37 MSK
+modified_at: 2026-03-23 12:10 MSK
+Ручная сверка guide/docs: 2026-03-23 12:10 MSK
 
 # Operations
 
@@ -869,7 +869,7 @@ Machine-readable карта деградации и partial-failure поведе
 - классы без свежего proof не маскируются под `pass`, а остаются `unknown`;
 - working-state freshness/confidence может выступать evidence only как сигнал, но не как полноценный proof для isolation/degradation класса, пока не materialized отдельный suite.
 
-Отдельный runnable proof path для части этих классов теперь есть:
+Отдельный runnable proof path для этих классов теперь есть:
 
 ```bash
 cargo run --release -- verify degradation
@@ -877,13 +877,20 @@ cargo run --release -- verify degradation
 
 Сейчас он materialize-ит synthetic verification для:
 - `cross_agent_scope`
+- `corrupt_scope_metadata`
+- `partial_refresh`
+- `partial_thread_index`
+- `qdrant_unavailable`
+- `stale_cache`
+- `empty_embeddings`
 - `stale_handoff`
 - `working_state_conflict`
 
 Этот proof:
-- использует те же working-state / restore алгоритмы, что и product path;
+- использует те же working-state / restore / temporal / lexical fallback алгоритмы, что и product path;
 - пишет snapshot `degradation_verification`;
-- даёт `last known evidence` для `degradation_model`, поэтому эти классы больше не висят как чистый policy-only gap.
+- даёт `last known evidence` для `degradation_model`, поэтому эти классы больше не висят как чистый policy-only gap;
+- versioned через `science.suites.degradation_verification`, чтобы same input -> same verdict проверялся как отдельный retrieval-science contour.
 
 Текущий репозиторный guard:
 - `qps > 35000`

@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 11:37 MSK
-Ручная сверка guide/docs: 2026-03-23 11:37 MSK
+modified_at: 2026-03-23 12:10 MSK
+Ручная сверка guide/docs: 2026-03-23 12:10 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1313,9 +1313,19 @@ cargo run --release -- verify degradation
 ```
 
 Он:
-- прогоняет synthetic working-state probes для `cross_agent_scope`, `stale_handoff` и `working_state_conflict`;
+- прогоняет versioned synthetic degradation suite для:
+  - `cross_agent_scope`
+  - `corrupt_scope_metadata`
+  - `partial_refresh`
+  - `partial_thread_index`
+  - `qdrant_unavailable`
+  - `stale_cache`
+  - `empty_embeddings`
+  - `stale_handoff`
+  - `working_state_conflict`
 - пишет snapshot `degradation_verification`;
-- поднимает их из `unknown` в `pass` только после реального machine-readable proof, а не по описанию policy.
+- поднимает их из `unknown` в `pass` только после реального machine-readable proof, а не по описанию policy;
+- использует те же product-path функции для working-state, temporal fail-closed и retrieval fallback, а не отдельную декоративную логику только для теста.
 
 Если нужен уже не короткий smoke, а честный end-to-end cold contour на большом real-repo pool:
 

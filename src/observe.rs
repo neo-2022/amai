@@ -776,7 +776,15 @@ fn evaluate_degradation_class(
             &["namespace_strict_fail_closed"],
             "Последний accuracy / isolation прогон подтвердил zero leakage между namespace.",
         ),
-        "cross_agent_scope" | "stale_handoff" | "working_state_conflict" => {
+        "cross_agent_scope"
+        | "corrupt_scope_metadata"
+        | "partial_refresh"
+        | "qdrant_unavailable"
+        | "stale_cache"
+        | "partial_thread_index"
+        | "empty_embeddings"
+        | "stale_handoff"
+        | "working_state_conflict" => {
             evaluate_degradation_verification_class(payload, class_key, entry)
         }
         _ => evaluate_policy_gap_class(payload, class_key, entry),
@@ -3066,7 +3074,10 @@ mod tests {
             .find(|item| item["class_key"].as_str() == Some("cross_agent_scope"))
             .expect("cross_agent_scope");
         assert_eq!(cross_agent["status"], json!("pass"));
-        assert_eq!(cross_agent["last_evidence_kind"], json!("degradation_verification"));
+        assert_eq!(
+            cross_agent["last_evidence_kind"],
+            json!("degradation_verification")
+        );
         assert_eq!(cross_agent["evidence_gap"], json!(false));
     }
 

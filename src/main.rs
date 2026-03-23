@@ -11,6 +11,7 @@ mod compatibility;
 mod config;
 mod continuity;
 mod dashboard;
+mod degradation_proof;
 mod deployment;
 mod edge_cache;
 mod external_benchmark;
