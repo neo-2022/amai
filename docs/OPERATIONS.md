@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:16 MSK
-Ручная сверка guide/docs: 2026-03-23 22:16 MSK
+modified_at: 2026-03-23 22:25 MSK
+Ручная сверка guide/docs: 2026-03-23 22:25 MSK
 
 # Operations
 
@@ -711,6 +711,10 @@ Proof:
 ./scripts/proof_client_lifecycle.sh
 ./scripts/proof_profiles.sh
 ```
+
+`./scripts/proof_onboarding.sh` теперь дополнительно проверяет, что локальный
+onboarding печатает explainability последнего собранного контекста, а не только
+готовность stack/config.
 
 ## Disconnect
 

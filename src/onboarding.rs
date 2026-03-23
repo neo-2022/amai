@@ -6,6 +6,7 @@ use crate::profiles;
 use anyhow::{Context, Result, anyhow, bail};
 use dirs::home_dir;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
@@ -69,6 +70,8 @@ struct InstallMetricsSummary {
     token_headline_value_percent: Option<f64>,
     token_headline_saved_tokens: Option<i64>,
     token_headline_scope_label: Option<String>,
+    latest_retrieval_included_reasons: Option<String>,
+    latest_retrieval_excluded_reasons: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -355,6 +358,12 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
                         format_u64(metrics.token_saved_lifetime_total),
                         format_percent_value(metrics.token_savings_percent_lifetime)
                     );
+                }
+                if let Some(value) = &metrics.latest_retrieval_included_reasons {
+                    println!("- Почему последний собранный контекст что-то включил: {value}");
+                }
+                if let Some(value) = &metrics.latest_retrieval_excluded_reasons {
+                    println!("- Почему часть слоёв ничего не добавила: {value}");
                 }
             } else {
                 println!(
@@ -681,7 +690,59 @@ async fn collect_install_metrics_summary(cfg: &config::AppConfig) -> Result<Inst
             ["headline"]["scope_label"]
             .as_str()
             .map(ToOwned::to_owned),
+        latest_retrieval_included_reasons: working_state_reason_summary(
+            &snapshot,
+            "included_reasons_summary",
+            "included",
+        ),
+        latest_retrieval_excluded_reasons: working_state_reason_summary(
+            &snapshot,
+            "excluded_reasons_summary",
+            "not_included",
+        ),
     })
+}
+
+fn working_state_reason_summary(
+    snapshot: &Value,
+    summary_key: &str,
+    trace_key: &str,
+) -> Option<String> {
+    let restore = &snapshot["latest_working_state_restore"]["working_state_restore"];
+    if let Some(value) = restore[summary_key]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        return Some(value.to_string());
+    }
+    let items = restore["latest_decision_trace"][trace_key].as_array()?;
+    let parts = items
+        .iter()
+        .take(3)
+        .filter_map(|item| {
+            let reason = item["reason"].as_str()?.trim();
+            if reason.is_empty() {
+                return None;
+            }
+            let strategy = match item["strategy"].as_str().unwrap_or_default() {
+                "exact_documents" => "точные совпадения",
+                "symbol_hits" => "совпадения по символам",
+                "lexical_chunks" => "текстовые фрагменты",
+                "semantic_chunks" => "смысловые фрагменты",
+                other => other,
+            };
+            let count = item["count"].as_u64();
+            Some(match count {
+                Some(value) if value > 0 => format!("{strategy} ({value}) — {reason}"),
+                _ => format!("{strategy} — {reason}"),
+            })
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" • "))
+    }
 }
 
 fn detect_memory_type() -> Option<String> {
@@ -1330,8 +1391,9 @@ fn maybe_backup_user_global(path: &Path, install_scope: &str) -> Result<Option<P
 mod tests {
     use super::{
         detection_score, env_keys, expand_target_template, install_scope_status,
-        resolve_client_target, resolve_output_path,
+        resolve_client_target, resolve_output_path, working_state_reason_summary,
     };
+    use serde_json::json;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1423,5 +1485,37 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         let repo = PathBuf::from("/tmp/amai-nonexistent");
         let home = PathBuf::from("/tmp/amai-home-nonexistent");
         assert!(detection_score(&repo, &home, &target).is_none());
+    }
+
+    #[test]
+    fn working_state_reason_summary_uses_summary_field_then_trace_fallback() {
+        let snapshot = json!({
+            "latest_working_state_restore": {
+                "working_state_restore": {
+                    "included_reasons_summary": "точные совпадения (1) — Нашлись точные совпадения.",
+                    "latest_decision_trace": {
+                        "included": [{
+                            "strategy": "exact_documents",
+                            "count": 1,
+                            "reason": "fallback should not win"
+                        }],
+                        "not_included": [{
+                            "strategy": "semantic_chunks",
+                            "reason": "Semantic layer abstained."
+                        }]
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            working_state_reason_summary(&snapshot, "included_reasons_summary", "included")
+                .as_deref(),
+            Some("точные совпадения (1) — Нашлись точные совпадения.")
+        );
+        assert_eq!(
+            working_state_reason_summary(&snapshot, "excluded_reasons_summary", "not_included")
+                .as_deref(),
+            Some("смысловые фрагменты — Semantic layer abstained.")
+        );
     }
 }
