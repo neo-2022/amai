@@ -1606,6 +1606,11 @@ fn build_live_progress_payload(
     let measured_query_slice_count = query_coverage["query_slice_count"]
         .as_u64()
         .unwrap_or_default();
+    let cold_workload_duration_seconds = cold_samples
+        .iter()
+        .map(|sample| sample.total_ms)
+        .sum::<f64>()
+        / 1000.0;
     let run_wall_clock_duration_seconds =
         (now_epoch_ms().saturating_sub(run_started_epoch_ms)) as f64 / 1000.0;
     let completed_case_count = cold_samples.len() as u64;
@@ -1681,7 +1686,7 @@ fn build_live_progress_payload(
                 "error_rate": cold_quality["error_rate"].as_f64().unwrap_or_default(),
                 "repo_count": measured_repo_count,
                 "query_slice_count": measured_query_slice_count,
-                "duration": run_wall_clock_duration_seconds,
+                "duration": cold_workload_duration_seconds,
                 "run_wall_clock_duration": run_wall_clock_duration_seconds,
                 "target_met": false,
                 "thermal_stop_count": 0,
@@ -1928,13 +1933,16 @@ fn read_max_temperature_celsius() -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColdBenchmarkCase, QualityScore, build_cold_benchmark_canonical_eval,
-        cold_sample_eval_verdict, determine_verdict, distribution_from_f64, evaluate_case,
-        should_index_repo_for_case,
+        ColdBenchmarkCase, ColdBenchmarkManifest, ColdBenchmarkProfile, ColdBenchmarkRepo,
+        CycleSummary, IndexedRepoSummary, QualityScore, RepoRuntime,
+        build_cold_benchmark_canonical_eval, build_live_progress_payload, cold_sample_eval_verdict,
+        determine_verdict, distribution_from_f64, evaluate_case, should_index_repo_for_case,
     };
-    use crate::cold_benchmark::{ColdBenchmarkProfile, item_matches_case};
+    use crate::cli::VerifyColdPathArgs;
+    use crate::cold_benchmark::item_matches_case;
     use serde_json::json;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::PathBuf;
 
     #[test]
     fn evaluate_case_uses_expected_paths_terms_and_symbols() {
@@ -2206,5 +2214,101 @@ mod tests {
             expected_symbols: vec!["install_amai".to_string()],
         };
         assert!(item_matches_case(&item, &case));
+    }
+
+    #[test]
+    fn live_progress_duration_uses_only_completed_cold_cases() {
+        let manifest = ColdBenchmarkManifest {
+            profile: ColdBenchmarkProfile {
+                display_name: "proof".to_string(),
+                summary: "proof".to_string(),
+                target_p50_ms: 2.0,
+                target_p95_ms: 5.0,
+                target_p99_ms: 10.0,
+                target_max_ms: 15.0,
+                min_precision: 0.997,
+                min_target_hit_rate: 0.997,
+                min_recall: 0.997,
+                min_sample_count: 1000,
+                min_repo_count: 75,
+                min_query_slice_count: 200,
+                max_duration_seconds: 10.0,
+                max_leakage: 0,
+                max_error_rate: 0.0,
+            },
+            repos: vec![ColdBenchmarkRepo {
+                code: "art".to_string(),
+                display_name: "Art".to_string(),
+                repo_root: PathBuf::from("/tmp/art"),
+                namespace: "cold_benchmark".to_string(),
+                repo_type: "mixed".to_string(),
+                size_class: "large_monorepo".to_string(),
+                limit_files: Some(10),
+                skip_embeddings: true,
+                default_retrieval_mode: "local_strict".to_string(),
+            }],
+            cases: vec![ColdBenchmarkCase {
+                repo_code: "art".to_string(),
+                query_slice: "docs_lookup".to_string(),
+                query: "README.md".to_string(),
+                retrieval_mode: None,
+                limit_documents: Some(1),
+                limit_symbols: Some(0),
+                limit_chunks: Some(0),
+                limit_semantic_chunks: Some(0),
+                expected_projects: vec!["art".to_string()],
+                expected_paths: vec!["README.md".to_string()],
+                expected_terms: Vec::new(),
+                expected_symbols: Vec::new(),
+            }],
+        };
+        let args = VerifyColdPathArgs {
+            manifest: PathBuf::from("config/cold_benchmark_manifest.toml"),
+            cycles: 1,
+            thermal_guard_celsius: 85.0,
+            cooldown_seconds: 20,
+            max_cooldown_retries: 2,
+            min_disk_free_gib: 25.0,
+            reindex_each_cycle: false,
+            skip_index: false,
+            output_dir: PathBuf::from("state/cold-benchmark/latest"),
+        };
+        let mut repo_map = BTreeMap::new();
+        repo_map.insert(
+            "art".to_string(),
+            RepoRuntime {
+                manifest: manifest.repos[0].clone(),
+                resolved_root: PathBuf::from("/tmp/art"),
+            },
+        );
+        let mut repo_target_file_counts = BTreeMap::new();
+        repo_target_file_counts.insert("art".to_string(), 10usize);
+        let payload = build_live_progress_payload(
+            PathBuf::from("state/cold-benchmark/latest").as_path(),
+            &manifest,
+            &args,
+            &repo_map,
+            &repo_target_file_counts,
+            super::now_epoch_ms().saturating_sub(30_000),
+            &[],
+            &[],
+            &Vec::<CycleSummary>::new(),
+            &Vec::<IndexedRepoSummary>::new(),
+            "indexing",
+            Some(0),
+            Some("art"),
+            None,
+        )
+        .expect("payload");
+        assert_eq!(
+            payload["cold_benchmark_progress"]["machine_readable_summary"]["duration"].as_f64(),
+            Some(0.0)
+        );
+        assert!(
+            payload["cold_benchmark_progress"]["machine_readable_summary"]["run_wall_clock_duration"]
+                .as_f64()
+                .unwrap_or_default()
+                > 0.0
+        );
     }
 }
