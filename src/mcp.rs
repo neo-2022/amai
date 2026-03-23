@@ -739,8 +739,13 @@ async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result
     let context = args.to_context_args();
     let result =
         retrieval::execute_context_pack_capture(cfg, &mut db, &context, args.persist).await?;
+    let context_summary = context_pack_summary(&result.payload);
     let structured = json!({
         "context_pack": result.payload,
+        "context_pack_summary": {
+            "included_reasons_summary": context_summary.included_reasons_summary,
+            "excluded_reasons_summary": context_summary.excluded_reasons_summary,
+        },
         "stats": {
             "context_pack_id": result.stats.context_pack_id,
             "exact_documents": result.stats.exact_documents,
@@ -773,6 +778,13 @@ async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result
         result.stats.semantic_chunks,
         result.stats.cache_hit,
     );
+    let mut summary = summary;
+    if let Some(value) = &context_summary.included_reasons_summary {
+        summary.push_str(&format!(" included={value}"));
+    }
+    if let Some(value) = &context_summary.excluded_reasons_summary {
+        summary.push_str(&format!(" excluded={value}"));
+    }
     Ok(tool_result(summary, structured))
 }
 
@@ -950,6 +962,47 @@ fn token_report_summary(payload: &Value) -> TokenReportSummary {
         events_count: headline["events_count"].as_u64().unwrap_or_default(),
         counted_events: headline["counted_events"].as_u64().unwrap_or_default(),
         note: headline["note"].as_str().unwrap_or("").to_string(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextPackSummary {
+    included_reasons_summary: Option<String>,
+    excluded_reasons_summary: Option<String>,
+}
+
+fn context_pack_summary(payload: &Value) -> ContextPackSummary {
+    ContextPackSummary {
+        included_reasons_summary: decision_trace_summary(&payload["decision_trace"], "included"),
+        excluded_reasons_summary: decision_trace_summary(
+            &payload["decision_trace"],
+            "not_included",
+        ),
+    }
+}
+
+fn decision_trace_summary(trace: &Value, key: &str) -> Option<String> {
+    let items = trace[key].as_array()?;
+    let parts = items
+        .iter()
+        .take(3)
+        .filter_map(|item| {
+            let reason = item["reason"].as_str()?.trim();
+            if reason.is_empty() {
+                return None;
+            }
+            let strategy = item["strategy"].as_str().unwrap_or("unknown");
+            let count = item["count"].as_u64();
+            Some(match count {
+                Some(value) if value > 0 => format!("{strategy} ({value}) — {reason}"),
+                _ => format!("{strategy} — {reason}"),
+            })
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" • "))
     }
 }
 
@@ -1917,7 +1970,8 @@ fn default_warm_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        McpConfigArgs, observe_snapshot_summary, render_client_config, token_report_summary,
+        McpConfigArgs, context_pack_summary, observe_snapshot_summary, render_client_config,
+        token_report_summary,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -2081,6 +2135,37 @@ mod tests {
         assert_eq!(
             summary.note,
             "Это главный честный KPI: live-only, quality-gated и с учётом recovery."
+        );
+    }
+
+    #[test]
+    fn context_pack_summary_surfaces_included_and_excluded_reasons() {
+        let payload = json!({
+            "decision_trace": {
+                "included": [{
+                    "strategy": "exact_documents",
+                    "count": 1,
+                    "reason": "Нашлись точные document/path совпадения внутри видимого контура."
+                }],
+                "not_included": [{
+                    "strategy": "semantic_chunks",
+                    "reason": "Semantic layer не добавил новых фрагментов после scope и relevance проверки."
+                }]
+            }
+        });
+
+        let summary = context_pack_summary(&payload);
+        assert_eq!(
+            summary.included_reasons_summary.as_deref(),
+            Some(
+                "exact_documents (1) — Нашлись точные document/path совпадения внутри видимого контура."
+            )
+        );
+        assert_eq!(
+            summary.excluded_reasons_summary.as_deref(),
+            Some(
+                "semantic_chunks — Semantic layer не добавил новых фрагментов после scope и relevance проверки."
+            )
         );
     }
 }

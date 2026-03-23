@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:39 MSK
-Ручная сверка guide/docs: 2026-03-23 22:39 MSK
+modified_at: 2026-03-23 22:43 MSK
+Ручная сверка guide/docs: 2026-03-23 22:43 MSK
 
 # Operations
 
@@ -638,6 +638,9 @@ cargo run -- mcp serve
   чтобы клиентский слой видел причины включения и невключения последнего контекста.
 - `amai_token_report` теперь тоже отдаёт наружу `token_report_summary`, где уже
   собраны `scope_label`, `status`, `counted_events / events_count` и `note`.
+- `amai_context_pack` теперь тоже отдаёт наружу `context_pack_summary`, где уже
+  лежат `included_reasons_summary / excluded_reasons_summary` для последнего
+  собранного context pack.
 
 ## MCP client config
 

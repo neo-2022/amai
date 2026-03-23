@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 22:39 MSK
-Ручная сверка guide/docs: 2026-03-23 22:39 MSK
+modified_at: 2026-03-23 22:43 MSK
+Ручная сверка guide/docs: 2026-03-23 22:43 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -876,6 +876,10 @@ cargo run -- deployment explain --target kubernetes_server
 собраны `scope_label`, `status`, `counted_events / events_count` и `note`.
 Это позволяет внешнему клиенту честно объяснить смысл KPI без ручного разбора
 всего `token_budget_report.headline`.
+
+`amai_context_pack` теперь тоже отдаёт наружу `context_pack_summary` с
+`included_reasons_summary / excluded_reasons_summary`, чтобы внешний клиент видел,
+почему именно этот контекст был собран и почему часть слоёв ничего не добавила.
 
 Понятный walkthrough для подключения:
 - [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md)
