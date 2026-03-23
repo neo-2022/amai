@@ -619,6 +619,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         postgres::latest_observability_snapshot(&db, "token_benchmark").await?;
     let latest_cold_path_benchmark =
         postgres::latest_observability_snapshot(&db, "cold_path_benchmark").await?;
+    let cold_path_benchmark_progress = read_live_cold_benchmark_progress(&repo_root);
     let latest_working_state_restore =
         postgres::latest_observability_snapshot(&db, "working_state_restore").await?;
     let latest_repo_working_state_restore =
@@ -666,6 +667,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_retrieval_load_cold_raw": latest_load_cold_raw,
         "latest_token_benchmark": latest_token_benchmark,
         "latest_cold_path_benchmark": latest_cold_path_benchmark,
+        "cold_path_benchmark_progress": cold_path_benchmark_progress,
         "latest_working_state_restore": latest_working_state_restore,
         "latest_repo_working_state_restore": latest_repo_working_state_restore,
         "latest_degradation_verification": latest_degradation_verification,
@@ -694,6 +696,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_retrieval_load_cold_raw": payload["latest_retrieval_load_cold_raw"].clone(),
         "latest_token_benchmark": payload["latest_token_benchmark"].clone(),
         "latest_cold_path_benchmark": payload["latest_cold_path_benchmark"].clone(),
+        "cold_path_benchmark_progress": payload["cold_path_benchmark_progress"].clone(),
         "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
         "latest_repo_working_state_restore": payload["latest_repo_working_state_restore"].clone(),
         "latest_degradation_verification": payload["latest_degradation_verification"].clone(),
@@ -1799,6 +1802,47 @@ fn benchmark_qdrant_cache_path() -> Option<PathBuf> {
             .join("observe")
             .join("benchmark_qdrant_last_success.json"),
     )
+}
+
+fn cold_benchmark_live_progress_path(repo_root: &Path) -> PathBuf {
+    repo_root
+        .join("state")
+        .join("cold-benchmark")
+        .join("live_progress.json")
+}
+
+fn read_live_cold_benchmark_progress(repo_root: &Path) -> Option<Value> {
+    let path = cold_benchmark_live_progress_path(repo_root);
+    let raw = fs::read_to_string(&path).ok()?;
+    let payload: Value = serde_json::from_str(&raw).ok()?;
+    let progress = &payload["cold_benchmark_progress"];
+    if progress["state"].as_str() != Some("running") {
+        let _ = fs::remove_file(path);
+        return None;
+    }
+    let pid = progress["pid"].as_u64()? as u32;
+    if !cold_benchmark_pid_is_live(pid) {
+        let _ = fs::remove_file(path);
+        return None;
+    }
+    Some(payload)
+}
+
+#[cfg(target_os = "linux")]
+fn cold_benchmark_pid_is_live(pid: u32) -> bool {
+    let proc_dir = PathBuf::from("/proc").join(pid.to_string());
+    if !proc_dir.exists() {
+        return false;
+    }
+    let cmdline = fs::read(proc_dir.join("cmdline")).ok();
+    cmdline
+        .map(|bytes| String::from_utf8_lossy(&bytes).contains("cold-path"))
+        .unwrap_or(true)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cold_benchmark_pid_is_live(_pid: u32) -> bool {
+    true
 }
 
 fn persist_last_successful_benchmark_qdrant_snapshot(value: &Value) {

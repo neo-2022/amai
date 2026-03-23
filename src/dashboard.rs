@@ -2115,7 +2115,21 @@ fn build_top_cards(snapshot: &Value) -> Vec<Value> {
 fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
     let hot_load = &snapshot["latest_retrieval_load_hot"]["load_verification"];
     let hot_retrieval = &snapshot["latest_retrieval_hot"]["benchmark"];
-    let cold_contour = &snapshot["latest_cold_path_benchmark"]["cold_benchmark"];
+    let cold_live_progress = &snapshot["cold_path_benchmark_progress"]["cold_benchmark_progress"];
+    let cold_live_running = cold_live_progress["state"].as_str() == Some("running");
+    let cold_contour = if cold_live_running {
+        cold_live_progress
+    } else {
+        &snapshot["latest_cold_path_benchmark"]["cold_benchmark"]
+    };
+    let live_elapsed_seconds = if cold_live_running {
+        snapshot["captured_at_epoch_ms"]
+            .as_u64()
+            .zip(cold_live_progress["started_at_epoch_ms"].as_u64())
+            .map(|(captured, started)| captured.saturating_sub(started) as f64 / 1000.0)
+    } else {
+        None
+    };
     let accuracy = &snapshot["latest_retrieval_accuracy"]["accuracy_verification"];
     let thresholds = &snapshot["thresholds"];
     let hot_load_sample_count = hot_load["success_count"]
@@ -2361,64 +2375,115 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
         hot_retrieval_card = with_status_tooltip(hot_retrieval_card, &tooltip);
     }
 
-    let cold_status = cold_contour_status(snapshot);
-    let mut cold_card = compare_table_card(
-            "Cold End-to-End Benchmark / latest_cold_path_benchmark",
-            "Контур данных: latest_cold_path_benchmark.cold_benchmark. Это последний честный end-to-end cold benchmark по реальным репозиториям и query slices.".to_string(),
-            cold_status,
-            Some(source_label(
-                "Источник: benchmark snapshot latest_cold_path_benchmark.cold_benchmark. Live-данные страницы сюда не подмешиваются",
-                cold_contour["captured_at_epoch_ms"].as_u64(),
-            )),
-            Some("Это проверка первого запроса без прогрева. Она меряет весь путь ответа целиком: от выбора нужного маршрута до сборки готового контекста для ответа.".to_string()),
-            Some(format_ms(
-                snapshot,
-                cold_contour["machine_readable_summary"]["p95"].as_f64(),
-            )),
-            vec![
+    let cold_status = if cold_live_running {
+        "waiting"
+    } else {
+        cold_contour_status(snapshot)
+    };
+    let cold_sample_count = cold_contour["machine_readable_summary"]["sample_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let cold_has_samples = cold_sample_count > 0;
+    let cold_headline_value = if cold_has_samples {
+        Some(format_ms(
+            snapshot,
+            cold_contour["machine_readable_summary"]["p95"].as_f64(),
+        ))
+    } else if cold_live_running {
+        Some("ещё нет данных".to_string())
+    } else {
+        Some(format_ms(
+            snapshot,
+            cold_contour["machine_readable_summary"]["p95"].as_f64(),
+        ))
+    };
+    let mut cold_rows = Vec::new();
+    if cold_live_running {
+        cold_rows.push(compare_table_row(
+            "Прогресс",
+            "Сколько cold-case уже завершено в текущем живом прогоне.",
+            compare_pair(
+                "идёт прогон".to_string(),
+                format!(
+                    "{} из {}",
+                    format_u64(cold_live_progress["progress"]["completed_case_count"].as_u64()),
+                    format_u64(cold_live_progress["progress"]["target_case_count"].as_u64()),
+                ),
+            ),
+        ));
+        cold_rows.push(compare_table_row(
+            "Прошло",
+            "Сколько уже длится текущий живой прогон по wall-clock времени.",
+            compare_pair(
+                "живой прогон".to_string(),
+                format_seconds(snapshot, live_elapsed_seconds),
+            ),
+        ));
+    }
+    cold_rows.extend([
                 compare_table_row(
                     "Cold P50",
-                    "Цель и факт по обычному уровню задержки в полном cold end-to-end пути.",
+                    if cold_live_running {
+                        "Текущий обычный уровень задержки по уже завершённой части живого cold-прогона."
+                    } else {
+                        "Цель и факт по обычному уровню задержки в полном cold end-to-end пути."
+                    },
                     format_time_compare_pair(
                         snapshot,
                         cold_contour["profile"]["target_p50_ms"].as_f64(),
-                        cold_contour["machine_readable_summary"]["p50"].as_f64(),
+                        cold_has_samples.then(|| cold_contour["machine_readable_summary"]["p50"].as_f64()).flatten(),
                         "<",
                     ),
                 ),
                 compare_table_row(
                     "Cold P95",
-                    "Цель и факт по p95 в полном cold end-to-end пути.",
+                    if cold_live_running {
+                        "Текущий тяжёлый хвост по уже завершённой части живого cold-прогона."
+                    } else {
+                        "Цель и факт по p95 в полном cold end-to-end пути."
+                    },
                     format_time_compare_pair(
                         snapshot,
                         cold_contour["profile"]["target_p95_ms"].as_f64(),
-                        cold_contour["machine_readable_summary"]["p95"].as_f64(),
+                        cold_has_samples.then(|| cold_contour["machine_readable_summary"]["p95"].as_f64()).flatten(),
                         "<",
                     ),
                 ),
                 compare_table_row(
                     "Cold P99",
-                    "Цель и факт по p99 в полном cold end-to-end пути.",
+                    if cold_live_running {
+                        "Текущий редкий хвост по уже завершённой части живого cold-прогона."
+                    } else {
+                        "Цель и факт по p99 в полном cold end-to-end пути."
+                    },
                     format_time_compare_pair(
                         snapshot,
                         cold_contour["profile"]["target_p99_ms"].as_f64(),
-                        cold_contour["machine_readable_summary"]["p99"].as_f64(),
+                        cold_has_samples.then(|| cold_contour["machine_readable_summary"]["p99"].as_f64()).flatten(),
                         "<",
                     ),
                 ),
                 compare_table_row(
                     "Cold Max",
-                    "Цель и факт по самому тяжёлому выбросу в cold benchmark.",
+                    if cold_live_running {
+                        "Самый тяжёлый уже завершённый запрос в текущем живом cold-прогоне."
+                    } else {
+                        "Цель и факт по самому тяжёлому выбросу в cold benchmark."
+                    },
                     format_time_compare_pair(
                         snapshot,
                         cold_contour["profile"]["target_max_ms"].as_f64(),
-                        cold_contour["machine_readable_summary"]["max"].as_f64(),
+                        cold_has_samples.then(|| cold_contour["machine_readable_summary"]["max"].as_f64()).flatten(),
                         "<",
                     ),
                 ),
                 compare_table_row(
                     "Precision",
-                    "Точность: насколько чисто найденный контекст оказался релевантным.",
+                    if cold_live_running {
+                        "Текущая чистота найденного контекста по уже завершённым cold-case."
+                    } else {
+                        "Точность: насколько чисто найденный контекст оказался релевантным."
+                    },
                     compare_pair(
                         format_threshold_value(
                             cold_contour["profile"]["min_precision"]
@@ -2428,12 +2493,16 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                             "%",
                             2,
                         ),
-                        format_ratio_percent(cold_contour["machine_readable_summary"]["precision"].as_f64()),
+                        format_ratio_percent(cold_has_samples.then(|| cold_contour["machine_readable_summary"]["precision"].as_f64()).flatten()),
                     ),
                 ),
                 compare_table_row(
                     "Recall",
-                    "Полнота: насколько полно система нашла нужные целевые данные.",
+                    if cold_live_running {
+                        "Текущая полнота найденного контекста по уже завершённым cold-case."
+                    } else {
+                        "Полнота: насколько полно система нашла нужные целевые данные."
+                    },
                     compare_pair(
                         format_threshold_value(
                             cold_contour["profile"]["min_recall"]
@@ -2443,12 +2512,16 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                             "%",
                             2,
                         ),
-                        format_ratio_percent(cold_contour["machine_readable_summary"]["recall"].as_f64()),
+                        format_ratio_percent(cold_has_samples.then(|| cold_contour["machine_readable_summary"]["recall"].as_f64()).flatten()),
                     ),
                 ),
                 compare_table_row(
                     "Hit rate",
-                    "Доля запросов, где система действительно попала в нужную цель.",
+                    if cold_live_running {
+                        "Доля уже завершённых cold-case, где система попала в нужную цель."
+                    } else {
+                        "Доля запросов, где система действительно попала в нужную цель."
+                    },
                     compare_pair(
                         format_threshold_value(
                             cold_contour["profile"]["min_target_hit_rate"]
@@ -2458,12 +2531,16 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                             "%",
                             2,
                         ),
-                        format_ratio_percent(cold_contour["machine_readable_summary"]["hit_rate"].as_f64()),
+                        format_ratio_percent(cold_has_samples.then(|| cold_contour["machine_readable_summary"]["hit_rate"].as_f64()).flatten()),
                     ),
                 ),
                 compare_table_row(
                     "Выборка",
-                    "Сколько cold-запросов вошло в итоговый benchmark.",
+                    if cold_live_running {
+                        "Сколько cold-case уже вошло в текущий живой прогон."
+                    } else {
+                        "Сколько cold-запросов вошло в итоговый benchmark."
+                    },
                     compare_pair(
                         format_threshold_at_least_or_equal(
                             cold_contour["profile"]["min_sample_count"].as_f64(),
@@ -2475,7 +2552,11 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 ),
                 compare_table_row(
                     "Repo count",
-                    "Сколько разных репозиториев вошло в последний cold benchmark.",
+                    if cold_live_running {
+                        "Сколько разных репозиториев уже покрыто в текущем живом прогоне."
+                    } else {
+                        "Сколько разных репозиториев вошло в последний cold benchmark."
+                    },
                     compare_pair(
                         format_threshold_at_least_or_equal(
                             cold_contour["profile"]["min_repo_count"].as_f64(),
@@ -2487,7 +2568,11 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 ),
                 compare_table_row(
                     "Query slices",
-                    "Сколько разных типов запросов покрывает последний cold benchmark.",
+                    if cold_live_running {
+                        "Сколько разных query-slice уже покрыто в текущем живом прогоне."
+                    } else {
+                        "Сколько разных типов запросов покрывает последний cold benchmark."
+                    },
                     compare_pair(
                         format_threshold_at_least_or_equal(
                             cold_contour["profile"]["min_query_slice_count"].as_f64(),
@@ -2499,17 +2584,29 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 ),
                 compare_table_row(
                     "Duration",
-                    "Сколько длился полный последний cold benchmark.",
+                    if cold_live_running {
+                        "Сколько уже длится текущий живой прогон. Пока это не финальное время завершённого benchmark."
+                    } else {
+                        "Сколько длился полный последний cold benchmark."
+                    },
                     format_seconds_compare_pair(
                         snapshot,
                         cold_contour["profile"]["max_duration_seconds"].as_f64(),
-                        cold_contour["machine_readable_summary"]["duration"].as_f64(),
+                        if cold_live_running {
+                            live_elapsed_seconds
+                        } else {
+                            cold_contour["machine_readable_summary"]["duration"].as_f64()
+                        },
                         "<",
                     ),
                 ),
                 compare_table_row(
                     "Leakage",
-                    "Сколько cross-project утечек поймал cold benchmark. Для строгой изоляции здесь должно оставаться ровно 0.",
+                    if cold_live_running {
+                        "Сколько cross-project утечек уже поймано в текущем живом прогоне."
+                    } else {
+                        "Сколько cross-project утечек поймал cold benchmark. Для строгой изоляции здесь должно оставаться ровно 0."
+                    },
                     compare_pair(
                         format_threshold_value(
                             cold_contour["profile"]["max_leakage"].as_f64(),
@@ -2522,7 +2619,11 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 ),
                 compare_table_row(
                     "Error rate",
-                    "Доля ошибок в последнем полном cold benchmark.",
+                    if cold_live_running {
+                        "Доля ошибок по уже завершённой части текущего живого прогона."
+                    } else {
+                        "Доля ошибок в последнем полном cold benchmark."
+                    },
                     compare_pair(
                         format_zero_or_at_most_percent(
                             cold_contour["profile"]["max_error_rate"]
@@ -2532,11 +2633,48 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                         format_percent(cold_contour["machine_readable_summary"]["error_rate"].as_f64()),
                     ),
                 ),
-            ],
-        );
+    ]);
+    let mut cold_card = compare_table_card(
+        "Cold End-to-End Benchmark / latest_cold_path_benchmark",
+        if cold_live_running {
+            "Контур данных: cold_path_benchmark_progress.cold_benchmark_progress. Сейчас реально идёт живой cold benchmark: цифры ниже частичные, обновляются по мере прогона и не подменяют финальный сохранённый snapshot.".to_string()
+        } else {
+            "Контур данных: latest_cold_path_benchmark.cold_benchmark. Это последний честный end-to-end cold benchmark по реальным репозиториям и query slices.".to_string()
+        },
+        cold_status,
+        Some(source_label(
+            if cold_live_running {
+                "Источник: live progress cold_path_benchmark_progress.cold_benchmark_progress. Финальный snapshot latest_cold_path_benchmark обновится после завершения этого прогона"
+            } else {
+                "Источник: benchmark snapshot latest_cold_path_benchmark.cold_benchmark. Live-данные страницы сюда не подмешиваются"
+            },
+            if cold_live_running {
+                snapshot["captured_at_epoch_ms"].as_u64()
+            } else {
+                cold_contour["captured_at_epoch_ms"]
+                    .as_u64()
+                    .or_else(|| cold_live_progress["captured_at_epoch_ms"].as_u64())
+            },
+        )),
+        Some(if cold_live_running {
+            "Это тот же cold contour, но в живом режиме: карточка показывает честный частичный прогресс текущего прогона и обновляется по мере новых завершённых case. Финальный verdict появится только после завершения полного benchmark.".to_string()
+        } else {
+            "Это проверка первого запроса без прогрева. Она меряет весь путь ответа целиком: от выбора нужного маршрута до сборки готового контекста для ответа.".to_string()
+        }),
+        cold_headline_value,
+        cold_rows,
+    );
+    if cold_live_running {
+        cold_card["status_label"] = Value::String("идёт прогон".to_string());
+        cold_card["table"]["columns"][2]["label"] = Value::String("Онлайн\nсейчас".to_string());
+    }
     if let Some(tooltip) = status_reason_tooltip(
         cold_status,
-        cold_benchmark_reasons(snapshot, cold_contour),
+        if cold_live_running {
+            cold_benchmark_progress_reasons(snapshot, cold_contour, cold_live_progress)
+        } else {
+            cold_benchmark_reasons(snapshot, cold_contour)
+        },
         "Cold end-to-end benchmark вышел из своей нормы, но детальные причины пока не удалось собрать.",
     ) {
         cold_card = with_status_tooltip(cold_card, &tooltip);
@@ -2867,6 +3005,37 @@ fn cold_benchmark_reasons(snapshot: &Value, cold_contour: &Value) -> Vec<String>
     ) {
         reasons.push(reason);
     }
+    reasons
+}
+
+fn cold_benchmark_progress_reasons(
+    snapshot: &Value,
+    cold_contour: &Value,
+    progress: &Value,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let completed = progress["progress"]["completed_case_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let target = progress["progress"]["target_case_count"]
+        .as_u64()
+        .unwrap_or(0);
+    reasons.push(format!(
+        "Прогон ещё не завершён: собрано {} из {} cold-case.",
+        format_u64(Some(completed)),
+        format_u64(Some(target))
+    ));
+    if let Some(phase) = progress["phase"].as_str() {
+        reasons.push(format!("Текущая фаза: {phase}."));
+    }
+    if cold_contour["machine_readable_summary"]["sample_count"].as_u64() == Some(0) {
+        reasons.push(
+            "Пока нет ни одного завершённого cold-case, поэтому latency и quality ещё не накопились."
+                .to_string(),
+        );
+        return reasons;
+    }
+    reasons.extend(cold_benchmark_reasons(snapshot, cold_contour));
     reasons
 }
 
@@ -7029,5 +7198,189 @@ mod tests {
             Some("benchmark-span-full")
         );
         assert_eq!(cards[3]["table_orientation"].as_str(), Some("transposed"));
+    }
+
+    #[test]
+    fn cold_benchmark_card_switches_to_live_progress_when_run_is_active() {
+        let snapshot = json!({
+            "cold_path_benchmark_progress": {
+                "cold_benchmark_progress": {
+                    "state": "running",
+                    "captured_at_epoch_ms": 10,
+                    "phase": "running",
+                    "progress": {
+                        "completed_case_count": 128,
+                        "target_case_count": 442
+                    },
+                    "profile": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 5.0,
+                        "target_p99_ms": 10.0,
+                        "target_max_ms": 15.0,
+                        "min_precision": 0.997,
+                        "min_recall": 0.997,
+                        "min_target_hit_rate": 0.997,
+                        "min_sample_count": 1000.0,
+                        "min_repo_count": 75.0,
+                        "min_query_slice_count": 200.0,
+                        "max_duration_seconds": 10.0,
+                        "max_leakage": 0.0,
+                        "max_error_rate": 0.0
+                    },
+                    "machine_readable_summary": {
+                        "p50": 1.345,
+                        "p95": 1.777,
+                        "p99": 2.307,
+                        "max": 6.529,
+                        "precision": 1.0,
+                        "recall": 1.0,
+                        "hit_rate": 1.0,
+                        "sample_count": 128,
+                        "repo_count": 32,
+                        "query_slice_count": 64,
+                        "duration": 312.0,
+                        "run_wall_clock_duration": 312.0,
+                        "leakage": 0,
+                        "error_rate": 0.0
+                    }
+                }
+            },
+            "latest_retrieval_load_hot": {
+                "load_verification": { "success_count": 0, "error_count": 0 }
+            },
+            "latest_retrieval_hot": {
+                "benchmark": {}
+            },
+            "latest_cold_path_benchmark": {
+                "cold_benchmark": {
+                    "captured_at_epoch_ms": 3,
+                    "executive_summary": { "verdict": "NOT MET" },
+                    "profile": {
+                        "target_p50_ms": 2.0,
+                        "target_p95_ms": 5.0,
+                        "target_p99_ms": 10.0,
+                        "target_max_ms": 15.0,
+                        "min_precision": 0.997,
+                        "min_recall": 0.997,
+                        "min_target_hit_rate": 0.997,
+                        "min_sample_count": 1000.0,
+                        "min_repo_count": 75.0,
+                        "min_query_slice_count": 200.0,
+                        "max_duration_seconds": 10.0,
+                        "max_leakage": 0.0,
+                        "max_error_rate": 0.0
+                    },
+                    "machine_readable_summary": {
+                        "p50": 9.0,
+                        "p95": 11.0,
+                        "p99": 13.0,
+                        "max": 18.0,
+                        "precision": 0.5,
+                        "recall": 0.5,
+                        "hit_rate": 0.5,
+                        "sample_count": 9,
+                        "repo_count": 4,
+                        "query_slice_count": 9,
+                        "duration": 999.0,
+                        "leakage": 1,
+                        "error_rate": 0.1
+                    }
+                }
+            },
+            "latest_retrieval_accuracy": {
+                "accuracy_verification": {
+                    "captured_at_epoch_ms": 4,
+                    "cross_project_leakage": 0.0,
+                    "symbol_precision": 1.0,
+                    "semantic_precision": 1.0
+                }
+            },
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                },
+                "load": {
+                    "hot_qps": { "target": 1200000.0 },
+                    "hot_error_rate": { "target": 0.0 },
+                    "hot_benchmark_table": {
+                        "target_p50_ms": 0.012,
+                        "target_p95_ms": 0.015,
+                        "target_p99_ms": 0.020,
+                        "target_max_ms": 0.500,
+                        "target_workers": 16.0,
+                        "target_sample_count": 10000.0
+                    }
+                },
+                "retrieval": {
+                    "hot_live_table": {
+                        "target_p50_ms": 1.0,
+                        "target_p95_ms": 1.0,
+                        "target_p99_ms": 2.0,
+                        "target_max_ms": 5.0
+                    },
+                    "hot_benchmark_table": {
+                        "target_iterations": 20.0,
+                        "target_warmup": 3.0
+                    }
+                },
+                "accuracy": {
+                    "symbol_precision": { "target": 0.99 },
+                    "semantic_precision": { "target": 0.98 }
+                }
+            },
+            "sla": {
+                "checks": [
+                    { "metric": "accuracy.cross_project_leakage", "status": "pass" },
+                    { "metric": "accuracy.symbol_precision", "status": "pass" },
+                    { "metric": "accuracy.semantic_precision", "status": "pass" }
+                ]
+            }
+        });
+
+        let cards = build_benchmark_cards(&snapshot);
+        let cold_card = &cards[2];
+        assert_eq!(cold_card["status"].as_str(), Some("waiting"));
+        assert_eq!(cold_card["status_label"].as_str(), Some("идёт прогон"));
+        assert!(
+            cold_card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("обновляются по мере прогона")
+        );
+        assert_eq!(
+            cold_card["table"]["columns"][2]["label"].as_str(),
+            Some("Онлайн\nсейчас")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][0]["label"].as_str(),
+            Some("Прогресс")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][0]["values"][1].as_str(),
+            Some("128 из 442")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][3]["values"][1].as_str(),
+            Some("1.777 ms")
+        );
+        assert!(
+            cold_card["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Прогон ещё не завершён")
+        );
     }
 }

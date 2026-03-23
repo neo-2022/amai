@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::process;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{Disks, System};
 use tokio::time::{Duration, sleep};
 use tokio_postgres::Client;
@@ -175,6 +176,53 @@ struct Distribution {
     sample_count: usize,
 }
 
+struct LiveProgressGuard {
+    repo_root: PathBuf,
+    output_dir: PathBuf,
+}
+
+impl LiveProgressGuard {
+    fn new(repo_root: PathBuf, output_dir: PathBuf) -> Self {
+        let guard = Self {
+            repo_root,
+            output_dir,
+        };
+        guard.clear();
+        guard
+    }
+
+    fn write(&self, payload: &Value) -> Result<()> {
+        let text = serde_json::to_string_pretty(payload)?;
+        for path in [
+            live_progress_cache_path(&self.repo_root),
+            output_progress_path(&self.output_dir),
+        ] {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::write(&path, &text)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    fn clear(&self) {
+        for path in [
+            live_progress_cache_path(&self.repo_root),
+            output_progress_path(&self.output_dir),
+        ] {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+impl Drop for LiveProgressGuard {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) -> Result<()> {
     if args.cycles == 0 {
         return Err(anyhow!("cold benchmark requires cycles > 0"));
@@ -195,9 +243,11 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
     let temp_dir = output_dir.join("tmp");
     fs::create_dir_all(&temp_dir)
         .with_context(|| format!("failed to create {}", temp_dir.display()))?;
+    let progress_guard = LiveProgressGuard::new(repo_root.to_path_buf(), output_dir.clone());
 
     let hardware_profile = collect_hardware_profile(repo_root)?;
     let run_started = Instant::now();
+    let run_started_epoch_ms = now_epoch_ms();
     let mut hardware_samples = Vec::new();
     let mut indexed_repos = Vec::new();
     let mut cold_samples = Vec::new();
@@ -214,13 +264,58 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
         .iter()
         .map(|repo| (repo.manifest.code.clone(), repo.clone()))
         .collect::<BTreeMap<_, _>>();
+    progress_guard.write(&build_live_progress_payload(
+        &output_dir,
+        &manifest,
+        args,
+        &repo_map,
+        run_started_epoch_ms,
+        &cold_samples,
+        &hot_samples,
+        &cycle_summaries,
+        &indexed_repos,
+        "initializing",
+        None,
+        None,
+        None,
+    )?)?;
 
     for repo in &repos {
         ensure_repo_registered(cfg, db, repo).await?;
         if !args.skip_index {
+            progress_guard.write(&build_live_progress_payload(
+                &output_dir,
+                &manifest,
+                args,
+                &repo_map,
+                run_started_epoch_ms,
+                &cold_samples,
+                &hot_samples,
+                &cycle_summaries,
+                &indexed_repos,
+                "indexing",
+                None,
+                Some(&repo.manifest.code),
+                None,
+            )?)?;
             let summary = index_repo(cfg, db, repo, true).await?;
             if let Some(summary) = summary {
                 indexed_repos.push(summary);
+                progress_guard.write(&build_live_progress_payload(
+                    &output_dir,
+                    &manifest,
+                    args,
+                    &repo_map,
+                    run_started_epoch_ms,
+                    &cold_samples,
+                    &hot_samples,
+                    &cycle_summaries,
+                    &indexed_repos,
+                    "indexing",
+                    Some(0),
+                    Some(&repo.manifest.code),
+                    None,
+                )?)?;
             }
         }
     }
@@ -228,6 +323,21 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
     'cycles: for cycle in 0..args.cycles {
         if args.reindex_each_cycle && !args.skip_index && cycle > 0 {
             for repo in repo_map.values() {
+                progress_guard.write(&build_live_progress_payload(
+                    &output_dir,
+                    &manifest,
+                    args,
+                    &repo_map,
+                    run_started_epoch_ms,
+                    &cold_samples,
+                    &hot_samples,
+                    &cycle_summaries,
+                    &indexed_repos,
+                    "indexing",
+                    Some(cycle),
+                    Some(&repo.manifest.code),
+                    None,
+                )?)?;
                 if let Some(summary) = index_repo(cfg, db, repo, true).await? {
                     indexed_repos.push(summary);
                 }
@@ -239,6 +349,21 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
             let repo = repo_map
                 .get(&case.repo_code)
                 .ok_or_else(|| anyhow!("unknown repo_code in manifest case: {}", case.repo_code))?;
+            progress_guard.write(&build_live_progress_payload(
+                &output_dir,
+                &manifest,
+                args,
+                &repo_map,
+                run_started_epoch_ms,
+                &cold_samples,
+                &hot_samples,
+                &cycle_summaries,
+                &indexed_repos,
+                "running",
+                Some(cycle),
+                Some(&repo.manifest.code),
+                Some(&case.query_slice),
+            )?)?;
 
             match enforce_safety_guards(
                 repo_root,
@@ -270,6 +395,21 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                     .expect("cold sample exists after push");
                 record.fallback_triggered = true;
             }
+            progress_guard.write(&build_live_progress_payload(
+                &output_dir,
+                &manifest,
+                args,
+                &repo_map,
+                run_started_epoch_ms,
+                &cold_samples,
+                &hot_samples,
+                &cycle_summaries,
+                &indexed_repos,
+                "running",
+                Some(cycle),
+                Some(&repo.manifest.code),
+                Some(&case.query_slice),
+            )?)?;
         }
 
         if cold_samples.len() > cold_start || hot_samples.len() > hot_start {
@@ -278,6 +418,21 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                 cold: distribution_from_samples(&cold_samples[cold_start..]),
                 hot: distribution_from_samples(&hot_samples[hot_start..]),
             });
+            progress_guard.write(&build_live_progress_payload(
+                &output_dir,
+                &manifest,
+                args,
+                &repo_map,
+                run_started_epoch_ms,
+                &cold_samples,
+                &hot_samples,
+                &cycle_summaries,
+                &indexed_repos,
+                "cycle_complete",
+                Some(cycle),
+                None,
+                None,
+            )?)?;
         }
     }
 
@@ -309,6 +464,21 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
     );
     let target_met = verdict == "TARGET MET";
     let canonical_eval = build_cold_benchmark_canonical_eval(&cold_samples)?;
+    progress_guard.write(&build_live_progress_payload(
+        &output_dir,
+        &manifest,
+        args,
+        &repo_map,
+        run_started_epoch_ms,
+        &cold_samples,
+        &hot_samples,
+        &cycle_summaries,
+        &indexed_repos,
+        "finalizing",
+        Some(args.cycles.saturating_sub(1)),
+        None,
+        None,
+    )?)?;
 
     let summary = json!({
         "cold_benchmark": {
@@ -439,6 +609,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
 
     write_outputs(&output_dir, &summary, &cold_samples, &hot_samples)?;
     let _ = postgres::insert_observability_snapshot(db, "cold_path_benchmark", &summary).await?;
+    progress_guard.clear();
     println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
 }
@@ -1384,6 +1555,150 @@ fn distribution_to_json(distribution: &Distribution) -> Value {
         "max": distribution.max,
         "sample_count": distribution.sample_count,
     })
+}
+
+fn cold_profile_to_json(profile: &ColdBenchmarkProfile) -> Value {
+    json!({
+        "display_name": profile.display_name,
+        "summary": profile.summary,
+        "target_p50_ms": profile.target_p50_ms,
+        "target_p95_ms": profile.target_p95_ms,
+        "target_p99_ms": profile.target_p99_ms,
+        "target_max_ms": profile.target_max_ms,
+        "min_precision": profile.min_precision,
+        "min_target_hit_rate": profile.min_target_hit_rate,
+        "min_recall": profile.min_recall,
+        "min_sample_count": profile.min_sample_count,
+        "min_repo_count": profile.min_repo_count,
+        "min_query_slice_count": profile.min_query_slice_count,
+        "max_duration_seconds": profile.max_duration_seconds,
+        "max_leakage": profile.max_leakage,
+        "max_error_rate": profile.max_error_rate,
+    })
+}
+
+fn build_live_progress_payload(
+    output_dir: &Path,
+    manifest: &ColdBenchmarkManifest,
+    args: &VerifyColdPathArgs,
+    repo_map: &BTreeMap<String, RepoRuntime>,
+    run_started_epoch_ms: u64,
+    cold_samples: &[RetrievalSample],
+    hot_samples: &[RetrievalSample],
+    cycle_summaries: &[CycleSummary],
+    indexed_repos: &[IndexedRepoSummary],
+    phase: &str,
+    current_cycle: Option<usize>,
+    current_repo_code: Option<&str>,
+    current_query_slice: Option<&str>,
+) -> Result<Value> {
+    let cold_distribution = distribution_from_samples(cold_samples);
+    let hot_distribution = distribution_from_samples(hot_samples);
+    let cold_quality = summarize_quality(cold_samples);
+    let hot_quality = summarize_quality(hot_samples);
+    let repo_coverage = repo_coverage(repo_map, cold_samples);
+    let query_coverage = query_coverage(cold_samples);
+    let measured_repo_count = repo_coverage["repo_count"].as_u64().unwrap_or_default();
+    let measured_query_slice_count = query_coverage["query_slice_count"]
+        .as_u64()
+        .unwrap_or_default();
+    let run_wall_clock_duration_seconds =
+        (now_epoch_ms().saturating_sub(run_started_epoch_ms)) as f64 / 1000.0;
+    let completed_case_count = cold_samples.len() as u64;
+    let target_case_count = (manifest.cases.len() * args.cycles) as u64;
+    let progress_ratio = if target_case_count == 0 {
+        0.0
+    } else {
+        completed_case_count as f64 / target_case_count as f64
+    };
+
+    Ok(json!({
+        "cold_benchmark_progress": {
+            "state": "running",
+            "pid": process::id(),
+            "captured_at_epoch_ms": now_epoch_ms(),
+            "started_at_epoch_ms": run_started_epoch_ms,
+            "phase": phase,
+            "current_cycle": current_cycle.map(|value| value as u64 + 1),
+            "total_cycles": args.cycles,
+            "current_repo_code": current_repo_code,
+            "current_query_slice": current_query_slice,
+            "output_dir": output_dir.display().to_string(),
+            "profile": cold_profile_to_json(&manifest.profile),
+            "executive_summary": {
+                "verdict": "RUNNING",
+                "why": format!(
+                    "Идёт живой cold benchmark: завершено {} из {} cold-case, фаза {}.",
+                    completed_case_count,
+                    target_case_count,
+                    phase
+                ),
+            },
+            "progress": {
+                "completed_case_count": completed_case_count,
+                "target_case_count": target_case_count,
+                "completed_ratio": progress_ratio,
+                "repo_count": measured_repo_count,
+                "query_slice_count": measured_query_slice_count,
+                "current_cycle": current_cycle.map(|value| value as u64 + 1),
+                "total_cycles": args.cycles,
+            },
+            "cold_latency_distribution": distribution_to_json(&cold_distribution),
+            "hot_latency_distribution": distribution_to_json(&hot_distribution),
+            "quality_metrics": {
+                "cold": cold_quality.clone(),
+                "hot": hot_quality,
+            },
+            "long_run_stability": {
+                "cycles": cycle_summaries.iter().map(cycle_summary_to_json).collect::<Vec<_>>(),
+                "summary": long_run_summary(cycle_summaries),
+            },
+            "machine_readable_summary": {
+                "p50": cold_distribution.p50,
+                "p95": cold_distribution.p95,
+                "p99": cold_distribution.p99,
+                "max": cold_distribution.max,
+                "sample_count": cold_distribution.sample_count,
+                "recall": cold_quality["recall"].as_f64().unwrap_or_default(),
+                "precision": cold_quality["precision"].as_f64().unwrap_or_default(),
+                "hit_rate": cold_quality["target_hit_rate"].as_f64().unwrap_or_default(),
+                "miss_rate": cold_quality["miss_rate"].as_f64().unwrap_or_default(),
+                "fallback_rate": cold_quality["fallback_rate"].as_f64().unwrap_or_default(),
+                "leakage": cold_quality["leakage"].as_u64().unwrap_or_default(),
+                "error_rate": cold_quality["error_rate"].as_f64().unwrap_or_default(),
+                "repo_count": measured_repo_count,
+                "query_slice_count": measured_query_slice_count,
+                "duration": run_wall_clock_duration_seconds,
+                "run_wall_clock_duration": run_wall_clock_duration_seconds,
+                "target_met": false,
+                "thermal_stop_count": 0,
+                "cleanup_actions_count": 0,
+            },
+            "dataset_coverage": repo_coverage,
+            "query_coverage": query_coverage,
+            "indexed_repos": indexed_repos.iter().map(indexed_repo_to_json).collect::<Vec<_>>(),
+        },
+        "retrieval_science": retrieval_science::suite_metadata("cold_path_benchmark")?,
+        "degradation_policy": retrieval_science::degradation_policy_json()?,
+    }))
+}
+
+fn live_progress_cache_path(repo_root: &Path) -> PathBuf {
+    repo_root
+        .join("state")
+        .join("cold-benchmark")
+        .join("live_progress.json")
+}
+
+fn output_progress_path(output_dir: &Path) -> PathBuf {
+    output_dir.join("progress.json")
+}
+
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn indexed_repo_to_json(summary: &IndexedRepoSummary) -> Value {
