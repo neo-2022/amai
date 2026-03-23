@@ -1,5 +1,10 @@
-use crate::cli::{ContextPackArgs, McpConfigArgs, VerifyMcpArgs, VerifyTokenBenchmarkArgs};
-use crate::{compatibility, config, observe, postgres, profiles, retrieval, token_budget, verify};
+use crate::cli::{
+    ContextPackArgs, McpConfigArgs, VerifyMcpArgs, VerifyMemoryMatrixArgs, VerifyTokenBenchmarkArgs,
+};
+use crate::{
+    compatibility, config, memory_task_matrix, observe, postgres, profiles, retrieval,
+    token_budget, verify,
+};
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -358,6 +363,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         "amai_context_pack".to_string(),
         "amai_token_benchmark".to_string(),
         "amai_token_report".to_string(),
+        "amai_memory_matrix".to_string(),
         "amai_observe_snapshot".to_string(),
         "amai_warm_cache".to_string(),
     ]);
@@ -547,6 +553,29 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         ));
     }
 
+    let memory_matrix = session
+        .tool_call(
+            "amai_memory_matrix",
+            json!({
+                "matrix": "letta_memory_local",
+                "project_prefix": "memory_eval"
+            }),
+        )
+        .await
+        .context("MCP amai_memory_matrix failed")?;
+    if memory_matrix["memory_matrix_summary"]["matrix"].as_str() != Some("letta_memory_local") {
+        return Err(anyhow!(
+            "MCP memory matrix did not keep requested matrix=letta_memory_local"
+        ));
+    }
+    if memory_matrix["memory_matrix_summary"]["tasks_failed"]
+        .as_u64()
+        .unwrap_or_default()
+        != 0
+    {
+        return Err(anyhow!("MCP memory matrix returned task failures"));
+    }
+
     let warm = session
         .tool_call(
             "amai_warm_cache",
@@ -578,6 +607,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "token_savings_factor": savings_factor,
             "token_savings_percent": savings_percent,
             "token_report_session_events": session_events,
+            "memory_matrix_tasks_failed": memory_matrix["memory_matrix_summary"]["tasks_failed"].clone(),
             "critical": critical,
             "unknown": unknown,
         }
@@ -845,6 +875,12 @@ async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> McpToolR
                 .await
                 .map_err(McpError::tool_runtime)
         }
+        "amai_memory_matrix" => {
+            let args: MemoryMatrixToolArgs = parse_arguments(request.arguments)?;
+            tool_memory_matrix(cfg, args)
+                .await
+                .map_err(McpError::tool_runtime)
+        }
         "amai_observe_snapshot" => tool_observe_snapshot(cfg)
             .await
             .map_err(McpError::tool_runtime),
@@ -1005,6 +1041,24 @@ fn summarize_with_limit(items: &[String]) -> String {
     }
 }
 
+fn summarize_verdict_counts(value: &Value) -> String {
+    let Some(object) = value.as_object() else {
+        return "none".to_string();
+    };
+    let parts = object
+        .iter()
+        .filter_map(|(key, count)| {
+            let count = count.as_u64()?;
+            Some(format!("{key}={count}"))
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
 async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result<Value> {
     compatibility::assert_supported(cfg).await?;
     let mut db = postgres::connect_admin(cfg).await?;
@@ -1129,6 +1183,42 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
     ))
 }
 
+async fn tool_memory_matrix(cfg: &AppConfig, args: MemoryMatrixToolArgs) -> Result<Value> {
+    compatibility::assert_supported(cfg).await?;
+    let payload = memory_task_matrix::collect_matrix(cfg, &args.to_verify_args()).await?;
+    let matrix_summary = memory_matrix_summary(&payload);
+    let summary = format!(
+        "memory matrix :: matrix={} tasks={}/{} failed={} success_rate={:.3} mean_score={:.3} p95_ms={:.3} gate_failures={} verdicts={}",
+        matrix_summary.matrix,
+        matrix_summary.tasks_passed,
+        matrix_summary.tasks_total,
+        matrix_summary.tasks_failed,
+        matrix_summary.success_rate,
+        matrix_summary.mean_score,
+        matrix_summary.p95_ms,
+        matrix_summary.gate_failures_count,
+        matrix_summary.compact_verdict_counts,
+    );
+    Ok(tool_result(
+        summary,
+        json!({
+            "memory_task_matrix": payload["memory_task_matrix"].clone(),
+            "memory_matrix_summary": {
+                "matrix": matrix_summary.matrix,
+                "display_name": matrix_summary.display_name,
+                "tasks_total": matrix_summary.tasks_total,
+                "tasks_passed": matrix_summary.tasks_passed,
+                "tasks_failed": matrix_summary.tasks_failed,
+                "success_rate": matrix_summary.success_rate,
+                "mean_score": matrix_summary.mean_score,
+                "p95_ms": matrix_summary.p95_ms,
+                "gate_failures_count": matrix_summary.gate_failures_count,
+                "compact_verdict_counts": matrix_summary.compact_verdict_counts,
+            }
+        }),
+    ))
+}
+
 async fn tool_observe_snapshot(cfg: &AppConfig) -> Result<Value> {
     compatibility::assert_supported(cfg).await?;
     let snapshot = observe::collect_snapshot_preview(cfg).await?;
@@ -1247,6 +1337,40 @@ struct TokenReportSummary {
     events_count: u64,
     counted_events: u64,
     note: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct MemoryMatrixSummary {
+    matrix: String,
+    display_name: String,
+    tasks_total: u64,
+    tasks_passed: u64,
+    tasks_failed: u64,
+    success_rate: f64,
+    mean_score: f64,
+    p95_ms: f64,
+    gate_failures_count: u64,
+    compact_verdict_counts: String,
+}
+
+fn memory_matrix_summary(payload: &Value) -> MemoryMatrixSummary {
+    let matrix = &payload["memory_task_matrix"];
+    MemoryMatrixSummary {
+        matrix: matrix["matrix"].as_str().unwrap_or("").to_string(),
+        display_name: matrix["display_name"].as_str().unwrap_or("").to_string(),
+        tasks_total: matrix["tasks_total"].as_u64().unwrap_or_default(),
+        tasks_passed: matrix["tasks_passed"].as_u64().unwrap_or_default(),
+        tasks_failed: matrix["tasks_failed"].as_u64().unwrap_or_default(),
+        success_rate: matrix["success_rate"].as_f64().unwrap_or_default(),
+        mean_score: matrix["mean_score"].as_f64().unwrap_or_default(),
+        p95_ms: matrix["p95_ms"].as_f64().unwrap_or_default(),
+        gate_failures_count: matrix["gate_failures"]
+            .as_array()
+            .map_or(0, |items| items.len() as u64),
+        compact_verdict_counts: summarize_verdict_counts(
+            &matrix["canonical_eval"]["verdict_counts"],
+        ),
+    }
 }
 
 fn token_report_summary(payload: &Value) -> TokenReportSummary {
@@ -1504,6 +1628,7 @@ fn server_instructions() -> String {
         "Use amai_context_pack for retrieval instead of asking for whole repositories.",
         "Use amai_token_benchmark when you need a measured token-economy comparison.",
         "Use amai_token_report when you need cumulative token savings for the current session, budget window, or lifetime.",
+        "Use amai_memory_matrix when you need the measured product-eval verdict for memory usefulness and isolation.",
         "Use amai_observe_snapshot when you need live stack health and SLA evidence.",
     ]
     .join(" ")
@@ -1538,6 +1663,10 @@ fn protocol_manifest() -> Value {
             "amai_token_report": {
                 "summary_field": "token_report_summary",
                 "short_summary_contract": "scope, status, counted-events semantics and saved tokens",
+            },
+            "amai_memory_matrix": {
+                "summary_field": "memory_matrix_summary",
+                "short_summary_contract": "measured memory usefulness/isolation pass rate, score, latency and verdict totals",
             },
             "amai_observe_snapshot": {
                 "summary_field": "observe_snapshot_summary",
@@ -1687,6 +1816,18 @@ fn tool_definitions() -> Vec<Value> {
                 "readOnlyHint": true,
                 "destructiveHint": false,
                 "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }),
+        json!({
+            "name": "amai_memory_matrix",
+            "description": "Run the canonical measured memory matrix for Amai and return product-eval verdicts.",
+            "inputSchema": memory_matrix_input_schema(),
+            "annotations": {
+                "title": "Memory Matrix",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
                 "openWorldHint": false
             }
         }),
@@ -1991,6 +2132,39 @@ fn stack_preflight_input_schema() -> Value {
                 "type": "string",
                 "default": "default",
                 "description": "Deployment profile code from config/deployment_profiles.toml."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn memory_matrix_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "matrix": {
+                "type": "string",
+                "default": "letta_memory_local",
+                "description": "Measured memory matrix code from config/memory_task_matrix.toml."
+            },
+            "project_prefix": {
+                "type": "string",
+                "default": "memory_eval",
+                "description": "Project-code prefix used for synthetic evaluation projects."
+            },
+            "min_success_rate": {
+                "type": ["number", "null"],
+                "minimum": 0.0,
+                "maximum": 1.0
+            },
+            "min_mean_score": {
+                "type": ["number", "null"],
+                "minimum": 0.0,
+                "maximum": 1.0
+            },
+            "max_p95_ms": {
+                "type": ["number", "null"],
+                "minimum": 0.0
             }
         },
         "additionalProperties": false
@@ -2469,6 +2643,29 @@ struct TokenReportToolArgs {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+struct MemoryMatrixToolArgs {
+    #[serde(default = "default_memory_matrix")]
+    matrix: String,
+    #[serde(default = "default_memory_project_prefix")]
+    project_prefix: String,
+    min_success_rate: Option<f64>,
+    min_mean_score: Option<f64>,
+    max_p95_ms: Option<f64>,
+}
+
+impl MemoryMatrixToolArgs {
+    fn to_verify_args(&self) -> VerifyMemoryMatrixArgs {
+        VerifyMemoryMatrixArgs {
+            matrix: self.matrix.clone(),
+            project_prefix: self.project_prefix.clone(),
+            min_success_rate: self.min_success_rate,
+            min_mean_score: self.min_mean_score,
+            max_p95_ms: self.max_p95_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 struct StackPreflightToolArgs {
     #[serde(default = "default_stack_profile")]
     profile: String,
@@ -2521,6 +2718,14 @@ fn default_stack_profile() -> String {
     "default".to_string()
 }
 
+fn default_memory_matrix() -> String {
+    "letta_memory_local".to_string()
+}
+
+fn default_memory_project_prefix() -> String {
+    "memory_eval".to_string()
+}
+
 fn default_tokenizer() -> String {
     "o200k_base".to_string()
 }
@@ -2545,9 +2750,9 @@ fn default_warm_limit() -> usize {
 mod tests {
     use super::{
         McpConfigArgs, McpError, context_pack_summary, mcp_tool_error_result,
-        observe_snapshot_summary, protocol_manifest, render_client_config, stack_preflight_summary,
-        summarize_codes, summarize_namespace_modes, token_benchmark_summary, token_report_summary,
-        warm_cache_summary,
+        memory_matrix_summary, observe_snapshot_summary, protocol_manifest, render_client_config,
+        stack_preflight_summary, summarize_codes, summarize_namespace_modes,
+        token_benchmark_summary, token_report_summary, warm_cache_summary,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -2721,6 +2926,44 @@ mod tests {
     }
 
     #[test]
+    fn memory_matrix_summary_surfaces_product_eval_contract() {
+        let payload = json!({
+            "memory_task_matrix": {
+                "matrix": "letta_memory_local",
+                "display_name": "Letta-style local memory matrix",
+                "tasks_total": 8,
+                "tasks_passed": 8,
+                "tasks_failed": 0,
+                "success_rate": 1.0,
+                "mean_score": 1.0,
+                "p95_ms": 418.778,
+                "gate_failures": [],
+                "canonical_eval": {
+                    "verdict_counts": {
+                        "hit_correct_target": 4,
+                        "recovered_useful": 4
+                    }
+                }
+            }
+        });
+
+        let summary = memory_matrix_summary(&payload);
+        assert_eq!(summary.matrix, "letta_memory_local");
+        assert_eq!(summary.display_name, "Letta-style local memory matrix");
+        assert_eq!(summary.tasks_total, 8);
+        assert_eq!(summary.tasks_passed, 8);
+        assert_eq!(summary.tasks_failed, 0);
+        assert_eq!(summary.success_rate, 1.0);
+        assert_eq!(summary.mean_score, 1.0);
+        assert_eq!(summary.p95_ms, 418.778);
+        assert_eq!(summary.gate_failures_count, 0);
+        assert_eq!(
+            summary.compact_verdict_counts,
+            "hit_correct_target=4, recovered_useful=4"
+        );
+    }
+
+    #[test]
     fn context_pack_summary_surfaces_included_and_excluded_reasons() {
         let payload = json!({
             "decision_trace": {
@@ -2860,6 +3103,10 @@ mod tests {
         assert_eq!(
             manifest["tool_contracts"]["amai_stack_preflight"]["summary_field"].as_str(),
             Some("preflight_summary")
+        );
+        assert_eq!(
+            manifest["tool_contracts"]["amai_memory_matrix"]["summary_field"].as_str(),
+            Some("memory_matrix_summary")
         );
         assert_eq!(
             manifest["prompt_contracts"]["amai-onboarding"]["purpose"].as_str(),

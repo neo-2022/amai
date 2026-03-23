@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 23:35 MSK
-Ручная сверка guide/docs: 2026-03-23 23:35 MSK
+modified_at: 2026-03-23 23:43 MSK
+Ручная сверка guide/docs: 2026-03-23 23:43 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -919,6 +919,16 @@ preview, а не только raw count.
 `compact_projects`, `cache_hits`, `exact_documents`, `symbol_hits`,
 `lexical_chunks` и `semantic_chunks`. Это позволяет внешнему клиенту понять,
 что именно реально прогрелось, а не видеть только финальное количество проектов.
+
+`amai_memory_matrix` теперь тоже доступен через MCP. Он отдаёт наружу
+`memory_task_matrix` и `memory_matrix_summary`, чтобы внешний клиент видел
+не только raw benchmark-like payload, но и уже собранный product-eval verdict:
+- сколько задач прошло;
+- сколько упало;
+- какой `success_rate`;
+- какой `mean_score`;
+- какой `p95_ms`;
+- какие verdict-классы накопились по памяти и изоляции.
 
 Кроме самих tools, `initialize` теперь отдаёт versioned `amai_protocol_manifest`.
 В нём зафиксированы:

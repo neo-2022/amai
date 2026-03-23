@@ -126,6 +126,19 @@ enum MemoryTaskKind {
 }
 
 pub async fn run_matrix(cfg: &AppConfig, args: &VerifyMemoryMatrixArgs) -> Result<()> {
+    let payload = collect_matrix(cfg, args).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    let gate_failures = gate_failures_from_payload(&payload);
+    if !gate_failures.is_empty() {
+        return Err(anyhow!(
+            "memory task matrix failed gates: {}",
+            gate_failures.join("; ")
+        ));
+    }
+    Ok(())
+}
+
+pub async fn collect_matrix(cfg: &AppConfig, args: &VerifyMemoryMatrixArgs) -> Result<Value> {
     bootstrap::bootstrap_stack(cfg).await?;
     let registry = load_registry()?;
     let matrix = registry
@@ -161,9 +174,9 @@ pub async fn run_matrix(cfg: &AppConfig, args: &VerifyMemoryMatrixArgs) -> Resul
     .await;
     let cleanup_result = fs::remove_dir_all(&temp_root)
         .with_context(|| format!("failed to remove {}", temp_root.display()));
-    run_result?;
+    let payload = run_result?;
     cleanup_result?;
-    Ok(())
+    Ok(payload)
 }
 
 async fn run_matrix_inner(
@@ -173,7 +186,7 @@ async fn run_matrix_inner(
     matrix: &MatrixEntry,
     ordered_tasks: &[(String, MatrixTask)],
     temp_root: &Path,
-) -> Result<()> {
+) -> Result<Value> {
     let db = postgres::connect_admin(cfg).await?;
     let mut task_results = Vec::with_capacity(ordered_tasks.len());
     for (task_code, task) in ordered_tasks {
@@ -289,14 +302,16 @@ async fn run_matrix_inner(
         }
     });
     let _ = postgres::insert_observability_snapshot(&db, "memory_task_matrix", &payload).await?;
-    println!("{}", serde_json::to_string_pretty(&payload)?);
-    if !gate_failures.is_empty() {
-        return Err(anyhow!(
-            "memory task matrix failed gates: {}",
-            gate_failures.join("; ")
-        ));
-    }
-    Ok(())
+    Ok(payload)
+}
+
+fn gate_failures_from_payload(payload: &Value) -> Vec<String> {
+    payload["memory_task_matrix"]["gate_failures"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+        .collect()
 }
 
 async fn run_task(
@@ -1122,7 +1137,9 @@ impl TaskResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{MatrixTask, MemoryLayer, MemoryTaskClass, load_registry};
+    use super::{
+        MatrixTask, MemoryLayer, MemoryTaskClass, gate_failures_from_payload, load_registry,
+    };
     use crate::eval_verdict::EvalPattern;
     use crate::eval_verdict::{EvalSignals, derive_eval_verdict};
     use serde_json::json;
@@ -1225,5 +1242,24 @@ mod tests {
         )
         .expect("verdict");
         assert_eq!(verdict.class_key, "hit_correct_target");
+    }
+
+    #[test]
+    fn gate_failures_are_collected_from_payload() {
+        let payload = json!({
+            "memory_task_matrix": {
+                "gate_failures": [
+                    "success_rate=0.5 below required 1.0",
+                    "mean_score=0.8 below required 1.0"
+                ]
+            }
+        });
+        assert_eq!(
+            gate_failures_from_payload(&payload),
+            vec![
+                "success_rate=0.5 below required 1.0".to_string(),
+                "mean_score=0.8 below required 1.0".to_string()
+            ]
+        );
     }
 }
