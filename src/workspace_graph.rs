@@ -3857,6 +3857,222 @@ mod tests {
     }
 
     #[test]
+    fn context_pack_workspace_graph_resolves_trait_qualified_calls_through_owner_module_alias_and_imported_trait_alias()
+     {
+        let context_pack_id = Uuid::parse_str("00000000-0000-0000-0000-000000000664").unwrap();
+        let graph = build_context_pack_workspace_graph(
+            &context_pack_id,
+            "<type_mod::Beta as FactoryAlias>::make",
+            "local_strict",
+            "scope-1",
+            &json!([{
+                "project_code": "project_alpha",
+                "namespace_code": "default"
+            }]),
+            &[DocumentHit {
+                project_code: "project_alpha".to_string(),
+                namespace_code: "default".to_string(),
+                repo_root: "/repo".to_string(),
+                relative_path: "src/lib.rs".to_string(),
+                language: Some("rust".to_string()),
+                source_kind: "git_tracked".to_string(),
+                git_commit_sha: Some("abc".to_string()),
+                score: 10.0,
+                snippet: "<type_mod::Beta as FactoryAlias>::make()".to_string(),
+            }],
+            &[],
+            &[],
+            &[],
+            &[
+                DocumentStructureRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/lib.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    structure: json!([
+                        {
+                            "kind": "function_item",
+                            "name": "make",
+                            "start_line": 6,
+                            "end_line": 8
+                        },
+                        {
+                            "kind": "function_item",
+                            "name": "runtime_summary",
+                            "start_line": 10,
+                            "end_line": 12
+                        }
+                    ]),
+                    imports: json!([
+                        {
+                            "kind": "use_declaration",
+                            "name": "crate::alpha",
+                            "text": "use crate::alpha as type_mod;",
+                            "start_line": 1,
+                            "end_line": 1
+                        },
+                        {
+                            "kind": "use_declaration",
+                            "name": "crate::traits::Factory",
+                            "text": "use crate::traits::Factory as FactoryAlias;",
+                            "start_line": 2,
+                            "end_line": 2
+                        }
+                    ]),
+                    exports: json!([]),
+                    metadata: json!({
+                        "call_references": [{
+                            "kind": "call_expression",
+                            "call_style": "scoped_identifier",
+                            "callee_name": "make",
+                            "callee_path": "<type_mod::Beta as FactoryAlias>::make",
+                            "receiver_text": null,
+                            "enclosing_owner_kind": null,
+                            "enclosing_owner_name": null,
+                            "enclosing_owner_path": null,
+                            "enclosing_trait_name": null,
+                            "generic": false,
+                            "start_line": 11,
+                            "end_line": 11,
+                            "text": "<type_mod::Beta as FactoryAlias>::make()"
+                        }]
+                    }),
+                },
+                DocumentStructureRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    structure: json!([{
+                        "kind": "struct_item",
+                        "name": "Beta",
+                        "start_line": 1,
+                        "end_line": 1
+                    }]),
+                    imports: json!([]),
+                    exports: json!([]),
+                    metadata: json!({"call_references":[]}),
+                },
+                DocumentStructureRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/traits.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    structure: json!([{
+                        "kind": "trait_item",
+                        "name": "Factory",
+                        "start_line": 1,
+                        "end_line": 3
+                    }]),
+                    imports: json!([]),
+                    exports: json!([]),
+                    metadata: json!({"call_references":[]}),
+                },
+            ],
+            &[
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/lib.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "make".to_string(),
+                    kind: "function_item".to_string(),
+                    start_line: 6,
+                    end_line: 8,
+                    start_byte: 48,
+                    end_byte: 114,
+                    metadata: json!({
+                        "language":"rust",
+                        "node_kind":"function_item",
+                        "owner_kind":"impl_item",
+                        "owner_name":"Beta",
+                        "owner_path":"type_mod::Beta",
+                        "trait_name":"FactoryAlias",
+                        "text":"fn make() -> type_mod::Beta { type_mod::Beta }"
+                    }),
+                },
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "Beta".to_string(),
+                    kind: "struct_item".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte: 0,
+                    end_byte: 16,
+                    metadata: json!({
+                        "language":"rust",
+                        "node_kind":"struct_item",
+                        "text":"pub struct Beta;"
+                    }),
+                },
+                DocumentScopedSymbolRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/traits.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    name: "Factory".to_string(),
+                    kind: "trait_item".to_string(),
+                    start_line: 1,
+                    end_line: 3,
+                    start_byte: 0,
+                    end_byte: 36,
+                    metadata: json!({
+                        "language":"rust",
+                        "node_kind":"trait_item",
+                        "text":"pub trait Factory { fn make() -> Beta; }"
+                    }),
+                },
+            ],
+        )
+        .expect("graph");
+        let edges = graph["edges"].as_array().expect("edges");
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("calls_symbol")
+                && edge["to_node_id"] == json!("symbol:project_alpha:default:src/lib.rs:make:6")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("resolves_call_symbol")
+                && edge["to_node_id"] == json!("symbol:project_alpha:default:src/lib.rs:make:6")
+        }));
+        let nodes = graph["nodes"].as_array().expect("nodes");
+        let target = nodes
+            .iter()
+            .find(|node| node["node_id"] == json!("symbol:project_alpha:default:src/lib.rs:make:6"))
+            .expect("target symbol");
+        assert_eq!(target["metadata"]["owner_path"], json!("type_mod::Beta"));
+        assert_eq!(
+            target["metadata"]["owner_path_canonical"],
+            json!("crate::alpha::Beta")
+        );
+        assert_eq!(target["metadata"]["trait_name"], json!("FactoryAlias"));
+        assert_eq!(
+            target["metadata"]["trait_name_canonical"],
+            json!("crate::traits::Factory")
+        );
+    }
+
+    #[test]
     fn canonicalize_rust_visible_path_stays_fail_closed_on_ambiguous_visible_name() {
         let visible_trait_targets = BTreeMap::from([(
             "FactoryAlias".to_string(),
@@ -3930,6 +4146,49 @@ mod tests {
         let resolution = resolve_rust_trait_qualified_symbol_path_target(
             &source_file,
             "<type_mod::Beta as trait_mod::Factory>::make",
+            &lookup,
+            Some(&imported_files),
+            Some(&visible_selectors),
+            None,
+            None,
+        );
+
+        assert!(resolution.is_none());
+    }
+
+    #[test]
+    fn trait_qualified_resolution_fails_closed_on_ambiguous_imported_trait_alias_with_owner_module_alias()
+     {
+        let source_file = fake_file("src/lib.rs");
+        let mut lookup = fake_lookup();
+        let alpha_key = scoped_path_key("project_alpha", "default", "src/alpha.rs");
+        lookup.trait_owner_symbol_node_ids.insert(
+            (
+                alpha_key.clone(),
+                "crate::alpha::Beta".to_string(),
+                "crate::traits::Factory".to_string(),
+                "make".to_string(),
+            ),
+            vec!["symbol:alpha:trait:make".to_string()],
+        );
+        let imported_files = BTreeSet::from([alpha_key]);
+        let visible_selectors = BTreeMap::from([
+            (
+                "type_mod".to_string(),
+                BTreeSet::from(["crate::alpha".to_string()]),
+            ),
+            (
+                "FactoryAlias".to_string(),
+                BTreeSet::from([
+                    "crate::traits::Factory".to_string(),
+                    "crate::other::Factory".to_string(),
+                ]),
+            ),
+        ]);
+
+        let resolution = resolve_rust_trait_qualified_symbol_path_target(
+            &source_file,
+            "<type_mod::Beta as FactoryAlias>::make",
             &lookup,
             Some(&imported_files),
             Some(&visible_selectors),
