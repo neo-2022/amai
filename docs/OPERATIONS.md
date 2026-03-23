@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 20:15 MSK
-Ручная сверка guide/docs: 2026-03-23 20:15 MSK
+modified_at: 2026-03-23 20:32 MSK
+Ручная сверка guide/docs: 2026-03-23 20:32 MSK
 
 # Operations
 
@@ -252,6 +252,7 @@ cd /home/art/agent-memory-index
 
 ```bash
 ./scripts/continuity_answer.sh --project project_alpha --namespace continuity --intent last_chat
+./scripts/continuity_answer.sh --project project_alpha --namespace continuity --intent last_chat --json
 ```
 
 Он:
@@ -259,6 +260,7 @@ cd /home/art/agent-memory-index
 - отдаёт сразу готовый короткий ответ;
 - не требует отдельной цепочки `startup -> restore/context`;
 - не должен порождать новый handoff.
+- если включить `--json`, тот же product path вернёт `canonical_eval`, `retrieval_science` и answer-level verdict-класс без write-side snapshot.
 
 Если нужен именно предыдущий чат и его хвост:
 
@@ -281,10 +283,23 @@ cd /home/art/agent-memory-index
 ./scripts/chat_lookup.sh --project project_alpha --namespace continuity --chat-reference current --messages-count 2
 ./scripts/chat_lookup.sh --project project_alpha --namespace continuity --at-time-rfc3339 2026-03-21T11:41:00+03:00 --messages-count 2
 ./scripts/chat_lookup.sh --project project_alpha --namespace continuity --question "на чем закончили в прошлом чате, какие последние два сообщения?"
+./scripts/chat_lookup.sh --project project_alpha --namespace continuity --question "на чем закончили в прошлом чате, какие последние два сообщения?" --json
 ```
 
 Это важный инвариант: `current / previous / exact time` идут одним temporal path, а не
 разными эвристическими обходами.
+
+Для Art есть и отдельный proof этого product-контура:
+
+```bash
+./scripts/proof_art_continuity_answer.sh
+```
+
+Он подтверждает:
+- `last_chat --json -> recovered_useful`
+- `previous_chat --json -> recovered_useful`
+- `exact-time miss --json -> hit_correct_target`
+- question-driven `chat_lookup.sh --json` не теряет тот же verdict-layer
 
 Для обычного startup это теперь выглядит так:
 

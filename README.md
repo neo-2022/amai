@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 20:15 MSK
-Ручная сверка guide/docs: 2026-03-23 20:15 MSK
+modified_at: 2026-03-23 20:32 MSK
+Ручная сверка guide/docs: 2026-03-23 20:32 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -290,16 +290,20 @@ scripts\install_amai.cmd --client codex
 
 ```bash
 ./scripts/continuity_answer.sh --project art --namespace continuity --intent last_chat
+./scripts/continuity_answer.sh --project art --namespace continuity --intent last_chat --json
 ./scripts/continuity_answer.sh --project art --namespace continuity --intent last_chat --include-previous-chat-messages --messages-count 2
+./scripts/chat_lookup.sh --project art --namespace continuity --question "что было в прошлом чате, какие последние два сообщения?" --json
 ./scripts/continuity_startup.sh --project art --namespace continuity
 ./scripts/continuity_restore.sh --project art --namespace continuity
 cargo run --quiet -- verify continuity --project art --namespace continuity
+./scripts/proof_art_continuity_answer.sh
 ```
 
 Разница такая:
 - `continuity answer`
   - печатает уже готовый короткий ответ для continuity-вопросов вроде `на чём остановились`;
   - это read-only путь без нового handoff;
+  - если добавить `--json`, тот же one-shot product path возвращает machine-readable payload с `canonical_eval`, `retrieval_science` и честным verdict-классом для конкретного ответа (`recovered_useful` или fail-closed `hit_correct_target`);
   - если добавить `--include-previous-chat-messages`, он ещё поднимет хвост предыдущего чата и последние сообщения;
 - `continuity startup`
   - печатает human-readable стартовую сводку для нового чата;
@@ -318,6 +322,8 @@ cargo run --quiet -- verify continuity --project art --namespace continuity
     - тот же `workspace_graph_summary` теперь поднимается и в `chat_start_restore`, и в human-readable startup/restore вывод, если в текущей линии уже были свежие retrieval-context события.
 - `verify continuity`
   - это уже не human-readable startup, а прямой machine-readable proof-контур для recovery;
+  - теперь он покрывает не только startup/import/replay, но и direct temporal chat lookup;
+  - а для самого product path есть отдельный proof `scripts/proof_art_continuity_answer.sh`, который прогоняет `continuity answer --json` и `chat_lookup.sh --json` на `last_chat / previous_chat / exact-time fail-closed`.
   - он проверяет уже 9 отдельных probe:
     - есть ли свежий `continuity_handoff`;
     - собрался ли `working_state_restore`;

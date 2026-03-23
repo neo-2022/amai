@@ -784,14 +784,6 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
     let parsed_question = args.question.as_deref().and_then(|question| {
         chat_question::interpret(question, chat_question::current_local_now())
     });
-    let mut intent = if args.intent != "last_chat" {
-        args.intent.clone()
-    } else {
-        parsed_question
-            .as_ref()
-            .map(|value| value.intent.clone())
-            .unwrap_or_else(|| args.intent.clone())
-    };
     let messages_count = if args.messages_count != 2 {
         args.messages_count
     } else {
@@ -809,14 +801,17 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
         .as_deref()
         .map(parse_chat_reference_spec)
         .unwrap_or(("current", 1));
-    if intent == "last_chat" && parsed_chat_reference.0 == "previous" {
-        intent = "previous_chat".to_string();
-    }
     let at_time_rfc3339 = args.at_time_rfc3339.clone().or_else(|| {
         parsed_question
             .as_ref()
             .and_then(|value| value.at_time_rfc3339.clone())
     });
+    let intent = resolve_answer_intent(
+        &args.intent,
+        parsed_question.as_ref().map(|value| value.intent.as_str()),
+        Some(parsed_chat_reference.0),
+        at_time_rfc3339.is_some(),
+    );
     let include_chat_messages = if args.include_chat_messages {
         true
     } else {
@@ -882,21 +877,39 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
     } else {
         None
     };
-    println!(
-        "{}",
-        render_direct_answer(
+    let previous_chat_offset = if wants_chat_lookup && parsed_chat_reference.0 == "previous" {
+        parsed_chat_reference.1
+    } else {
+        1
+    };
+    let answer_text = render_direct_answer(
+        &handoff_summary,
+        restore.as_ref(),
+        chat_tail.as_ref(),
+        &intent,
+        at_time_rfc3339.as_deref(),
+        previous_chat_offset,
+    );
+    if args.json {
+        let payload = build_continuity_answer_payload(
+            &project,
+            &namespace,
             &handoff_summary,
             restore.as_ref(),
             chat_tail.as_ref(),
             &intent,
+            args.question.as_deref(),
+            chat_reference.as_deref(),
             at_time_rfc3339.as_deref(),
-            if wants_chat_lookup && parsed_chat_reference.0 == "previous" {
-                parsed_chat_reference.1
-            } else {
-                1
-            },
-        )
-    );
+            messages_count,
+            include_chat_messages,
+            previous_chat_offset,
+            &answer_text,
+        )?;
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("{answer_text}");
+    }
     Ok(())
 }
 
@@ -977,6 +990,237 @@ pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> R
     .await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
+}
+
+fn build_continuity_answer_payload(
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    handoff_summary: &Value,
+    restore: Option<&Value>,
+    chat_tail: Option<&codex_threads::ChatTail>,
+    intent: &str,
+    question: Option<&str>,
+    chat_reference: Option<&str>,
+    at_time_rfc3339: Option<&str>,
+    messages_count: usize,
+    include_chat_messages: bool,
+    previous_chat_offset: usize,
+    answer_text: &str,
+) -> Result<Value> {
+    let probe = build_continuity_answer_probe(
+        handoff_summary,
+        chat_tail,
+        intent,
+        at_time_rfc3339,
+        previous_chat_offset,
+        answer_text,
+    )?;
+    let canonical_eval = build_continuity_canonical_eval(std::slice::from_ref(&probe))?;
+    Ok(json!({
+        "continuity_answer": {
+            "project": {
+                "code": project.code,
+                "display_name": project.display_name,
+                "repo_root": project.repo_root,
+            },
+            "namespace": {
+                "code": namespace.code,
+                "display_name": namespace.display_name,
+            },
+            "question": question,
+            "intent": intent,
+            "chat_reference": chat_reference,
+            "at_time_rfc3339": at_time_rfc3339,
+            "messages_count": messages_count,
+            "include_chat_messages": include_chat_messages,
+            "previous_chat_offset": previous_chat_offset,
+            "handoff_summary": {
+                "headline": handoff_summary["headline"].as_str().unwrap_or("ещё нет данных"),
+                "next_step": handoff_summary["next_step"].as_str().unwrap_or("ещё нет данных"),
+            },
+            "restore_present": restore.is_some(),
+            "chat_lookup": {
+                "found": chat_tail.is_some(),
+                "thread_id": chat_tail.map(|value| value.thread_id.as_str()),
+                "title": chat_tail.map(|value| value.title.as_str()),
+                "summary_headline": chat_tail.and_then(|value| value.summary_headline.as_deref()),
+                "summary_next_step": chat_tail.and_then(|value| value.summary_next_step.as_deref()),
+                "messages_count": chat_tail.map(|value| value.messages.len()).unwrap_or(0),
+                "selected_time_slice": chat_tail
+                    .and_then(|value| value.selected_time_slice.as_ref())
+                    .map(|slice| {
+                        json!({
+                            "started_at": slice.started_at,
+                            "ended_at": slice.ended_at,
+                            "summary_headline": slice.summary_headline,
+                            "summary_next_step": slice.summary_next_step,
+                            "user_anchor": slice.user_anchor,
+                            "assistant_anchor": slice.assistant_anchor,
+                        })
+                    }),
+            },
+            "answer_text": answer_text,
+            "canonical_eval": canonical_eval,
+        },
+        "retrieval_science": retrieval_science::suite_metadata("continuity_answer")?,
+        "degradation_policy": retrieval_science::degradation_policy_json()?,
+    }))
+}
+
+fn build_continuity_answer_probe(
+    handoff_summary: &Value,
+    chat_tail: Option<&codex_threads::ChatTail>,
+    intent: &str,
+    at_time_rfc3339: Option<&str>,
+    previous_chat_offset: usize,
+    answer_text: &str,
+) -> Result<ContinuityEvalProbe> {
+    let project_headline = handoff_summary["headline"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    let project_next_step = handoff_summary["next_step"]
+        .as_str()
+        .and_then(normalize_next_step_value)
+        .unwrap_or_else(|| "ещё нет данных".to_string());
+    let first_line = answer_text.lines().next().unwrap_or_default();
+    match intent {
+        "previous_chat" => {
+            if let Some(chat_tail) = chat_tail {
+                let expected_fragments = continuity_answer_expected_fragments(chat_tail);
+                let expected_present = expected_fragments
+                    .iter()
+                    .any(|fragment| !fragment.is_empty() && answer_text.contains(fragment));
+                let stale_substitution = first_line.contains(project_headline)
+                    && !expected_fragments
+                        .iter()
+                        .any(|fragment| !fragment.is_empty() && first_line.contains(fragment));
+                return build_continuity_eval_probe(
+                    "previous_chat_answer_recovered_useful",
+                    "recovered_useful",
+                    EvalPattern::RecoveryTarget,
+                    true,
+                    json!({
+                        "expected_present": expected_present,
+                        "unexpected_present": stale_substitution,
+                        "intent": "previous_chat",
+                        "offset": previous_chat_offset,
+                        "expected_fragments": expected_fragments,
+                        "answer": answer_text,
+                    }),
+                );
+            }
+            let fail_closed_ok = answer_text.contains(
+                "На чём закончился прошлый чат: для такого смещения назад нет известного чата.",
+            ) && answer_text.contains(project_headline)
+                && answer_text.contains(&project_next_step);
+            return build_continuity_eval_probe(
+                "previous_chat_answer_fail_closed",
+                "hit_correct_target",
+                EvalPattern::IsolationBoundary,
+                false,
+                json!({
+                    "boundary_clean": fail_closed_ok,
+                    "fail_closed_ok": fail_closed_ok,
+                    "unexpected_present": answer_mentions_temporal_match(answer_text),
+                    "intent": "previous_chat",
+                    "offset": previous_chat_offset,
+                    "answer": answer_text,
+                }),
+            );
+        }
+        "chat_at_time" => {
+            if let Some(chat_tail) = chat_tail {
+                let expected_fragments = continuity_answer_expected_fragments(chat_tail);
+                let expected_present = expected_fragments
+                    .iter()
+                    .any(|fragment| !fragment.is_empty() && answer_text.contains(fragment))
+                    && at_time_rfc3339.is_none_or(|target_time| answer_text.contains(target_time));
+                let stale_substitution = first_line.contains(project_headline)
+                    && !expected_fragments
+                        .iter()
+                        .any(|fragment| !fragment.is_empty() && first_line.contains(fragment));
+                return build_continuity_eval_probe(
+                    "exact_time_answer_recovered_useful",
+                    "recovered_useful",
+                    EvalPattern::RecoveryTarget,
+                    true,
+                    json!({
+                        "expected_present": expected_present,
+                        "unexpected_present": stale_substitution,
+                        "intent": "chat_at_time",
+                        "target_time": at_time_rfc3339,
+                        "expected_fragments": expected_fragments,
+                        "answer": answer_text,
+                    }),
+                );
+            }
+            let fail_closed_ok = answer_text.contains(
+                "Что было в чате на этот момент: для этого момента нет точного совпадения в известных чатах.",
+            ) && answer_text.contains(project_headline)
+                && answer_text.contains(&project_next_step)
+                && at_time_rfc3339
+                    .is_none_or(|target_time| answer_text.contains(target_time));
+            return build_continuity_eval_probe(
+                "exact_time_answer_fail_closed",
+                "hit_correct_target",
+                EvalPattern::IsolationBoundary,
+                false,
+                json!({
+                    "boundary_clean": fail_closed_ok,
+                    "fail_closed_ok": fail_closed_ok,
+                    "unexpected_present": answer_mentions_temporal_match(answer_text),
+                    "intent": "chat_at_time",
+                    "target_time": at_time_rfc3339,
+                    "answer": answer_text,
+                }),
+            );
+        }
+        _ => {}
+    }
+    build_continuity_eval_probe(
+        "continuity_answer_recovered_useful",
+        "recovered_useful",
+        EvalPattern::RecoveryTarget,
+        true,
+        json!({
+            "expected_present": answer_text.contains(project_headline)
+                && answer_text.contains(&project_next_step),
+            "unexpected_present": false,
+            "intent": intent,
+            "answer": answer_text,
+        }),
+    )
+}
+
+fn continuity_answer_expected_fragments(chat_tail: &codex_threads::ChatTail) -> Vec<String> {
+    let answer_headline = summarize_chat_tail_headline(chat_tail).unwrap_or_default();
+    let answer_next_step = extract_chat_tail_next_step(chat_tail).unwrap_or_default();
+    let mut fragments = vec![answer_headline.clone(), answer_next_step];
+    if let Some(label) = select_chat_tail_label(chat_tail, &answer_headline) {
+        fragments.push(label);
+    }
+    if let Some(slice) = chat_tail.selected_time_slice.as_ref() {
+        fragments.push(collapse_answer_text(&slice.user_anchor, 220));
+        fragments.push(collapse_answer_text(&slice.summary_headline, 220));
+    }
+    for message in &chat_tail.messages {
+        fragments.push(collapse_answer_text(&message.text, 320));
+    }
+    fragments.retain(|fragment| !fragment.trim().is_empty());
+    fragments
+}
+
+fn answer_mentions_temporal_match(answer_text: &str) -> bool {
+    [
+        "Предыдущий чат по времени:",
+        "Подходящий chat thread:",
+        "Найденный chat thread:",
+        "Последние сообщения предыдущего чата:",
+        "Ближайшие сообщения к этому моменту:",
+        "Смысловой срез времени:",
+    ]
+    .iter()
+    .any(|needle| answer_text.contains(needle))
 }
 
 fn render_direct_answer(
@@ -1563,6 +1807,26 @@ fn parse_chat_reference_spec(value: &str) -> (&str, usize) {
         return ("previous", parsed.unwrap_or(1));
     }
     (trimmed, 1)
+}
+
+fn resolve_answer_intent(
+    requested_intent: &str,
+    parsed_intent: Option<&str>,
+    chat_reference_kind: Option<&str>,
+    has_at_time: bool,
+) -> String {
+    let mut intent = if requested_intent != "last_chat" {
+        requested_intent.to_string()
+    } else {
+        parsed_intent.unwrap_or(requested_intent).to_string()
+    };
+    if intent == "last_chat" && chat_reference_kind == Some("previous") {
+        intent = "previous_chat".to_string();
+    }
+    if intent == "last_chat" && has_at_time {
+        intent = "chat_at_time".to_string();
+    }
+    intent
 }
 
 async fn load_startup_context(
@@ -2536,12 +2800,12 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_chat_start_restore, build_continuity_canonical_eval, continuity_replay_guard_probes,
-        continuity_snapshot_semantic_epoch_ms, continuity_temporal_lookup_probes,
-        degradation_proof_scenarios, enrich_thread_index_file, extract_next_step_from_text,
-        fake_continuity_handoff_snapshot, fake_continuity_import_snapshot,
-        is_meta_continuity_handoff, latest_scoped_snapshot, parse_chat_reference_spec,
-        render_direct_answer,
+        build_chat_start_restore, build_continuity_answer_payload, build_continuity_canonical_eval,
+        continuity_replay_guard_probes, continuity_snapshot_semantic_epoch_ms,
+        continuity_temporal_lookup_probes, degradation_proof_scenarios, enrich_thread_index_file,
+        extract_next_step_from_text, fake_continuity_handoff_snapshot,
+        fake_continuity_import_snapshot, is_meta_continuity_handoff, latest_scoped_snapshot,
+        parse_chat_reference_spec, render_direct_answer, resolve_answer_intent,
     };
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
@@ -2840,6 +3104,158 @@ mod tests {
     }
 
     #[test]
+    fn continuity_answer_json_marks_last_chat_as_recovered_useful() {
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "art".to_string(),
+            display_name: "Art".to_string(),
+            repo_root: "/home/art/Art".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let handoff = json!({
+            "headline": "Temporal lookup materialized",
+            "next_step": "Проверить lookup по точному времени на реальном новом чате."
+        });
+        let answer = render_direct_answer(&handoff, None, None, "last_chat", None, 1);
+        let payload = build_continuity_answer_payload(
+            &project,
+            &namespace,
+            &handoff,
+            None,
+            None,
+            "last_chat",
+            Some("на чем остановились"),
+            None,
+            None,
+            2,
+            false,
+            1,
+            &answer,
+        )
+        .expect("payload");
+        assert_eq!(
+            payload["continuity_answer"]["canonical_eval"]["verdict_counts"]["recovered_useful"]
+                .as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            payload["retrieval_science"]["suite_key"].as_str(),
+            Some("continuity_answer")
+        );
+    }
+
+    #[test]
+    fn continuity_answer_json_marks_previous_chat_as_recovered_useful() {
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "art".to_string(),
+            display_name: "Art".to_string(),
+            repo_root: "/home/art/Art".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let handoff = json!({
+            "headline": "Current project line",
+            "next_step": "Current project next step."
+        });
+        let chat_tail = ChatTail {
+            thread_id: "thread-2".to_string(),
+            title: "чат про continuity".to_string(),
+            summary_headline: Some("Закончили на temporal contour.".to_string()),
+            summary_next_step: Some("Проверить новый чат ещё раз.".to_string()),
+            selected_time_slice: None,
+            messages: vec![TranscriptMessage {
+                role: "assistant".to_string(),
+                text: "Закончили на temporal contour.".to_string(),
+            }],
+        };
+        let answer =
+            render_direct_answer(&handoff, None, Some(&chat_tail), "previous_chat", None, 1);
+        let payload = build_continuity_answer_payload(
+            &project,
+            &namespace,
+            &handoff,
+            None,
+            Some(&chat_tail),
+            "previous_chat",
+            Some("что было в прошлом чате"),
+            Some("previous"),
+            None,
+            2,
+            true,
+            1,
+            &answer,
+        )
+        .expect("payload");
+        assert_eq!(
+            payload["continuity_answer"]["canonical_eval"]["verdict_counts"]["recovered_useful"]
+                .as_u64(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn continuity_answer_json_marks_missing_exact_time_as_fail_closed_hit() {
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "art".to_string(),
+            display_name: "Art".to_string(),
+            repo_root: "/home/art/Art".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let handoff = json!({
+            "headline": "Current project line",
+            "next_step": "Current project next step."
+        });
+        let answer = render_direct_answer(
+            &handoff,
+            None,
+            None,
+            "chat_at_time",
+            Some("2099-01-01T12:00:00Z"),
+            1,
+        );
+        let payload = build_continuity_answer_payload(
+            &project,
+            &namespace,
+            &handoff,
+            None,
+            None,
+            "chat_at_time",
+            Some("что было в прошлую среду"),
+            None,
+            Some("2099-01-01T12:00:00Z"),
+            2,
+            true,
+            1,
+            &answer,
+        )
+        .expect("payload");
+        assert_eq!(
+            payload["continuity_answer"]["canonical_eval"]["verdict_counts"]["hit_correct_target"]
+                .as_u64(),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn render_direct_answer_marks_ordinal_previous_chat_lookup() {
         let handoff = json!({
             "headline": "Current project line",
@@ -2972,6 +3388,22 @@ mod tests {
         assert_eq!(parse_chat_reference_spec("previous"), ("previous", 1));
         assert_eq!(parse_chat_reference_spec("previous:2"), ("previous", 2));
         assert_eq!(parse_chat_reference_spec("current"), ("current", 1));
+    }
+
+    #[test]
+    fn resolve_answer_intent_promotes_previous_and_exact_time_paths() {
+        assert_eq!(
+            resolve_answer_intent("last_chat", None, Some("previous"), false),
+            "previous_chat"
+        );
+        assert_eq!(
+            resolve_answer_intent("last_chat", None, Some("current"), true),
+            "chat_at_time"
+        );
+        assert_eq!(
+            resolve_answer_intent("last_chat", Some("previous_chat"), Some("current"), false),
+            "previous_chat"
+        );
     }
 
     #[test]

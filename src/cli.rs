@@ -280,6 +280,8 @@ pub struct ContinuityAnswerArgs {
     pub chat_reference: Option<String>,
     #[arg(long)]
     pub at_time_rfc3339: Option<String>,
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
