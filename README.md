@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 08:12 MSK
-Ручная сверка guide/docs: 2026-03-23 08:12 MSK
+modified_at: 2026-03-23 09:00 MSK
+Ручная сверка guide/docs: 2026-03-23 09:00 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -436,7 +436,8 @@ scripts\human_dashboard_down.cmd
 ```
 
 После запуска `human_dashboard` теперь не держится за открытый терминал.
-Он сам поднимает observe-server в фоне, пишет PID и путь к логу, а затем возвращает URL.
+На Linux launcher сначала поднимает `observe serve` как `systemd --user` сервис `amai-human-dashboard.service`, а если user-level `systemd` недоступен, честно уходит в обычный detached fallback.
+Для Linux статус и логи теперь правильно смотреть через `systemctl --user status amai-human-dashboard.service` и `journalctl --user -u amai-human-dashboard.service`.
 По умолчанию панель обновляется раз в `1` секунду, чтобы live-цифры были ближе к реальному состоянию, а не висели как старый снимок.
 
 После запуска откройте в браузере:

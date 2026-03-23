@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 08:12 MSK
-Ручная сверка guide/docs: 2026-03-23 08:12 MSK
+modified_at: 2026-03-23 09:00 MSK
+Ручная сверка guide/docs: 2026-03-23 09:00 MSK
 
 # Operations
 
@@ -1545,8 +1545,9 @@ scripts\human_dashboard_down.cmd
 
 Launcher human dashboard теперь:
 - сам поднимает observe-server в фоне;
-- пишет PID в `state/human_dashboard.pid`;
-- складывает лог в `tmp/human_dashboard.log`;
+- на Linux предпочитает `systemd --user` сервис `amai-human-dashboard.service`, а не временный терминальный обход;
+- для Linux живой статус и логи нужно смотреть через `systemctl --user status amai-human-dashboard.service` и `journalctl --user -u amai-human-dashboard.service`;
+- если user-level `systemd` недоступен, launcher честно падает в обычный detached fallback с логом в `tmp/human_dashboard.log`;
 - не требует держать терминал открытым только ради живой панели.
 - по умолчанию обновляет страницу раз в `1` секунду, чтобы live-картина была ближе к текущему состоянию.
 - если локальный `cmake` уже materialized в `state/tooling/cmake-venv/bin`, launcher сам подхватывает этот `PATH`, чтобы observability-path не падал только из-за отсутствия системного `cmake`.

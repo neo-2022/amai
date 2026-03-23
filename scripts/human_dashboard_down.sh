@@ -12,8 +12,9 @@ if [[ "$browser_host" == "0.0.0.0" || "$browser_host" == "::" ]]; then
   browser_host="127.0.0.1"
 fi
 
-pid_file="./state/human_dashboard.pid"
+legacy_pid_file="./state/human_dashboard.pid"
 health_url="http://${browser_host}:${port}/healthz"
+unit_file="amai-human-dashboard.service"
 
 stop_pid() {
   local pid="$1"
@@ -29,10 +30,15 @@ stop_pid() {
   return 0
 }
 
-if [[ -f "$pid_file" ]]; then
-  pid="$(cat "$pid_file")"
+if systemctl --user show-environment >/dev/null 2>&1; then
+  systemctl --user stop "$unit_file" >/dev/null 2>&1 || true
+  systemctl --user reset-failed "$unit_file" >/dev/null 2>&1 || true
+fi
+
+if [[ -f "$legacy_pid_file" ]]; then
+  pid="$(cat "$legacy_pid_file")"
   stop_pid "$pid"
-  rm -f "$pid_file"
+  rm -f "$legacy_pid_file"
 fi
 
 while read -r orphan_pid; do

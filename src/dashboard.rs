@@ -258,14 +258,18 @@ pub fn render_html(refresh_ms: u64) -> String {
     .status-pill {
       display: inline-flex;
       align-items: center;
-      gap: 8px;
+      justify-content: center;
       padding: 7px 12px;
       border-radius: 999px;
       font-size: 13px;
       font-weight: 700;
+      line-height: 1.1;
       width: fit-content;
       white-space: nowrap;
       flex-shrink: 0;
+      min-height: 32px;
+      text-align: center;
+      align-self: flex-start;
     }
 
     .status-pill.pass { background: var(--pass-soft); color: var(--pass); }
@@ -848,6 +852,37 @@ pub fn render_html(refresh_ms: u64) -> String {
       line-height: 1.45;
     }
 
+    .link-group-title {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .link-group-note {
+      display: block;
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .link-group-items {
+      display: grid;
+      gap: 10px;
+    }
+
+    .link-group-item {
+      padding-top: 10px;
+      border-top: 1px solid var(--surface-border);
+    }
+
+    .link-group-item:first-child {
+      padding-top: 0;
+      border-top: none;
+    }
+
     .link-inline {
       display: inline-flex;
       align-items: center;
@@ -1153,8 +1188,8 @@ pub fn render_html(refresh_ms: u64) -> String {
         wrap.appendChild(link);
       } else {
         wrap.appendChild(textNode("span", "inline-copyable", label));
+        wrap.appendChild(createCopyButton(copyValue));
       }
-      wrap.appendChild(createCopyButton(copyValue));
       return wrap;
     }
 
@@ -1210,6 +1245,17 @@ pub fn render_html(refresh_ms: u64) -> String {
       }
       wrap.textContent = text;
       return wrap;
+    }
+
+    function statusPill(status, label, tooltip = null) {
+      const pill = document.createElement("div");
+      pill.className = `status-pill ${statusClass(status)}${tooltip ? " has-tooltip" : ""}`;
+      pill.textContent = label;
+      if (tooltip) {
+        pill.tabIndex = 0;
+        pill.setAttribute("data-tip", tooltip);
+      }
+      return pill;
     }
 
     function showTooltip(target) {
@@ -1317,7 +1363,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       const head = document.createElement("div");
       head.className = "compare-head";
       head.appendChild(labelWithTooltip(card.title, card.title_tooltip, "card-title"));
-      head.appendChild(textNode("div", `status-pill ${statusClass(card.status)}`, card.status_label));
+      head.appendChild(statusPill(card.status, card.status_label, card.status_tooltip));
       element.appendChild(head);
 
       if (card.headline_value) {
@@ -1459,7 +1505,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     function renderSummary(meta, headline) {
       const summary = document.getElementById("summary-status");
       clearNode(summary);
-      const pill = textNode("div", `status-pill ${statusClass(headline.status)}`, headline.status_label);
+      const pill = statusPill(headline.status, headline.status_label, headline.status_tooltip);
       const headRow = document.createElement("div");
       headRow.className = "summary-head-row";
       headRow.appendChild(pill);
@@ -1486,20 +1532,55 @@ pub fn render_html(refresh_ms: u64) -> String {
       clearNode(list);
       links.forEach((entry) => {
         const li = document.createElement("li");
-        const main = document.createElement("div");
-        main.className = "link-item-main";
-        if (entry.url) {
-          main.appendChild(createInlineCopyableText(entry.label, entry.url, entry.url));
+        const items = Array.isArray(entry.items) ? entry.items : null;
+        if (items && items.length > 0) {
+          if (entry.label) {
+            li.appendChild(textNode("div", "link-group-title", entry.label));
+          }
+          if (entry.note) {
+            const note = document.createElement("span");
+            note.className = "link-group-note";
+            appendInlineNoteFragment(note, entry.note);
+            li.appendChild(note);
+          }
+          const group = document.createElement("div");
+          group.className = "link-group-items";
+          items.forEach((item) => {
+            const row = document.createElement("div");
+            row.className = "link-group-item";
+            const main = document.createElement("div");
+            main.className = "link-item-main";
+            if (item.url) {
+              main.appendChild(createInlineCopyableText(item.label, item.url, item.url));
+            } else {
+              main.appendChild(textNode("span", "link-disabled", item.label));
+            }
+            if (item.note) {
+              const note = document.createElement("span");
+              note.className = "link-item-note";
+              appendInlineNoteFragment(note, item.note);
+              main.appendChild(note);
+            }
+            row.appendChild(main);
+            group.appendChild(row);
+          });
+          li.appendChild(group);
         } else {
-          main.appendChild(textNode("span", "link-disabled", entry.label));
+          const main = document.createElement("div");
+          main.className = "link-item-main";
+          if (entry.url) {
+            main.appendChild(createInlineCopyableText(entry.label, entry.url, entry.url));
+          } else {
+            main.appendChild(textNode("span", "link-disabled", entry.label));
+          }
+          if (entry.note) {
+            const note = document.createElement("span");
+            note.className = "link-item-note";
+            appendInlineNoteFragment(note, entry.note);
+            main.appendChild(note);
+          }
+          li.appendChild(main);
         }
-        if (entry.note) {
-          const note = document.createElement("span");
-          note.className = "link-item-note";
-          appendInlineNoteFragment(note, entry.note);
-          main.appendChild(note);
-        }
-        li.appendChild(main);
         list.appendChild(li);
       });
     }
@@ -1519,7 +1600,7 @@ pub fn render_html(refresh_ms: u64) -> String {
         const top = document.createElement("div");
         top.className = "card-top";
         top.appendChild(labelWithTooltip(card.title, card.title_tooltip));
-        top.appendChild(textNode("div", `status-pill ${statusClass(card.status)}`, card.status_label));
+        top.appendChild(statusPill(card.status, card.status_label, card.status_tooltip));
         element.appendChild(top);
 
         const valueClass = kind === "service-card" ? "service-headline" : "card-value";
@@ -2341,8 +2422,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let lifetime_answer_count = lifetime["answer_like_counted_events"].as_u64().unwrap_or(0);
     let lifetime_answer_percent = lifetime["verified_answer_like_savings_pct"].as_f64();
 
-    vec![
-        card_with_rows(
+    let mut session_card = card_with_rows(
             "Экономия токенов за текущую сессию",
             format_signed_count(session_saved),
             if session_events > 0 {
@@ -2389,38 +2469,55 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             None,
             Some("Эта карточка отвечает на вопрос, сколько токенов Amai сэкономил в текущей непрерывной сессии работы. Сессия здесь начинается заново после паузы дольше 30 минут и считает только strict verified live retrieval-события без потери качества. Raw contour ниже показан отдельно только для объяснения и не является тем же KPI.".to_string()),
             current_session_lane_rows(current_session),
-        ),
-        card_with_tooltip(
-            "Экономия токенов за рабочее окно",
-            format_signed_count(rolling_saved),
-            if rolling_events > 0 {
-                format!(
-                    "Это текущее скользящее окно профиля {}. Период: {}. Строго verified live для этого KPI: {} из {} событий окна. Проверенная реальная экономия: {}. {}",
-                    rolling_window_label,
-                    elapsed_since_epoch_label(rolling_started, rolling_ended),
-                    format_u64(Some(rolling_events)),
-                    format_u64(Some(rolling_events_total)),
-                    format_percent(rolling_percent),
-                    recovery_sentence(rolling_recovery)
-                ) + &format!(
-                    " До более строгого полезного ответа без лишнего доуточнения уже дошли: {} событий, {} от окна, экономия по ним: {}.",
-                    format_u64(Some(rolling_answer_count)),
-                    format_percent(rolling_answer_rate),
-                    format_percent(rolling_answer_percent)
-                )
-            } else if rolling_events_total > 0 {
-                format!(
-                    "В текущем рабочем окне уже есть Amai-запросы: {}. Но строго verified live для главного KPI пока: 0 из {}. Поэтому реальную экономию за окно пока рано считать устойчивой.",
-                    format_u64(Some(rolling_events_total)),
-                    format_u64(Some(rolling_events_total))
-                )
-            } else {
-                "В текущем рабочем окне Amai ещё не накопил учтённых запросов, поэтому здесь пока нет живой verified статистики.".to_string()
-            },
-            savings_status(rolling_saved, rolling_events, rolling_events_total),
-            Some(format!("Эта карточка показывает не одну сессию, а текущее скользящее рабочее окно профиля {}. Окно может захватывать несколько сессий подряд и нужно для недавнего тренда, а не только для последнего непрерывного захода. В главный KPI здесь тоже попадают только strict verified live retrieval-события без потери качества.", rolling_window_label)),
-        ),
-        card_with_tooltip(
+        );
+    if session_events_total > 0 && session_events == 0 {
+        session_card = with_status_tooltip(
+            session_card,
+            "Это не ошибка. В этой сессии уже были живые retrieval-запросы, но пока ни один из них ещё не подтвердился как полезный без потери качества. Как только появится первый такой случай, главный KPI этой карточки начнёт считаться.",
+        );
+    }
+
+    let mut rolling_card = card_with_tooltip(
+        "Экономия токенов за рабочее окно",
+        format_signed_count(rolling_saved),
+        if rolling_events > 0 {
+            format!(
+                "Это текущее скользящее окно профиля {}. Период: {}. Строго verified live для этого KPI: {} из {} событий окна. Проверенная реальная экономия: {}. {}",
+                rolling_window_label,
+                elapsed_since_epoch_label(rolling_started, rolling_ended),
+                format_u64(Some(rolling_events)),
+                format_u64(Some(rolling_events_total)),
+                format_percent(rolling_percent),
+                recovery_sentence(rolling_recovery)
+            ) + &format!(
+                " До более строгого полезного ответа без лишнего доуточнения уже дошли: {} событий, {} от окна, экономия по ним: {}.",
+                format_u64(Some(rolling_answer_count)),
+                format_percent(rolling_answer_rate),
+                format_percent(rolling_answer_percent)
+            )
+        } else if rolling_events_total > 0 {
+            format!(
+                "В текущем рабочем окне уже есть Amai-запросы: {}. Но строго verified live для главного KPI пока: 0 из {}. Поэтому реальную экономию за окно пока рано считать устойчивой.",
+                format_u64(Some(rolling_events_total)),
+                format_u64(Some(rolling_events_total))
+            )
+        } else {
+            "В текущем рабочем окне Amai ещё не накопил учтённых запросов, поэтому здесь пока нет живой verified статистики.".to_string()
+        },
+        savings_status(rolling_saved, rolling_events, rolling_events_total),
+        Some(format!(
+            "Эта карточка показывает не одну сессию, а текущее скользящее рабочее окно профиля {}. Окно может захватывать несколько сессий подряд и нужно для недавнего тренда, а не только для последнего непрерывного захода. В главный KPI здесь тоже попадают только strict verified live retrieval-события без потери качества.",
+            rolling_window_label
+        )),
+    );
+    if rolling_events_total > 0 && rolling_events == 0 {
+        rolling_card = with_status_tooltip(
+            rolling_card,
+            "Это не ошибка. В текущем рабочем окне уже есть живые retrieval-события, но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому окно ещё копит подтверждённую выборку.",
+        );
+    }
+
+    let mut lifetime_card = card_with_tooltip(
             "Экономия токенов за всё время записи",
             format_signed_count(lifetime_saved),
             if lifetime_events > 0 {
@@ -2448,8 +2545,15 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             },
             savings_status(lifetime_saved, lifetime_events, lifetime_events_total),
             Some("Эта карточка показывает накопительный итог с первого записанного retrieval-события в текущей установке Amai. Это не процент от лимита чата и не вся история всех внешних клиентов навсегда. В главный lifetime KPI попадают только strict verified live retrieval-события без потери качества; benchmark, proof и другой инженерный трафик в него не смешиваются.".to_string()),
-        ),
-    ]
+        );
+    if lifetime_events_total > 0 && lifetime_events == 0 {
+        lifetime_card = with_status_tooltip(
+            lifetime_card,
+            "Это не ошибка. История уже содержит живые retrieval-события, но пока ещё нет ни одного подтверждённого случая без потери качества. Поэтому накопительный KPI ещё не может считаться надёжным.",
+        );
+    }
+
+    vec![session_card, rolling_card, lifetime_card]
 }
 
 fn build_machine_cards(
@@ -3288,28 +3392,32 @@ fn build_glossary() -> Vec<Value> {
 }
 
 fn build_links(base_url: &str) -> Vec<Value> {
-    let mut links = vec![
-        json!({
-            "label": "Raw dashboard JSON",
-            "url": format!("{base_url}/api/dashboard"),
-            "note": "Если хотите отдать эти же данные другой программе."
-        }),
-        json!({
-            "label": "Raw snapshot JSON",
-            "url": format!("{base_url}/api/snapshot"),
-            "note": "Полный live snapshot без human-упаковки."
-        }),
-        json!({
-            "label": "Prometheus metrics",
-            "url": format!("{base_url}/metrics"),
-            "note": "Инженерный слой для scrape и алертов."
-        }),
-        json!({
-            "label": "Health JSON",
-            "url": format!("{base_url}/healthz"),
-            "note": "Быстрый health-check с тем же SLA-контуром."
-        }),
-    ];
+    let mut links = vec![json!({
+        "label": "Прямые JSON и probe endpoints",
+        "note": "Это технические ссылки этой же панели. Они уже кликабельны, поэтому отдельное копирование рядом с ними не показывается.",
+        "items": [
+            {
+                "label": "Raw dashboard JSON",
+                "url": format!("{base_url}/api/dashboard"),
+                "note": "Если хотите отдать эти же данные другой программе."
+            },
+            {
+                "label": "Raw snapshot JSON",
+                "url": format!("{base_url}/api/snapshot"),
+                "note": "Полный live snapshot без human-упаковки."
+            },
+            {
+                "label": "Prometheus metrics",
+                "url": format!("{base_url}/metrics"),
+                "note": "Инженерный слой для scrape и алертов."
+            },
+            {
+                "label": "Health JSON",
+                "url": format!("{base_url}/healthz"),
+                "note": "Быстрый health-check с тем же SLA-контуром."
+            }
+        ]
+    })];
 
     let prometheus_port = env::var("AMI_PROMETHEUS_PORT").unwrap_or_else(|_| "59090".to_string());
     let grafana_port = env::var("AMI_GRAFANA_PORT").unwrap_or_else(|_| "53000".to_string());
@@ -3321,26 +3429,32 @@ fn build_links(base_url: &str) -> Vec<Value> {
     let prometheus_available = tcp_port_is_open("127.0.0.1", &prometheus_port);
     let grafana_available = tcp_port_is_open("127.0.0.1", &grafana_port);
     links.push(json!({
-        "label": "Prometheus",
-        "url": if prometheus_available { Value::from(monitoring_url(base_url, &prometheus_port)) } else { Value::Null },
-        "note": if prometheus_available {
-            "Глубокие live-метрики уже доступны."
-        } else {
-            "Monitoring profile сейчас не поднят. Сначала запустите ./scripts/monitoring_up.sh."
-        }
-    }));
-    links.push(json!({
-        "label": "Grafana",
-        "url": if grafana_available { Value::from(monitoring_url(base_url, &grafana_port)) } else { Value::Null },
-        "note": if grafana_available {
-            if grafana_default_password {
-                format!("Готовый инженерный dashboard уже доступен. Логин: {}. Пароль сейчас стандартный из .env: admin_change_me. Лучше сменить его в AMI_GRAFANA_ADMIN_PASSWORD.", grafana_admin_user)
-            } else {
-                format!("Готовый инженерный dashboard уже доступен. Логин: {}. Текущий пароль задан в .env через AMI_GRAFANA_ADMIN_PASSWORD.", grafana_admin_user)
+        "label": "Monitoring profile",
+        "note": "Prometheus и Grafana живут отдельным monitoring contour. Если профиль поднят, ссылки открываются прямо отсюда.",
+        "items": [
+            {
+                "label": "Prometheus",
+                "url": if prometheus_available { Value::from(monitoring_url(base_url, &prometheus_port)) } else { Value::Null },
+                "note": if prometheus_available {
+                    "Глубокие live-метрики уже доступны."
+                } else {
+                    "Monitoring profile сейчас не поднят. Сначала запустите ./scripts/monitoring_up.sh."
+                }
+            },
+            {
+                "label": "Grafana",
+                "url": if grafana_available { Value::from(monitoring_url(base_url, &grafana_port)) } else { Value::Null },
+                "note": if grafana_available {
+                    if grafana_default_password {
+                        format!("Готовый инженерный dashboard уже доступен. Логин: {}. Пароль сейчас стандартный из .env: admin_change_me. Лучше сменить его в AMI_GRAFANA_ADMIN_PASSWORD.", grafana_admin_user)
+                    } else {
+                        format!("Готовый инженерный dashboard уже доступен. Логин: {}. Текущий пароль задан в .env через AMI_GRAFANA_ADMIN_PASSWORD.", grafana_admin_user)
+                    }
+                } else {
+                    "Grafana поднимается вместе с monitoring profile. Сначала запустите ./scripts/monitoring_up.sh.".to_string()
+                }
             }
-        } else {
-            "Grafana поднимается вместе с monitoring profile. Сначала запустите ./scripts/monitoring_up.sh.".to_string()
-        }
+        ]
     }));
     links
 }
@@ -3407,6 +3521,16 @@ fn with_table_orientation(mut card: Value, table_orientation: &str) -> Value {
         object.insert(
             "table_orientation".to_string(),
             Value::from(table_orientation),
+        );
+    }
+    card
+}
+
+fn with_status_tooltip(mut card: Value, status_tooltip: &str) -> Value {
+    if let Some(object) = card.as_object_mut() {
+        object.insert(
+            "status_tooltip".to_string(),
+            Value::from(status_tooltip.to_string()),
         );
     }
     card
@@ -3691,6 +3815,7 @@ fn card_with_rows(
         "note": note,
         "status": status,
         "status_label": status_label(status),
+        "status_tooltip": Value::Null,
         "source_label": source_label,
         "title_tooltip": title_tooltip,
         "rows": rows,
@@ -3869,7 +3994,7 @@ fn status_label(status: &str) -> &'static str {
         "pass" => "в норме",
         "alert" => "внимание",
         "critical" => "критично",
-        "waiting" => "ждём verified-выборку",
+        "waiting" => "ждём подтверждённую выборку",
         _ => "нет данных",
     }
 }
@@ -4815,7 +4940,7 @@ fn human_elapsed_ms(value_ms: u64) -> String {
 mod tests {
     use super::{
         benchmark_qdrant_live_card, browser_base_url, build_benchmark_cards, build_hero_cards,
-        build_machine_cards, build_top_cards, format_ms, format_time_compare_pair,
+        build_links, build_machine_cards, build_top_cards, format_ms, format_time_compare_pair,
         human_elapsed_ms, live_latency_compare_card, monitoring_url, worst_status,
     };
     use serde_json::json;
@@ -5433,13 +5558,38 @@ mod tests {
         assert_eq!(cards[0]["status"].as_str(), Some("waiting"));
         assert_eq!(
             cards[0]["status_label"].as_str(),
-            Some("ждём verified-выборку")
+            Some("ждём подтверждённую выборку")
+        );
+        assert!(
+            cards[0]["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Это не ошибка.")
         );
         assert!(
             cards[0]["note"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("строго verified live для главного KPI пока: 0 из 1")
+        );
+    }
+
+    #[test]
+    fn build_links_groups_api_and_monitoring_entries() {
+        let links = build_links("http://127.0.0.1:9464");
+        assert_eq!(links.len(), 2);
+        assert_eq!(
+            links[0]["label"].as_str(),
+            Some("Прямые JSON и probe endpoints")
+        );
+        assert_eq!(
+            links[0]["items"].as_array().map(|items| items.len()),
+            Some(4)
+        );
+        assert_eq!(links[1]["label"].as_str(), Some("Monitoring profile"));
+        assert_eq!(
+            links[1]["items"].as_array().map(|items| items.len()),
+            Some(2)
         );
     }
 
