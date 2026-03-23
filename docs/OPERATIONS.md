@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 23:22 MSK
-Ручная сверка guide/docs: 2026-03-23 23:22 MSK
+modified_at: 2026-03-23 23:35 MSK
+Ручная сверка guide/docs: 2026-03-23 23:35 MSK
 
 # Operations
 
@@ -649,6 +649,9 @@ cargo run -- mcp serve
   `naive_tokens`, `context_tokens` и `files_considered`.
 - `amai_list_projects` и `amai_list_namespaces` теперь тоже дают compact discovery
   preview в short summary, а не только count.
+- `amai_stack_preflight` теперь даёт наружу `preflight_summary` и `preflight_report`,
+  чтобы внешний клиент видел честный verdict по deployment profile и machine guarantees,
+  а не только локальный human-print из CLI.
 - `amai_warm_cache` теперь тоже отдаёт наружу `warm_cache_summary`, где уже
   собраны `compact_projects`, `cache_hits`, `exact_documents`, `symbol_hits`,
   `lexical_chunks` и `semantic_chunks`, а не только итоговый count warmed projects.

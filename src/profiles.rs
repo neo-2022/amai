@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use sysinfo::{Disks, System};
@@ -56,6 +57,36 @@ pub fn print_preflight(repo_root: &Path, profile_code: &str) -> Result<()> {
     let report = preflight_report(repo_root, profile_code)?;
     print_preflight_report(&report);
     Ok(())
+}
+
+pub fn report_json(report: &PreflightReport) -> Value {
+    json!({
+        "profile_code": report.profile_code,
+        "profile": {
+            "display_name": report.profile.display_name,
+            "summary": report.profile.summary,
+            "suitable_for": report.profile.suitable_for,
+            "not_for": report.profile.not_for,
+            "minimum_cpu_logical": report.profile.minimum_cpu_logical,
+            "minimum_memory_gib": report.profile.minimum_memory_gib,
+            "minimum_disk_gib": report.profile.minimum_disk_gib,
+            "recommended_cpu_logical": report.profile.recommended_cpu_logical,
+            "recommended_memory_gib": report.profile.recommended_memory_gib,
+            "recommended_disk_gib": report.profile.recommended_disk_gib,
+            "supports_peak_benchmarks": report.profile.supports_peak_benchmarks,
+            "start_monitoring_by_default": report.profile.start_monitoring_by_default,
+            "remote_mode_recommended": report.profile.remote_mode_recommended,
+        },
+        "host": {
+            "logical_cpus": report.host_logical_cpus,
+            "total_memory_gib": report.host_total_memory_gib,
+            "available_memory_gib": report.host_available_memory_gib,
+            "available_disk_gib": report.host_available_disk_gib,
+        },
+        "verdict": report.verdict,
+        "unmet_minimums": report.unmet_minimums,
+        "unmet_recommendations": report.unmet_recommendations,
+    })
 }
 
 pub fn print_preflight_report(report: &PreflightReport) {
@@ -370,7 +401,7 @@ fn yes_no(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::DeploymentProfile;
+    use super::{DeploymentProfile, PreflightReport, report_json};
 
     #[test]
     fn profile_supports_plain_human_fields() {
@@ -393,5 +424,48 @@ mod tests {
         assert_eq!(profile.display_name, "Lite VPS");
         assert!(!profile.supports_peak_benchmarks);
         assert!(profile.remote_mode_recommended);
+    }
+
+    #[test]
+    fn report_json_surfaces_machine_readable_preflight_contract() {
+        let profile = DeploymentProfile {
+            display_name: "Lite VPS".to_string(),
+            summary: "cheap remote smoke profile".to_string(),
+            suitable_for: vec!["small smoke".to_string()],
+            not_for: vec!["peak benchmark".to_string()],
+            minimum_cpu_logical: 1,
+            minimum_memory_gib: 2.0,
+            minimum_disk_gib: 20.0,
+            recommended_cpu_logical: 2,
+            recommended_memory_gib: 4.0,
+            recommended_disk_gib: 30.0,
+            supports_peak_benchmarks: false,
+            start_monitoring_by_default: false,
+            remote_mode_recommended: true,
+        };
+        let report = PreflightReport {
+            profile_code: "lite_vps".to_string(),
+            profile,
+            host_logical_cpus: 2,
+            host_total_memory_gib: 4.0,
+            host_available_memory_gib: 3.5,
+            host_available_disk_gib: 40.0,
+            verdict: "pass",
+            unmet_minimums: vec![],
+            unmet_recommendations: vec![],
+        };
+
+        let payload = report_json(&report);
+        assert_eq!(payload["profile_code"].as_str(), Some("lite_vps"));
+        assert_eq!(
+            payload["profile"]["display_name"].as_str(),
+            Some("Lite VPS")
+        );
+        assert_eq!(payload["verdict"].as_str(), Some("pass"));
+        assert_eq!(payload["host"]["logical_cpus"].as_u64(), Some(2));
+        assert_eq!(
+            payload["profile"]["remote_mode_recommended"].as_bool(),
+            Some(true)
+        );
     }
 }

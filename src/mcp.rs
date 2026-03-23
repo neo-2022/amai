@@ -1,5 +1,5 @@
 use crate::cli::{ContextPackArgs, McpConfigArgs, VerifyMcpArgs, VerifyTokenBenchmarkArgs};
-use crate::{compatibility, config, observe, postgres, retrieval, token_budget, verify};
+use crate::{compatibility, config, observe, postgres, profiles, retrieval, token_budget, verify};
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -354,6 +354,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     let expected_tools = BTreeSet::from([
         "amai_list_projects".to_string(),
         "amai_list_namespaces".to_string(),
+        "amai_stack_preflight".to_string(),
         "amai_context_pack".to_string(),
         "amai_token_benchmark".to_string(),
         "amai_token_report".to_string(),
@@ -435,6 +436,16 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         return Err(anyhow!(
             "MCP list_namespaces did not return {}",
             args.context.namespace
+        ));
+    }
+
+    let preflight = session
+        .tool_call("amai_stack_preflight", json!({ "profile": "default" }))
+        .await
+        .context("MCP amai_stack_preflight failed")?;
+    if preflight["preflight_summary"]["profile_code"].as_str() != Some("default") {
+        return Err(anyhow!(
+            "MCP stack_preflight did not keep requested profile=default"
         ));
     }
 
@@ -810,6 +821,12 @@ async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> McpToolR
                 .await
                 .map_err(McpError::tool_runtime)
         }
+        "amai_stack_preflight" => {
+            let args: StackPreflightToolArgs = parse_arguments(request.arguments)?;
+            tool_stack_preflight(args)
+                .await
+                .map_err(McpError::tool_runtime)
+        }
         "amai_context_pack" => {
             let args: ContextPackToolArgs = parse_arguments(request.arguments)?;
             tool_context_pack(cfg, args)
@@ -915,6 +932,42 @@ async fn tool_list_namespaces(cfg: &AppConfig, args: ListNamespacesArgs) -> Resu
                 .unwrap_or("none")
         ),
         structured,
+    ))
+}
+
+async fn tool_stack_preflight(args: StackPreflightToolArgs) -> Result<Value> {
+    let repo_root = config::discover_repo_root(None)?;
+    let report = profiles::preflight_report(&repo_root, &args.profile)?;
+    let preflight = profiles::report_json(&report);
+    let summary = stack_preflight_summary(&preflight);
+    Ok(tool_result(
+        format!(
+            "stack preflight :: profile={} verdict={} cpu={} memory={:.2}GiB disk={:.2}GiB peak_benchmarks={} monitoring_default={} remote_recommended={}",
+            summary.profile_code,
+            summary.verdict,
+            summary.host_logical_cpus,
+            summary.host_total_memory_gib,
+            summary.host_available_disk_gib,
+            summary.supports_peak_benchmarks,
+            summary.start_monitoring_by_default,
+            summary.remote_mode_recommended,
+        ),
+        json!({
+            "preflight_report": preflight,
+            "preflight_summary": {
+                "profile_code": summary.profile_code,
+                "profile_display_name": summary.profile_display_name,
+                "verdict": summary.verdict,
+                "host_logical_cpus": summary.host_logical_cpus,
+                "host_total_memory_gib": summary.host_total_memory_gib,
+                "host_available_disk_gib": summary.host_available_disk_gib,
+                "supports_peak_benchmarks": summary.supports_peak_benchmarks,
+                "start_monitoring_by_default": summary.start_monitoring_by_default,
+                "remote_mode_recommended": summary.remote_mode_recommended,
+                "unmet_minimums_count": summary.unmet_minimums_count,
+                "unmet_recommendations_count": summary.unmet_recommendations_count,
+            }
+        }),
     ))
 }
 
@@ -1393,12 +1446,61 @@ fn warm_cache_summary(warmed: &[Value], projects: &[String]) -> WarmCacheSummary
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct StackPreflightSummary {
+    profile_code: String,
+    profile_display_name: String,
+    verdict: String,
+    host_logical_cpus: u64,
+    host_total_memory_gib: f64,
+    host_available_disk_gib: f64,
+    supports_peak_benchmarks: bool,
+    start_monitoring_by_default: bool,
+    remote_mode_recommended: bool,
+    unmet_minimums_count: u64,
+    unmet_recommendations_count: u64,
+}
+
+fn stack_preflight_summary(payload: &Value) -> StackPreflightSummary {
+    StackPreflightSummary {
+        profile_code: payload["profile_code"].as_str().unwrap_or("").to_string(),
+        profile_display_name: payload["profile"]["display_name"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        verdict: payload["verdict"].as_str().unwrap_or("unknown").to_string(),
+        host_logical_cpus: payload["host"]["logical_cpus"].as_u64().unwrap_or_default(),
+        host_total_memory_gib: payload["host"]["total_memory_gib"]
+            .as_f64()
+            .unwrap_or_default(),
+        host_available_disk_gib: payload["host"]["available_disk_gib"]
+            .as_f64()
+            .unwrap_or_default(),
+        supports_peak_benchmarks: payload["profile"]["supports_peak_benchmarks"]
+            .as_bool()
+            .unwrap_or(false),
+        start_monitoring_by_default: payload["profile"]["start_monitoring_by_default"]
+            .as_bool()
+            .unwrap_or(false),
+        remote_mode_recommended: payload["profile"]["remote_mode_recommended"]
+            .as_bool()
+            .unwrap_or(false),
+        unmet_minimums_count: payload["unmet_minimums"]
+            .as_array()
+            .map_or(0, |items| items.len() as u64),
+        unmet_recommendations_count: payload["unmet_recommendations"]
+            .as_array()
+            .map_or(0, |items| items.len() as u64),
+    }
+}
+
 fn server_instructions() -> String {
     [
         "Amai is a project-scoped continuity and retrieval server for AI agents.",
         "Default law: keep projects isolated and prefer local_strict unless a related-project policy is explicitly required.",
         "Use amai_list_projects first when you do not know what is registered.",
         "Use amai_list_namespaces before querying an unfamiliar project.",
+        "Use amai_stack_preflight when you need to know what this machine can honestly support.",
         "Use amai_context_pack for retrieval instead of asking for whole repositories.",
         "Use amai_token_benchmark when you need a measured token-economy comparison.",
         "Use amai_token_report when you need cumulative token savings for the current session, budget window, or lifetime.",
@@ -1420,6 +1522,10 @@ fn protocol_manifest() -> Value {
             "amai_list_namespaces": {
                 "summary_field": "namespaces_summary",
                 "short_summary_contract": "namespace count plus compact namespace=mode preview",
+            },
+            "amai_stack_preflight": {
+                "summary_field": "preflight_summary",
+                "short_summary_contract": "host suitability verdict plus machine guarantees for a named deployment profile",
             },
             "amai_context_pack": {
                 "summary_field": "context_pack_summary",
@@ -1530,6 +1636,18 @@ fn tool_definitions() -> Vec<Value> {
             },
             "annotations": {
                 "title": "List Namespaces",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }),
+        json!({
+            "name": "amai_stack_preflight",
+            "description": "Measure what this machine can honestly support for a named deployment profile.",
+            "inputSchema": stack_preflight_input_schema(),
+            "annotations": {
+                "title": "Stack Preflight",
                 "readOnlyHint": true,
                 "destructiveHint": false,
                 "idempotentHint": true,
@@ -1859,6 +1977,20 @@ fn token_report_input_schema() -> Value {
                 "type": "boolean",
                 "description": "Whether verification and benchmark events should be included with live token usage.",
                 "default": false
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn stack_preflight_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "profile": {
+                "type": "string",
+                "default": "default",
+                "description": "Deployment profile code from config/deployment_profiles.toml."
             }
         },
         "additionalProperties": false
@@ -2337,6 +2469,12 @@ struct TokenReportToolArgs {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+struct StackPreflightToolArgs {
+    #[serde(default = "default_stack_profile")]
+    profile: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 struct WarmCacheToolArgs {
     #[serde(default)]
     projects: Vec<String>,
@@ -2379,6 +2517,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_stack_profile() -> String {
+    "default".to_string()
+}
+
 fn default_tokenizer() -> String {
     "o200k_base".to_string()
 }
@@ -2403,8 +2545,8 @@ fn default_warm_limit() -> usize {
 mod tests {
     use super::{
         McpConfigArgs, McpError, context_pack_summary, mcp_tool_error_result,
-        observe_snapshot_summary, protocol_manifest, render_client_config, summarize_codes,
-        summarize_namespace_modes, token_benchmark_summary, token_report_summary,
+        observe_snapshot_summary, protocol_manifest, render_client_config, stack_preflight_summary,
+        summarize_codes, summarize_namespace_modes, token_benchmark_summary, token_report_summary,
         warm_cache_summary,
     };
     use serde_json::json;
@@ -2670,6 +2812,40 @@ mod tests {
     }
 
     #[test]
+    fn stack_preflight_summary_surfaces_machine_guarantees() {
+        let payload = json!({
+            "profile_code": "default",
+            "profile": {
+                "display_name": "Workstation Full",
+                "supports_peak_benchmarks": true,
+                "start_monitoring_by_default": false,
+                "remote_mode_recommended": false
+            },
+            "host": {
+                "logical_cpus": 16,
+                "total_memory_gib": 31.5,
+                "available_disk_gib": 420.0
+            },
+            "verdict": "pass",
+            "unmet_minimums": [],
+            "unmet_recommendations": ["memory below recommendation"]
+        });
+
+        let summary = stack_preflight_summary(&payload);
+        assert_eq!(summary.profile_code, "default");
+        assert_eq!(summary.profile_display_name, "Workstation Full");
+        assert_eq!(summary.verdict, "pass");
+        assert_eq!(summary.host_logical_cpus, 16);
+        assert_eq!(summary.host_total_memory_gib, 31.5);
+        assert_eq!(summary.host_available_disk_gib, 420.0);
+        assert!(summary.supports_peak_benchmarks);
+        assert!(!summary.start_monitoring_by_default);
+        assert!(!summary.remote_mode_recommended);
+        assert_eq!(summary.unmet_minimums_count, 0);
+        assert_eq!(summary.unmet_recommendations_count, 1);
+    }
+
+    #[test]
     fn protocol_manifest_lists_summary_contracts() {
         let manifest = protocol_manifest();
         assert_eq!(manifest["version"].as_str(), Some("mcp-contract-v1"));
@@ -2680,6 +2856,10 @@ mod tests {
         assert_eq!(
             manifest["tool_contracts"]["amai_warm_cache"]["summary_field"].as_str(),
             Some("warm_cache_summary")
+        );
+        assert_eq!(
+            manifest["tool_contracts"]["amai_stack_preflight"]["summary_field"].as_str(),
+            Some("preflight_summary")
         );
         assert_eq!(
             manifest["prompt_contracts"]["amai-onboarding"]["purpose"].as_str(),

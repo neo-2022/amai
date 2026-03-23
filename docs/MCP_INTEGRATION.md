@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 23:22 MSK
-Ручная сверка guide/docs: 2026-03-23 23:22 MSK
+modified_at: 2026-03-23 23:35 MSK
+Ручная сверка guide/docs: 2026-03-23 23:35 MSK
 
 # MCP Integration
 
@@ -240,11 +240,20 @@ cargo build --release
 Сейчас доступны:
 - `amai_list_projects`
 - `amai_list_namespaces`
+- `amai_stack_preflight`
 - `amai_context_pack`
 - `amai_token_benchmark`
 - `amai_token_report`
 - `amai_observe_snapshot`
 - `amai_warm_cache`
+
+У `amai_stack_preflight` structured output теперь даёт не один human verdict,
+а две machine-readable формы:
+- `preflight_report`
+- `preflight_summary`
+
+Это нужно для внешних клиентов, которым важно понимать не только текущий health
+stack-а, но и какие deployment promises вообще честно достижимы на этой машине.
 
 У `amai_warm_cache` короткий summary теперь тоже не ограничивается сообщением
 `сколько проектов прогрето`. Он показывает preview проектов и totals по

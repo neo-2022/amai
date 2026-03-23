@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 23:22 MSK
-Ручная сверка guide/docs: 2026-03-23 23:22 MSK
+modified_at: 2026-03-23 23:35 MSK
+Ручная сверка guide/docs: 2026-03-23 23:35 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -906,6 +906,14 @@ cargo run -- deployment explain --target kubernetes_server
 `amai_list_projects` и `amai_list_namespaces` теперь тоже не схлопывают discovery
 до одного числа: короткий summary сразу показывает коды проектов и namespace/mode
 preview, а не только raw count.
+
+`amai_stack_preflight` теперь тоже доступен через MCP. Он отдаёт наружу
+`preflight_report` и `preflight_summary`, чтобы внешний клиент machine-readable
+способом видел:
+- подходит ли эта машина для `default` или `lite_vps`;
+- можно ли честно обещать пиковые benchmark-контуры;
+- уместен ли remote mode;
+- где не хватает минимума, а где просто нет запаса прочности.
 
 `amai_warm_cache` теперь тоже отдаёт наружу `warm_cache_summary`, где уже собраны
 `compact_projects`, `cache_hits`, `exact_documents`, `symbol_hits`,
