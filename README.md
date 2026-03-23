@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 15:54 MSK
-Ручная сверка guide/docs: 2026-03-23 15:54 MSK
+modified_at: 2026-03-23 16:12 MSK
+Ручная сверка guide/docs: 2026-03-23 16:12 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -312,7 +312,7 @@ scripts\install_amai.cmd --client codex
     - `recent_actions[].execution_state` (`attempted / succeeded / superseded / stale`);
     - `action_state_counts`;
     - `state_lineage` с `lineage_model_version = lineage-v2`, authoritative event, truth ranking и явным graph-слоем `nodes / edges`, чтобы было видно, какой event authoritative, какие его поддерживают и какие уже superseded.
-    - `workspace_graph` с `workspace_graph_model_version = workspace-graph-v2` и `artifact_lineage_model_version = artifact-lineage-v1`, где recent retrieval теперь materialize-ится как graph `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref`, а также resolved relations `imports_file / re_exports_file / imports_symbol / re_exports_symbol / resolves_file / resolves_symbol`;
+    - `workspace_graph` с `workspace_graph_model_version = workspace-graph-v3` и `artifact_lineage_model_version = artifact-lineage-v1`, где recent retrieval теперь materialize-ится как graph `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref / call_ref`, а также resolved relations `imports_file / re_exports_file / imports_symbol / re_exports_symbol / resolves_file / resolves_symbol / calls_file / calls_symbol / resolves_call_file / resolves_call_symbol`;
     - тот же `workspace_graph_summary` теперь поднимается и в `chat_start_restore`, и в human-readable startup/restore вывод, если в текущей линии уже были свежие retrieval-context события.
 
 Если у вас несколько параллельных агентов:

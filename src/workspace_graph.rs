@@ -21,6 +21,7 @@ struct FileAggregate {
     structure_nodes: BTreeMap<String, Value>,
     symbol_nodes: BTreeMap<String, Value>,
     reference_nodes: BTreeMap<String, Value>,
+    call_nodes: BTreeMap<String, Value>,
     retrieved_via: BTreeSet<String>,
 }
 
@@ -61,6 +62,7 @@ pub fn build_context_pack_workspace_graph(
         populate_structure_nodes(file, structure);
         populate_reference_nodes(file, &structure.imports, "import_ref");
         populate_reference_nodes(file, &structure.exports, "export_ref");
+        populate_call_nodes(file, &structure.metadata["call_references"]);
     }
 
     for scoped_symbol in scoped_symbols {
@@ -263,6 +265,7 @@ pub fn build_context_pack_workspace_graph(
                 "structure_count": file.structure_nodes.len(),
                 "symbol_count": file.symbol_nodes.len(),
                 "reference_count": file.reference_nodes.len(),
+                "call_count": file.call_nodes.len(),
             }),
         );
         for structure in file.structure_nodes.into_values() {
@@ -313,6 +316,22 @@ pub fn build_context_pack_workspace_graph(
                     }),
                 );
             }
+        }
+        for call in file.call_nodes.into_values() {
+            let call_node_id = call["node_id"].as_str().unwrap_or_default().to_string();
+            nodes.insert(call_node_id.clone(), call);
+            edges.insert(
+                (
+                    file_node_id.clone(),
+                    call_node_id.clone(),
+                    "calls_reference".to_string(),
+                ),
+                json!({
+                    "from_node_id": file_node_id,
+                    "to_node_id": call_node_id,
+                    "relation": "calls_reference",
+                }),
+            );
         }
         for reference in file.reference_nodes.into_values() {
             let reference_node_id = reference["node_id"]
@@ -477,15 +496,16 @@ pub fn human_summary(graph: &Value) -> Option<String> {
         .get("export_ref")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let calls = counts.get("call_ref").and_then(Value::as_u64).unwrap_or(0);
     let context_packs = graph["source_context_pack_ids"]
         .as_array()
         .map(Vec::len)
         .unwrap_or(0);
-    if files == 0 && symbols == 0 && chunks == 0 && imports == 0 && exports == 0 {
+    if files == 0 && symbols == 0 && chunks == 0 && imports == 0 && exports == 0 && calls == 0 {
         return None;
     }
     Some(format!(
-        "структурный граф: контекстных снимков {context_packs}, файлов {files}, структурных узлов {structures}, символов {symbols}, фрагментов {chunks}, импортов {imports}, экспортов {exports}"
+        "структурный граф: контекстных снимков {context_packs}, файлов {files}, структурных узлов {structures}, символов {symbols}, фрагментов {chunks}, импортов {imports}, экспортов {exports}, вызовов {calls}"
     ))
 }
 
@@ -512,6 +532,7 @@ fn ensure_file_aggregate_from_structure<'a>(
             structure_nodes: BTreeMap::new(),
             symbol_nodes: BTreeMap::new(),
             reference_nodes: BTreeMap::new(),
+            call_nodes: BTreeMap::new(),
             retrieved_via: BTreeSet::new(),
         })
 }
@@ -605,6 +626,7 @@ fn ensure_file_aggregate_from_path<'a>(
             structure_nodes: BTreeMap::new(),
             symbol_nodes: BTreeMap::new(),
             reference_nodes: BTreeMap::new(),
+            call_nodes: BTreeMap::new(),
             retrieved_via: BTreeSet::new(),
         })
 }
@@ -670,6 +692,51 @@ fn populate_reference_nodes(file: &mut FileAggregate, nodes: &Value, node_type: 
                     "name": item["name"].clone(),
                     "text": item["text"].clone(),
                     "kind": item["kind"].clone(),
+                    "start_line": item["start_line"].clone(),
+                    "end_line": item["end_line"].clone(),
+                })
+            });
+    }
+}
+
+fn populate_call_nodes(file: &mut FileAggregate, nodes: &Value) {
+    let Some(items) = nodes.as_array() else {
+        return;
+    };
+    for item in items {
+        let label = item["callee_path"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                item["callee_name"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| item["text"].as_str().unwrap_or("call"));
+        let call_node_id = call_node_id(
+            &file.project_code,
+            &file.namespace_code,
+            &file.relative_path,
+            label,
+            item["start_line"].as_i64().unwrap_or_default(),
+        );
+        file.call_nodes
+            .entry(call_node_id.clone())
+            .or_insert_with(|| {
+                json!({
+                    "node_id": call_node_id,
+                    "node_type": "call_ref",
+                    "project_code": file.project_code,
+                    "namespace_code": file.namespace_code,
+                    "relative_path": file.relative_path,
+                    "kind": item["kind"].clone(),
+                    "call_style": item["call_style"].clone(),
+                    "callee_name": item["callee_name"].clone(),
+                    "callee_path": item["callee_path"].clone(),
+                    "receiver_text": item["receiver_text"].clone(),
+                    "generic": item["generic"].clone(),
+                    "label": label,
+                    "text": item["text"].clone(),
                     "start_line": item["start_line"].clone(),
                     "end_line": item["end_line"].clone(),
                 })
@@ -743,6 +810,7 @@ fn compact_symbol_metadata(metadata: &Value) -> Value {
 
 #[derive(Debug, Clone)]
 struct ReferenceResolution {
+    target_file_key: ScopedPathKey,
     target_file_node_id: String,
     target_symbol_node_id: Option<String>,
 }
@@ -765,7 +833,13 @@ fn append_resolved_reference_edges(
     edges: &mut BTreeMap<(String, String, String), Value>,
 ) {
     let lookup = build_graph_lookup(files);
+    let mut imported_files_by_source = BTreeMap::<ScopedPathKey, BTreeSet<ScopedPathKey>>::new();
     for file in files.values() {
+        let source_key = scoped_path_key(
+            &file.project_code,
+            &file.namespace_code,
+            &file.relative_path,
+        );
         for reference in file.reference_nodes.values() {
             let Some(reference_node_id) = reference["node_id"].as_str() else {
                 continue;
@@ -805,6 +879,10 @@ fn append_resolved_reference_edges(
                     "relation": "resolves_file",
                 }),
             );
+            imported_files_by_source
+                .entry(source_key.clone())
+                .or_default()
+                .insert(resolution.target_file_key.clone());
             if let Some(symbol_node_id) = resolution.target_symbol_node_id {
                 let symbol_relation = if reference_kind == "import_ref" {
                     "imports_symbol"
@@ -833,6 +911,71 @@ fn append_resolved_reference_edges(
                         "from_node_id": reference_node_id,
                         "to_node_id": symbol_node_id,
                         "relation": "resolves_symbol",
+                    }),
+                );
+            }
+        }
+        for call in file.call_nodes.values() {
+            let Some(call_node_id) = call["node_id"].as_str() else {
+                continue;
+            };
+            let Some(resolution) = resolve_call(
+                file,
+                call,
+                &lookup,
+                imported_files_by_source.get(&source_key),
+            ) else {
+                continue;
+            };
+            if resolution.target_file_key != source_key {
+                edges.insert(
+                    (
+                        file.node_id.clone(),
+                        resolution.target_file_node_id.clone(),
+                        "calls_file".to_string(),
+                    ),
+                    json!({
+                        "from_node_id": file.node_id,
+                        "to_node_id": resolution.target_file_node_id,
+                        "relation": "calls_file",
+                    }),
+                );
+            }
+            edges.insert(
+                (
+                    call_node_id.to_string(),
+                    resolution.target_file_node_id.clone(),
+                    "resolves_call_file".to_string(),
+                ),
+                json!({
+                    "from_node_id": call_node_id,
+                    "to_node_id": resolution.target_file_node_id,
+                    "relation": "resolves_call_file",
+                }),
+            );
+            if let Some(symbol_node_id) = resolution.target_symbol_node_id {
+                edges.insert(
+                    (
+                        file.node_id.clone(),
+                        symbol_node_id.clone(),
+                        "calls_symbol".to_string(),
+                    ),
+                    json!({
+                        "from_node_id": file.node_id,
+                        "to_node_id": symbol_node_id,
+                        "relation": "calls_symbol",
+                    }),
+                );
+                edges.insert(
+                    (
+                        call_node_id.to_string(),
+                        symbol_node_id.clone(),
+                        "resolves_call_symbol".to_string(),
+                    ),
+                    json!({
+                        "from_node_id": call_node_id,
+                        "to_node_id": symbol_node_id,
+                        "relation": "resolves_call_symbol",
                     }),
                 );
             }
@@ -876,16 +1019,22 @@ fn resolve_reference(
 ) -> Option<ReferenceResolution> {
     let language = source_file.language.as_deref()?;
     let target = match language {
-        "rust" => resolve_rust_reference(source_file, reference, lookup)?,
+        "rust" => resolve_rust_path_target(
+            source_file,
+            &extract_rust_reference_path(reference)?,
+            lookup,
+        )?,
         "javascript" | "typescript" | "tsx" => {
             let target_relative_path =
                 resolve_ecmascript_reference(source_file, reference, lookup)?;
-            let target_file_node_id = lookup.file_node_ids.get(&scoped_path_key(
+            let target_file_key = scoped_path_key(
                 &source_file.project_code,
                 &source_file.namespace_code,
                 &target_relative_path,
-            ))?;
+            );
+            let target_file_node_id = lookup.file_node_ids.get(&target_file_key)?;
             ReferenceResolution {
+                target_file_key,
                 target_file_node_id: target_file_node_id.clone(),
                 target_symbol_node_id: None,
             }
@@ -895,12 +1044,32 @@ fn resolve_reference(
     Some(target)
 }
 
-fn resolve_rust_reference(
+fn resolve_call(
     source_file: &FileAggregate,
-    reference: &Value,
+    call: &Value,
+    lookup: &GraphLookup,
+    imported_files: Option<&BTreeSet<ScopedPathKey>>,
+) -> Option<ReferenceResolution> {
+    let call_style = call["call_style"].as_str()?;
+    match call_style {
+        "scoped_identifier" | "macro_scoped_identifier" => {
+            resolve_rust_path_target(source_file, call["callee_path"].as_str()?, lookup)
+        }
+        "identifier" | "macro_identifier" => resolve_rust_symbol_name_target(
+            source_file,
+            call["callee_name"].as_str()?,
+            lookup,
+            imported_files,
+        ),
+        _ => None,
+    }
+}
+
+fn resolve_rust_path_target(
+    source_file: &FileAggregate,
+    path: &str,
     lookup: &GraphLookup,
 ) -> Option<ReferenceResolution> {
-    let path = extract_rust_reference_path(reference)?;
     let (base_dir, segments) = rust_reference_base_and_segments(&source_file.relative_path, &path)?;
     let (target_relative_path, imported_symbol) = select_rust_target_path(
         &source_file.project_code,
@@ -925,8 +1094,48 @@ fn resolve_rust_reference(
         }
     });
     Some(ReferenceResolution {
+        target_file_key: file_key,
         target_file_node_id,
         target_symbol_node_id,
+    })
+}
+
+fn resolve_rust_symbol_name_target(
+    source_file: &FileAggregate,
+    symbol_name: &str,
+    lookup: &GraphLookup,
+    imported_files: Option<&BTreeSet<ScopedPathKey>>,
+) -> Option<ReferenceResolution> {
+    let source_key = scoped_path_key(
+        &source_file.project_code,
+        &source_file.namespace_code,
+        &source_file.relative_path,
+    );
+    let mut candidate_files = BTreeSet::new();
+    candidate_files.insert(source_key.clone());
+    if let Some(imported_files) = imported_files {
+        candidate_files.extend(imported_files.iter().cloned());
+    }
+    let mut matches = Vec::<(ScopedPathKey, String)>::new();
+    for candidate_file in candidate_files {
+        let symbol_key = (candidate_file.clone(), symbol_name.to_string());
+        let Some(symbol_node_ids) = lookup.symbol_node_ids.get(&symbol_key) else {
+            continue;
+        };
+        if symbol_node_ids.len() != 1 {
+            return None;
+        }
+        matches.push((candidate_file, symbol_node_ids[0].clone()));
+    }
+    if matches.len() != 1 {
+        return None;
+    }
+    let (target_file_key, target_symbol_node_id) = matches.into_iter().next()?;
+    let target_file_node_id = lookup.file_node_ids.get(&target_file_key)?.clone();
+    Some(ReferenceResolution {
+        target_file_key,
+        target_file_node_id,
+        target_symbol_node_id: Some(target_symbol_node_id),
     })
 }
 
@@ -1269,6 +1478,19 @@ fn structure_node_id(
     )
 }
 
+fn call_node_id(
+    project_code: &str,
+    namespace_code: &str,
+    relative_path: &str,
+    label: &str,
+    start_line: i64,
+) -> String {
+    format!(
+        "call_ref:{project_code}:{namespace_code}:{relative_path}:{}:{start_line}",
+        short_hash(label)
+    )
+}
+
 fn reference_node_id(
     node_type: &str,
     project_code: &str,
@@ -1388,6 +1610,7 @@ mod tests {
                     "end_line": 1
                 }]),
                 exports: json!([]),
+                metadata: json!({"call_references":[]}),
             }],
             &[DocumentScopedSymbolRecord {
                 project_code: "project_alpha".to_string(),
@@ -1503,6 +1726,7 @@ mod tests {
                         "end_line": 1
                     }]),
                     exports: json!([]),
+                    metadata: json!({"call_references":[]}),
                 },
                 DocumentStructureRecord {
                     project_code: "project_alpha".to_string(),
@@ -1520,6 +1744,7 @@ mod tests {
                     }]),
                     imports: json!([]),
                     exports: json!([]),
+                    metadata: json!({"call_references":[]}),
                 },
             ],
             &[DocumentScopedSymbolRecord {
@@ -1607,6 +1832,7 @@ mod tests {
                         "end_line": 1
                     }]),
                     exports: json!([]),
+                    metadata: json!({"call_references":[]}),
                 },
                 DocumentStructureRecord {
                     project_code: "project_alpha".to_string(),
@@ -1619,6 +1845,7 @@ mod tests {
                     structure: json!([]),
                     imports: json!([]),
                     exports: json!([]),
+                    metadata: json!({"call_references":[]}),
                 },
                 DocumentStructureRecord {
                     project_code: "project_alpha".to_string(),
@@ -1631,6 +1858,7 @@ mod tests {
                     structure: json!([]),
                     imports: json!([]),
                     exports: json!([]),
+                    metadata: json!({"call_references":[]}),
                 },
             ],
             &[],
@@ -1644,10 +1872,135 @@ mod tests {
     }
 
     #[test]
+    fn context_pack_workspace_graph_resolves_calls_to_imported_symbols() {
+        let context_pack_id = Uuid::parse_str("00000000-0000-0000-0000-000000000656").unwrap();
+        let graph = build_context_pack_workspace_graph(
+            &context_pack_id,
+            "beta_name",
+            "local_strict",
+            "scope-1",
+            &json!([{
+                "project_code": "project_alpha",
+                "namespace_code": "default"
+            }]),
+            &[DocumentHit {
+                project_code: "project_alpha".to_string(),
+                namespace_code: "default".to_string(),
+                repo_root: "/repo".to_string(),
+                relative_path: "src/lib.rs".to_string(),
+                language: Some("rust".to_string()),
+                source_kind: "git_tracked".to_string(),
+                git_commit_sha: Some("abc".to_string()),
+                score: 10.0,
+                snippet: "beta_name()".to_string(),
+            }],
+            &[],
+            &[],
+            &[],
+            &[
+                DocumentStructureRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/lib.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    structure: json!([{
+                        "kind": "function_item",
+                        "name": "runtime_summary",
+                        "start_line": 3,
+                        "end_line": 5
+                    }]),
+                    imports: json!([{
+                        "kind": "use_declaration",
+                        "name": "crate::alpha::beta_name",
+                        "text": "use crate::alpha::beta_name;",
+                        "start_line": 1,
+                        "end_line": 1
+                    }]),
+                    exports: json!([]),
+                    metadata: json!({
+                        "call_references": [{
+                            "kind": "call_expression",
+                            "call_style": "identifier",
+                            "callee_name": "beta_name",
+                            "callee_path": "beta_name",
+                            "receiver_text": null,
+                            "generic": false,
+                            "start_line": 4,
+                            "end_line": 4,
+                            "text": "beta_name()"
+                        }]
+                    }),
+                },
+                DocumentStructureRecord {
+                    project_code: "project_alpha".to_string(),
+                    namespace_code: "default".to_string(),
+                    repo_root: "/repo".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    language: Some("rust".to_string()),
+                    source_kind: "git_tracked".to_string(),
+                    git_commit_sha: Some("abc".to_string()),
+                    structure: json!([{
+                        "kind": "function_item",
+                        "name": "beta_name",
+                        "start_line": 1,
+                        "end_line": 3
+                    }]),
+                    imports: json!([]),
+                    exports: json!([]),
+                    metadata: json!({"call_references":[]}),
+                },
+            ],
+            &[DocumentScopedSymbolRecord {
+                project_code: "project_alpha".to_string(),
+                namespace_code: "default".to_string(),
+                repo_root: "/repo".to_string(),
+                relative_path: "src/alpha.rs".to_string(),
+                language: Some("rust".to_string()),
+                source_kind: "git_tracked".to_string(),
+                git_commit_sha: Some("abc".to_string()),
+                name: "beta_name".to_string(),
+                kind: "function_item".to_string(),
+                start_line: 1,
+                end_line: 3,
+                start_byte: 0,
+                end_byte: 40,
+                metadata: json!({"language":"rust","node_kind":"function_item","text":"pub fn beta_name() -> &'static str { \"beta\" }"}),
+            }],
+        )
+        .expect("graph");
+        let edges = graph["edges"].as_array().expect("edges");
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("calls_file")
+                && edge["to_node_id"] == json!("file:project_alpha:default:src/alpha.rs")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("calls_symbol")
+                && edge["to_node_id"]
+                    == json!("symbol:project_alpha:default:src/alpha.rs:beta_name:1")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge["relation"] == json!("resolves_call_symbol")
+                && edge["to_node_id"]
+                    == json!("symbol:project_alpha:default:src/alpha.rs:beta_name:1")
+        }));
+        assert_eq!(
+            graph["summary"]["node_counts"]["call_ref"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            graph["summary"]["relation_counts"]["calls_symbol"].as_u64(),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn merge_workspace_graphs_deduplicates_nodes_and_keeps_context_pack_lineage() {
         let merged = merge_workspace_graphs(&[
             json!({
-                "workspace_graph_model_version": "workspace-graph-v2",
+                "workspace_graph_model_version": "workspace-graph-v3",
                 "artifact_lineage_model_version": "artifact-lineage-v1",
                 "lineage_model_version": "lineage-v2",
                 "truth_ranking": ["continuity_handoff"],
@@ -1662,7 +2015,7 @@ mod tests {
                 ]
             }),
             json!({
-                "workspace_graph_model_version": "workspace-graph-v2",
+                "workspace_graph_model_version": "workspace-graph-v3",
                 "artifact_lineage_model_version": "artifact-lineage-v1",
                 "lineage_model_version": "lineage-v2",
                 "truth_ranking": ["continuity_handoff"],

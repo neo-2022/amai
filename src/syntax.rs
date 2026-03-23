@@ -21,6 +21,7 @@ pub struct SyntaxAnalysis {
     pub structure: Value,
     pub imports: Value,
     pub exports: Value,
+    pub call_references: Value,
     pub diagnostics: Value,
     pub symbols: Vec<SymbolRecord>,
     pub chunks: Vec<SyntaxChunk>,
@@ -47,6 +48,7 @@ pub fn analyze(cfg: &AppConfig, language: &str, content: &str) -> Result<SyntaxA
     let structure = json!(collect_structure(language, root, bytes));
     let imports = json!(collect_nodes(language, root, bytes, import_kinds(language)));
     let exports = json!(collect_nodes(language, root, bytes, export_kinds(language)));
+    let call_references = json!(collect_call_references(language, root, bytes));
     let symbols = collect_symbols(language, root, bytes);
     let diagnostics = json!(collect_diagnostics(root, bytes));
     let metrics = collect_metrics(content, root);
@@ -56,6 +58,7 @@ pub fn analyze(cfg: &AppConfig, language: &str, content: &str) -> Result<SyntaxA
         structure,
         imports,
         exports,
+        call_references,
         diagnostics,
         symbols,
         chunks,
@@ -131,6 +134,93 @@ fn collect_symbols(language: &str, root: Node<'_>, bytes: &[u8]) -> Vec<SymbolRe
             })
         })
         .collect()
+}
+
+fn collect_call_references(language: &str, root: Node<'_>, bytes: &[u8]) -> Vec<Value> {
+    match language {
+        "rust" => collect_rust_call_references(root, bytes),
+        _ => Vec::new(),
+    }
+}
+
+fn collect_rust_call_references(root: Node<'_>, bytes: &[u8]) -> Vec<Value> {
+    traverse(root)
+        .into_iter()
+        .filter_map(|node| match node.kind() {
+            "call_expression" => rust_call_reference(node, bytes),
+            "macro_invocation" => rust_macro_reference(node, bytes),
+            _ => None,
+        })
+        .collect()
+}
+
+fn rust_call_reference(node: Node<'_>, bytes: &[u8]) -> Option<Value> {
+    let function = node.child_by_field_name("function")?;
+    let is_generic = function.kind() == "generic_function";
+    let callee = if is_generic {
+        function.child_by_field_name("function").unwrap_or(function)
+    } else {
+        function
+    };
+    let call_style = match callee.kind() {
+        "identifier" => "identifier",
+        "scoped_identifier" => "scoped_identifier",
+        "field_expression" => "field_expression",
+        _ => return None,
+    };
+    let callee_name = rust_callee_name(callee, bytes);
+    let callee_path = Some(trimmed_text(callee, bytes));
+    let receiver_text = if callee.kind() == "field_expression" {
+        callee
+            .child_by_field_name("value")
+            .map(|value| snippet(value, bytes, 160))
+    } else {
+        None
+    };
+    Some(json!({
+        "kind": node.kind(),
+        "call_style": call_style,
+        "callee_name": callee_name,
+        "callee_path": callee_path,
+        "receiver_text": receiver_text,
+        "generic": is_generic,
+        "start_line": (node.start_position().row + 1) as i32,
+        "end_line": (node.end_position().row + 1) as i32,
+        "text": snippet(node, bytes, 240),
+    }))
+}
+
+fn rust_macro_reference(node: Node<'_>, bytes: &[u8]) -> Option<Value> {
+    let macro_node = node.child_by_field_name("macro")?;
+    let call_style = match macro_node.kind() {
+        "identifier" => "macro_identifier",
+        "scoped_identifier" => "macro_scoped_identifier",
+        _ => return None,
+    };
+    Some(json!({
+        "kind": node.kind(),
+        "call_style": call_style,
+        "callee_name": rust_callee_name(macro_node, bytes),
+        "callee_path": trimmed_text(macro_node, bytes),
+        "receiver_text": Value::Null,
+        "generic": false,
+        "start_line": (node.start_position().row + 1) as i32,
+        "end_line": (node.end_position().row + 1) as i32,
+        "text": snippet(node, bytes, 240),
+    }))
+}
+
+fn rust_callee_name(node: Node<'_>, bytes: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" => Some(trimmed_text(node, bytes)),
+        "scoped_identifier" => node
+            .child_by_field_name("name")
+            .map(|name| trimmed_text(name, bytes)),
+        "field_expression" => node
+            .child_by_field_name("field")
+            .map(|field| trimmed_text(field, bytes)),
+        _ => None,
+    }
 }
 
 fn collect_diagnostics(root: Node<'_>, bytes: &[u8]) -> Vec<Value> {
@@ -382,5 +472,81 @@ fn export_kinds(language: &str) -> &'static [&'static str] {
             "export_default_declaration",
         ],
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::analyze;
+    use crate::config::AppConfig;
+    use serde_json::json;
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            stack_name: "amai".to_string(),
+            pg_db: "amai".to_string(),
+            app_db_user: "amai".to_string(),
+            app_db_password: "amai".to_string(),
+            postgres_dsn: "postgres://localhost/unused".to_string(),
+            app_postgres_dsn: "postgres://localhost/unused".to_string(),
+            qdrant_url: "http://127.0.0.1:6334".to_string(),
+            qdrant_http_url: "http://127.0.0.1:6334".to_string(),
+            qdrant_collection_code: "test".to_string(),
+            benchmark_qdrant_http_url: None,
+            benchmark_qdrant_collection_code: None,
+            qdrant_alias_code: "test".to_string(),
+            qdrant_collection_memory: "memory".to_string(),
+            qdrant_alias_memory: "memory".to_string(),
+            qdrant_code_dim: 384,
+            qdrant_memory_dim: 384,
+            qdrant_distance: "Cosine".to_string(),
+            s3_endpoint: "http://127.0.0.1:9000".to_string(),
+            s3_region: "us-east-1".to_string(),
+            s3_access_key: "test".to_string(),
+            s3_secret_key: "test".to_string(),
+            s3_bucket_artifacts: "artifacts".to_string(),
+            s3_bucket_transcripts: "transcripts".to_string(),
+            s3_bucket_context: "context".to_string(),
+            nats_url: "nats://127.0.0.1:4222".to_string(),
+            nats_http_url: "http://127.0.0.1:8222".to_string(),
+            edge_cache_path: "/tmp/edge-cache-test.db".into(),
+            default_retrieval_mode: "local_strict".to_string(),
+            code_embed_model: "multilingual_e5_small".to_string(),
+            memory_embed_model: "multilingual_e5_small".to_string(),
+            chunk_max_bytes: 512,
+            fallback_chunk_lines: 40,
+            fallback_chunk_overlap_lines: 5,
+            local_fast_cache_ttl_ms: 5_000,
+        }
+    }
+
+    #[test]
+    fn rust_analysis_collects_call_references() {
+        let cfg = test_config();
+        let analysis = analyze(
+            &cfg,
+            "rust",
+            r#"
+mod alpha;
+use crate::alpha::beta_name;
+
+pub fn runtime_summary() -> &'static str {
+    println!("{}", beta_name());
+    beta_name()
+}
+"#,
+        )
+        .expect("syntax analysis");
+        let calls = analysis
+            .call_references
+            .as_array()
+            .expect("call references");
+        assert!(calls.iter().any(|call| {
+            call["call_style"] == json!("identifier") && call["callee_name"] == json!("beta_name")
+        }));
+        assert!(calls.iter().any(|call| {
+            call["call_style"] == json!("macro_identifier")
+                && call["callee_name"] == json!("println")
+        }));
     }
 }

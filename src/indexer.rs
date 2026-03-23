@@ -74,6 +74,7 @@ type TreeSitterAnalysis = (
     Value,
     Value,
     Value,
+    Value,
     Vec<SymbolRecord>,
     Vec<ChunkBlueprint>,
     Value,
@@ -381,6 +382,7 @@ fn analyze_file(
         structure,
         imports,
         exports,
+        call_references,
         diagnostics,
         symbols,
         chunk_blueprints,
@@ -428,7 +430,8 @@ fn analyze_file(
             "source_kind": descriptor.source_kind,
             "parser_language": descriptor.parser_language,
             "ast_eligible": ast_eligible,
-            "analysis_mode": analysis_mode
+            "analysis_mode": analysis_mode,
+            "call_references": call_references
         }),
         symbols,
         chunk_blueprints,
@@ -464,6 +467,7 @@ fn parse_with_tree_sitter(
         analysis.structure,
         analysis.imports,
         analysis.exports,
+        analysis.call_references,
         analysis.diagnostics,
         analysis.symbols,
         chunk_blueprints,
@@ -476,6 +480,7 @@ fn fallback_analysis(
     cfg: &AppConfig,
     content: &str,
 ) -> (
+    Value,
     Value,
     Value,
     Value,
@@ -501,6 +506,7 @@ fn fallback_analysis(
         "max_depth": 0
     });
     (
+        json!([]),
         json!([]),
         json!([]),
         json!([]),

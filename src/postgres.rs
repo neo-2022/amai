@@ -90,6 +90,7 @@ pub struct DocumentStructureRecord {
     pub structure: Value,
     pub imports: Value,
     pub exports: Value,
+    pub metadata: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -930,7 +931,8 @@ pub async fn list_document_structures_for_namespace_paths(
                 d.git_commit_sha,
                 d.structure,
                 d.imports,
-                d.exports
+                d.exports,
+                d.metadata
             FROM requested r
             JOIN ami.code_documents d
               ON d.namespace_id = r.namespace_id
@@ -956,6 +958,7 @@ pub async fn list_document_structures_for_namespace_paths(
             structure: row.get(7),
             imports: row.get(8),
             exports: row.get(9),
+            metadata: row.get(10),
         })
         .collect())
 }

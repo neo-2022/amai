@@ -1,5 +1,5 @@
-modified_at: 2026-03-23 15:54 MSK
-Ручная сверка guide/docs: 2026-03-23 15:54 MSK
+modified_at: 2026-03-23 16:12 MSK
+Ручная сверка guide/docs: 2026-03-23 16:12 MSK
 
 # Operations
 
@@ -298,8 +298,8 @@ cd /home/art/agent-memory-index
   - `recent_actions[].execution_state` разводит `attempted / succeeded / superseded / stale`;
   - `state_lineage` хранит `lineage_model_version = lineage-v2`, authoritative event, supporting event ids, truth ranking и явный graph-слой `nodes / edges`;
   - `workspace_graph` хранит versioned structural runtime/workspace graph:
-    `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref`,
-    а в `workspace-graph-v2` ещё и resolved relations `imports_file / re_exports_file / imports_symbol / re_exports_symbol / resolves_file / resolves_symbol`;
+    `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref / call_ref`,
+    а в `workspace-graph-v3` ещё и resolved relations `imports_file / re_exports_file / imports_symbol / re_exports_symbol / resolves_file / resolves_symbol / calls_file / calls_symbol / resolves_call_file / resolves_call_symbol`;
   - `workspace_graph_summary` в `chat_start_restore` и startup-output нужен как короткий human-readable слой поверх этого graph;
   - при битом `session_id` restore-path теперь fail-closed и не смешивает несколько пустых сессий в один bundle.
 
@@ -508,9 +508,9 @@ cargo run -- context pack \
 - внутри payload теперь отдельно materialize-ится `workspace_graph`:
   это компактный structural graph по уже найденным scoped-артефактам, а не догадка “по соседним файлам”.
 - этот graph собирается только из того, что уже лежит в scope:
-  `file`, `structure_item`, `symbol`, `chunk`, `import_ref`, `export_ref`;
-- в `workspace-graph-v2` он теперь дополнительно materialize-ит resolved file-to-file и file-to-symbol lineage
-  только там, где target реально существует в том же `project + namespace + scope`; неоднозначный target остаётся неразрешённым;
+  `file`, `structure_item`, `symbol`, `chunk`, `import_ref`, `export_ref`, `call_ref`;
+- в `workspace-graph-v3` он теперь дополнительно materialize-ит resolved file-to-file, file-to-symbol и conservative call lineage
+  только там, где target реально существует в том же `project + namespace + scope`; неоднозначный target остаётся неразрешённым, а недоказуемый call остаётся просто `call_ref` без target-edge;
 - тот же graph потом без дополнительного reparse попадает в `working_state_restore`.
 
 Важно:
