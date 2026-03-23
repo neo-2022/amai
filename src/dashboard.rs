@@ -265,7 +265,9 @@ pub fn render_html(refresh_ms: u64) -> String {
       font-weight: 700;
       line-height: 1.1;
       width: fit-content;
-      white-space: nowrap;
+      max-width: min(100%, 176px);
+      white-space: normal;
+      word-break: break-word;
       flex-shrink: 0;
       min-height: 32px;
       text-align: center;
@@ -1059,11 +1061,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     </section>
 
     <section class="panel section">
-      <h2>Живой Поток Сейчас</h2>
-      <p class="muted">
-        Это именно текущая живая сессия. Здесь нет старых benchmark-цифр: только потоковые метрики,
-        которые меняются по мере новых запросов и автообновляются на странице.
-      </p>
+      <h2 class="has-tooltip" tabindex="0" data-tip="Это именно текущая живая сессия. Здесь нет старых benchmark-цифр: только потоковые метрики, которые меняются по мере новых запросов и автообновляются на странице.">Live</h2>
       <div class="cards" id="top-cards"></div>
     </section>
 
@@ -1247,6 +1245,13 @@ pub fn render_html(refresh_ms: u64) -> String {
       return wrap;
     }
 
+    function mergeTooltipParts(...parts) {
+      return parts
+        .map((part) => (typeof part === "string" ? part.trim() : ""))
+        .filter(Boolean)
+        .join("\n\n");
+    }
+
     function statusPill(status, label, tooltip = null) {
       const pill = document.createElement("div");
       pill.className = `status-pill ${statusClass(status)}${tooltip ? " has-tooltip" : ""}`;
@@ -1362,7 +1367,8 @@ pub fn render_html(refresh_ms: u64) -> String {
 
       const head = document.createElement("div");
       head.className = "compare-head";
-      head.appendChild(labelWithTooltip(card.title, card.title_tooltip, "card-title"));
+      const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
+      head.appendChild(labelWithTooltip(card.title, titleTooltip, "card-title"));
       head.appendChild(statusPill(card.status, card.status_label, card.status_tooltip));
       element.appendChild(head);
 
@@ -1373,10 +1379,9 @@ pub fn render_html(refresh_ms: u64) -> String {
         element.appendChild(headline);
       }
 
-      if (card.source_label) {
-        element.appendChild(textNode("p", "card-source", card.source_label));
+      if (card.note) {
+        element.appendChild(textNode("p", "card-note", card.note));
       }
-      element.appendChild(textNode("p", "card-note", card.note));
 
       if (card.metrics && card.metrics.length > 0) {
         const compareGrid = document.createElement("div");
@@ -1599,16 +1604,16 @@ pub fn render_html(refresh_ms: u64) -> String {
 
         const top = document.createElement("div");
         top.className = "card-top";
-        top.appendChild(labelWithTooltip(card.title, card.title_tooltip));
+        const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
+        top.appendChild(labelWithTooltip(card.title, titleTooltip));
         top.appendChild(statusPill(card.status, card.status_label, card.status_tooltip));
         element.appendChild(top);
 
         const valueClass = kind === "service-card" ? "service-headline" : "card-value";
         element.appendChild(textNode("p", valueClass, card.value));
-        if (card.source_label) {
-          element.appendChild(textNode("p", "card-source", card.source_label));
+        if (card.note) {
+          element.appendChild(textNode("p", "card-note", card.note));
         }
-        element.appendChild(textNode("p", "card-note", card.note));
 
         if (card.rows && card.rows.length > 0) {
           const list = document.createElement("ul");
@@ -3393,8 +3398,8 @@ fn build_glossary() -> Vec<Value> {
 
 fn build_links(base_url: &str) -> Vec<Value> {
     let mut links = vec![json!({
-        "label": "Прямые JSON и probe endpoints",
-        "note": "Это технические ссылки этой же панели. Они уже кликабельны, поэтому отдельное копирование рядом с ними не показывается.",
+        "label": "",
+        "note": "",
         "items": [
             {
                 "label": "Raw dashboard JSON",
@@ -3556,12 +3561,12 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
 
     json!({
         "kind": "live_compare",
-        "title": "Как Amai отвечает на live retrieval сейчас",
-        "title_tooltip": "Это живое сравнение только двух retrieval-режимов: повторный запрос по уже прогретому кэшу и первый запрос без прогрева. Continuity, handoff, working-state, observability proof и benchmark-снимки сюда не входят.",
+        "title": "Скорость ответа",
+        "title_tooltip": "Показывает, как быстро Amai отвечает прямо сейчас в двух обычных ситуациях: когда похожий запрос уже был и когда запрос идёт впервые. Верхние числа — это обычное время ответа в этих двух случаях. Это не сводка по всей работе Amai: сюда не входят сохранённые проверки, служебные прогоны и другие отдельные рабочие линии.",
         "status": overall_status,
         "status_label": status_label(overall_status),
         "source_label": "Источник: живая retrieval-выборка текущей сессии из token_budget live lane, обновляется при новых context-pack запросах. Benchmark-данные сюда не подмешиваются.",
-        "note": "Сверху показана медиана, то есть обычный уровень ответа в каждом retrieval-режиме. Это не карточка про всю работу проекта: continuity, handoff, observe/proof и другие линии Amai живут отдельно.",
+        "note": "",
         "metrics": [
             {
                 "label": "Повторный запрос",
@@ -3623,12 +3628,12 @@ fn working_state_live_card(snapshot: &Value) -> Value {
     let restore = &snapshot["latest_working_state_restore"]["working_state_restore"];
     if !restore.is_object() {
         return card_with_rows(
-            "На чём Amai реально работает сейчас",
+            "Текущая работа",
             "ещё нет данных".to_string(),
-            "Working-state / continuity lane пока не дал последнего restore snapshot, поэтому панель ещё не может показать текущую рабочую линию.".to_string(),
+            "Пока ещё нет последнего рабочего снимка, поэтому панель не может показать текущую линию работы Amai.".to_string(),
             "unknown",
             Some("Источник: latest_working_state_restore.working_state_restore".to_string()),
-            Some("Этот блок показывает не latency retrieval, а текущую рабочую линию Amai: цель, следующий шаг, последнюю команду и активные файлы.".to_string()),
+            Some("Показывает, чем Amai действительно занят сейчас: какая цель активна, какой следующий шаг он держит, какая команда была последней и какие файлы остаются в работе. Это не замер скорости ответа, а снимок текущей рабочей линии.".to_string()),
             vec![],
         );
     }
@@ -3687,10 +3692,10 @@ fn working_state_live_card(snapshot: &Value) -> Value {
     };
 
     card_with_rows(
-        "На чём Amai реально работает сейчас",
+        "Текущая работа",
         current_goal,
         format!(
-            "Это working-state / continuity lane Amai, а не latency retrieval. Следующий обязательный шаг: {}.",
+            "Это не карточка про скорость ответа. Следующий обязательный шаг: {}.",
             next_step
         ),
         status,
@@ -3698,7 +3703,7 @@ fn working_state_live_card(snapshot: &Value) -> Value {
             "Источник: latest_working_state_restore.working_state_restore. Этот блок питается continuity / working-state, а не token_budget live retrieval",
             restore["captured_at_epoch_ms"].as_u64(),
         )),
-        Some("Показывает текущую рабочую линию Amai: цель, следующий шаг, последнюю команду и активные файлы. Именно здесь видно реальную проектную работу, которая не обязана проходить через live retrieval.".to_string()),
+        Some("Показывает, чем Amai действительно занят сейчас: какая цель активна, какой следующий шаг остаётся обязательным, какая команда была последней и какие файлы ещё в работе. Это не замер скорости ответа, а снимок текущей рабочей линии.".to_string()),
         vec![
             metric_row(
                 "Scope",
@@ -5373,19 +5378,13 @@ mod tests {
 
         let cards = build_top_cards(&snapshot);
         assert_eq!(cards.len(), 2);
-        assert_eq!(
-            cards[0]["title"].as_str(),
-            Some("Как Amai отвечает на live retrieval сейчас")
-        );
-        assert_eq!(
-            cards[1]["title"].as_str(),
-            Some("На чём Amai реально работает сейчас")
-        );
+        assert_eq!(cards[0]["title"].as_str(), Some("Скорость ответа"));
+        assert_eq!(cards[1]["title"].as_str(), Some("Текущая работа"));
         assert!(
             cards[1]["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("working-state / continuity lane")
+                .contains("не карточка про скорость ответа")
         );
     }
 
@@ -5578,10 +5577,7 @@ mod tests {
     fn build_links_groups_api_and_monitoring_entries() {
         let links = build_links("http://127.0.0.1:9464");
         assert_eq!(links.len(), 2);
-        assert_eq!(
-            links[0]["label"].as_str(),
-            Some("Прямые JSON и probe endpoints")
-        );
+        assert_eq!(links[0]["label"].as_str(), Some(""));
         assert_eq!(
             links[0]["items"].as_array().map(|items| items.len()),
             Some(4)
