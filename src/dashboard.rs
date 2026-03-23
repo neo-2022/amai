@@ -2419,6 +2419,27 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
                 format_seconds(snapshot, live_elapsed_seconds),
             ),
         ));
+        if let Some(current_repo_code) = cold_live_progress["current_repo_code"].as_str() {
+            let current_repo_name = cold_live_progress["current_repo_display_name"]
+                .as_str()
+                .unwrap_or(current_repo_code);
+            cold_rows.push(compare_table_row(
+                "Индексирование",
+                "Сколько файлов текущего репозитория уже реально записано в индекс для этого cold-прогона.",
+                compare_pair(
+                    current_repo_name.to_string(),
+                    format!(
+                        "{} из {}",
+                        format_u64(
+                            cold_live_progress["progress"]["current_repo_indexed_files"].as_u64()
+                        ),
+                        format_u64(
+                            cold_live_progress["progress"]["current_repo_target_files"].as_u64()
+                        ),
+                    ),
+                ),
+            ));
+        }
     }
     cold_rows.extend([
                 compare_table_row(
@@ -3023,6 +3044,21 @@ fn cold_benchmark_progress_reasons(
     ));
     if let Some(phase) = progress["phase"].as_str() {
         reasons.push(format!("Текущая фаза: {phase}."));
+    }
+    if let Some(current_repo_code) = progress["current_repo_code"].as_str() {
+        let current_repo_name = progress["current_repo_display_name"]
+            .as_str()
+            .unwrap_or(current_repo_code);
+        let indexed = progress["progress"]["current_repo_indexed_files"].as_u64();
+        let target = progress["progress"]["current_repo_target_files"].as_u64();
+        if indexed.is_some() || target.is_some() {
+            reasons.push(format!(
+                "Сейчас индексируется репозиторий {}: {} из {} файлов уже записаны в индекс.",
+                current_repo_name,
+                format_u64(indexed),
+                format_u64(target),
+            ));
+        }
     }
     if cold_contour["machine_readable_summary"]["sample_count"].as_u64() == Some(0) {
         reasons.push(
@@ -7208,8 +7244,12 @@ mod tests {
                     "phase": "running",
                     "progress": {
                         "completed_case_count": 128,
-                        "target_case_count": 442
+                        "target_case_count": 442,
+                        "current_repo_indexed_files": 512,
+                        "current_repo_target_files": 800
                     },
+                    "current_repo_code": "amai_local",
+                    "current_repo_display_name": "Amai",
                     "profile": {
                         "target_p50_ms": 2.0,
                         "target_p95_ms": 5.0,
@@ -7375,18 +7415,26 @@ mod tests {
             Some("120 s")
         );
         assert_eq!(
-            cold_card["table"]["rows"][3]["values"][1].as_str(),
+            cold_card["table"]["rows"][2]["values"][0].as_str(),
+            Some("Amai")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][2]["values"][1].as_str(),
+            Some("512 из 800")
+        );
+        assert_eq!(
+            cold_card["table"]["rows"][4]["values"][1].as_str(),
             Some("1.777 ms")
         );
         assert_eq!(
-            cold_card["table"]["rows"][12]["values"][1].as_str(),
+            cold_card["table"]["rows"][13]["values"][1].as_str(),
             Some("9.5 s")
         );
         assert!(
             cold_card["status_tooltip"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("Прогон ещё не завершён")
+                .contains("Сейчас индексируется репозиторий Amai")
         );
     }
 }

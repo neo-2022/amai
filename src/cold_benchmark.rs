@@ -264,11 +264,20 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
         .iter()
         .map(|repo| (repo.manifest.code.clone(), repo.clone()))
         .collect::<BTreeMap<_, _>>();
+    let repo_target_file_counts = repos
+        .iter()
+        .map(|repo| {
+            let count =
+                indexer::collect_files(&repo.resolved_root, repo.manifest.limit_files, None)?.len();
+            Ok((repo.manifest.code.clone(), count))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
     progress_guard.write(&build_live_progress_payload(
         &output_dir,
         &manifest,
         args,
         &repo_map,
+        &repo_target_file_counts,
         run_started_epoch_ms,
         &cold_samples,
         &hot_samples,
@@ -288,6 +297,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                 &manifest,
                 args,
                 &repo_map,
+                &repo_target_file_counts,
                 run_started_epoch_ms,
                 &cold_samples,
                 &hot_samples,
@@ -306,6 +316,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                     &manifest,
                     args,
                     &repo_map,
+                    &repo_target_file_counts,
                     run_started_epoch_ms,
                     &cold_samples,
                     &hot_samples,
@@ -328,6 +339,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                     &manifest,
                     args,
                     &repo_map,
+                    &repo_target_file_counts,
                     run_started_epoch_ms,
                     &cold_samples,
                     &hot_samples,
@@ -354,6 +366,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                 &manifest,
                 args,
                 &repo_map,
+                &repo_target_file_counts,
                 run_started_epoch_ms,
                 &cold_samples,
                 &hot_samples,
@@ -400,6 +413,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                 &manifest,
                 args,
                 &repo_map,
+                &repo_target_file_counts,
                 run_started_epoch_ms,
                 &cold_samples,
                 &hot_samples,
@@ -423,6 +437,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                 &manifest,
                 args,
                 &repo_map,
+                &repo_target_file_counts,
                 run_started_epoch_ms,
                 &cold_samples,
                 &hot_samples,
@@ -469,6 +484,7 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
         &manifest,
         args,
         &repo_map,
+        &repo_target_file_counts,
         run_started_epoch_ms,
         &cold_samples,
         &hot_samples,
@@ -1582,6 +1598,7 @@ fn build_live_progress_payload(
     manifest: &ColdBenchmarkManifest,
     args: &VerifyColdPathArgs,
     repo_map: &BTreeMap<String, RepoRuntime>,
+    repo_target_file_counts: &BTreeMap<String, usize>,
     run_started_epoch_ms: u64,
     cold_samples: &[RetrievalSample],
     hot_samples: &[RetrievalSample],
@@ -1611,6 +1628,13 @@ fn build_live_progress_payload(
     } else {
         completed_case_count as f64 / target_case_count as f64
     };
+    let current_repo_target_files = current_repo_code
+        .and_then(|code| repo_target_file_counts.get(code))
+        .copied()
+        .map(|value| value as u64);
+    let current_repo_display_name = current_repo_code
+        .and_then(|code| repo_map.get(code))
+        .map(|repo| repo.manifest.display_name.clone());
 
     Ok(json!({
         "cold_benchmark_progress": {
@@ -1622,6 +1646,7 @@ fn build_live_progress_payload(
             "current_cycle": current_cycle.map(|value| value as u64 + 1),
             "total_cycles": args.cycles,
             "current_repo_code": current_repo_code,
+            "current_repo_display_name": current_repo_display_name,
             "current_query_slice": current_query_slice,
             "output_dir": output_dir.display().to_string(),
             "profile": cold_profile_to_json(&manifest.profile),
@@ -1642,6 +1667,7 @@ fn build_live_progress_payload(
                 "query_slice_count": measured_query_slice_count,
                 "current_cycle": current_cycle.map(|value| value as u64 + 1),
                 "total_cycles": args.cycles,
+                "current_repo_target_files": current_repo_target_files,
             },
             "cold_latency_distribution": distribution_to_json(&cold_distribution),
             "hot_latency_distribution": distribution_to_json(&hot_distribution),

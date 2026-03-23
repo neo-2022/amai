@@ -242,7 +242,7 @@ fn build_code_embedder(cfg: &AppConfig) -> Result<TextEmbedding> {
     TextEmbedding::try_new(InitOptions::new(model).with_show_download_progress(false))
 }
 
-fn collect_files(
+pub fn collect_files(
     root: &Path,
     limit: Option<usize>,
     paths_file: Option<&Path>,

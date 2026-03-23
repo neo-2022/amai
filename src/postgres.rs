@@ -1260,6 +1260,29 @@ pub async fn delete_namespace_documents(client: &Client, namespace_id: Uuid) -> 
         .context("failed to delete namespace documents")
 }
 
+pub async fn count_documents_for_project_namespace_codes(
+    client: &Client,
+    project_code: &str,
+    namespace_code: &str,
+) -> Result<u64> {
+    let row = client
+        .query_one(
+            r#"
+            SELECT COUNT(*)
+            FROM ami.code_documents d
+            JOIN ami.projects p ON p.project_id = d.project_id
+            JOIN ami.namespaces n ON n.namespace_id = d.namespace_id
+            WHERE p.code = $1
+              AND n.code = $2
+            "#,
+            &[&project_code, &namespace_code],
+        )
+        .await
+        .context("failed to count code documents for project/namespace")?;
+    let count: i64 = row.get(0);
+    Ok(count.max(0) as u64)
+}
+
 pub async fn status_counts(client: &Client) -> Result<(i64, i64, i64)> {
     let row = client
         .query_one(

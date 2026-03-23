@@ -620,6 +620,8 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
     let latest_cold_path_benchmark =
         postgres::latest_observability_snapshot(&db, "cold_path_benchmark").await?;
     let cold_path_benchmark_progress = read_live_cold_benchmark_progress(&repo_root);
+    let cold_path_benchmark_progress =
+        enrich_live_cold_benchmark_progress(&db, cold_path_benchmark_progress).await?;
     let latest_working_state_restore =
         postgres::latest_observability_snapshot(&db, "working_state_restore").await?;
     let latest_repo_working_state_restore =
@@ -1826,6 +1828,35 @@ fn read_live_cold_benchmark_progress(repo_root: &Path) -> Option<Value> {
         return None;
     }
     Some(payload)
+}
+
+async fn enrich_live_cold_benchmark_progress(
+    db: &Client,
+    progress: Option<Value>,
+) -> Result<Option<Value>> {
+    let Some(mut payload) = progress else {
+        return Ok(None);
+    };
+    let current_repo_code = payload["cold_benchmark_progress"]["current_repo_code"]
+        .as_str()
+        .map(str::to_string);
+    if let Some(project_code) = current_repo_code {
+        let indexed_files = postgres::count_documents_for_project_namespace_codes(
+            db,
+            &project_code,
+            "cold_benchmark",
+        )
+        .await?;
+        if let Some(progress_object) =
+            payload["cold_benchmark_progress"]["progress"].as_object_mut()
+        {
+            progress_object.insert(
+                "current_repo_indexed_files".to_string(),
+                Value::from(indexed_files),
+            );
+        }
+    }
+    Ok(Some(payload))
 }
 
 #[cfg(target_os = "linux")]
