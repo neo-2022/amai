@@ -112,6 +112,8 @@ struct TokenBudgetContractConfig {
     infra_cost_profile_version: String,
     #[serde(default = "default_contractual_evidence_pack_version")]
     contractual_evidence_pack_version: String,
+    #[serde(default = "default_contractual_statement_export_version")]
+    contractual_statement_export_version: String,
     #[serde(default = "default_rate_card_version")]
     rate_card_version: String,
     #[serde(default = "default_currency_profile")]
@@ -153,6 +155,7 @@ impl Default for TokenBudgetContractConfig {
             margin_model_version: default_margin_model_version(),
             infra_cost_profile_version: default_infra_cost_profile_version(),
             contractual_evidence_pack_version: default_contractual_evidence_pack_version(),
+            contractual_statement_export_version: default_contractual_statement_export_version(),
             rate_card_version: default_rate_card_version(),
             currency_profile: default_currency_profile(),
             settlement_status: default_settlement_status(),
@@ -522,6 +525,10 @@ fn default_contractual_evidence_pack_version() -> String {
     "contractual-evidence-pack-v1".to_string()
 }
 
+fn default_contractual_statement_export_version() -> String {
+    "contractual-statement-export-v1".to_string()
+}
+
 fn default_rate_card_version() -> String {
     "unpriced-v1".to_string()
 }
@@ -566,6 +573,7 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "margin_model_version": contract.margin_model_version.clone(),
         "infra_cost_profile_version": contract.infra_cost_profile_version.clone(),
         "contractual_evidence_pack_version": contract.contractual_evidence_pack_version.clone(),
+        "contractual_statement_export_version": contract.contractual_statement_export_version.clone(),
         "rate_card_version": contract.rate_card_version.clone(),
         "currency_profile": contract.currency_profile.clone(),
         "settlement_status": contract.settlement_status.clone(),
@@ -604,6 +612,7 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "margin_model_version": contract.margin_model_version.clone(),
         "infra_cost_profile_version": contract.infra_cost_profile_version.clone(),
         "contractual_evidence_pack_version": contract.contractual_evidence_pack_version.clone(),
+        "contractual_statement_export_version": contract.contractual_statement_export_version.clone(),
         "rate_card_version": contract.rate_card_version.clone(),
         "currency_profile": contract.currency_profile.clone(),
         "settlement_status": contract.settlement_status.clone(),
@@ -1337,6 +1346,7 @@ fn build_telemetry_surfaces_json(contract: &TokenBudgetContractConfig) -> Value 
                 "margin_view",
                 "adjustment_request_schema",
                 "adjustment_registry",
+                "statement_export_previews",
                 "contractual_evidence_pack"
             ],
             "state": "report_only_preview",
@@ -2025,9 +2035,111 @@ fn contractual_line_item_json(event: &TokenBudgetEvent) -> Value {
     })
 }
 
+fn build_contractual_line_item_sets(scope_events: &[TokenBudgetEvent]) -> (Vec<Value>, Vec<Value>) {
+    let included_items = scope_events
+        .iter()
+        .filter(|event| usage_excluded_reason_code(event).is_none())
+        .map(contractual_line_item_json)
+        .collect::<Vec<_>>();
+    let excluded_items = scope_events
+        .iter()
+        .filter(|event| usage_excluded_reason_code(event).is_some())
+        .map(contractual_line_item_json)
+        .collect::<Vec<_>>();
+    (included_items, excluded_items)
+}
+
 fn hash_line_items(items: &[Value]) -> Result<String> {
     let bytes = serde_json::to_vec(items).context("failed to encode contractual line items")?;
     Ok(hex_sha256(&bytes))
+}
+
+fn build_statement_export_preview(
+    report: &Value,
+    scope_code: &str,
+    scope_label: &str,
+    scope_events: &[TokenBudgetEvent],
+    contract: &TokenBudgetContractConfig,
+    include_verify_events: bool,
+) -> Result<Value> {
+    let statement_preview = report["token_budget_report"]["statement_previews"][scope_code].clone();
+    let reconciliation_preview =
+        report["token_budget_report"]["reconciliation_previews"][scope_code].clone();
+    let margin_scope = report["token_budget_report"]["margin_view"][scope_code].clone();
+    let contractual_summary =
+        report["token_budget_report"]["contractual_statement_summaries"][scope_code].clone();
+
+    let (included_items, excluded_items) = build_contractual_line_item_sets(scope_events);
+    let included_hash = hash_line_items(&included_items)?;
+    let excluded_hash = hash_line_items(&excluded_items)?;
+    let export_identity = format!(
+        "{}:{}:{}:{}:{}",
+        scope_code,
+        contract.settlement_statement_version,
+        contract.contractual_statement_export_version,
+        included_hash,
+        excluded_hash
+    );
+    let adjustment_preview = statement_preview["adjustment_preview"].clone();
+    let pending_entries = adjustment_preview["pending_entries_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let disputed_entries = adjustment_preview["disputed_entries_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let adjustment_status = adjustment_preview["status"].as_str().unwrap_or("unknown");
+    let credit_action_state = if adjustment_status == "not_configured" {
+        "registry_not_configured"
+    } else if pending_entries > 0 {
+        "pending_review"
+    } else {
+        "no_credit_entries"
+    };
+    let dispute_action_state = if disputed_entries > 0 {
+        "open_dispute_entries"
+    } else {
+        "no_open_disputes"
+    };
+
+    Ok(json!({
+        "model_version": contract.contractual_statement_export_version.clone(),
+        "scope_code": scope_code,
+        "scope_label": scope_label,
+        "statement_preview_id": hex_sha256(export_identity.as_bytes()),
+        "contractual_state": contractual_summary["contractual_state"].clone(),
+        "coverage_state": contractual_summary["coverage_state"].clone(),
+        "contractual_freshness_state": contractual_summary["contractual_freshness_state"].clone(),
+        "reconciliation_state": contractual_summary["reconciliation_state"].clone(),
+        "margin_state": contractual_summary["margin_state"].clone(),
+        "export_status": "review_ready_report_only",
+        "included_events_count": included_items.len(),
+        "excluded_events_count": excluded_items.len(),
+        "included_events_hash": included_hash,
+        "excluded_events_hash": excluded_hash,
+        "customer_review_ready": true,
+        "invoice_ready": false,
+        "credit_action_state": credit_action_state,
+        "dispute_action_state": dispute_action_state,
+        "pending_adjustment_entries_count": pending_entries,
+        "disputed_entries_count": disputed_entries,
+        "blocking_reasons": contractual_summary["blocking_reasons"].clone(),
+        "evidence_pack_available": true,
+        "evidence_pack_command": format!(
+            "cargo run --release -- observe token-evidence-pack --scope {}{}",
+            scope_code,
+            if include_verify_events {
+                " --include-verify-events true"
+            } else {
+                ""
+            }
+        ),
+        "line_item_surfaces": {
+            "statement_preview": statement_preview,
+            "reconciliation_preview": reconciliation_preview,
+            "margin_scope": margin_scope,
+        },
+        "note": "Это stable export preview для customer review: hashes и scope states уже зафиксированы, но invoice-grade settlement всё ещё не materialized."
+    }))
 }
 
 fn build_contractual_evidence_pack(
@@ -2040,16 +2152,7 @@ fn build_contractual_evidence_pack(
     include_verify_events: bool,
     generated_at_epoch_ms: i64,
 ) -> Result<Value> {
-    let included_items = scope_events
-        .iter()
-        .filter(|event| usage_excluded_reason_code(event).is_none())
-        .map(contractual_line_item_json)
-        .collect::<Vec<_>>();
-    let excluded_items = scope_events
-        .iter()
-        .filter(|event| usage_excluded_reason_code(event).is_some())
-        .map(contractual_line_item_json)
-        .collect::<Vec<_>>();
+    let (included_items, excluded_items) = build_contractual_line_item_sets(scope_events);
 
     let statement_preview = report["token_budget_report"]["statement_previews"][scope_code].clone();
     let reconciliation_preview =
@@ -2652,6 +2755,79 @@ async fn collect_report(
         &lifetime_margin_scope,
         &lifetime_metering_freshness,
     );
+    let current_session_statement_export = build_statement_export_preview(
+        &json!({
+            "token_budget_report": {
+                "statement_previews": {
+                    "current_session": current_session_statement_preview.clone(),
+                },
+                "reconciliation_previews": {
+                    "current_session": current_session_reconciliation_preview.clone(),
+                },
+                "margin_view": {
+                    "current_session": current_session_margin_scope.clone(),
+                },
+                "contractual_statement_summaries": {
+                    "current_session": current_session_contractual_summary.clone(),
+                }
+            }
+        }),
+        "current_session",
+        "текущая сессия",
+        &session_events,
+        &config.contract,
+        include_verify_events,
+    )?;
+    let rolling_window_statement_export = if profile.rolling_window_hours.is_some() {
+        build_statement_export_preview(
+            &json!({
+                "token_budget_report": {
+                    "statement_previews": {
+                        "rolling_window": rolling_window_statement_preview.clone(),
+                    },
+                    "reconciliation_previews": {
+                        "rolling_window": rolling_window_reconciliation_preview.clone(),
+                    },
+                    "margin_view": {
+                        "rolling_window": rolling_window_margin_scope.clone(),
+                    },
+                    "contractual_statement_summaries": {
+                        "rolling_window": rolling_window_contractual_summary.clone(),
+                    }
+                }
+            }),
+            "rolling_window",
+            &format!("окно {}", profile.display_name),
+            &rolling_window_events,
+            &config.contract,
+            include_verify_events,
+        )?
+    } else {
+        Value::Null
+    };
+    let lifetime_statement_export = build_statement_export_preview(
+        &json!({
+            "token_budget_report": {
+                "statement_previews": {
+                    "lifetime": lifetime_statement_preview.clone(),
+                },
+                "reconciliation_previews": {
+                    "lifetime": lifetime_reconciliation_preview.clone(),
+                },
+                "margin_view": {
+                    "lifetime": lifetime_margin_scope.clone(),
+                },
+                "contractual_statement_summaries": {
+                    "lifetime": lifetime_contractual_summary.clone(),
+                }
+            }
+        }),
+        "lifetime",
+        "всё время записи",
+        &events,
+        &config.contract,
+        include_verify_events,
+    )?;
 
     Ok(json!({
         "token_budget_report": {
@@ -2728,6 +2904,11 @@ async fn collect_report(
                 "current_session": current_session_contractual_summary,
                 "rolling_window": rolling_window_contractual_summary,
                 "lifetime": lifetime_contractual_summary,
+            },
+            "statement_export_previews": {
+                "current_session": current_session_statement_export,
+                "rolling_window": rolling_window_statement_export,
+                "lifetime": lifetime_statement_export,
             },
             "source_breakdown": source_breakdown,
             "query_slices": query_slices,
@@ -6270,8 +6451,9 @@ mod tests {
         build_external_truth_sources_json, build_margin_contract_json, build_margin_scope,
         build_metering_freshness_contract_json, build_metering_freshness_summary,
         build_product_headline, build_rate_card_json, build_reconciliation_contract_json,
-        build_reconciliation_preview, build_settlement_contract_json, build_statement_preview,
-        build_telemetry_surfaces_json, build_usage_event_schema_json, contractual_line_item_json,
+        build_reconciliation_preview, build_settlement_contract_json,
+        build_statement_export_preview, build_statement_preview, build_telemetry_surfaces_json,
+        build_usage_event_schema_json, contractual_line_item_json,
         default_adjustment_preview_model_version, default_adjustment_registry_version,
         default_adjustment_request_schema_version, default_backfill_policy_version,
         default_baseline_method_version, default_billing_mode, default_billing_policy_version,
@@ -7463,6 +7645,86 @@ default_output_cost_per_1k_tokens = 0.02
             summary["blocking_reasons"],
             json!(["metering_pipeline_lagging", "late_arrival_window_open"])
         );
+    }
+
+    #[test]
+    fn statement_export_preview_carries_hashes_and_adjustment_states() {
+        let contract = contract_fixture();
+        let report = json!({
+            "token_budget_report": {
+                "statement_previews": {
+                    "current_session": {
+                        "contractual_state": "report_only_preview_open",
+                        "adjustment_preview": {
+                            "status": "not_configured",
+                            "pending_entries_count": 0,
+                            "disputed_entries_count": 0,
+                        }
+                    }
+                },
+                "reconciliation_previews": {
+                    "current_session": {
+                        "reconciliation_state": "awaiting_provider_usage_source"
+                    }
+                },
+                "margin_view": {
+                    "current_session": {
+                        "margin_state": "awaiting_rate_card"
+                    }
+                },
+                "contractual_statement_summaries": {
+                    "current_session": {
+                        "contractual_state": "report_only_preview_open",
+                        "coverage_state": "partially_confirmed",
+                        "contractual_freshness_state": "provisional_open_window",
+                        "reconciliation_state": "awaiting_provider_usage_source",
+                        "margin_state": "awaiting_rate_card",
+                        "blocking_reasons": ["late_arrival_window_open"]
+                    }
+                }
+            }
+        });
+        let events = vec![
+            token_event! {
+                event_id: "event-included".to_string(),
+                correlation_id: "ctx-a".to_string(),
+                query_hash: "hash-a".to_string(),
+                naive_tokens: 1000,
+                context_tokens: 100,
+                effective_saved_tokens: 900,
+                quality_ok: true,
+            },
+            token_event! {
+                event_id: "event-excluded".to_string(),
+                correlation_id: "ctx-b".to_string(),
+                query_hash: "hash-b".to_string(),
+                naive_tokens: 500,
+                context_tokens: 200,
+                effective_saved_tokens: 300,
+                quality_ok: false,
+            },
+        ];
+
+        let preview = build_statement_export_preview(
+            &report,
+            "current_session",
+            "текущая сессия",
+            &events,
+            &contract,
+            false,
+        )
+        .expect("statement export preview");
+
+        assert_eq!(preview["model_version"], "contractual-statement-export-v1");
+        assert_eq!(preview["export_status"], "review_ready_report_only");
+        assert_eq!(preview["included_events_count"], 1);
+        assert_eq!(preview["excluded_events_count"], 1);
+        assert_eq!(preview["credit_action_state"], "registry_not_configured");
+        assert_eq!(preview["dispute_action_state"], "no_open_disputes");
+        assert_eq!(preview["evidence_pack_available"], true);
+        assert!(preview["statement_preview_id"].as_str().unwrap_or("").len() > 10);
+        assert!(preview["included_events_hash"].as_str().unwrap_or("").len() > 10);
+        assert!(preview["excluded_events_hash"].as_str().unwrap_or("").len() > 10);
     }
 
     #[test]

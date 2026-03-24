@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:55 MSK
-Ручная сверка guide/docs: 2026-03-24 13:55 MSK
+modified_at: 2026-03-24 14:07 MSK
+Ручная сверка guide/docs: 2026-03-24 14:07 MSK
 
 # MCP Integration
 
@@ -272,6 +272,7 @@ cargo build --release
   - `contractual_margin_state`
   - `contractual_blockers_summary`
   - `contractual_statement_summary`
+  - `statement_export_preview`
 
 Это нужно затем, чтобы клиентский слой мог показать короткий contractual state для review/audit
 без парсинга полного raw `token_budget_report`.

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:55 MSK
-Ручная сверка guide/docs: 2026-03-24 13:55 MSK
+modified_at: 2026-03-24 14:07 MSK
+Ручная сверка guide/docs: 2026-03-24 14:07 MSK
 
 # Operations
 
@@ -1653,6 +1653,12 @@ cargo run --release -- verify token-benchmark-suite \
     hashes включённых и исключённых line items;
   - raw `query` туда не попадает, только `query_hash` и usage-state поля;
   - это contractual evidence для review/export, но не invoice.
+- `statement_export_previews`
+  - `current_session / rolling_window / lifetime`;
+  - compact export-layer поверх statement/reconciliation/margin/freshness;
+  - публикует `statement_preview_id`, hashes line items, adjustment/dispute action state
+    и готовую команду для on-demand evidence pack;
+  - это bridge между live report и full contractual evidence pack.
 - `adjustment_request_schema`
   - versioned request contract для future credit/correction/dispute entries;
   - запрещает тихую ретро-перезапись прошлого statement;

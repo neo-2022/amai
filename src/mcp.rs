@@ -1256,6 +1256,11 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
                 } else {
                     payload["token_budget_report"]["contractual_statement_summaries"]["rolling_window"].clone()
                 },
+                "statement_export_preview": if payload["token_budget_report"]["statement_export_previews"]["rolling_window"].is_null() {
+                    payload["token_budget_report"]["statement_export_previews"]["lifetime"].clone()
+                } else {
+                    payload["token_budget_report"]["statement_export_previews"]["rolling_window"].clone()
+                },
                 "note": token_summary.note,
             }
         }),

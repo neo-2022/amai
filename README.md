@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:55 MSK
-Ручная сверка guide/docs: 2026-03-24 13:55 MSK
+modified_at: 2026-03-24 14:07 MSK
+Ручная сверка guide/docs: 2026-03-24 14:07 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1117,6 +1117,17 @@ preview, а не только raw count.
     hashes включённых/исключённых line items и сами line items без сырого текста запроса;
   - это нужно затем, чтобы customer-facing audit/export не подменялся dashboard-экраном;
   - но это по-прежнему не invoice и не готовый settlement.
+- `statement_export_previews`
+  - по каждому scope теперь есть стабильный export-preview слой;
+  - он публикует:
+    - `statement_preview_id`
+    - `included_events_hash`
+    - `excluded_events_hash`
+    - `credit_action_state`
+    - `dispute_action_state`
+    - `evidence_pack_command`
+  - это нужно затем, чтобы customer review/export начинался с компактного preview,
+    а не сразу с full evidence pack.
 - first-class `coverage`
   - у каждого rollup теперь есть не только savings, но и честный охват:
     `measured / included / excluded`;

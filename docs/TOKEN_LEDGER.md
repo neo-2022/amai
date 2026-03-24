@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:55 MSK
-Ручная сверка guide/docs: 2026-03-24 13:55 MSK
+modified_at: 2026-03-24 14:07 MSK
+Ручная сверка guide/docs: 2026-03-24 14:07 MSK
 
 # Token Ledger
 
@@ -739,6 +739,20 @@ Hashes по line items нужны затем, чтобы:
 - доказать состав export без ручного перебора;
 - не подменять included/excluded состав незаметно;
 - иметь audit-friendly anchor для будущих settlement/dispute flows.
+
+Поверх полного pack теперь нужен и отдельный:
+- `statement_export_previews.current_session / rolling_window / lifetime`
+
+Это не дублирование, а отдельный слой:
+- preview даёт компактный `statement_preview_id`;
+- публикует `included_events_hash / excluded_events_hash`;
+- отдельно показывает `credit_action_state` и `dispute_action_state`;
+- даёт готовую команду `observe token-evidence-pack` для полного export.
+
+Именно так customer-facing export должен масштабироваться:
+- сначала compact preview;
+- затем on-demand full evidence pack;
+- и только потом, в будущем, settlement/dispute workflow.
 
 ## Preliminary vs stable
 
