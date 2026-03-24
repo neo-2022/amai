@@ -1258,15 +1258,8 @@ import sys\n\
 \n\
 root = pathlib.Path(sys.argv[1])\n\
 files = sorted(root.rglob('result_*.json'))\n\
-if not files:\n\
-    print('no_results')\n\
-    raise SystemExit(0)\n\
-for path in files:\n\
-    data = json.loads(path.read_text())\n\
-    for result in data.get('results', []):\n\
-        if result.get('label') != ':)':\n\
-            print('benchmark_failed')\n\
-            raise SystemExit(0)\n\
+if not files:\n    print('no_results')\n    raise SystemExit(0)\n\
+for path in files:\n    data = json.loads(path.read_text())\n    for result in data.get('results', []):\n        if result.get('label') != ':)':\n            print('benchmark_failed')\n            raise SystemExit(0)\n\
 print('benchmark_ok')\n\
 PY\n\
 )\"\n\
@@ -1749,12 +1742,13 @@ async fn download_dataset_file(dataset: &ExternalDatasetEntry, path: &Path) -> R
 #[cfg(test)]
 mod tests {
     use super::{
-        AdapterStatus, ExternalBenchmarkEntry, ExternalBenchmarkFile, ExternalBenchmarkSource,
-        ExternalDatasetEntry, ExternalDatasetFile, ExternalDatasetStorage, ExternalResultSummary,
-        VectorDbBenchBundle, adapter_compatibility_overrides, ann_benchmark_dataset_name,
-        build_launch_commands, determine_adapter_status, normalize_key, ordered_benchmarks,
-        recommended_datasets, reconcile_run_status, reconcile_run_status_with_runtime,
-        resolve_benchmark, resolve_dataset,
+        AdapterRenderContext, AdapterStatus, ExternalBenchmarkEntry, ExternalBenchmarkFile,
+        ExternalBenchmarkSource, ExternalDatasetEntry, ExternalDatasetFile, ExternalDatasetStorage,
+        ExternalResultSummary, VectorDbBenchBundle, adapter_compatibility_overrides,
+        ann_benchmark_dataset_name, build_launch_commands, determine_adapter_status, normalize_key,
+        ordered_benchmarks, recommended_datasets, reconcile_run_status,
+        reconcile_run_status_with_runtime, render_adapter_script, resolve_benchmark,
+        resolve_dataset,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1870,6 +1864,57 @@ mod tests {
         assert!(joined.contains("AMAI_BENCHMARK_QDRANT_HTTP_URL"));
         assert!(joined.contains("http://127.0.0.1:6333"));
         assert!(joined.contains("qdrant/qdrant:v1.12.5"));
+    }
+
+    #[test]
+    fn rendered_vectordbbench_script_keeps_result_verdict_python_indented() {
+        let registry = sample_registry();
+        let catalog = sample_catalog();
+        let benchmark = &registry.benchmarks["vectordbbench"];
+        let dataset = &catalog.datasets["dbpedia_openai_1000k_angular"];
+        let bundle = VectorDbBenchBundle {
+            dataset_root: Path::new("/tmp/bundle").to_path_buf(),
+            bundle_dir: Path::new("/tmp/bundle/dbpedia").to_path_buf(),
+            dataset_name: "AmaiExternal".to_owned(),
+            dataset_dir: "dbpedia_openai_1000k_angular".to_owned(),
+            train_rows: 990000,
+            test_rows: 1000,
+            neighbors_rows: 1000,
+            dim: 1536,
+            metric_type: "COSINE".to_owned(),
+            train_file_count: 1,
+            manifest_path: Path::new("/tmp/bundle/dbpedia/conversion_manifest.json").to_path_buf(),
+        };
+        let launch_commands = build_launch_commands(
+            "vectordbbench",
+            Path::new("/tmp/vdbbench"),
+            Path::new("/tmp/datasets/dbpedia-openai-1000k-angular.hdf5"),
+            dataset,
+            Path::new("/tmp/output"),
+            Some(&bundle),
+            "http://127.0.0.1:7633",
+        );
+        let comparison_commands = vec!["./target/release/amai verify cold-path".to_owned()];
+        let compatibility_overrides = adapter_compatibility_overrides("vectordbbench");
+        let render_ctx = AdapterRenderContext {
+            benchmark_code: "vectordbbench",
+            benchmark,
+            dataset_code: "dbpedia_openai_1000k_angular",
+            dataset,
+            dataset_path: Path::new("/tmp/datasets/dbpedia-openai-1000k-angular.hdf5"),
+            status: AdapterStatus::Prepared,
+            adapter_kind: "custom_parquet_bundle",
+            launch_commands: &launch_commands,
+            comparison_commands: &comparison_commands,
+            compatibility_overrides: &compatibility_overrides,
+            upstream_dir: Path::new("/tmp/vdbbench"),
+        };
+        let script = render_adapter_script(&render_ctx);
+        assert!(script.contains("if not files:\n    print('no_results')"));
+        assert!(script.contains("for path in files:\n    data = json.loads(path.read_text())"));
+        assert!(script.contains(
+            "for result in data.get('results', []):\n        if result.get('label') != ':)':"
+        ));
     }
 
     #[test]
