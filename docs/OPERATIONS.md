@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 08:52 MSK
-Ручная сверка guide/docs: 2026-03-24 08:52 MSK
+modified_at: 2026-03-24 09:16 MSK
+Ручная сверка guide/docs: 2026-03-24 09:16 MSK
 
 # Operations
 
@@ -1054,6 +1054,28 @@ Machine-readable карта деградации и partial-failure поведе
 - классы без свежего proof не маскируются под `pass`, а остаются `unknown`;
 - working-state freshness/confidence может выступать evidence only как сигнал, но не как полноценный proof для isolation/degradation класса, пока не materialized отдельный suite.
 
+## Continuity correctness
+
+Отдельный machine-readable слой continuity correctness теперь тоже собирается прямо в live system snapshot:
+- raw JSON: `/api/snapshot -> continuity_correctness_model`;
+- human-visible слой: service-card `Правильное продолжение`;
+- MCP: `amai_observe_snapshot -> observe_snapshot_summary.continuity_*`;
+- Prometheus:
+  - `amai_continuity_verified_probes_total`
+  - `amai_continuity_failed_probes_total`
+  - `amai_continuity_recovered_useful_total`
+  - `amai_continuity_fail_closed_total`
+
+Этот слой показывает уже не косвенные признаки working-state, а именно последний explicit `verify continuity` proof:
+- сколько continuity probes подтверждены;
+- сколько из них полезно восстановили рабочую линию;
+- сколько fail-closed проверок подтвердили, что Amai не подменяет отсутствующий прошлый чат или точное время ближайшим похожим результатом;
+- сколько probes реально провалилось.
+
+Важно:
+- `verify continuity` теперь сохраняет observability snapshot и при PASS, и при реальном провале;
+- поэтому human dashboard и observe snapshot видят честный последний verdict, а не только последний удачный run.
+
 Отдельный runnable proof path для этих классов теперь есть:
 
 ```bash
@@ -1853,6 +1875,7 @@ Launcher human dashboard теперь:
 - не требует держать терминал открытым только ради живой панели.
 - по умолчанию обновляет страницу раз в `1` секунду, чтобы live-картина была ближе к текущему состоянию.
 - если локальный `cmake` уже materialized в `state/tooling/cmake-venv/bin`, launcher сам подхватывает этот `PATH`, чтобы observability-path не падал только из-за отсутствия системного `cmake`.
+- отдельно показывает `Правильное продолжение`, чтобы operator видел не только policy по сбоям, но и последний реальный proof того, что новый чат продолжает работу правильно.
 
 Встроенный exporter:
 

@@ -638,6 +638,8 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         };
     let latest_degradation_verification =
         postgres::latest_observability_snapshot(&db, "degradation_verification").await?;
+    let latest_continuity_verification =
+        postgres::latest_observability_snapshot(&db, "continuity_verification").await?;
     let token_budget_report = token_budget::collect_default_report(&db).await?;
     let artifact_cleanup_summary = artifact_cleanup::read_latest_summary(&repo_root)?
         .unwrap_or_else(|| {
@@ -672,10 +674,12 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_working_state_restore": latest_working_state_restore,
         "latest_repo_working_state_restore": latest_repo_working_state_restore,
         "latest_degradation_verification": latest_degradation_verification,
+        "latest_continuity_verification": latest_continuity_verification,
         "token_budget_report": token_budget_report,
         "artifact_cleanup": artifact_cleanup_summary["artifact_cleanup"].clone(),
     });
     let degradation_model = build_degradation_model(&payload)?;
+    let continuity_correctness_model = build_continuity_correctness_model(&payload)?;
     let sla = evaluate_sla(&payload, &profile);
     let snapshot = json!({
         "captured_at_epoch_ms": captured_at_epoch_ms,
@@ -701,15 +705,72 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
         "latest_repo_working_state_restore": payload["latest_repo_working_state_restore"].clone(),
         "latest_degradation_verification": payload["latest_degradation_verification"].clone(),
+        "latest_continuity_verification": payload["latest_continuity_verification"].clone(),
         "token_budget_report": payload["token_budget_report"].clone(),
         "artifact_cleanup": payload["artifact_cleanup"].clone(),
         "degradation_model": degradation_model,
+        "continuity_correctness_model": continuity_correctness_model,
         "sla": sla,
     });
     if persist_snapshot {
         let _ = postgres::insert_observability_snapshot(&db, "system_snapshot", &snapshot).await?;
     }
     Ok(snapshot)
+}
+
+fn build_continuity_correctness_model(payload: &Value) -> Result<Value> {
+    let verification = &payload["latest_continuity_verification"]["continuity_verification"];
+    if !verification.is_object() {
+        return Ok(json!({
+            "summary": {
+                "status": "unknown",
+                "probe_count": 0,
+                "verified_probes": 0,
+                "failed_probes": 0,
+                "recovered_useful": 0,
+                "fail_closed": 0,
+                "evidence_gap": true,
+            },
+            "failed_probe_names": [],
+            "last_evidence_at_epoch_ms": Value::Null,
+        }));
+    }
+
+    let canonical_eval = &verification["canonical_eval"];
+    let probe_count = verification["probe_count"].as_u64().unwrap_or_else(|| {
+        canonical_eval["probes"]
+            .as_array()
+            .map_or(0, |items| items.len() as u64)
+    });
+    let failed_probe_names = verification["failed_probes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let failed_probes = failed_probe_names.len() as u64;
+    let verified_probes = verification["verified_probes"]
+        .as_u64()
+        .unwrap_or_else(|| probe_count.saturating_sub(failed_probes));
+    let verification_status =
+        verification["verification_status"]
+            .as_str()
+            .unwrap_or(if failed_probes > 0 {
+                "critical"
+            } else {
+                "pass"
+            });
+    Ok(json!({
+        "summary": {
+            "status": verification_status,
+            "probe_count": probe_count,
+            "verified_probes": verified_probes,
+            "failed_probes": failed_probes,
+            "recovered_useful": canonical_eval["verdict_counts"]["recovered_useful"].as_u64().unwrap_or(0),
+            "fail_closed": canonical_eval["verdict_counts"]["hit_correct_target"].as_u64().unwrap_or(0),
+            "evidence_gap": false,
+        },
+        "failed_probe_names": failed_probe_names,
+        "last_evidence_at_epoch_ms": verification["captured_at_epoch_ms"].clone(),
+    }))
 }
 
 fn build_degradation_model(payload: &Value) -> Result<Value> {
@@ -2998,6 +3059,30 @@ fn render_prometheus_metrics(snapshot: &Value) -> String {
         "Count of degradation classes that still lack fresh machine-readable proof.",
         snapshot["degradation_model"]["summary"]["evidence_gaps"].as_f64(),
     );
+    push_metric(
+        &mut output,
+        "amai_continuity_verified_probes_total",
+        "Count of continuity verification probes currently confirmed by the last known proof.",
+        snapshot["continuity_correctness_model"]["summary"]["verified_probes"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_continuity_failed_probes_total",
+        "Count of continuity verification probes currently failing the last known proof.",
+        snapshot["continuity_correctness_model"]["summary"]["failed_probes"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_continuity_recovered_useful_total",
+        "Count of continuity verification probes that recovered useful working context.",
+        snapshot["continuity_correctness_model"]["summary"]["recovered_useful"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_continuity_fail_closed_total",
+        "Count of continuity verification probes that fail-closed instead of substituting a wrong chat or time slice.",
+        snapshot["continuity_correctness_model"]["summary"]["fail_closed"].as_f64(),
+    );
 
     output
 }
@@ -3042,8 +3127,8 @@ fn push_metric(output: &mut String, name: &str, help: &str, value: Option<f64>) 
 #[cfg(test)]
 mod tests {
     use super::{
-        benchmark_contamination_value, build_degradation_model, evaluate_sla,
-        expired_retention_candidates, load_profile, profile_thresholds_json,
+        benchmark_contamination_value, build_continuity_correctness_model, build_degradation_model,
+        evaluate_sla, expired_retention_candidates, load_profile, profile_thresholds_json,
         render_prometheus_metrics, select_latest_clean_benchmark_snapshot,
     };
     use crate::postgres::ObservabilityRetentionCandidate;
@@ -3112,6 +3197,14 @@ mod tests {
                     "graceful_fallback_total": 6.0,
                     "evidence_gaps": 9.0
                 }
+            },
+            "continuity_correctness_model": {
+                "summary": {
+                    "verified_probes": 9.0,
+                    "failed_probes": 0.0,
+                    "recovered_useful": 7.0,
+                    "fail_closed": 2.0
+                }
             }
         });
 
@@ -3124,6 +3217,51 @@ mod tests {
         assert!(output.contains("amai_degradation_unknown_total 9"));
         assert!(output.contains("amai_degradation_fail_closed_total 5"));
         assert!(output.contains("amai_degradation_graceful_fallback_total 6"));
+        assert!(output.contains("amai_continuity_verified_probes_total 9"));
+        assert!(output.contains("amai_continuity_recovered_useful_total 7"));
+        assert!(output.contains("amai_continuity_fail_closed_total 2"));
+    }
+
+    #[test]
+    fn continuity_correctness_model_reports_passing_probe_counts() {
+        let payload = json!({
+            "latest_continuity_verification": {
+                "continuity_verification": {
+                    "captured_at_epoch_ms": 4242,
+                    "verification_status": "pass",
+                    "probe_count": 9,
+                    "verified_probes": 9,
+                    "failed_probes": [],
+                    "canonical_eval": {
+                        "verdict_counts": {
+                            "recovered_useful": 7,
+                            "hit_correct_target": 2
+                        }
+                    }
+                }
+            }
+        });
+
+        let model = build_continuity_correctness_model(&payload).expect("continuity model");
+        assert_eq!(model["summary"]["status"], json!("pass"));
+        assert_eq!(model["summary"]["probe_count"], json!(9));
+        assert_eq!(model["summary"]["verified_probes"], json!(9));
+        assert_eq!(model["summary"]["failed_probes"], json!(0));
+        assert_eq!(model["summary"]["recovered_useful"], json!(7));
+        assert_eq!(model["summary"]["fail_closed"], json!(2));
+        assert_eq!(model["summary"]["evidence_gap"], json!(false));
+    }
+
+    #[test]
+    fn continuity_correctness_model_reports_gap_without_snapshot() {
+        let payload = json!({
+            "latest_continuity_verification": null
+        });
+
+        let model = build_continuity_correctness_model(&payload).expect("continuity model");
+        assert_eq!(model["summary"]["status"], json!("unknown"));
+        assert_eq!(model["summary"]["probe_count"], json!(0));
+        assert_eq!(model["summary"]["evidence_gap"], json!(true));
     }
 
     #[test]

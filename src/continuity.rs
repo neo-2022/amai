@@ -832,12 +832,12 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
             )
         })
         .collect::<Vec<_>>();
-    if !failing_probes.is_empty() {
-        return Err(anyhow!(
-            "continuity verification failed: {}",
-            failing_probes.join(", ")
-        ));
-    }
+    let verification_status = if failing_probes.is_empty() {
+        "pass"
+    } else {
+        "critical"
+    };
+    let verified_probes = probes.len().saturating_sub(failing_probes.len()) as u64;
 
     let verification_run_id = Uuid::new_v4();
     let captured_at_epoch_ms = SystemTime::now()
@@ -869,6 +869,10 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
             "working_state_restore_present": working_state_restore_present,
             "working_state_restore": working_state_restore,
             "chat_start_restore": chat_start_node,
+            "verification_status": verification_status,
+            "probe_count": probes.len(),
+            "verified_probes": verified_probes,
+            "failed_probes": failing_probes,
             "canonical_eval": canonical_eval
         },
         "retrieval_science": retrieval_science::suite_metadata("continuity_verification")?,
@@ -876,6 +880,18 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
     });
     let _ =
         postgres::insert_observability_snapshot(&db, "continuity_verification", &payload).await?;
+    if verification_status != "pass" {
+        return Err(anyhow!(
+            "continuity verification failed: {}",
+            payload["continuity_verification"]["failed_probes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }

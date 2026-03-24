@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 08:52 MSK
-Ручная сверка guide/docs: 2026-03-24 08:52 MSK
+modified_at: 2026-03-24 09:16 MSK
+Ручная сверка guide/docs: 2026-03-24 09:16 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1567,6 +1567,25 @@ cargo run --release -- verify degradation
 - использует те же product-path функции для working-state, temporal fail-closed и retrieval fallback, а не отдельную декоративную логику только для теста;
 - для `working_state_conflict` теперь пишет уже не плоский lineage, а `lineage-v2` graph с `nodes / edges`;
 - а proof-слой в коде дополнительно усилен property-based tests для fail-closed выбора `agent_scope / session_id` и для exact-time drift в temporal lookup.
+
+Рядом с этим в live snapshot и human dashboard теперь materialized ещё и отдельный continuity-layer:
+- raw JSON: `/api/snapshot -> continuity_correctness_model`;
+- human-visible слой: service-card `Правильное продолжение`;
+- Prometheus:
+  - `amai_continuity_verified_probes_total`
+  - `amai_continuity_failed_probes_total`
+  - `amai_continuity_recovered_useful_total`
+  - `amai_continuity_fail_closed_total`
+
+Этот слой показывает не policy, а именно последний explicit `verify continuity` proof:
+- сколько continuity probes подтверждены;
+- сколько из них полезно восстанавливают рабочую линию;
+- сколько честно fail-closed на отсутствующем прошлом чате или точном времени;
+- сколько continuity checks реально провалилось.
+
+Важно:
+- `verify continuity` теперь сохраняет snapshot не только при PASS, но и при реальном провале;
+- поэтому dashboard не обязан угадывать состояние по косвенным признакам и может честно показать `critical`, если continuity proof сломался.
 
 Если нужен уже не короткий smoke, а честный end-to-end cold contour на большом real-repo pool:
 

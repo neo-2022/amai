@@ -4028,6 +4028,7 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
     }
 
     let degradation_card = build_degradation_model_card(snapshot);
+    let continuity_card = build_continuity_correctness_card(snapshot);
 
     vec![
         postgres_card,
@@ -4035,7 +4036,91 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
         benchmark_qdrant_card,
         nats_card,
         degradation_card,
+        continuity_card,
     ]
+}
+
+fn build_continuity_correctness_card(snapshot: &Value) -> Value {
+    let model = &snapshot["continuity_correctness_model"];
+    if !model.is_object() {
+        return with_status_tooltip(
+            card_with_rows(
+                "Правильное продолжение",
+                "ещё нет данных".to_string(),
+                "Пока панель не видит отдельную проверку того, что Amai правильно продолжает работу между чатами и не подменяет отсутствующие данные похожим ответом.".to_string(),
+                "unknown",
+                Some("Источник: latest continuity_verification snapshot".to_string()),
+                Some("Показывает, что Amai действительно умеет поднимать правильную рабочую линию, не подменяет прошлый чат чужим и честно говорит, когда точного совпадения по времени нет.".to_string()),
+                vec![],
+            ),
+            "Статус пока не может считаться нормальным по следующим причинам:\n- Свежий continuity proof ещё не попал в system snapshot.",
+        );
+    }
+
+    let summary = &model["summary"];
+    let status = summary["status"].as_str().unwrap_or("unknown");
+    let probe_count = summary["probe_count"].as_u64().unwrap_or(0);
+    let verified_probes = summary["verified_probes"].as_u64().unwrap_or(0);
+    let failed_probes = summary["failed_probes"].as_u64().unwrap_or(0);
+    let recovered_useful = summary["recovered_useful"].as_u64().unwrap_or(0);
+    let fail_closed = summary["fail_closed"].as_u64().unwrap_or(0);
+    let value = if probe_count > 0 {
+        format!("{verified_probes} из {probe_count} проверок подтверждены")
+    } else {
+        "ещё нет данных".to_string()
+    };
+    let last_evidence = model["last_evidence_at_epoch_ms"].as_u64();
+    let note = if probe_count > 0 {
+        format!(
+            "Это отдельная проверка продолжения работы: старт нового чата, восстановление рабочего состояния, handoff и точный поиск по времени. Сейчас подтверждены {verified_probes} из {probe_count} проверок; полезное восстановление сработало в {recovered_useful} случаях, а границы без подмены подтверждены в {fail_closed} случаях."
+        )
+    } else {
+        "Пока нет свежей отдельной проверки того, что Amai правильно продолжает работу между чатами.".to_string()
+    };
+    let mut card = card_with_rows(
+        "Правильное продолжение",
+        value,
+        note,
+        status,
+        Some(source_label(
+            "Источник: latest continuity_verification snapshot. Карточка показывает только последний explicit continuity proof, а не косвенные признаки из working-state.",
+            last_evidence,
+        )),
+        Some("Показывает, что Amai действительно умеет поднимать правильную рабочую линию, не подменяет прошлый чат чужим и честно говорит, когда точного совпадения по времени нет.".to_string()),
+        vec![
+            metric_row(
+                "Полезно восстановлено",
+                format_u64(Some(recovered_useful)),
+                Some("Сколько проверок подтвердили полезное восстановление handoff, рабочего состояния или стартовой подсказки нового чата."),
+            ),
+            metric_row(
+                "Границы не нарушены",
+                format_u64(Some(fail_closed)),
+                Some("Сколько проверок подтвердили, что Amai не подменяет отсутствующий прошлый чат или точное время ближайшим похожим результатом."),
+            ),
+            metric_row(
+                "Провалено",
+                format_u64(Some(failed_probes)),
+                Some("Сколько проверок продолжения работы провалились в последнем явном прогоне."),
+            ),
+            metric_row(
+                "Всего проверок",
+                format_u64(Some(probe_count)),
+                Some("Сколько отдельных проверок вошло в последний прогон корректности продолжения."),
+            ),
+            metric_row(
+                "Последняя проверка",
+                last_evidence
+                    .map(human_timestamp)
+                    .unwrap_or_else(|| "ещё нет данных".to_string()),
+                Some("Когда был сделан последний явный прогон этой проверки."),
+            ),
+        ],
+    );
+    if let Some(tooltip) = continuity_correctness_status_tooltip(model) {
+        card = with_status_tooltip(card, &tooltip);
+    }
+    card
 }
 
 fn build_degradation_model_card(snapshot: &Value) -> Value {
@@ -4278,6 +4363,24 @@ fn degradation_status_count(model: &Value, mode: Option<&str>, status: &str) -> 
         .filter(|item| item["status"].as_str() == Some(status))
         .filter(|item| mode.map_or(true, |value| item["mode"].as_str() == Some(value)))
         .count() as u64
+}
+
+fn continuity_correctness_status_tooltip(model: &Value) -> Option<String> {
+    let summary = &model["summary"];
+    let status = summary["status"].as_str().unwrap_or("unknown");
+    let reasons = model["failed_probe_names"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str())
+        .map(|item| format!("Проверка продолжения работы провалилась: {item}."))
+        .collect::<Vec<_>>();
+    let fallback = if summary["evidence_gap"].as_bool() == Some(true) {
+        "Свежая проверка продолжения работы ещё не найдена."
+    } else {
+        "Корректность продолжения ещё не подтверждена свежим явным прогоном."
+    };
+    status_reason_tooltip(status, reasons, fallback)
 }
 
 fn newest_degradation_evidence_epoch_ms(model: &Value) -> Option<u64> {
@@ -6228,9 +6331,10 @@ fn human_elapsed_ms(value_ms: u64) -> String {
 mod tests {
     use super::{
         benchmark_qdrant_live_card, browser_base_url, build_benchmark_cards,
-        build_degradation_model_card, build_hero_cards, build_links, build_machine_cards,
-        build_top_cards, format_ms, format_time_compare_pair, human_elapsed_ms,
-        live_latency_compare_card, monitoring_url, working_state_live_card, worst_status,
+        build_continuity_correctness_card, build_degradation_model_card, build_hero_cards,
+        build_links, build_machine_cards, build_top_cards, format_ms, format_time_compare_pair,
+        human_elapsed_ms, live_latency_compare_card, monitoring_url, working_state_live_card,
+        worst_status,
     };
     use serde_json::json;
 
@@ -7072,6 +7176,33 @@ mod tests {
                 .unwrap_or_default()
                 .contains("Устаревший handoff")
         );
+    }
+
+    #[test]
+    fn continuity_correctness_card_surfaces_verified_probe_counts() {
+        let snapshot = json!({
+            "continuity_correctness_model": {
+                "summary": {
+                    "status": "pass",
+                    "probe_count": 9,
+                    "verified_probes": 9,
+                    "failed_probes": 0,
+                    "recovered_useful": 7,
+                    "fail_closed": 2,
+                    "evidence_gap": false
+                },
+                "last_evidence_at_epoch_ms": 42,
+                "failed_probe_names": []
+            }
+        });
+
+        let card = build_continuity_correctness_card(&snapshot);
+        assert_eq!(card["title"], json!("Правильное продолжение"));
+        assert_eq!(card["status"], json!("pass"));
+        assert_eq!(card["value"], json!("9 из 9 проверок подтверждены"));
+        assert_eq!(card["rows"][0]["value"], json!("7"));
+        assert_eq!(card["rows"][1]["value"], json!("2"));
+        assert_eq!(card["rows"][2]["value"], json!("0"));
     }
 
     #[test]

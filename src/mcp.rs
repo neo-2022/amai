@@ -1285,6 +1285,12 @@ async fn tool_observe_snapshot(cfg: &AppConfig) -> Result<Value> {
         };
         text.push_str(&format!(" compatibility={profile}:{state}"));
     }
+    if let Some(status) = &summary.continuity_status {
+        text.push_str(&format!(
+            " continuity={}/{}:{}",
+            summary.continuity_verified_probes, summary.continuity_total_probes, status
+        ));
+    }
     if let Some(value) = &summary.included_reasons_summary {
         text.push_str(&format!(" included={value}"));
     }
@@ -1296,6 +1302,9 @@ async fn tool_observe_snapshot(cfg: &AppConfig) -> Result<Value> {
         json!({
             "snapshot": snapshot,
             "observe_snapshot_summary": {
+                "continuity_status": summary.continuity_status,
+                "continuity_verified_probes": summary.continuity_verified_probes,
+                "continuity_total_probes": summary.continuity_total_probes,
                 "compatibility_profile": summary.compatibility_profile,
                 "compatibility_compatible": summary.compatibility_compatible,
                 "included_reasons_summary": summary.included_reasons_summary,
@@ -1311,6 +1320,9 @@ struct ObserveSnapshotSummary {
     alert: u64,
     critical: u64,
     unknown: u64,
+    continuity_status: Option<String>,
+    continuity_verified_probes: u64,
+    continuity_total_probes: u64,
     compatibility_profile: Option<String>,
     compatibility_compatible: Option<bool>,
     included_reasons_summary: Option<String>,
@@ -1324,6 +1336,16 @@ fn observe_snapshot_summary(snapshot: &Value) -> ObserveSnapshotSummary {
         alert: sla["alert"].as_u64().unwrap_or_default(),
         critical: sla["critical"].as_u64().unwrap_or_default(),
         unknown: sla["unknown"].as_u64().unwrap_or_default(),
+        continuity_status: snapshot["continuity_correctness_model"]["summary"]["status"]
+            .as_str()
+            .map(ToOwned::to_owned),
+        continuity_verified_probes:
+            snapshot["continuity_correctness_model"]["summary"]["verified_probes"]
+                .as_u64()
+                .unwrap_or_default(),
+        continuity_total_probes: snapshot["continuity_correctness_model"]["summary"]["probe_count"]
+            .as_u64()
+            .unwrap_or_default(),
         compatibility_profile: snapshot["compatibility"]["profile"]
             .as_str()
             .map(ToOwned::to_owned),
@@ -2954,6 +2976,13 @@ mod tests {
     #[test]
     fn observe_snapshot_summary_uses_reason_summaries_and_trace_fallback() {
         let snapshot = json!({
+            "continuity_correctness_model": {
+                "summary": {
+                    "status": "pass",
+                    "verified_probes": 9,
+                    "probe_count": 9
+                }
+            },
             "compatibility": {
                 "profile": "amai-1",
                 "compatible": true
@@ -2989,6 +3018,9 @@ mod tests {
         assert_eq!(summary.alert, 0);
         assert_eq!(summary.critical, 0);
         assert_eq!(summary.unknown, 0);
+        assert_eq!(summary.continuity_status.as_deref(), Some("pass"));
+        assert_eq!(summary.continuity_verified_probes, 9);
+        assert_eq!(summary.continuity_total_probes, 9);
         assert_eq!(summary.compatibility_profile.as_deref(), Some("amai-1"));
         assert_eq!(summary.compatibility_compatible, Some(true));
         assert_eq!(
