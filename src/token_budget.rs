@@ -527,15 +527,15 @@ fn default_adjustment_request_schema_version() -> String {
 }
 
 fn default_adjustment_registry_version() -> String {
-    "adjustment-registry-v1".to_string()
+    "adjustment-registry-v2".to_string()
 }
 
 fn default_rate_card_binding_model_version() -> String {
-    "rate-card-binding-v2".to_string()
+    "rate-card-binding-v3".to_string()
 }
 
 fn default_infra_cost_binding_model_version() -> String {
-    "infra-cost-binding-v2".to_string()
+    "infra-cost-binding-v3".to_string()
 }
 
 fn default_telemetry_surface_split_version() -> String {
@@ -559,7 +559,7 @@ fn default_billing_mode() -> String {
 }
 
 fn default_reconciliation_contract_version() -> String {
-    "provider-reconciliation-v5".to_string()
+    "provider-reconciliation-v6".to_string()
 }
 
 fn default_margin_model_version() -> String {
@@ -571,11 +571,11 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v7".to_string()
+    "contractual-evidence-pack-v8".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v7".to_string()
+    "contractual-statement-export-v8".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -1009,6 +1009,21 @@ fn parse_provider_invoice_export_file(raw: &str) -> Result<ProviderInvoiceExport
         .context("failed to parse provider invoice export as JSON or TOML")
 }
 
+fn file_last_modified_epoch_ms(path: &Path) -> Option<i64> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    let duration = modified.duration_since(UNIX_EPOCH).ok()?;
+    Some(duration.as_millis() as i64)
+}
+
+fn attach_source_file_evidence(base: &mut Value, path: &Path, raw: &str) {
+    base["source_bytes"] = json!(raw.len() as u64);
+    base["source_sha256"] = Value::String(hex_sha256(raw.as_bytes()));
+    base["source_last_modified_epoch_ms"] = match file_last_modified_epoch_ms(path) {
+        Some(value) => json!(value),
+        None => Value::Null,
+    };
+}
+
 fn parse_infra_cost_profile_file(raw: &str) -> Result<InfraCostProfileFile> {
     serde_json::from_str::<InfraCostProfileFile>(raw)
         .or_else(|_| toml::from_str::<InfraCostProfileFile>(raw).map_err(anyhow::Error::from))
@@ -1021,6 +1036,9 @@ fn bind_rate_card_json_from_source(source: &Value, contract: &TokenBudgetContrac
         "configured_contract_version": contract.rate_card_version.clone(),
         "configured_currency_profile": contract.currency_profile.clone(),
         "source": source.clone(),
+        "source_bytes": Value::Null,
+        "source_sha256": Value::Null,
+        "source_last_modified_epoch_ms": Value::Null,
         "money_conversion_enabled": false,
         "status": source["status"].clone(),
         "bound_rate_card_version": Value::Null,
@@ -1053,6 +1071,7 @@ fn bind_rate_card_json_from_source(source: &Value, contract: &TokenBudgetContrac
             return base;
         }
     };
+    attach_source_file_evidence(&mut base, Path::new(path), &raw);
     let rate_card = match parse_rate_card_file(&raw) {
         Ok(rate_card) => rate_card,
         Err(error) => {
@@ -1111,6 +1130,9 @@ fn bind_infra_cost_profile_json_from_source(
         "binding_model_version": contract.infra_cost_binding_model_version.clone(),
         "configured_contract_version": contract.infra_cost_profile_version.clone(),
         "source": source.clone(),
+        "source_bytes": Value::Null,
+        "source_sha256": Value::Null,
+        "source_last_modified_epoch_ms": Value::Null,
         "status": source["status"].clone(),
         "schema_version": Value::Null,
         "bound_profile_version": Value::Null,
@@ -1145,6 +1167,7 @@ fn bind_infra_cost_profile_json_from_source(
             return base;
         }
     };
+    attach_source_file_evidence(&mut base, Path::new(path), &raw);
     let profile = match parse_infra_cost_profile_file(&raw) {
         Ok(profile) => profile,
         Err(error) => {
@@ -1457,6 +1480,9 @@ fn load_adjustment_registry_from_source(
         "schema_version": contract.adjustment_registry_version.clone(),
         "request_schema_version": contract.adjustment_request_schema_version.clone(),
         "source": source.clone(),
+        "source_bytes": Value::Null,
+        "source_sha256": Value::Null,
+        "source_last_modified_epoch_ms": Value::Null,
         "status": source["status"].clone(),
         "entries_count": 0,
         "pending_entries_count": 0,
@@ -1510,6 +1536,7 @@ fn load_adjustment_registry_from_source(
             return base;
         }
     };
+    attach_source_file_evidence(&mut base, Path::new(path), &content);
     let registry = match serde_json::from_str::<AdjustmentRegistryFile>(&content) {
         Ok(registry) => registry,
         Err(error) => {
@@ -1693,6 +1720,70 @@ fn build_adjustment_preview_json(
             "dispute_hold"
         ],
         "note": "Корректировки и credit semantics materialize-ятся отдельным registry слоем: report-only preview не переписывает прошлые statement задним числом."
+    })
+}
+
+fn binding_currency_profile(binding: &Value) -> Value {
+    if !binding["bound_currency_profile"].is_null() {
+        binding["bound_currency_profile"].clone()
+    } else {
+        binding["currency_profile"].clone()
+    }
+}
+
+fn binding_bound_version(binding: &Value) -> Value {
+    for key in [
+        "bound_rate_card_version",
+        "bound_profile_version",
+        "schema_version",
+    ] {
+        if !binding[key].is_null() {
+            return binding[key].clone();
+        }
+    }
+    Value::Null
+}
+
+fn build_external_truth_manifest_entry(binding: &Value) -> Value {
+    json!({
+        "status": binding["status"].clone(),
+        "binding_status": binding["source"]["binding_status"].clone(),
+        "resolved_path": binding["source"]["resolved_path"].clone(),
+        "source_bytes": binding["source_bytes"].clone(),
+        "source_sha256": binding["source_sha256"].clone(),
+        "source_last_modified_epoch_ms": binding["source_last_modified_epoch_ms"].clone(),
+        "schema_version": binding["schema_version"].clone(),
+        "bound_version": binding_bound_version(binding),
+        "provider": binding["provider"].clone(),
+        "currency_profile": binding_currency_profile(binding),
+    })
+}
+
+fn build_external_truth_manifest(
+    contract: &TokenBudgetContractConfig,
+    rate_card: &Value,
+    infra_cost_profile: &Value,
+    provider_usage_binding: &Value,
+    provider_invoice_binding: &Value,
+    adjustment_registry: &Value,
+) -> Value {
+    let entries = json!({
+        "provider_usage_export": build_external_truth_manifest_entry(provider_usage_binding),
+        "provider_invoice_export": build_external_truth_manifest_entry(provider_invoice_binding),
+        "provider_rate_card": build_external_truth_manifest_entry(rate_card),
+        "infra_cost_profile": build_external_truth_manifest_entry(infra_cost_profile),
+        "token_adjustment_registry": build_external_truth_manifest_entry(adjustment_registry),
+    });
+    let manifest_hash = serde_json::to_vec(&entries)
+        .map(|bytes| hex_sha256(&bytes))
+        .unwrap_or_else(|_| "hash_error".to_string());
+    json!({
+        "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
+        "statement_export_version": contract.contractual_statement_export_version.clone(),
+        "evidence_pack_version": contract.contractual_evidence_pack_version.clone(),
+        "entries": entries,
+        "manifest_hash": manifest_hash,
+        "note": "External truth manifest фиксирует fingerprint привязанных usage/invoice/rate-card/infra/adjustment sources. Это audit trail для contractual review, а не invoice-grade settlement."
     })
 }
 
@@ -2200,6 +2291,9 @@ fn load_provider_usage_binding_from_source(source: &Value, rate_card: &Value) ->
     let mut base = json!({
         "status": source["status"].clone(),
         "source": source.clone(),
+        "source_bytes": Value::Null,
+        "source_sha256": Value::Null,
+        "source_last_modified_epoch_ms": Value::Null,
         "schema_version": Value::Null,
         "provider": Value::Null,
         "bound_currency_profile": Value::Null,
@@ -2232,6 +2326,7 @@ fn load_provider_usage_binding_from_source(source: &Value, rate_card: &Value) ->
             return base;
         }
     };
+    attach_source_file_evidence(&mut base, Path::new(path), &raw);
     let export = match parse_provider_usage_export_file(&raw) {
         Ok(export) => export,
         Err(error) => {
@@ -2296,6 +2391,9 @@ fn load_provider_invoice_binding_from_source(source: &Value) -> Value {
     let mut base = json!({
         "status": source["status"].clone(),
         "source": source.clone(),
+        "source_bytes": Value::Null,
+        "source_sha256": Value::Null,
+        "source_last_modified_epoch_ms": Value::Null,
         "schema_version": Value::Null,
         "provider": Value::Null,
         "bound_currency_profile": Value::Null,
@@ -2323,6 +2421,7 @@ fn load_provider_invoice_binding_from_source(source: &Value) -> Value {
             return base;
         }
     };
+    attach_source_file_evidence(&mut base, Path::new(path), &raw);
     let export = match parse_provider_invoice_export_file(&raw) {
         Ok(export) => export,
         Err(error) => {
@@ -4085,6 +4184,7 @@ fn build_statement_export_preview(
                 "statement_preview_id",
                 "contractual_state",
                 "coverage_state",
+                "external_truth_manifest",
                 "transactional_statuses",
                 "included_events_hash",
                 "excluded_events_hash",
@@ -4093,6 +4193,7 @@ fn build_statement_export_preview(
             ]
         },
         "blocking_reasons": contractual_summary["blocking_reasons"].clone(),
+        "external_truth_manifest": report["token_budget_report"]["external_truth_manifest"].clone(),
         "suitability": contractual_summary["suitability"].clone(),
         "evidence_pack_available": true,
         "evidence_pack_command": format!(
@@ -4159,6 +4260,7 @@ fn build_contractual_evidence_pack(
         "provider_usage_provider": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["provider_usage_provider"].clone(),
         "provider_invoice_provider": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["provider_invoice_provider"].clone(),
         "provider_identity_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["provider_identity_state"].clone(),
+        "external_truth_manifest": report["token_budget_report"]["external_truth_manifest"].clone(),
         "export_semantics": {
             "surface_kind": "customer_evidence_pack_report_only",
             "self_serve_state": "self_serve_ready_report_only",
@@ -4168,6 +4270,7 @@ fn build_contractual_evidence_pack(
             "customer_visible_sections": [
                 "truth_guardrail",
                 "contract_versions",
+                "external_truth_manifest",
                 "statement_preview",
                 "reconciliation_preview",
                 "margin_scope",
@@ -4449,6 +4552,7 @@ fn build_contractual_sources_value(
         "scope_code": scope_code,
         "scope_label": scope_label,
         "external_truth_sources": external_truth_sources,
+        "external_truth_manifest": report["token_budget_report"]["external_truth_manifest"].clone(),
         "rate_card": report["token_budget_report"]["rate_card"].clone(),
         "infra_cost_profile": report["token_budget_report"]["infra_cost_profile"].clone(),
         "reconciliation_contract": report["token_budget_report"]["reconciliation_contract"].clone(),
@@ -5148,9 +5252,18 @@ async fn collect_report(
         &lifetime_margin_scope,
         &lifetime_metering_freshness,
     );
+    let external_truth_manifest = build_external_truth_manifest(
+        &config.contract,
+        &rate_card,
+        &infra_cost_profile,
+        &provider_usage_binding,
+        &provider_invoice_binding,
+        &adjustment_registry,
+    );
     let current_session_statement_export = build_statement_export_preview(
         &json!({
             "token_budget_report": {
+                "external_truth_manifest": external_truth_manifest.clone(),
                 "statement_previews": {
                     "current_session": current_session_statement_preview.clone(),
                 },
@@ -5175,6 +5288,7 @@ async fn collect_report(
         build_statement_export_preview(
             &json!({
                 "token_budget_report": {
+                    "external_truth_manifest": external_truth_manifest.clone(),
                     "statement_previews": {
                         "rolling_window": rolling_window_statement_preview.clone(),
                     },
@@ -5201,6 +5315,7 @@ async fn collect_report(
     let lifetime_statement_export = build_statement_export_preview(
         &json!({
             "token_budget_report": {
+                "external_truth_manifest": external_truth_manifest.clone(),
                 "statement_previews": {
                     "lifetime": lifetime_statement_preview.clone(),
                 },
@@ -5248,6 +5363,7 @@ async fn collect_report(
             "adjustment_request_schema": build_adjustment_request_schema_json(&config.contract),
             "adjustment_registry": adjustment_registry.clone(),
             "reconciliation_contract": reconciliation_contract.clone(),
+            "external_truth_manifest": external_truth_manifest,
             "provider_usage_binding": provider_usage_binding.clone(),
             "provider_invoice_binding": provider_invoice_binding.clone(),
             "infra_cost_profile": infra_cost_profile.clone(),
@@ -9300,7 +9416,7 @@ mod tests {
         assert_eq!(token_event["contract"]["billing_mode"], "report_only");
         assert_eq!(
             token_event["contract"]["reconciliation_contract_version"],
-            "provider-reconciliation-v5"
+            "provider-reconciliation-v6"
         );
         assert_eq!(
             token_event["contract"]["margin_model_version"],
@@ -9312,7 +9428,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v7"
+            "contractual-evidence-pack-v8"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -9332,11 +9448,11 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["adjustment_registry_version"],
-            "adjustment-registry-v1"
+            "adjustment-registry-v2"
         );
         assert_eq!(
             token_event["contract"]["rate_card_binding_model_version"],
-            "rate-card-binding-v2"
+            "rate-card-binding-v3"
         );
         assert_eq!(
             token_event["contract"]["telemetry_surface_split_version"],
@@ -9526,6 +9642,15 @@ effective_to_epoch_ms = 2000
         assert_eq!(rate_card["effective_from_epoch_ms"], 1000);
         assert_eq!(rate_card["effective_to_epoch_ms"], 2000);
         assert_eq!(rate_card["temporal_scope_state"], "source_period_bounded");
+        assert!(rate_card["source_bytes"].as_u64().unwrap_or(0) > 0);
+        assert!(
+            rate_card["source_sha256"]
+                .as_str()
+                .unwrap_or_default()
+                .len()
+                > 10
+        );
+        assert!(rate_card["source_last_modified_epoch_ms"].is_number());
     }
 
     #[test]
@@ -9584,6 +9709,9 @@ effective_to_epoch_ms = 2000
         assert_eq!(binding["effective_from_epoch_ms"], 1000);
         assert_eq!(binding["effective_to_epoch_ms"], 2000);
         assert_eq!(binding["temporal_scope_state"], "source_period_bounded");
+        assert!(binding["source_bytes"].as_u64().unwrap_or(0) > 0);
+        assert!(binding["source_sha256"].as_str().unwrap_or_default().len() > 10);
+        assert!(binding["source_last_modified_epoch_ms"].is_number());
     }
 
     #[test]
@@ -9621,6 +9749,9 @@ effective_to_epoch_ms = 2000
         assert_eq!(registry["status"], "loaded");
         assert_eq!(registry["entries_count"], 1);
         assert_eq!(registry["source"]["binding_status"], "loaded");
+        assert!(registry["source_bytes"].as_u64().unwrap_or(0) > 0);
+        assert!(registry["source_sha256"].as_str().unwrap_or_default().len() > 10);
+        assert!(registry["source_last_modified_epoch_ms"].is_number());
     }
 
     #[test]
@@ -9672,6 +9803,9 @@ effective_to_epoch_ms = 2000
             "source_period_bounded"
         );
         assert_eq!(binding["source"]["binding_status"], "usage_and_cost_bound");
+        assert!(binding["source_bytes"].as_u64().unwrap_or(0) > 0);
+        assert!(binding["source_sha256"].as_str().unwrap_or_default().len() > 10);
+        assert!(binding["source_last_modified_epoch_ms"].is_number());
     }
 
     #[test]
@@ -9714,6 +9848,9 @@ effective_to_epoch_ms = 2000
             "source_period_bounded"
         );
         assert_eq!(binding["source"]["binding_status"], "invoice_bound");
+        assert!(binding["source_bytes"].as_u64().unwrap_or(0) > 0);
+        assert!(binding["source_sha256"].as_str().unwrap_or_default().len() > 10);
+        assert!(binding["source_last_modified_epoch_ms"].is_number());
     }
 
     #[test]
@@ -9977,7 +10114,7 @@ effective_to_epoch_ms = 2000
             schema["retroactive_rewrite_policy"],
             "forbidden_use_adjustment_entries"
         );
-        assert_eq!(registry["schema_version"], "adjustment-registry-v1");
+        assert_eq!(registry["schema_version"], "adjustment-registry-v2");
         assert_eq!(registry["status"], "default_path_missing");
         assert_eq!(registry["entries_count"], 0);
     }
@@ -9999,7 +10136,7 @@ effective_to_epoch_ms = 2000
 
         assert_eq!(
             reconciliation["contract_version"],
-            "provider-reconciliation-v5"
+            "provider-reconciliation-v6"
         );
         assert_eq!(reconciliation["status"], "awaiting_provider_usage_source");
         assert_eq!(
@@ -11101,6 +11238,9 @@ effective_to_epoch_ms = 2000
                             }
                         }
                     }
+                },
+                "external_truth_manifest": {
+                    "manifest_hash": "truth-hash"
                 }
             }
         });
@@ -11135,7 +11275,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v7");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v8");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -11178,6 +11318,10 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(preview["included_events_count"], 1);
         assert_eq!(preview["excluded_events_count"], 1);
+        assert_eq!(
+            preview["external_truth_manifest"]["manifest_hash"],
+            "truth-hash"
+        );
         assert_eq!(preview["credit_action_state"], "registry_not_configured");
         assert_eq!(preview["dispute_action_state"], "no_open_disputes");
         assert_eq!(preview["evidence_pack_available"], true);
@@ -11263,6 +11407,9 @@ effective_to_epoch_ms = 2000
                             }
                         }
                     }
+                },
+                "external_truth_manifest": {
+                    "manifest_hash": "truth-hash"
                 }
             }
         });
@@ -11307,7 +11454,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v7");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v8");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -11335,6 +11482,10 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(payload["included_events_count"], 1);
         assert_eq!(payload["excluded_events_count"], 1);
+        assert_eq!(
+            payload["external_truth_manifest"]["manifest_hash"],
+            "truth-hash"
+        );
         assert!(
             payload["included_events_hash"]
                 .as_str()

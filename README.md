@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 21:05 MSK
-Ручная сверка guide/docs: 2026-03-24 21:05 MSK
+modified_at: 2026-03-24 22:10 MSK
+Ручная сверка guide/docs: 2026-03-24 22:10 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1300,6 +1300,20 @@ preview, а не только raw count.
     - `statement_export_preview.json`
     - `contractual_evidence_pack.json`
     - `token_contractual_sources.json`
+  - `statement_export_preview.json` и `contractual_evidence_pack.json` теперь ещё отдельно несут
+    `external_truth_manifest` с fingerprint внешних truth sources:
+    - `provider_usage_export`
+    - `provider_invoice_export`
+    - `provider_rate_card`
+    - `infra_cost_profile`
+    - `token_adjustment_registry`
+  - это нужно затем, чтобы customer-facing review видел не только current status, но и
+    machine-readable evidence того, какие именно source files реально были привязаны:
+    - `resolved_path`
+    - `source_bytes`
+    - `source_sha256`
+    - `source_last_modified_epoch_ms`
+    - `bound_version`
   - это уже customer-facing review surface с hashes и contract states, но всё ещё строго
     `report_only`, а не invoice.
 - metering freshness теперь тоже first-class:

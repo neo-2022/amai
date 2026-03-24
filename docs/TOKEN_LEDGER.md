@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 21:05 MSK
-Ручная сверка guide/docs: 2026-03-24 21:05 MSK
+modified_at: 2026-03-24 22:10 MSK
+Ручная сверка guide/docs: 2026-03-24 22:10 MSK
 
 # Token Ledger
 
@@ -640,7 +640,7 @@ materialized end-to-end.
 - какой у них per-scope hash.
 
 Текущий truthful status без подключённого источника:
-- `adjustment_registry_version = adjustment-registry-v1`
+- `adjustment_registry_version = adjustment-registry-v2`
 - `resolved_path = /home/art/agent-memory-index/state/token_adjustment_registry.json`
 - `status = default_path_missing`
 - `entries_count = 0`
@@ -712,7 +712,7 @@ Operator-safe report-only команды:
 - готовы ли мы вообще к external reconciliation.
 
 Текущий truthful status:
-- `reconciliation_contract_version = provider-reconciliation-v5`
+- `reconciliation_contract_version = provider-reconciliation-v6`
 - `ready_for_external_reconciliation` теперь зависит от реального bind provider usage export,
   а не от одного факта, что где-то прописан путь;
 - contract теперь ещё отдельно публикует:
@@ -825,7 +825,7 @@ Customer-facing export bundle:
 
 Текущий truthful status:
 - `margin_model_version = margin-view-v4`
-- `infra_cost_binding_model_version = infra-cost-binding-v2`
+- `infra_cost_binding_model_version = infra-cost-binding-v3`
 - `infra_cost_profile_version = unpriced-infra-v1`
 - `money_margin_enabled` включается только после честного bind на
   `priced rate card + provider usage + infra cost profile`;
@@ -914,11 +914,37 @@ Customer-facing export bundle:
 - `line_items.excluded`
 
 Честный смысл этого export сейчас такой:
-- это `contractual-evidence-pack-v7`;
+- это `contractual-evidence-pack-v8`;
 - это всё ещё `report_only tokenonomics`;
 - это не invoice;
 - это не final settlement;
 - это не разрешение quietly подменять прошлый period.
+
+Поверх export теперь отдельно materialize-ится и `external_truth_manifest`.
+
+Он нужен затем, чтобы customer-facing review surface видела не только сами statement/reconciliation
+состояния, но и audit-friendly fingerprint привязанных truth sources:
+- `provider_usage_export`
+- `provider_invoice_export`
+- `provider_rate_card`
+- `infra_cost_profile`
+- `token_adjustment_registry`
+
+У каждого source в manifest теперь должны быть:
+- `status`
+- `binding_status`
+- `resolved_path`
+- `source_bytes`
+- `source_sha256`
+- `source_last_modified_epoch_ms`
+- `schema_version`
+- `bound_version`
+- `provider`
+- `currency_profile`
+
+Именно поэтому contractual review/export теперь обязан не просто ссылаться на внешние truth
+sources “словами”, а показывать machine-readable fingerprint того, что реально было привязано в
+момент сборки export.
 
 Отдельный truth guardrail внутри pack обязателен:
 - `retrieval_savings_floor = real`

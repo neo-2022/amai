@@ -112,6 +112,11 @@ assert payload["rate_card"]["status"] == "priced_bound", payload
 assert payload["provider_usage_binding"]["status"] == "usage_and_cost_bound", payload
 assert payload["provider_invoice_binding"]["status"] == "invoice_bound", payload
 assert payload["infra_cost_profile"]["status"] == "priced_bound", payload
+assert payload["external_truth_manifest"]["manifest_hash"], payload
+assert payload["external_truth_manifest"]["entries"]["provider_usage_export"]["source_sha256"], payload
+assert payload["external_truth_manifest"]["entries"]["provider_invoice_export"]["source_sha256"], payload
+assert payload["external_truth_manifest"]["entries"]["provider_rate_card"]["source_sha256"], payload
+assert payload["external_truth_manifest"]["entries"]["infra_cost_profile"]["source_sha256"], payload
 assert payload["reconciliation_preview"]["reconciliation_state"] == "external_usage_and_invoice_aligned_report_only", payload
 assert payload["reconciliation_preview"]["usage_truth_completeness_state"] == "provider_usage_bound", payload
 assert payload["reconciliation_preview"]["money_truth_completeness_state"] == "provider_cost_and_invoice_bound", payload
