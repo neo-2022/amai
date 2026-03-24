@@ -435,7 +435,7 @@ fn default_usage_event_schema_version() -> String {
 }
 
 fn default_settlement_statement_version() -> String {
-    "settlement-preview-v3".to_string()
+    "settlement-preview-v4".to_string()
 }
 
 fn default_metering_event_schema_version() -> String {
@@ -495,7 +495,7 @@ fn default_dispute_policy_version() -> String {
 }
 
 fn default_settlement_lifecycle_model_version() -> String {
-    "settlement-lifecycle-v3".to_string()
+    "settlement-lifecycle-v4".to_string()
 }
 
 fn default_statement_period_governance_version() -> String {
@@ -555,11 +555,11 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v2".to_string()
+    "contractual-evidence-pack-v3".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v2".to_string()
+    "contractual-statement-export-v3".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -2854,6 +2854,159 @@ fn next_settlement_stage_blockers(
     billing_close_barriers.to_vec()
 }
 
+fn merge_string_slices(slices: &[&[String]]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut merged = Vec::new();
+    for slice in slices {
+        for item in *slice {
+            if seen.insert(item.clone()) {
+                merged.push(item.clone());
+            }
+        }
+    }
+    merged
+}
+
+fn transactional_status_entry(
+    status: &str,
+    boundary: &str,
+    materialized: bool,
+    blocking_reasons: Vec<String>,
+) -> Value {
+    json!({
+        "status": status,
+        "boundary": boundary,
+        "materialized": materialized,
+        "blocking_reasons": blocking_reasons,
+    })
+}
+
+fn build_transactional_statuses(
+    contract: &TokenBudgetContractConfig,
+    measured_events: usize,
+    settlement_stage: &str,
+    next_stage_candidate: &str,
+    next_stage_blockers: &[String],
+    billing_close_barriers: &[String],
+    adjustment_preview: &Value,
+) -> Value {
+    let no_usage_reasons = vec!["no_measured_usage_events".to_string()];
+    let review_ready = settlement_stage == "measured_review_ready_report_only";
+    let measured = if measured_events == 0 {
+        transactional_status_entry(
+            "awaiting_measured_usage",
+            "not_started",
+            false,
+            no_usage_reasons.clone(),
+        )
+    } else {
+        transactional_status_entry(settlement_stage, "measured_report_only", true, Vec::new())
+    };
+    let review = if measured_events == 0 {
+        transactional_status_entry(
+            "awaiting_measured_usage",
+            "not_started",
+            false,
+            no_usage_reasons.clone(),
+        )
+    } else if review_ready {
+        transactional_status_entry(
+            "review_ready_report_only",
+            "measured_report_only",
+            true,
+            Vec::new(),
+        )
+    } else {
+        transactional_status_entry(
+            "review_blocked_report_only",
+            "measured_report_only",
+            true,
+            next_stage_blockers.to_vec(),
+        )
+    };
+    let billable = if next_stage_candidate == "billable_reserved" {
+        transactional_status_entry("billable_reserved", "reserved_future", false, Vec::new())
+    } else if measured_events == 0 {
+        transactional_status_entry(
+            "awaiting_measured_usage",
+            "reserved_future",
+            false,
+            no_usage_reasons.clone(),
+        )
+    } else {
+        transactional_status_entry(
+            "billable_blocked_reserved",
+            "reserved_future",
+            false,
+            if next_stage_blockers.is_empty() {
+                billing_close_barriers.to_vec()
+            } else {
+                next_stage_blockers.to_vec()
+            },
+        )
+    };
+    let reserved_follow_on_blockers = if measured_events == 0 {
+        no_usage_reasons.clone()
+    } else {
+        merge_string_slices(&[
+            billing_close_barriers,
+            &vec!["billable_not_materialized".to_string()],
+        ])
+    };
+    let disputed = if adjustment_preview["disputed_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        transactional_status_entry(
+            "dispute_hold_report_only",
+            "measured_report_only",
+            true,
+            vec!["open_dispute_entries".to_string()],
+        )
+    } else {
+        transactional_status_entry(
+            "disputed_reserved",
+            "reserved_future",
+            false,
+            vec!["no_open_dispute_entries".to_string()],
+        )
+    };
+
+    json!({
+        "model_version": contract.settlement_lifecycle_model_version.clone(),
+        "measured": measured,
+        "review": review,
+        "billable": billable,
+        "settled": transactional_status_entry(
+            "settled_reserved",
+            "reserved_future",
+            false,
+            reserved_follow_on_blockers.clone(),
+        ),
+        "invoiced": transactional_status_entry(
+            "invoiced_reserved",
+            "reserved_future",
+            false,
+            reserved_follow_on_blockers.clone(),
+        ),
+        "credited": transactional_status_entry(
+            "credited_reserved",
+            "reserved_future",
+            false,
+            reserved_follow_on_blockers.clone(),
+        ),
+        "disputed": disputed,
+        "closed": transactional_status_entry(
+            "closed_reserved",
+            "reserved_future",
+            false,
+            reserved_follow_on_blockers,
+        ),
+        "note": "Transactional statuses честно разделяют уже materialized measured/report-only стадии и будущие reserved money-facing стадии. Reserved не означает включённый billing workflow."
+    })
+}
+
 fn provisional_close_barriers(
     summary: &Value,
     metering_freshness: &Value,
@@ -3151,6 +3304,7 @@ fn build_contractual_statement_summary(
         "next_settlement_stage_candidate": statement_preview["next_settlement_stage_candidate"].clone(),
         "next_settlement_stage_blockers": statement_preview["next_settlement_stage_blockers"].clone(),
         "future_reserved_settlement_stages": statement_preview["future_reserved_settlement_stages"].clone(),
+        "transactional_statuses": statement_preview["transactional_statuses"].clone(),
         "coverage_state": statement_preview["coverage"]["completeness_state"].clone(),
         "provisional_close_state": statement_preview["provisional_close_state"].clone(),
         "provisional_close_candidate": statement_preview["provisional_close_candidate"].clone(),
@@ -3274,6 +3428,15 @@ fn build_statement_preview(
         &provisional_close_barriers,
         &billing_close_barriers,
     );
+    let transactional_statuses = build_transactional_statuses(
+        contract,
+        measured_events,
+        settlement_stage,
+        next_stage_candidate,
+        &next_stage_blockers,
+        &billing_close_barriers,
+        &adjustment_preview,
+    );
     json!({
         "scope_code": scope_code,
         "scope_label": scope_label,
@@ -3284,6 +3447,7 @@ fn build_statement_preview(
         "next_settlement_stage_candidate": next_stage_candidate,
         "next_settlement_stage_blockers": next_stage_blockers,
         "future_reserved_settlement_stages": future_reserved_settlement_stages(),
+        "transactional_statuses": transactional_statuses,
         "operational_state": "live_measurement_open",
         "contractual_state": match lifecycle_state {
             "measured_non_billable_dispute_hold" => "report_only_preview_dispute_hold",
@@ -3461,6 +3625,7 @@ fn build_statement_export_preview(
         "next_settlement_stage_candidate": contractual_summary["next_settlement_stage_candidate"].clone(),
         "next_settlement_stage_blockers": contractual_summary["next_settlement_stage_blockers"].clone(),
         "future_reserved_settlement_stages": contractual_summary["future_reserved_settlement_stages"].clone(),
+        "transactional_statuses": contractual_summary["transactional_statuses"].clone(),
         "coverage_state": contractual_summary["coverage_state"].clone(),
         "provisional_close_state": contractual_summary["provisional_close_state"].clone(),
         "provisional_close_candidate": contractual_summary["provisional_close_candidate"].clone(),
@@ -3541,6 +3706,7 @@ fn build_contractual_evidence_pack(
         "settlement_stage_family": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["settlement_stage_family"].clone(),
         "next_settlement_stage_candidate": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["next_settlement_stage_candidate"].clone(),
         "next_settlement_stage_blockers": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["next_settlement_stage_blockers"].clone(),
+        "transactional_statuses": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["transactional_statuses"].clone(),
         "statement_preview": statement_preview,
         "reconciliation_preview": reconciliation_preview,
         "margin_scope": margin_scope,
@@ -3824,6 +3990,7 @@ fn build_contractual_sources_value(
         "reconciliation_preview": report["token_budget_report"]["reconciliation_previews"][scope_code].clone(),
         "margin_scope": report["token_budget_report"]["margin_view"][scope_code].clone(),
         "statement_export_preview": report["token_budget_report"]["statement_export_previews"][scope_code].clone(),
+        "transactional_statuses": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["transactional_statuses"].clone(),
         "suggested_repo_local_paths": {
             "provider_usage_export": provider_usage_default_path(repo_root).display().to_string(),
             "provider_invoice_export": provider_invoice_default_path(repo_root).display().to_string(),
@@ -8661,11 +8828,11 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v2"
+            "contractual-evidence-pack-v3"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
-            "settlement-lifecycle-v3"
+            "settlement-lifecycle-v4"
         );
         assert_eq!(
             token_event["contract"]["statement_period_governance_version"],
@@ -9082,11 +9249,11 @@ fixed_scope_cost_amount = 0.01
 
         assert_eq!(
             settlement_contract["statement_version"],
-            "settlement-preview-v3"
+            "settlement-preview-v4"
         );
         assert_eq!(
             settlement_contract["settlement_lifecycle_model_version"],
-            "settlement-lifecycle-v3"
+            "settlement-lifecycle-v4"
         );
         assert_eq!(
             settlement_contract["current_materialized_boundary"],
@@ -9126,6 +9293,18 @@ fixed_scope_cost_amount = 0.01
                 "disputed_reserved",
                 "closed_reserved"
             ])
+        );
+        assert_eq!(
+            preview["transactional_statuses"]["measured"]["status"],
+            "measured_open_report_only"
+        );
+        assert_eq!(
+            preview["transactional_statuses"]["review"]["status"],
+            "review_blocked_report_only"
+        );
+        assert_eq!(
+            preview["transactional_statuses"]["billable"]["status"],
+            "billable_blocked_reserved"
         );
         assert_eq!(preview["contractual_state"], "report_only_preview_open");
         assert_eq!(
@@ -9225,6 +9404,14 @@ fixed_scope_cost_amount = 0.01
                 "external_reconciliation_not_bound",
                 "rate_card_unpriced"
             ])
+        );
+        assert_eq!(
+            preview["transactional_statuses"]["review"]["status"],
+            "review_ready_report_only"
+        );
+        assert_eq!(
+            preview["transactional_statuses"]["billable"]["status"],
+            "billable_blocked_reserved"
         );
         assert_eq!(preview["provisional_close_candidate"], true);
         assert_eq!(preview["freeze_status"], "provisionally_frozen_report_only");
@@ -9772,6 +9959,11 @@ fixed_scope_cost_amount = 0.01
                     "disputed_reserved",
                     "closed_reserved"
                 ],
+                "transactional_statuses": {
+                    "billable": {
+                        "status": "billable_blocked_reserved"
+                    }
+                },
                 "provisional_close_state": "report_only_preview_provisional_hold",
                 "provisional_close_candidate": false,
                 "provisional_close_barriers": ["coverage_not_final"],
@@ -9835,6 +10027,10 @@ fixed_scope_cost_amount = 0.01
         assert_eq!(
             summary["next_settlement_stage_blockers"],
             json!(["coverage_not_final"])
+        );
+        assert_eq!(
+            summary["transactional_statuses"]["billable"]["status"],
+            "billable_blocked_reserved"
         );
         assert_eq!(summary["coverage_state"], "partially_confirmed");
         assert_eq!(
@@ -9960,6 +10156,11 @@ fixed_scope_cost_amount = 0.01
                             "disputed_reserved",
                             "closed_reserved"
                         ],
+                        "transactional_statuses": {
+                            "review": {
+                                "status": "review_blocked_report_only"
+                            }
+                        },
                         "coverage_state": "partially_confirmed",
                         "contractual_freshness_state": "provisional_open_window",
                         "reconciliation_state": "awaiting_provider_usage_source",
@@ -10012,7 +10213,7 @@ fixed_scope_cost_amount = 0.01
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v2");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v3");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -10023,6 +10224,10 @@ fixed_scope_cost_amount = 0.01
         assert_eq!(
             preview["next_settlement_stage_blockers"],
             json!(["coverage_not_final"])
+        );
+        assert_eq!(
+            preview["transactional_statuses"]["review"]["status"],
+            "review_blocked_report_only"
         );
         assert_eq!(preview["included_events_count"], 1);
         assert_eq!(preview["excluded_events_count"], 1);
@@ -10097,6 +10302,11 @@ fixed_scope_cost_amount = 0.01
                         "settlement_stage_family": "measured_report_only",
                         "next_settlement_stage_candidate": "billable_blocked",
                         "next_settlement_stage_blockers": ["billing_mode_report_only"],
+                        "transactional_statuses": {
+                            "billable": {
+                                "status": "billable_blocked_reserved"
+                            }
+                        },
                         "suitability": {
                             "surfaces": {
                                 "contractual_export": {
@@ -10150,7 +10360,7 @@ fixed_scope_cost_amount = 0.01
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v2");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v3");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -10163,6 +10373,10 @@ fixed_scope_cost_amount = 0.01
         assert_eq!(
             payload["next_settlement_stage_blockers"],
             json!(["billing_mode_report_only"])
+        );
+        assert_eq!(
+            payload["transactional_statuses"]["billable"]["status"],
+            "billable_blocked_reserved"
         );
         assert_eq!(payload["included_events_count"], 1);
         assert_eq!(payload["excluded_events_count"], 1);

@@ -30,6 +30,11 @@ assert manifest["scope_code"] == "lifetime", manifest
 assert statement_export["scope_code"] == "lifetime", statement_export
 assert evidence_pack["scope_code"] == "lifetime", evidence_pack
 assert contractual_sources["scope_code"] == "lifetime", contractual_sources
+assert statement_export["model_version"] == "contractual-statement-export-v3", statement_export
+assert evidence_pack["pack_version"] == "contractual-evidence-pack-v3", evidence_pack
+assert statement_export["transactional_statuses"]["billable"]["boundary"] == "reserved_future", statement_export
+assert evidence_pack["transactional_statuses"]["measured"]["boundary"] in {"not_started", "measured_report_only"}, evidence_pack
+assert contractual_sources["transactional_statuses"] == evidence_pack["transactional_statuses"], contractual_sources
 assert manifest["statement_preview_id"] == statement_export["statement_preview_id"], manifest
 assert evidence_pack["included_events_hash"] == statement_export["included_events_hash"], evidence_pack
 assert contractual_sources["statement_export_preview"]["statement_preview_id"] == statement_export["statement_preview_id"], contractual_sources

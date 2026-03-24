@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 17:08 MSK
-Ручная сверка guide/docs: 2026-03-24 17:08 MSK
+modified_at: 2026-03-24 17:21 MSK
+Ручная сверка guide/docs: 2026-03-24 17:21 MSK
 
 # Operations
 
@@ -1779,6 +1779,8 @@ cargo run -- context pack \
   - в них видно measured non-billable lower bound по каждому scope;
   - в них отдельно видны `lifecycle_state`, `contractual_state`, `settlement_stage`,
     `next_settlement_stage_candidate`, `next_settlement_stage_blockers`, `close_barriers`;
+  - в них теперь ещё есть `transactional_statuses`, которые по-честному разводят
+    `measured / review / billable / settled / invoiced / credited / disputed / closed`;
   - в них теперь ещё есть `period`, `adjustment_preview`, `freshness`,
     `provisional_close_state`, `provisional_close_candidate`,
     `provisional_close_barriers`, `billing_close_barriers`;

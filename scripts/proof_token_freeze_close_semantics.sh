@@ -18,10 +18,10 @@ preview = payload["statement_previews"]["current_session"]
 summary = payload["contractual_statement_summaries"]["current_session"]
 period = preview["period"]
 
-assert contract["statement_version"] == "settlement-preview-v3", contract
+assert contract["statement_version"] == "settlement-preview-v4", contract
 assert contract["freeze_close_policy_version"] == "freeze-close-v2", contract
 assert contract["late_arrival_policy_version"] == "late-arrival-v2", contract
-assert contract["settlement_lifecycle_model_version"] == "settlement-lifecycle-v3", contract
+assert contract["settlement_lifecycle_model_version"] == "settlement-lifecycle-v4", contract
 assert contract["statement_period_governance_version"] == "statement-period-governance-v2", contract
 assert contract["freeze_close_status"] == "provisional_report_only", contract
 assert contract["late_arrival_status"] == "deadline_from_latest_event_report_only", contract
@@ -54,6 +54,8 @@ assert preview["next_settlement_stage_candidate"] in {
 }, preview
 assert isinstance(preview["next_settlement_stage_blockers"], list), preview
 assert preview["future_reserved_settlement_stages"] == contract["future_reserved_settlement_stages"], (preview, contract)
+assert preview["transactional_statuses"]["measured"]["boundary"] == "measured_report_only", preview
+assert preview["transactional_statuses"]["billable"]["boundary"] == "reserved_future", preview
 assert preview["close_readiness"] in {
     "provisionally_stable_report_only",
     "provisionally_blocked_report_only",
@@ -83,6 +85,7 @@ assert summary["settlement_stage"] == preview["settlement_stage"], (summary, pre
 assert summary["settlement_stage_family"] == preview["settlement_stage_family"], (summary, preview)
 assert summary["next_settlement_stage_candidate"] == preview["next_settlement_stage_candidate"], (summary, preview)
 assert summary["next_settlement_stage_blockers"] == preview["next_settlement_stage_blockers"], (summary, preview)
+assert summary["transactional_statuses"] == preview["transactional_statuses"], (summary, preview)
 assert summary["provisional_close_barriers"] == preview["provisional_close_barriers"], (summary, preview)
 assert summary["billing_close_barriers"] == preview["billing_close_barriers"], (summary, preview)
 assert summary["provisional_close_earliest_at_epoch_ms"] == period["provisional_close_earliest_at_epoch_ms"], (summary, period)
