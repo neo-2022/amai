@@ -435,7 +435,7 @@ fn default_usage_event_schema_version() -> String {
 }
 
 fn default_settlement_statement_version() -> String {
-    "settlement-preview-v2".to_string()
+    "settlement-preview-v3".to_string()
 }
 
 fn default_metering_event_schema_version() -> String {
@@ -495,7 +495,7 @@ fn default_dispute_policy_version() -> String {
 }
 
 fn default_settlement_lifecycle_model_version() -> String {
-    "settlement-lifecycle-v2".to_string()
+    "settlement-lifecycle-v3".to_string()
 }
 
 fn default_statement_period_governance_version() -> String {
@@ -555,11 +555,11 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v1".to_string()
+    "contractual-evidence-pack-v2".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v1".to_string()
+    "contractual-statement-export-v2".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -1159,6 +1159,7 @@ fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value
         "adjustment_preview_model_version": contract.adjustment_preview_model_version.clone(),
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "settlement_status": contract.settlement_status.clone(),
+        "current_materialized_boundary": "measured_report_only",
         "statement_lifecycle": [
             {
                 "code": "live_measurement_open",
@@ -1191,6 +1192,50 @@ fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value
                 "meaning": "Будущий invoice-grade слой должен использовать отдельные adjustment/credit semantics, а не тихую перезапись."
             }
         ],
+        "materialized_settlement_stages": [
+            {
+                "code": "empty_report_only",
+                "family": "empty",
+                "surface": "contractual",
+                "meaning": "Пока нет измеренных usage-событий даже для report-only statement preview."
+            },
+            {
+                "code": "measured_open_report_only",
+                "family": "measured_report_only",
+                "surface": "contractual",
+                "meaning": "Измеренный report-only scope уже есть, но он ещё не дотянулся даже до review-ready состояния."
+            },
+            {
+                "code": "measured_review_ready_report_only",
+                "family": "measured_report_only",
+                "surface": "contractual",
+                "meaning": "Measured lower bound уже provisionally stable и пригоден для review/export, но всё ещё не является billable amount."
+            },
+            {
+                "code": "measured_adjusted_report_only",
+                "family": "measured_report_only",
+                "surface": "contractual",
+                "meaning": "Measured lower bound уже содержит applied report-only adjustment entries."
+            },
+            {
+                "code": "measured_pending_adjustment_report_only",
+                "family": "measured_report_only",
+                "surface": "contractual",
+                "meaning": "Есть measured scope, но adjustment review ещё не завершён."
+            },
+            {
+                "code": "measured_disputed_report_only",
+                "family": "measured_report_only",
+                "surface": "contractual",
+                "meaning": "Measured scope существует, но по нему открыт dispute hold."
+            }
+        ],
+        "future_reserved_settlement_stages": future_reserved_settlement_stages(),
+        "transition_contract": {
+            "current_materialized_boundary": "measured_report_only",
+            "future_reserved_boundary": "billable_and_beyond_reserved",
+            "note": "Текущий runtime materialize-ит только measured/report-only lifecycle. Billable, settled, invoiced, credited, disputed и closed остаются зарезервированными стадиями, а не активной денежной логикой."
+        },
         "current_operational_state": "live_measurement_open",
         "current_contractual_state": "report_only_preview_open",
         "freeze_close_status": "provisional_report_only",
@@ -2716,13 +2761,109 @@ fn statement_lifecycle_state(adjustment_preview: &Value) -> &'static str {
     }
 }
 
+fn settlement_stage(
+    measured_events: usize,
+    adjustment_preview: &Value,
+    metering_freshness: &Value,
+    provisional_close_candidate: bool,
+) -> &'static str {
+    if measured_events == 0 {
+        "empty_report_only"
+    } else if adjustment_preview["disputed_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "measured_disputed_report_only"
+    } else if adjustment_preview["pending_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "measured_pending_adjustment_report_only"
+    } else if adjustment_preview["applied_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "measured_adjusted_report_only"
+    } else if metering_freshness["can_treat_scope_as_stable"].as_bool() == Some(true)
+        && provisional_close_candidate
+    {
+        "measured_review_ready_report_only"
+    } else {
+        "measured_open_report_only"
+    }
+}
+
+fn settlement_stage_family(stage: &str) -> &'static str {
+    match stage {
+        "empty_report_only" => "empty",
+        "measured_disputed_report_only"
+        | "measured_pending_adjustment_report_only"
+        | "measured_adjusted_report_only"
+        | "measured_review_ready_report_only"
+        | "measured_open_report_only" => "measured_report_only",
+        "billable_reserved" | "settled_reserved" | "invoiced_reserved" | "credited_reserved"
+        | "disputed_reserved" | "closed_reserved" => "future_reserved",
+        _ => "unknown",
+    }
+}
+
+fn future_reserved_settlement_stages() -> [&'static str; 6] {
+    [
+        "billable_reserved",
+        "settled_reserved",
+        "invoiced_reserved",
+        "credited_reserved",
+        "disputed_reserved",
+        "closed_reserved",
+    ]
+}
+
+fn next_settlement_stage_candidate(
+    measured_events: usize,
+    metering_freshness: &Value,
+    provisional_close_candidate: bool,
+    billing_close_barriers: &[String],
+) -> &'static str {
+    if measured_events == 0 {
+        "awaiting_measured_usage"
+    } else if !(metering_freshness["can_treat_scope_as_stable"].as_bool() == Some(true)
+        && provisional_close_candidate)
+    {
+        "review_ready_blocked"
+    } else if !billing_close_barriers.is_empty() {
+        "billable_blocked"
+    } else {
+        "billable_reserved"
+    }
+}
+
+fn next_settlement_stage_blockers(
+    measured_events: usize,
+    provisional_close_barriers: &[String],
+    billing_close_barriers: &[String],
+) -> Vec<String> {
+    if measured_events == 0 {
+        return vec!["no_measured_usage_events".to_string()];
+    }
+    if !provisional_close_barriers.is_empty() {
+        return provisional_close_barriers.to_vec();
+    }
+    billing_close_barriers.to_vec()
+}
+
 fn provisional_close_barriers(
     summary: &Value,
     metering_freshness: &Value,
     adjustment_preview: &Value,
 ) -> Vec<String> {
     let mut barriers = Vec::new();
-    if summary["coverage"]["completeness_state"].as_str() != Some("confirmed") {
+    if !matches!(
+        summary["coverage"]["completeness_state"].as_str(),
+        Some("confirmed" | "fully_confirmed")
+    ) {
         barriers.push("coverage_not_final".to_string());
     }
     if metering_freshness["contractual_lag_state"].as_str() == Some("awaiting_late_events") {
@@ -2991,6 +3132,9 @@ fn build_contractual_statement_summary(
     {
         return Value::Null;
     }
+    let settlement_stage = statement_preview["settlement_stage"]
+        .as_str()
+        .unwrap_or("unknown");
     let suitability = build_scope_suitability(
         contract,
         statement_preview,
@@ -3002,6 +3146,11 @@ fn build_contractual_statement_summary(
         "scope_code": scope_code,
         "scope_label": scope_label,
         "contractual_state": statement_preview["contractual_state"].clone(),
+        "settlement_stage": statement_preview["settlement_stage"].clone(),
+        "settlement_stage_family": statement_preview["settlement_stage_family"].clone(),
+        "next_settlement_stage_candidate": statement_preview["next_settlement_stage_candidate"].clone(),
+        "next_settlement_stage_blockers": statement_preview["next_settlement_stage_blockers"].clone(),
+        "future_reserved_settlement_stages": statement_preview["future_reserved_settlement_stages"].clone(),
         "coverage_state": statement_preview["coverage"]["completeness_state"].clone(),
         "provisional_close_state": statement_preview["provisional_close_state"].clone(),
         "provisional_close_candidate": statement_preview["provisional_close_candidate"].clone(),
@@ -3040,6 +3189,7 @@ fn build_contractual_statement_summary(
         "close_barriers": statement_preview["close_barriers"].clone(),
         "blocking_reasons": combine_reason_arrays(&[
             &statement_preview["close_barriers"],
+            &statement_preview["next_settlement_stage_blockers"],
             &reconciliation_preview["blocking_reasons"],
             &margin_scope["blocking_reasons"],
             &metering_freshness["blocking_reasons"],
@@ -3048,7 +3198,11 @@ fn build_contractual_statement_summary(
         "customer_review_ready": true,
         "invoice_ready": false,
         "currency_profile": statement_preview["currency_profile"].clone(),
-        "note": "Это короткий customer-facing summary поверх statement/reconciliation/margin/freshness previews. Он пригоден для review и audit, но не для invoice."
+        "note": if settlement_stage == "measured_review_ready_report_only" {
+            "Это короткий customer-facing summary поверх statement/reconciliation/margin/freshness previews. Он уже review-ready, но всё ещё остаётся report-only и не является invoice."
+        } else {
+            "Это короткий customer-facing summary поверх statement/reconciliation/margin/freshness previews. Он пригоден для review и audit, но не для invoice."
+        }
     })
 }
 
@@ -3097,16 +3251,39 @@ fn build_statement_preview(
         .as_i64()
         .unwrap_or(0);
     let lifecycle_state = statement_lifecycle_state(&adjustment_preview);
+    let measured_events = events.len();
+    let settlement_stage = settlement_stage(
+        measured_events,
+        &adjustment_preview,
+        metering_freshness,
+        provisional_close_candidate,
+    );
     let provisional_close_state = if provisional_close_candidate {
         "report_only_preview_provisionally_stable"
     } else {
         "report_only_preview_provisional_hold"
     };
+    let next_stage_candidate = next_settlement_stage_candidate(
+        measured_events,
+        metering_freshness,
+        provisional_close_candidate,
+        &billing_close_barriers,
+    );
+    let next_stage_blockers = next_settlement_stage_blockers(
+        measured_events,
+        &provisional_close_barriers,
+        &billing_close_barriers,
+    );
     json!({
         "scope_code": scope_code,
         "scope_label": scope_label,
         "statement_status": "report_only_preview",
         "lifecycle_state": lifecycle_state,
+        "settlement_stage": settlement_stage,
+        "settlement_stage_family": settlement_stage_family(settlement_stage),
+        "next_settlement_stage_candidate": next_stage_candidate,
+        "next_settlement_stage_blockers": next_stage_blockers,
+        "future_reserved_settlement_stages": future_reserved_settlement_stages(),
         "operational_state": "live_measurement_open",
         "contractual_state": match lifecycle_state {
             "measured_non_billable_dispute_hold" => "report_only_preview_dispute_hold",
@@ -3161,7 +3338,11 @@ fn build_statement_preview(
             .unwrap_or(&contract.currency_profile)
             .to_string(),
         "settlement_status": contract.settlement_status.clone(),
-        "note": "Это preview measured lower bound для scope, а не закрытый statement и не сумма к оплате."
+        "note": if settlement_stage == "measured_review_ready_report_only" {
+            "Это preview measured lower bound для scope. Он уже review-ready и provisionally stable, но по-прежнему не является billable statement или суммой к оплате."
+        } else {
+            "Это preview measured lower bound для scope, а не закрытый statement и не сумма к оплате."
+        }
     })
 }
 
@@ -3275,6 +3456,11 @@ fn build_statement_export_preview(
         "scope_label": scope_label,
         "statement_preview_id": hex_sha256(export_identity.as_bytes()),
         "contractual_state": contractual_summary["contractual_state"].clone(),
+        "settlement_stage": contractual_summary["settlement_stage"].clone(),
+        "settlement_stage_family": contractual_summary["settlement_stage_family"].clone(),
+        "next_settlement_stage_candidate": contractual_summary["next_settlement_stage_candidate"].clone(),
+        "next_settlement_stage_blockers": contractual_summary["next_settlement_stage_blockers"].clone(),
+        "future_reserved_settlement_stages": contractual_summary["future_reserved_settlement_stages"].clone(),
         "coverage_state": contractual_summary["coverage_state"].clone(),
         "provisional_close_state": contractual_summary["provisional_close_state"].clone(),
         "provisional_close_candidate": contractual_summary["provisional_close_candidate"].clone(),
@@ -3344,18 +3530,22 @@ fn build_contractual_evidence_pack(
                 "code": profile.code.clone(),
                 "display_name": profile.display_name.clone(),
             },
-            "include_verify_events": include_verify_events,
-            "truth_guardrail": {
-                "retrieval_savings_floor": "real",
-                "partial_whole_agent_cycle_lower_bound": "real",
-                "full_session_economics": "not_fully_measured"
-            },
-            "contract_versions": report["token_budget_report"]["contract"].clone(),
-            "statement_preview": statement_preview,
-            "reconciliation_preview": reconciliation_preview,
-            "margin_scope": margin_scope,
-            "suitability": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["suitability"].clone(),
-            "included_events_count": included_items.len(),
+        "include_verify_events": include_verify_events,
+        "truth_guardrail": {
+            "retrieval_savings_floor": "real",
+            "partial_whole_agent_cycle_lower_bound": "real",
+            "full_session_economics": "not_fully_measured"
+        },
+        "contract_versions": report["token_budget_report"]["contract"].clone(),
+        "settlement_stage": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["settlement_stage"].clone(),
+        "settlement_stage_family": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["settlement_stage_family"].clone(),
+        "next_settlement_stage_candidate": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["next_settlement_stage_candidate"].clone(),
+        "next_settlement_stage_blockers": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["next_settlement_stage_blockers"].clone(),
+        "statement_preview": statement_preview,
+        "reconciliation_preview": reconciliation_preview,
+        "margin_scope": margin_scope,
+        "suitability": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["suitability"].clone(),
+        "included_events_count": included_items.len(),
             "excluded_events_count": excluded_items.len(),
             "included_events_hash": hash_line_items(&included_items)?,
             "excluded_events_hash": hash_line_items(&excluded_items)?,
@@ -8471,11 +8661,11 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v1"
+            "contractual-evidence-pack-v2"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
-            "settlement-lifecycle-v2"
+            "settlement-lifecycle-v3"
         );
         assert_eq!(
             token_event["contract"]["statement_period_governance_version"],
@@ -8892,7 +9082,15 @@ fixed_scope_cost_amount = 0.01
 
         assert_eq!(
             settlement_contract["statement_version"],
-            "settlement-preview-v2"
+            "settlement-preview-v3"
+        );
+        assert_eq!(
+            settlement_contract["settlement_lifecycle_model_version"],
+            "settlement-lifecycle-v3"
+        );
+        assert_eq!(
+            settlement_contract["current_materialized_boundary"],
+            "measured_report_only"
         );
         assert_eq!(
             settlement_contract["freeze_close_status"],
@@ -8908,6 +9106,27 @@ fixed_scope_cost_amount = 0.01
         );
         assert_eq!(preview["statement_status"], "report_only_preview");
         assert_eq!(preview["lifecycle_state"], "measured_non_billable_open");
+        assert_eq!(preview["settlement_stage"], "measured_open_report_only");
+        assert_eq!(preview["settlement_stage_family"], "measured_report_only");
+        assert_eq!(
+            preview["next_settlement_stage_candidate"],
+            "review_ready_blocked"
+        );
+        assert_eq!(
+            preview["next_settlement_stage_blockers"],
+            json!(["coverage_not_final", "late_arrival_window_open"])
+        );
+        assert_eq!(
+            preview["future_reserved_settlement_stages"],
+            json!([
+                "billable_reserved",
+                "settled_reserved",
+                "invoiced_reserved",
+                "credited_reserved",
+                "disputed_reserved",
+                "closed_reserved"
+            ])
+        );
         assert_eq!(preview["contractual_state"], "report_only_preview_open");
         assert_eq!(
             preview["close_readiness"],
@@ -8989,6 +9208,23 @@ fixed_scope_cost_amount = 0.01
         assert_eq!(
             preview["provisional_close_state"],
             "report_only_preview_provisionally_stable"
+        );
+        assert_eq!(
+            preview["settlement_stage"],
+            "measured_review_ready_report_only"
+        );
+        assert_eq!(preview["settlement_stage_family"], "measured_report_only");
+        assert_eq!(
+            preview["next_settlement_stage_candidate"],
+            "billable_blocked"
+        );
+        assert_eq!(
+            preview["next_settlement_stage_blockers"],
+            json!([
+                "billing_mode_report_only",
+                "external_reconciliation_not_bound",
+                "rate_card_unpriced"
+            ])
         );
         assert_eq!(preview["provisional_close_candidate"], true);
         assert_eq!(preview["freeze_status"], "provisionally_frozen_report_only");
@@ -9524,6 +9760,18 @@ fixed_scope_cost_amount = 0.01
             "текущая сессия",
             &json!({
                 "contractual_state": "report_only_preview_open",
+                "settlement_stage": "measured_open_report_only",
+                "settlement_stage_family": "measured_report_only",
+                "next_settlement_stage_candidate": "review_ready_blocked",
+                "next_settlement_stage_blockers": ["coverage_not_final"],
+                "future_reserved_settlement_stages": [
+                    "billable_reserved",
+                    "settled_reserved",
+                    "invoiced_reserved",
+                    "credited_reserved",
+                    "disputed_reserved",
+                    "closed_reserved"
+                ],
                 "provisional_close_state": "report_only_preview_provisional_hold",
                 "provisional_close_candidate": false,
                 "provisional_close_barriers": ["coverage_not_final"],
@@ -9578,6 +9826,16 @@ fixed_scope_cost_amount = 0.01
         );
 
         assert_eq!(summary["scope_code"], "current_session");
+        assert_eq!(summary["settlement_stage"], "measured_open_report_only");
+        assert_eq!(summary["settlement_stage_family"], "measured_report_only");
+        assert_eq!(
+            summary["next_settlement_stage_candidate"],
+            "review_ready_blocked"
+        );
+        assert_eq!(
+            summary["next_settlement_stage_blockers"],
+            json!(["coverage_not_final"])
+        );
         assert_eq!(summary["coverage_state"], "partially_confirmed");
         assert_eq!(
             summary["provisional_close_state"],
@@ -9622,7 +9880,11 @@ fixed_scope_cost_amount = 0.01
         );
         assert_eq!(
             summary["blocking_reasons"],
-            json!(["billing_mode_report_only", "billing_policy_report_only"])
+            json!([
+                "billing_mode_report_only",
+                "coverage_not_final",
+                "billing_policy_report_only"
+            ])
         );
     }
 
@@ -9686,6 +9948,18 @@ fixed_scope_cost_amount = 0.01
                 "contractual_statement_summaries": {
                     "current_session": {
                         "contractual_state": "report_only_preview_open",
+                        "settlement_stage": "measured_open_report_only",
+                        "settlement_stage_family": "measured_report_only",
+                        "next_settlement_stage_candidate": "review_ready_blocked",
+                        "next_settlement_stage_blockers": ["coverage_not_final"],
+                        "future_reserved_settlement_stages": [
+                            "billable_reserved",
+                            "settled_reserved",
+                            "invoiced_reserved",
+                            "credited_reserved",
+                            "disputed_reserved",
+                            "closed_reserved"
+                        ],
                         "coverage_state": "partially_confirmed",
                         "contractual_freshness_state": "provisional_open_window",
                         "reconciliation_state": "awaiting_provider_usage_source",
@@ -9738,8 +10012,18 @@ fixed_scope_cost_amount = 0.01
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v1");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v2");
         assert_eq!(preview["export_status"], "review_ready_report_only");
+        assert_eq!(preview["settlement_stage"], "measured_open_report_only");
+        assert_eq!(preview["settlement_stage_family"], "measured_report_only");
+        assert_eq!(
+            preview["next_settlement_stage_candidate"],
+            "review_ready_blocked"
+        );
+        assert_eq!(
+            preview["next_settlement_stage_blockers"],
+            json!(["coverage_not_final"])
+        );
         assert_eq!(preview["included_events_count"], 1);
         assert_eq!(preview["excluded_events_count"], 1);
         assert_eq!(preview["credit_action_state"], "registry_not_configured");
@@ -9809,6 +10093,10 @@ fixed_scope_cost_amount = 0.01
                 },
                 "contractual_statement_summaries": {
                     "lifetime": {
+                        "settlement_stage": "measured_review_ready_report_only",
+                        "settlement_stage_family": "measured_report_only",
+                        "next_settlement_stage_candidate": "billable_blocked",
+                        "next_settlement_stage_blockers": ["billing_mode_report_only"],
                         "suitability": {
                             "surfaces": {
                                 "contractual_export": {
@@ -9862,7 +10150,20 @@ fixed_scope_cost_amount = 0.01
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v1");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v2");
+        assert_eq!(
+            payload["settlement_stage"],
+            "measured_review_ready_report_only"
+        );
+        assert_eq!(payload["settlement_stage_family"], "measured_report_only");
+        assert_eq!(
+            payload["next_settlement_stage_candidate"],
+            "billable_blocked"
+        );
+        assert_eq!(
+            payload["next_settlement_stage_blockers"],
+            json!(["billing_mode_report_only"])
+        );
         assert_eq!(payload["included_events_count"], 1);
         assert_eq!(payload["excluded_events_count"], 1);
         assert!(

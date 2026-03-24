@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 16:57 MSK
-Ручная сверка guide/docs: 2026-03-24 16:57 MSK
+modified_at: 2026-03-24 17:08 MSK
+Ручная сверка guide/docs: 2026-03-24 17:08 MSK
 
 # Token Ledger
 
@@ -528,20 +528,25 @@ reporting layers:
 - закрыт ли уже реальный денежный workflow или это всё ещё report-only preview.
 
 Текущий truthful status:
-- `statement_version = settlement-preview-v2`
-- `settlement_lifecycle_model_version = settlement-lifecycle-v2`
+- `statement_version = settlement-preview-v3`
+- `settlement_lifecycle_model_version = settlement-lifecycle-v3`
 - `statement_period_governance_version = statement-period-governance-v2`
 - `adjustment_preview_model_version = adjustment-preview-v1`
 - `freeze_close_status = provisional_report_only`
 - `late_arrival_status = deadline_from_latest_event_report_only`
 - `current_operational_state = live_measurement_open`
 - `current_contractual_state = report_only_preview_open`
+- `current_materialized_boundary = measured_report_only`
+- `materialized_settlement_stages` публикуют только реально materialized report-only стадии
+- `future_reserved_settlement_stages` отдельно перечисляют будущие billable/settled/invoiced/credited/disputed/closed стадии
 - corrections/disputes пока не invoice-grade, а только report-only semantics
 
 `statement_previews` нужны затем, чтобы по каждому scope показать:
 - measured non-billable lower bound;
 - coverage;
 - settlement status;
+- settlement stage;
+- next settlement stage candidate;
 - lifecycle state;
 - contractual state;
 - close barriers;
@@ -555,6 +560,18 @@ reporting layers:
 - `statement_status = report_only_preview`
 - `lifecycle_state = measured_non_billable_open`
 - `contractual_state = report_only_preview_open`
+- `settlement_stage` уже может быть:
+  - `empty_report_only`
+  - `measured_open_report_only`
+  - `measured_review_ready_report_only`
+  - `measured_adjusted_report_only`
+  - `measured_pending_adjustment_report_only`
+  - `measured_disputed_report_only`
+- `next_settlement_stage_candidate` честно отделяет:
+  - `awaiting_measured_usage`
+  - `review_ready_blocked`
+  - `billable_blocked`
+  - `billable_reserved`
 - `provisional_close_state` уже может быть:
   - `report_only_preview_provisionally_stable`
   - `report_only_preview_provisional_hold`
@@ -861,7 +878,7 @@ Customer-facing export bundle:
 - `line_items.excluded`
 
 Честный смысл этого export сейчас такой:
-- это `contractual-evidence-pack-v1`;
+- это `contractual-evidence-pack-v2`;
 - это всё ещё `report_only tokenonomics`;
 - это не invoice;
 - это не final settlement;
@@ -887,6 +904,7 @@ Hashes по line items нужны затем, чтобы:
 
 Это не дублирование, а отдельный слой:
 - preview даёт компактный `statement_preview_id`;
+- preview теперь ещё несёт `settlement_stage`, `settlement_stage_family` и `next_settlement_stage_candidate`;
 - публикует `included_events_hash / excluded_events_hash`;
 - отдельно показывает `credit_action_state` и `dispute_action_state`;
 - и хранит рядом уже готовые `statement_preview / reconciliation_preview / margin_scope`;

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 16:57 MSK
-Ручная сверка guide/docs: 2026-03-24 16:57 MSK
+modified_at: 2026-03-24 17:08 MSK
+Ручная сверка guide/docs: 2026-03-24 17:08 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1205,10 +1205,14 @@ preview, а не только raw count.
 - settlement preview теперь тоже first-class:
   - `statement_previews.current_session / rolling_window / lifetime`
   - там уже видно measured non-billable lower bound по scope;
-  - там теперь ещё явно видны `lifecycle_state`, `contractual_state` и `close_barriers`;
+  - там теперь ещё явно видны `lifecycle_state`, `contractual_state`, `settlement_stage`,
+    `next_settlement_stage_candidate` и `close_barriers`;
   - там теперь ещё живёт и `freshness`, чтобы было видно ingest health и окно поздних событий;
   - там теперь ещё есть `period` с `period_start / period_end / window_anchor` и
     `adjustment_preview` для будущих credit/correction semantics;
+  - top-level `settlement_contract` теперь отдельно публикует `current_materialized_boundary`,
+    `materialized_settlement_stages` и `future_reserved_settlement_stages`, чтобы report-only
+    lifecycle не выглядел как уже готовый billable workflow;
   - но `billable_lower_bound_tokens` и `final_amount` остаются пустыми, пока billing не
     включён честно.
 - correction/dispute слой теперь тоже versioned:
