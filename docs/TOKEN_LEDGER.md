@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 17:21 MSK
-Ручная сверка guide/docs: 2026-03-24 17:21 MSK
+modified_at: 2026-03-24 17:27 MSK
+Ручная сверка guide/docs: 2026-03-24 17:27 MSK
 
 # Token Ledger
 
@@ -888,7 +888,7 @@ Customer-facing export bundle:
 - `line_items.excluded`
 
 Честный смысл этого export сейчас такой:
-- это `contractual-evidence-pack-v3`;
+- это `contractual-evidence-pack-v4`;
 - это всё ещё `report_only tokenonomics`;
 - это не invoice;
 - это не final settlement;
@@ -917,6 +917,8 @@ Hashes по line items нужны затем, чтобы:
 - preview теперь ещё несёт `settlement_stage`, `settlement_stage_family` и `next_settlement_stage_candidate`;
 - preview теперь ещё несёт `transactional_statuses`, чтобы export не путал уже materialized
   measured/report-only стадии с будущими reserved billing стадиями;
+- preview и evidence pack теперь ещё несут `export_semantics`, чтобы customer review surface
+  не смешивался с operational telemetry и не выглядел как invoice-grade settlement;
 - публикует `included_events_hash / excluded_events_hash`;
 - отдельно показывает `credit_action_state` и `dispute_action_state`;
 - и хранит рядом уже готовые `statement_preview / reconciliation_preview / margin_scope`;

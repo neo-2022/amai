@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 17:21 MSK
-Ручная сверка guide/docs: 2026-03-24 17:21 MSK
+modified_at: 2026-03-24 17:27 MSK
+Ручная сверка guide/docs: 2026-03-24 17:27 MSK
 
 # Operations
 
@@ -1781,6 +1781,8 @@ cargo run -- context pack \
     `next_settlement_stage_candidate`, `next_settlement_stage_blockers`, `close_barriers`;
   - в них теперь ещё есть `transactional_statuses`, которые по-честному разводят
     `measured / review / billable / settled / invoiced / credited / disputed / closed`;
+  - statement export / evidence pack теперь ещё публикуют `export_semantics`, чтобы
+    customer-facing self-serve surface не смешивался с operational telemetry;
   - в них теперь ещё есть `period`, `adjustment_preview`, `freshness`,
     `provisional_close_state`, `provisional_close_candidate`,
     `provisional_close_barriers`, `billing_close_barriers`;

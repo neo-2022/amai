@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 17:21 MSK
-Ручная сверка guide/docs: 2026-03-24 17:21 MSK
+modified_at: 2026-03-24 17:27 MSK
+Ручная сверка guide/docs: 2026-03-24 17:27 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1210,6 +1210,8 @@ preview, а не только raw count.
   - там теперь ещё есть `transactional_statuses`, чтобы customer-facing export видел отдельно
     `measured / review / billable / settled / invoiced / credited / disputed / closed`
     и не путал materialized report-only стадии с будущими reserved billing стадиями;
+  - statement export и evidence pack теперь ещё несут `export_semantics`, чтобы self-serve
+    customer review не смешивался с operational telemetry и не выглядел как invoice-grade слой;
   - там теперь ещё живёт и `freshness`, чтобы было видно ingest health и окно поздних событий;
   - там теперь ещё есть `period` с `period_start / period_end / window_anchor` и
     `adjustment_preview` для будущих credit/correction semantics;

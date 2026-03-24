@@ -555,11 +555,11 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v3".to_string()
+    "contractual-evidence-pack-v4".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v3".to_string()
+    "contractual-statement-export-v4".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -3647,6 +3647,23 @@ fn build_statement_export_preview(
         "dispute_action_state": dispute_action_state,
         "pending_adjustment_entries_count": pending_entries,
         "disputed_entries_count": disputed_entries,
+        "export_semantics": {
+            "surface_kind": "customer_review_report_only",
+            "self_serve_state": "self_serve_ready_report_only",
+            "invoice_grade": false,
+            "operational_telemetry_included": false,
+            "redaction_policy": "raw_query_text_removed_keep_query_hash_and_token_state",
+            "customer_visible_sections": [
+                "statement_preview_id",
+                "contractual_state",
+                "coverage_state",
+                "transactional_statuses",
+                "included_events_hash",
+                "excluded_events_hash",
+                "suitability",
+                "evidence_pack_command"
+            ]
+        },
         "blocking_reasons": contractual_summary["blocking_reasons"].clone(),
         "suitability": contractual_summary["suitability"].clone(),
         "evidence_pack_available": true,
@@ -3707,6 +3724,22 @@ fn build_contractual_evidence_pack(
         "next_settlement_stage_candidate": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["next_settlement_stage_candidate"].clone(),
         "next_settlement_stage_blockers": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["next_settlement_stage_blockers"].clone(),
         "transactional_statuses": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["transactional_statuses"].clone(),
+        "export_semantics": {
+            "surface_kind": "customer_evidence_pack_report_only",
+            "self_serve_state": "self_serve_ready_report_only",
+            "invoice_grade": false,
+            "operational_telemetry_included": false,
+            "redaction_policy": "raw_query_text_removed_keep_query_hash_and_token_state",
+            "customer_visible_sections": [
+                "truth_guardrail",
+                "contract_versions",
+                "statement_preview",
+                "reconciliation_preview",
+                "margin_scope",
+                "transactional_statuses",
+                "line_items"
+            ]
+        },
         "statement_preview": statement_preview,
         "reconciliation_preview": reconciliation_preview,
         "margin_scope": margin_scope,
@@ -3991,6 +4024,12 @@ fn build_contractual_sources_value(
         "margin_scope": report["token_budget_report"]["margin_view"][scope_code].clone(),
         "statement_export_preview": report["token_budget_report"]["statement_export_previews"][scope_code].clone(),
         "transactional_statuses": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["transactional_statuses"].clone(),
+        "customer_contractual_boundary": {
+            "surface_kind": "customer_contractual_sources_report_only",
+            "self_serve_state": "self_serve_ready_report_only",
+            "invoice_grade": false,
+            "operational_telemetry_included": false
+        },
         "suggested_repo_local_paths": {
             "provider_usage_export": provider_usage_default_path(repo_root).display().to_string(),
             "provider_invoice_export": provider_invoice_default_path(repo_root).display().to_string(),
@@ -4143,10 +4182,15 @@ pub async fn print_statement_export_bundle(
                 "contractual_evidence_pack": "contractual_evidence_pack.json",
                 "token_contractual_sources": "token_contractual_sources.json",
             },
-            "statement_export_preview": statement_export_preview.clone(),
-            "contractual_evidence_pack": evidence_pack["contractual_evidence_pack"].clone(),
-            "token_contractual_sources": contractual_sources,
-            "note": "Этот bundle собирает customer-facing statement preview, evidence pack и contractual sources в один report-only export surface. Он пригоден для review/audit, но не для invoice."
+        "statement_export_preview": statement_export_preview.clone(),
+        "contractual_evidence_pack": evidence_pack["contractual_evidence_pack"].clone(),
+        "token_contractual_sources": contractual_sources,
+        "surface_kind": "customer_review_bundle_report_only",
+        "self_serve_state": "self_serve_ready_report_only",
+        "invoice_grade": false,
+        "operational_telemetry_included": false,
+        "redaction_policy": "raw_query_text_removed_keep_query_hash_and_token_state",
+        "note": "Этот bundle собирает customer-facing statement preview, evidence pack и contractual sources в один report-only export surface. Он пригоден для review/audit, но не для invoice."
         }
     });
     if let Some(output_dir) = &args.output_dir {
@@ -4159,6 +4203,11 @@ pub async fn print_statement_export_bundle(
             "scope_code": root["scope_code"].clone(),
             "scope_label": root["scope_label"].clone(),
             "report_only": root["report_only"].clone(),
+            "surface_kind": root["surface_kind"].clone(),
+            "self_serve_state": root["self_serve_state"].clone(),
+            "invoice_grade": root["invoice_grade"].clone(),
+            "operational_telemetry_included": root["operational_telemetry_included"].clone(),
+            "redaction_policy": root["redaction_policy"].clone(),
             "statement_preview_id": root["statement_preview_id"].clone(),
             "files": root["files"].clone(),
             "note": root["note"].clone(),
@@ -8828,7 +8877,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v3"
+            "contractual-evidence-pack-v4"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -10213,7 +10262,7 @@ fixed_scope_cost_amount = 0.01
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v3");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v4");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -10228,6 +10277,14 @@ fixed_scope_cost_amount = 0.01
         assert_eq!(
             preview["transactional_statuses"]["review"]["status"],
             "review_blocked_report_only"
+        );
+        assert_eq!(
+            preview["export_semantics"]["surface_kind"],
+            "customer_review_report_only"
+        );
+        assert_eq!(
+            preview["export_semantics"]["operational_telemetry_included"],
+            false
         );
         assert_eq!(preview["included_events_count"], 1);
         assert_eq!(preview["excluded_events_count"], 1);
@@ -10360,7 +10417,7 @@ fixed_scope_cost_amount = 0.01
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v3");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v4");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -10377,6 +10434,14 @@ fixed_scope_cost_amount = 0.01
         assert_eq!(
             payload["transactional_statuses"]["billable"]["status"],
             "billable_blocked_reserved"
+        );
+        assert_eq!(
+            payload["export_semantics"]["surface_kind"],
+            "customer_evidence_pack_report_only"
+        );
+        assert_eq!(
+            payload["export_semantics"]["operational_telemetry_included"],
+            false
         );
         assert_eq!(payload["included_events_count"], 1);
         assert_eq!(payload["excluded_events_count"], 1);
