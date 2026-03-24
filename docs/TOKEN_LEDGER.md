@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:17 MSK
-Ручная сверка guide/docs: 2026-03-24 11:17 MSK
+modified_at: 2026-03-24 11:23 MSK
+Ручная сверка guide/docs: 2026-03-24 11:23 MSK
 
 # Token Ledger
 
@@ -436,6 +436,35 @@ reporting layers:
 
 То есть billing-grade governance ещё не завершён, но truth-contract уже не скрыт внутри
 кода.
+
+## Baseline fairness, billing policy и rate card
+
+Следующий честный слой после usage-event contract — не деньги сами по себе, а правила,
+по которым эти деньги когда-нибудь вообще можно будет считать.
+
+Поэтому report теперь должен публиковать отдельно:
+- `baseline_contract`
+- `billing_policy`
+- `rate_card`
+
+`baseline_contract` нужен затем, чтобы:
+- явно перечислить разрешённые baseline classes;
+- явно перечислить запрещённые раздутые baseline classes;
+- не дать savings расти за счёт нечестного baseline.
+
+`billing_policy` нужен затем, чтобы:
+- прямо показывать текущий mode;
+- прямо показывать, что billable layer сейчас ещё отключён;
+- не смешивать measured/report-only semantics с будущим денежным settlement.
+
+`rate_card` нужен затем, чтобы:
+- не делать вид, что токены уже переведены в деньги;
+- явно фиксировать `unpriced` состояние до появления настоящего pricing profile.
+
+Практическое правило сейчас такое:
+- metering уже сильный;
+- fairness/policy contract уже machine-readable;
+- pricing и settlement пока ещё не materialized как money-facing layer.
 
 ## Preliminary vs stable
 

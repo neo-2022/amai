@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:17 MSK
-Ручная сверка guide/docs: 2026-03-24 11:17 MSK
+modified_at: 2026-03-24 11:23 MSK
+Ручная сверка guide/docs: 2026-03-24 11:23 MSK
 
 # Operations
 
@@ -1593,6 +1593,17 @@ cargo run --release -- verify token-benchmark-suite \
     - canonical event-time field;
     - lifecycle status codes;
     - backfill/correction policy;
+- `baseline_contract`
+  - allowed/disallowed baseline classes;
+  - fairness note, почему `entire_repo/all_docs` нельзя считать честным baseline;
+- `billing_policy`
+  - current mode;
+  - current billable state;
+  - required traffic class и quality gate;
+  - preliminary thresholds;
+- `rate_card`
+  - rate-card version и currency profile;
+  - `money_conversion_enabled = false`, пока pricing engine ещё не materialized;
 - `coverage`
   - отдельный truth-layer поверх каждого rollup:
     - `measured_events`
@@ -1643,6 +1654,9 @@ cargo run --release -- verify token-benchmark-suite \
   - `excluded_legacy_unverified`
   - `excluded_non_live`
   - `backfill_status` тоже виден отдельно и не маскируется под обычный live ingest.
+- `baseline_strategy_slices` теперь тоже каноничны:
+  - для каждого baseline класса видно `events_count`, `counted_events`,
+    `verified_effective_savings_pct`, `quality_ok_rate`, `coverage`.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе:

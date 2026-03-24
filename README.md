@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:17 MSK
-Ручная сверка guide/docs: 2026-03-24 11:17 MSK
+modified_at: 2026-03-24 11:23 MSK
+Ручная сверка guide/docs: 2026-03-24 11:23 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1056,6 +1056,15 @@ preview, а не только raw count.
   - там уже machine-readable видны dedup key, canonical event-time field,
     lifecycle status codes, backfill/correction policy;
   - это первый мост от measuring engine к будущему billing-grade contract.
+- `baseline_contract`
+  - отдельно опубликованы allowed/disallowed baseline classes и fairness note;
+  - это защищает savings от нечестного раздутого baseline.
+- `billing_policy`
+  - видно, что сейчас реально billable отключён и весь слой остаётся `report_only`;
+  - там же живут preliminary thresholds и правило `live + quality gate`.
+- `rate_card`
+  - честно показывает, что денежная конверсия пока ещё `unpriced`, а не делает вид,
+    что токены уже автоматически переведены в деньги.
 - first-class `coverage`
   - у каждого rollup теперь есть не только savings, но и честный охват:
     `measured / included / excluded`;
@@ -1082,6 +1091,9 @@ preview, а не только raw count.
   - `excluded_*`
   - `legacy_ingest / reverified_backfill / live_ingest`
   Он нужен затем, чтобы savings не теряла связь с event lifecycle.
+- baseline fairness теперь тоже first-class:
+  - `baseline_strategy_slices` показывают, какой baseline реально использовался и
+    как по нему выглядит verified/coverage contour.
 
 По умолчанию proof/benchmark-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе, используйте:

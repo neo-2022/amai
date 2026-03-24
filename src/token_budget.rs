@@ -409,6 +409,72 @@ fn build_usage_event_schema_json(contract: &TokenBudgetContractConfig) -> Value 
     })
 }
 
+fn allowed_baseline_classes() -> [&'static str; 5] {
+    [
+        "naive_top_files",
+        "grep_top_files",
+        "ide_search_top_files",
+        "semantic_top_k",
+        "legacy_pre_amai",
+    ]
+}
+
+fn disallowed_baseline_classes() -> [&'static str; 2] {
+    ["entire_repo", "all_docs"]
+}
+
+fn build_baseline_contract_json(contract: &TokenBudgetContractConfig) -> Value {
+    json!({
+        "baseline_method_version": contract.baseline_method_version.clone(),
+        "allowed_classes": allowed_baseline_classes(),
+        "disallowed_classes": disallowed_baseline_classes(),
+        "fairness_note": "Savings разрешено считать только против реалистичного baseline scope; раздутый entire_repo/all_docs baseline запрещён."
+    })
+}
+
+fn build_billing_policy_json(
+    contract: &TokenBudgetContractConfig,
+    measurement: &MeasurementConfig,
+) -> Value {
+    json!({
+        "policy_version": contract.billing_policy_version.clone(),
+        "mode": contract.billing_mode.clone(),
+        "status": "report_only",
+        "settlement_status": contract.settlement_status.clone(),
+        "current_billable_state": "disabled_report_only",
+        "confirmed_lower_bound_term": "verified live lower bound",
+        "quality_gate_required": true,
+        "required_traffic_class": "live",
+        "preliminary_thresholds": {
+            "min_events": measurement.preliminary_min_events,
+            "min_baseline_tokens": measurement.preliminary_min_baseline_tokens
+        },
+        "included_reporting_layers": [
+            "measured_non_billable",
+            "unmeasured"
+        ],
+        "excluded_from_future_billing": [
+            "synthetic traffic",
+            "unverified live events",
+            "quality_gate_failed",
+            "awaiting_followup_reconciliation"
+        ],
+        "note": "Billing semantics пока не активны: lower bound уже измеряется, но current policy остаётся report-only и не превращает savings в денежное начисление."
+    })
+}
+
+fn build_rate_card_json(contract: &TokenBudgetContractConfig) -> Value {
+    let money_conversion_enabled =
+        contract.rate_card_version != "unpriced-v1" && contract.currency_profile != "unpriced";
+    json!({
+        "rate_card_version": contract.rate_card_version.clone(),
+        "currency_profile": contract.currency_profile.clone(),
+        "money_conversion_enabled": money_conversion_enabled,
+        "status": if money_conversion_enabled { "priced" } else { "unpriced" },
+        "note": "Денежная конверсия пока отключена: savings считаются в токенах и lower-bound semantics уже materialized, но rate-card ещё не введён."
+    })
+}
+
 pub async fn print_report(db: &Client, args: &ObserveTokenReportArgs) -> Result<()> {
     let repo_root = config::discover_repo_root(None)?;
     let config = load_config(&repo_root)?;
@@ -676,6 +742,8 @@ async fn collect_report(
         .unwrap_or_else(|| json!(null));
     let source_breakdown = source_breakdown(&events, &config.measurement, &config.contract);
     let query_slices = query_slice_breakdown(&events, &config.measurement, &config.contract);
+    let baseline_strategy_slices =
+        baseline_strategy_breakdown(&events, &config.measurement, &config.contract);
     let temperature_slices =
         temperature_slice_breakdown(&events, &config.measurement, &config.contract);
     let current_session_summary = summarize_events(
@@ -729,6 +797,9 @@ async fn collect_report(
             },
             "contract": report_contract_json(&config.contract),
             "usage_event_schema": build_usage_event_schema_json(&config.contract),
+            "baseline_contract": build_baseline_contract_json(&config.contract),
+            "billing_policy": build_billing_policy_json(&config.contract, &config.measurement),
+            "rate_card": build_rate_card_json(&config.contract),
             "filters": {
                 "include_verify_events": include_verify_events,
             },
@@ -740,6 +811,7 @@ async fn collect_report(
             "agent_cycle_economics": agent_cycle_economics,
             "source_breakdown": source_breakdown,
             "query_slices": query_slices,
+            "baseline_strategy_slices": baseline_strategy_slices,
             "temperature_slices": temperature_slices,
         }
     }))
@@ -2643,6 +2715,48 @@ fn query_slice_breakdown(
     )
 }
 
+fn baseline_strategy_breakdown(
+    events: &[TokenBudgetEvent],
+    measurement: &MeasurementConfig,
+    contract: &TokenBudgetContractConfig,
+) -> Value {
+    let allowed = allowed_baseline_classes()
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let mut grouped = BTreeMap::<String, Vec<TokenBudgetEvent>>::new();
+    for event in events {
+        grouped
+            .entry(event.baseline_strategy.clone())
+            .or_default()
+            .push(event.clone());
+    }
+    Value::Array(
+        grouped
+            .into_iter()
+            .map(|(baseline_strategy, items)| {
+                let summary = summarize_events(
+                    &items,
+                    items
+                        .last()
+                        .map(|item| item.created_at_epoch_ms)
+                        .unwrap_or_default(),
+                    measurement,
+                    contract,
+                );
+                json!({
+                    "baseline_strategy": baseline_strategy,
+                    "allowed_class": allowed.contains(baseline_strategy.as_str()),
+                    "events_count": summary["events_count"],
+                    "counted_events": summary["counted_events"],
+                    "verified_effective_savings_pct": summary["verified_effective_savings_pct"],
+                    "quality_ok_rate": summary["quality_ok_rate"],
+                    "coverage": summary["coverage"],
+                })
+            })
+            .collect(),
+    )
+}
+
 fn temperature_slice_breakdown(
     events: &[TokenBudgetEvent],
     measurement: &MeasurementConfig,
@@ -4131,8 +4245,9 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
 mod tests {
     use super::{
         MeasurementConfig, NaiveScope, TokenBudgetContractConfig, TokenBudgetEvent,
-        apply_reverification_metadata, build_event_payload, build_product_headline,
-        build_usage_event_schema_json, default_backfill_policy_version,
+        apply_reverification_metadata, baseline_strategy_breakdown, build_baseline_contract_json,
+        build_billing_policy_json, build_event_payload, build_product_headline,
+        build_rate_card_json, build_usage_event_schema_json, default_backfill_policy_version,
         default_baseline_method_version, default_billing_mode, default_billing_policy_version,
         default_correction_policy_version, default_coverage_model_version,
         default_currency_profile, default_dedup_contract_version,
@@ -4582,6 +4697,27 @@ mod tests {
             schema["corrections"]["policy_version"],
             "report-only-correction-v1"
         );
+    }
+
+    #[test]
+    fn billing_policy_and_rate_card_are_truthful_report_only() {
+        let measurement = measurement_fixture();
+        let contract = contract_fixture();
+        let billing_policy = build_billing_policy_json(&contract, &measurement);
+        let rate_card = build_rate_card_json(&contract);
+        let baseline_contract = build_baseline_contract_json(&contract);
+
+        assert_eq!(billing_policy["mode"], "report_only");
+        assert_eq!(
+            billing_policy["current_billable_state"],
+            "disabled_report_only"
+        );
+        assert_eq!(billing_policy["required_traffic_class"], "live");
+        assert_eq!(billing_policy["preliminary_thresholds"]["min_events"], 50);
+        assert_eq!(rate_card["status"], "unpriced");
+        assert_eq!(rate_card["money_conversion_enabled"], false);
+        assert_eq!(baseline_contract["allowed_classes"][0], "naive_top_files");
+        assert_eq!(baseline_contract["disallowed_classes"][0], "entire_repo");
     }
 
     #[test]
@@ -5263,6 +5399,51 @@ mod tests {
         assert_eq!(excluded_items[0]["events_count"], 1);
         assert_eq!(excluded_items[0]["baseline_tokens"], 500);
         assert_eq!(excluded_items[0]["delivered_tokens"], 200);
+    }
+
+    #[test]
+    fn baseline_strategy_breakdown_exposes_allowed_class_and_coverage() {
+        let measurement = measurement_fixture();
+        let events = vec![
+            token_event! {
+                event_id: "event-1".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                naive_tokens: 1000,
+                context_tokens: 100,
+                saved_tokens: 900,
+                effective_saved_tokens: 900,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+            },
+            token_event! {
+                event_id: "event-2".to_string(),
+                baseline_strategy: "semantic_top_k".to_string(),
+                naive_tokens: 500,
+                context_tokens: 200,
+                saved_tokens: 300,
+                effective_saved_tokens: 300,
+                savings_percent: 60.0,
+                effective_savings_percent: 60.0,
+                quality_ok: false,
+            },
+        ];
+
+        let breakdown = baseline_strategy_breakdown(&events, &measurement, &contract_fixture());
+        let items = breakdown.as_array().expect("baseline breakdown");
+        let naive = items
+            .iter()
+            .find(|item| item["baseline_strategy"] == "naive_top_files")
+            .expect("naive strategy");
+        let semantic = items
+            .iter()
+            .find(|item| item["baseline_strategy"] == "semantic_top_k")
+            .expect("semantic strategy");
+
+        assert_eq!(naive["allowed_class"], true);
+        assert_eq!(naive["coverage"]["included_events"], 1);
+        assert_eq!(semantic["allowed_class"], true);
+        assert_eq!(semantic["coverage"]["excluded_events"], 1);
     }
 
     #[test]
