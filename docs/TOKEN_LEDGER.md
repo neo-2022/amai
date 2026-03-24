@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:50 MSK
-Ручная сверка guide/docs: 2026-03-24 12:50 MSK
+modified_at: 2026-03-24 13:04 MSK
+Ручная сверка guide/docs: 2026-03-24 13:04 MSK
 
 # Token Ledger
 
@@ -462,7 +462,18 @@ reporting layers:
 
 `rate_card` нужен затем, чтобы:
 - не делать вид, что токены уже переведены в деньги;
-- явно фиксировать `unpriced` состояние до появления настоящего pricing profile.
+- явно фиксировать не только `currency_profile`, но и versioned binding layer;
+- отличать честные состояния:
+  - `not_configured`
+  - `read_error`
+  - `parse_error`
+  - `bound_but_unpriced`
+  - `priced_bound`
+
+Практическое правило здесь такое:
+- `money_conversion_enabled = true` разрешён только при `priced_bound`;
+- если файл не подключён, не читается, не парсится или остаётся без цен, report
+  обязан оставаться небиллинговым и денежные поля должны быть `null`.
 
 Практическое правило сейчас такое:
 - metering уже сильный;

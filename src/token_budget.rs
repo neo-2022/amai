@@ -86,6 +86,8 @@ struct TokenBudgetContractConfig {
     adjustment_request_schema_version: String,
     #[serde(default = "default_adjustment_registry_version")]
     adjustment_registry_version: String,
+    #[serde(default = "default_rate_card_binding_model_version")]
+    rate_card_binding_model_version: String,
     #[serde(default = "default_telemetry_surface_split_version")]
     telemetry_surface_split_version: String,
     #[serde(default = "default_event_time_policy_version")]
@@ -133,6 +135,7 @@ impl Default for TokenBudgetContractConfig {
             adjustment_preview_model_version: default_adjustment_preview_model_version(),
             adjustment_request_schema_version: default_adjustment_request_schema_version(),
             adjustment_registry_version: default_adjustment_registry_version(),
+            rate_card_binding_model_version: default_rate_card_binding_model_version(),
             telemetry_surface_split_version: default_telemetry_surface_split_version(),
             event_time_policy_version: default_event_time_policy_version(),
             billing_policy_version: default_billing_policy_version(),
@@ -189,6 +192,16 @@ struct AdjustmentRegistryEntry {
     related_statement_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct RateCardFile {
+    schema_version: String,
+    rate_card_version: String,
+    currency_profile: String,
+    provider: String,
+    default_input_cost_per_1k_tokens: f64,
+    default_output_cost_per_1k_tokens: f64,
+}
+
 #[derive(Debug, Clone)]
 struct TokenBudgetEvent {
     created_at_epoch_ms: i64,
@@ -223,6 +236,7 @@ struct TokenBudgetEvent {
     adjustment_preview_model_version: String,
     adjustment_request_schema_version: String,
     adjustment_registry_version: String,
+    rate_card_binding_model_version: String,
     telemetry_surface_split_version: String,
     event_time_policy_version: String,
     billing_policy_version: String,
@@ -401,6 +415,10 @@ fn default_adjustment_registry_version() -> String {
     "adjustment-registry-v1".to_string()
 }
 
+fn default_rate_card_binding_model_version() -> String {
+    "rate-card-binding-v1".to_string()
+}
+
 fn default_telemetry_surface_split_version() -> String {
     "tokenonomics-surface-split-v1".to_string()
 }
@@ -467,6 +485,7 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "adjustment_preview_model_version": contract.adjustment_preview_model_version.clone(),
         "adjustment_request_schema_version": contract.adjustment_request_schema_version.clone(),
         "adjustment_registry_version": contract.adjustment_registry_version.clone(),
+        "rate_card_binding_model_version": contract.rate_card_binding_model_version.clone(),
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
@@ -503,6 +522,7 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "adjustment_preview_model_version": contract.adjustment_preview_model_version.clone(),
         "adjustment_request_schema_version": contract.adjustment_request_schema_version.clone(),
         "adjustment_registry_version": contract.adjustment_registry_version.clone(),
+        "rate_card_binding_model_version": contract.rate_card_binding_model_version.clone(),
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
@@ -627,16 +647,83 @@ fn build_billing_policy_json(
     })
 }
 
-fn build_rate_card_json(contract: &TokenBudgetContractConfig) -> Value {
-    let money_conversion_enabled =
-        contract.rate_card_version != "unpriced-v1" && contract.currency_profile != "unpriced";
-    json!({
-        "rate_card_version": contract.rate_card_version.clone(),
-        "currency_profile": contract.currency_profile.clone(),
-        "money_conversion_enabled": money_conversion_enabled,
-        "status": if money_conversion_enabled { "priced" } else { "unpriced" },
-        "note": "Денежная конверсия пока отключена: savings считаются в токенах и lower-bound semantics уже materialized, но rate-card ещё не введён."
-    })
+fn parse_rate_card_file(raw: &str) -> Result<RateCardFile> {
+    serde_json::from_str::<RateCardFile>(raw)
+        .or_else(|_| toml::from_str::<RateCardFile>(raw).map_err(anyhow::Error::from))
+        .context("failed to parse rate-card file as JSON or TOML")
+}
+
+fn bind_rate_card_json_from_source(source: &Value, contract: &TokenBudgetContractConfig) -> Value {
+    let mut base = json!({
+        "binding_model_version": contract.rate_card_binding_model_version.clone(),
+        "configured_contract_version": contract.rate_card_version.clone(),
+        "configured_currency_profile": contract.currency_profile.clone(),
+        "source": source.clone(),
+        "money_conversion_enabled": false,
+        "status": source["status"].clone(),
+        "bound_rate_card_version": Value::Null,
+        "bound_currency_profile": Value::Null,
+        "provider": Value::Null,
+        "default_input_cost_per_1k_tokens": Value::Null,
+        "default_output_cost_per_1k_tokens": Value::Null,
+        "note": "Денежная конверсия включается только после честного bind на versioned rate-card file."
+    });
+
+    if source["status"].as_str() != Some("configured_existing_path") {
+        return base;
+    }
+    let Some(path) = source["resolved_path"].as_str() else {
+        return base;
+    };
+
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            base["status"] = Value::String("read_error".to_string());
+            base["source"]["binding_status"] = Value::String("read_error".to_string());
+            base["read_error"] = Value::String(error.to_string());
+            return base;
+        }
+    };
+    let rate_card = match parse_rate_card_file(&raw) {
+        Ok(rate_card) => rate_card,
+        Err(error) => {
+            base["status"] = Value::String("parse_error".to_string());
+            base["source"]["binding_status"] = Value::String("parse_error".to_string());
+            base["parse_error"] = Value::String(error.to_string());
+            return base;
+        }
+    };
+
+    let money_conversion_enabled = rate_card.default_input_cost_per_1k_tokens > 0.0
+        && rate_card.default_output_cost_per_1k_tokens > 0.0;
+    base["status"] = Value::String(if money_conversion_enabled {
+        "priced_bound".to_string()
+    } else {
+        "bound_but_unpriced".to_string()
+    });
+    base["source"]["binding_status"] = base["status"].clone();
+    base["money_conversion_enabled"] = Value::Bool(money_conversion_enabled);
+    base["schema_version"] = Value::String(rate_card.schema_version);
+    base["bound_rate_card_version"] = Value::String(rate_card.rate_card_version);
+    base["bound_currency_profile"] = Value::String(rate_card.currency_profile);
+    base["provider"] = Value::String(rate_card.provider);
+    base["default_input_cost_per_1k_tokens"] =
+        Value::from(rate_card.default_input_cost_per_1k_tokens);
+    base["default_output_cost_per_1k_tokens"] =
+        Value::from(rate_card.default_output_cost_per_1k_tokens);
+    base
+}
+
+fn build_rate_card_json(repo_root: &Path, contract: &TokenBudgetContractConfig) -> Value {
+    let source = configured_external_truth_source(
+        repo_root,
+        "AMAI_PROVIDER_RATE_CARD_PATH",
+        "provider_rate_card",
+        "Versioned rate-card для денежной конверcии tokenonomics",
+        true,
+    );
+    bind_rate_card_json_from_source(&source, contract)
 }
 
 fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value {
@@ -775,15 +862,10 @@ fn adjustment_entry_json(entry: &AdjustmentRegistryEntry) -> Value {
     })
 }
 
-fn build_adjustment_registry_json(repo_root: &Path, contract: &TokenBudgetContractConfig) -> Value {
-    let source = configured_external_truth_source(
-        repo_root,
-        "AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH",
-        "token_adjustment_registry",
-        "Report-only registry для correction/credit/dispute entries",
-        false,
-    );
-
+fn load_adjustment_registry_from_source(
+    source: &Value,
+    contract: &TokenBudgetContractConfig,
+) -> Value {
     let mut base = json!({
         "schema_version": contract.adjustment_registry_version.clone(),
         "request_schema_version": contract.adjustment_request_schema_version.clone(),
@@ -825,7 +907,7 @@ fn build_adjustment_registry_json(repo_root: &Path, contract: &TokenBudgetContra
         return base;
     }
 
-    let Some(path) = source["path"].as_str() else {
+    let Some(path) = source["resolved_path"].as_str() else {
         return base;
     };
 
@@ -833,6 +915,7 @@ fn build_adjustment_registry_json(repo_root: &Path, contract: &TokenBudgetContra
         Ok(content) => content,
         Err(error) => {
             base["status"] = Value::String("read_error".to_string());
+            base["source"]["binding_status"] = Value::String("read_error".to_string());
             base["read_error"] = Value::String(error.to_string());
             return base;
         }
@@ -841,6 +924,7 @@ fn build_adjustment_registry_json(repo_root: &Path, contract: &TokenBudgetContra
         Ok(registry) => registry,
         Err(error) => {
             base["status"] = Value::String("parse_error".to_string());
+            base["source"]["binding_status"] = Value::String("parse_error".to_string());
             base["parse_error"] = Value::String(error.to_string());
             return base;
         }
@@ -908,6 +992,7 @@ fn build_adjustment_registry_json(repo_root: &Path, contract: &TokenBudgetContra
         .count();
 
     base["status"] = Value::String("loaded".to_string());
+    base["source"]["binding_status"] = Value::String("loaded".to_string());
     base["entries_count"] = json!(entries.len());
     base["pending_entries_count"] = json!(pending_entries_count);
     base["applied_entries_count"] = json!(applied_entries_count);
@@ -916,6 +1001,17 @@ fn build_adjustment_registry_json(repo_root: &Path, contract: &TokenBudgetContra
         Value::String(hash_line_items(&entries).unwrap_or_else(|_| "hash_error".to_string()));
     base["scopes"] = Value::Object(scope_map);
     base
+}
+
+fn build_adjustment_registry_json(repo_root: &Path, contract: &TokenBudgetContractConfig) -> Value {
+    let source = configured_external_truth_source(
+        repo_root,
+        "AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH",
+        "token_adjustment_registry",
+        "Report-only registry для correction/credit/dispute entries",
+        false,
+    );
+    load_adjustment_registry_from_source(&source, contract)
 }
 
 fn build_adjustment_preview_json(
@@ -1175,11 +1271,13 @@ fn build_reconciliation_preview(
 
 fn build_margin_contract_json(
     contract: &TokenBudgetContractConfig,
+    rate_card: &Value,
     infra_cost_source: &Value,
     reconciliation_contract: &Value,
 ) -> Value {
-    let rate_card_priced =
-        contract.rate_card_version != "unpriced-v1" && contract.currency_profile != "unpriced";
+    let rate_card_priced = rate_card["money_conversion_enabled"]
+        .as_bool()
+        .unwrap_or(false);
     let infra_cost_status = infra_cost_source["status"]
         .as_str()
         .unwrap_or("not_configured");
@@ -1196,6 +1294,7 @@ fn build_margin_contract_json(
     json!({
         "model_version": contract.margin_model_version.clone(),
         "infra_cost_profile_version": contract.infra_cost_profile_version.clone(),
+        "rate_card_status": rate_card["status"].clone(),
         "status": status,
         "money_margin_enabled": false,
         "infra_cost_source": infra_cost_source.clone(),
@@ -1863,8 +1962,10 @@ async fn collect_report(
         &config.contract,
         &external_truth_sources,
     );
+    let rate_card = build_rate_card_json(repo_root, &config.contract);
     let margin_contract = build_margin_contract_json(
         &config.contract,
+        &rate_card,
         &infra_cost_source,
         &reconciliation_contract,
     );
@@ -1884,7 +1985,7 @@ async fn collect_report(
             "usage_event_schema": build_usage_event_schema_json(&config.contract),
             "baseline_contract": build_baseline_contract_json(&config.contract),
             "billing_policy": build_billing_policy_json(&config.contract, &config.measurement),
-            "rate_card": build_rate_card_json(&config.contract),
+            "rate_card": rate_card.clone(),
             "settlement_contract": build_settlement_contract_json(&config.contract),
             "telemetry_surfaces": build_telemetry_surfaces_json(&config.contract),
             "adjustment_request_schema": build_adjustment_request_schema_json(&config.contract),
@@ -2382,6 +2483,10 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .unwrap_or("adjustment-registry-v0")
         .to_string();
+    let rate_card_binding_model_version = node["contract"]["rate_card_binding_model_version"]
+        .as_str()
+        .unwrap_or("rate-card-binding-v0")
+        .to_string();
     let telemetry_surface_split_version = node["contract"]["telemetry_surface_split_version"]
         .as_str()
         .unwrap_or("tokenonomics-surface-split-v0")
@@ -2525,6 +2630,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         adjustment_preview_model_version,
         adjustment_request_schema_version,
         adjustment_registry_version,
+        rate_card_binding_model_version,
         telemetry_surface_split_version,
         event_time_policy_version,
         billing_policy_version,
@@ -4180,6 +4286,7 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
             "adjustment_preview_model_version": event.adjustment_preview_model_version.clone(),
             "adjustment_request_schema_version": event.adjustment_request_schema_version.clone(),
             "adjustment_registry_version": event.adjustment_registry_version.clone(),
+            "rate_card_binding_model_version": event.rate_card_binding_model_version.clone(),
             "telemetry_surface_split_version": event.telemetry_surface_split_version.clone(),
             "event_time_policy_version": event.event_time_policy_version.clone(),
             "billing_policy_version": event.billing_policy_version.clone(),
@@ -5471,7 +5578,8 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
 mod tests {
     use super::{
         MeasurementConfig, NaiveScope, TokenBudgetContractConfig, TokenBudgetEvent,
-        apply_reverification_metadata, baseline_strategy_breakdown, build_adjustment_registry_json,
+        apply_reverification_metadata, baseline_strategy_breakdown,
+        bind_rate_card_json_from_source, build_adjustment_registry_json,
         build_adjustment_request_schema_json, build_baseline_contract_json,
         build_billing_policy_json, build_contractual_evidence_pack, build_event_payload,
         build_external_truth_sources_json, build_margin_contract_json, build_margin_scope,
@@ -5486,19 +5594,22 @@ mod tests {
         default_dispute_policy_version, default_event_time_policy_version,
         default_excluded_taxonomy_version, default_freeze_close_policy_version,
         default_infra_cost_profile_version, default_late_arrival_policy_version,
-        default_margin_model_version, default_quality_method_version, default_rate_card_version,
+        default_margin_model_version, default_quality_method_version,
+        default_rate_card_binding_model_version, default_rate_card_version,
         default_reconciliation_contract_version, default_settlement_lifecycle_model_version,
         default_settlement_statement_version, default_settlement_status,
         default_statement_period_governance_version, default_telemetry_surface_split_version,
         derive_baseline_strategy, derive_quality_verdict, derive_query_type, derive_traffic_class,
         event_to_json, followup_queries_related, include_traffic_class_in_report,
-        latency_slice_breakdown, needs_live_reverification, parse_snapshot_event,
-        reconcile_followup_recovery, repair_legacy_token_event_payload, report_contract_json,
-        summarize_events,
+        latency_slice_breakdown, load_adjustment_registry_from_source, needs_live_reverification,
+        parse_rate_card_file, parse_snapshot_event, reconcile_followup_recovery,
+        repair_legacy_token_event_payload, report_contract_json, summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
+    use std::fs;
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use uuid::Uuid;
 
     fn contract_fixture() -> TokenBudgetContractConfig {
@@ -5524,6 +5635,14 @@ mod tests {
             session_gap_minutes: 30,
             rolling_window_hours: Some(24),
         }
+    }
+
+    fn unique_temp_path(prefix: &str, extension: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}.{extension}"))
     }
 
     fn adjustment_registry_fixture(contract: &TokenBudgetContractConfig) -> serde_json::Value {
@@ -5566,6 +5685,7 @@ mod tests {
                     adjustment_preview_model_version: default_adjustment_preview_model_version(),
                     adjustment_request_schema_version: default_adjustment_request_schema_version(),
                     adjustment_registry_version: default_adjustment_registry_version(),
+                    rate_card_binding_model_version: default_rate_card_binding_model_version(),
                     telemetry_surface_split_version: default_telemetry_surface_split_version(),
                     event_time_policy_version: default_event_time_policy_version(),
                     billing_policy_version: default_billing_policy_version(),
@@ -5907,6 +6027,10 @@ mod tests {
             "adjustment-registry-v1"
         );
         assert_eq!(
+            token_event["contract"]["rate_card_binding_model_version"],
+            "rate-card-binding-v1"
+        );
+        assert_eq!(
             token_event["contract"]["telemetry_surface_split_version"],
             "tokenonomics-surface-split-v1"
         );
@@ -6011,7 +6135,7 @@ mod tests {
         let measurement = measurement_fixture();
         let contract = contract_fixture();
         let billing_policy = build_billing_policy_json(&contract, &measurement);
-        let rate_card = build_rate_card_json(&contract);
+        let rate_card = build_rate_card_json(Path::new("/tmp/amai-no-rate-card"), &contract);
         let baseline_contract = build_baseline_contract_json(&contract);
 
         assert_eq!(billing_policy["mode"], "report_only");
@@ -6021,10 +6145,95 @@ mod tests {
         );
         assert_eq!(billing_policy["required_traffic_class"], "live");
         assert_eq!(billing_policy["preliminary_thresholds"]["min_events"], 50);
-        assert_eq!(rate_card["status"], "unpriced");
+        assert_eq!(rate_card["status"], "not_configured");
         assert_eq!(rate_card["money_conversion_enabled"], false);
         assert_eq!(baseline_contract["allowed_classes"][0], "naive_top_files");
         assert_eq!(baseline_contract["disallowed_classes"][0], "entire_repo");
+    }
+
+    #[test]
+    fn rate_card_parser_accepts_machine_readable_profile() {
+        let parsed = parse_rate_card_file(
+            r#"{
+                "schema_version":"provider-rate-card-v1",
+                "rate_card_version":"demo-priced-v1",
+                "currency_profile":"USD",
+                "provider":"generic",
+                "default_input_cost_per_1k_tokens":0.01,
+                "default_output_cost_per_1k_tokens":0.02
+            }"#,
+        )
+        .expect("rate card");
+        assert_eq!(parsed.rate_card_version, "demo-priced-v1");
+        assert_eq!(parsed.currency_profile, "USD");
+    }
+
+    #[test]
+    fn rate_card_binding_uses_resolved_path_and_sets_priced_status() {
+        let contract = contract_fixture();
+        let path = unique_temp_path("amai-rate-card", "toml");
+        fs::write(
+            &path,
+            r#"
+schema_version = "provider-rate-card-v1"
+rate_card_version = "demo-priced-v1"
+currency_profile = "USD"
+provider = "demo-provider"
+default_input_cost_per_1k_tokens = 0.01
+default_output_cost_per_1k_tokens = 0.02
+"#,
+        )
+        .expect("write rate card");
+        let source = json!({
+            "status": "configured_existing_path",
+            "resolved_path": path.display().to_string(),
+            "binding_status": "configured_but_unbound"
+        });
+        let rate_card = bind_rate_card_json_from_source(&source, &contract);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(rate_card["status"], "priced_bound");
+        assert_eq!(rate_card["money_conversion_enabled"], true);
+        assert_eq!(rate_card["bound_rate_card_version"], "demo-priced-v1");
+        assert_eq!(rate_card["provider"], "demo-provider");
+        assert_eq!(rate_card["source"]["binding_status"], "priced_bound");
+    }
+
+    #[test]
+    fn adjustment_registry_binding_uses_resolved_path() {
+        let contract = contract_fixture();
+        let path = unique_temp_path("amai-adjustment-registry", "json");
+        fs::write(
+            &path,
+            r#"{
+  "adjustments": [
+    {
+      "adjustment_id": "adj-1",
+      "scope_code": "current_session",
+      "status": "applied_report_only",
+      "kind": "adjustment_entry",
+      "reason_code": "proof_adjustment",
+      "created_at_epoch_ms": 1000,
+      "tokens_delta": -12,
+      "amount_delta": null,
+      "currency_profile": null,
+      "related_statement_id": null
+    }
+  ]
+}"#,
+        )
+        .expect("write adjustment registry");
+        let source = json!({
+            "status": "configured_existing_path",
+            "resolved_path": path.display().to_string(),
+            "binding_status": "configured_but_unbound"
+        });
+        let registry = load_adjustment_registry_from_source(&source, &contract);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(registry["status"], "loaded");
+        assert_eq!(registry["entries_count"], 1);
+        assert_eq!(registry["source"]["binding_status"], "loaded");
     }
 
     #[test]
@@ -6212,10 +6421,12 @@ mod tests {
         let contract = contract_fixture();
         let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
         let reconciliation = build_reconciliation_contract_json(&contract, &sources);
+        let rate_card = build_rate_card_json(Path::new("/tmp/amai-no-rate-card"), &contract);
         let infra_cost_source = json!({
             "status": "not_configured"
         });
-        let margin = build_margin_contract_json(&contract, &infra_cost_source, &reconciliation);
+        let margin =
+            build_margin_contract_json(&contract, &rate_card, &infra_cost_source, &reconciliation);
 
         assert_eq!(margin["model_version"], "margin-view-v1");
         assert_eq!(margin["infra_cost_profile_version"], "unpriced-infra-v1");

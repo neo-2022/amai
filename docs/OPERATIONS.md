@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:50 MSK
-Ручная сверка guide/docs: 2026-03-24 12:50 MSK
+modified_at: 2026-03-24 13:04 MSK
+Ручная сверка guide/docs: 2026-03-24 13:04 MSK
 
 # Operations
 
@@ -1602,8 +1602,14 @@ cargo run --release -- verify token-benchmark-suite \
   - required traffic class и quality gate;
   - preliminary thresholds;
 - `rate_card`
-  - rate-card version и currency profile;
-  - `money_conversion_enabled = false`, пока pricing engine ещё не materialized;
+  - `rate_card_binding_model_version`, rate-card version и currency profile;
+  - truthful statuses:
+    - `not_configured`
+    - `read_error`
+    - `parse_error`
+    - `bound_but_unpriced`
+    - `priced_bound`
+  - `money_conversion_enabled = false`, пока binding не дошёл до `priced_bound`;
 - `settlement_contract`
   - statement version;
   - freeze/close policy version;
@@ -1625,6 +1631,7 @@ cargo run --release -- verify token-benchmark-suite \
 - `margin_contract`
   - versioned truth-layer для product margin;
   - current truthful status: money-margin ещё не включён;
+  - `rate_card_status` обязан повторять runtime status настоящего rate-card binding;
 - `margin_view`
   - `current_session / rolling_window / lifetime`;
   - customer lower-bound savings в токенах;

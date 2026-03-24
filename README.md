@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:50 MSK
-Ручная сверка guide/docs: 2026-03-24 12:50 MSK
+modified_at: 2026-03-24 13:04 MSK
+Ручная сверка guide/docs: 2026-03-24 13:04 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1063,8 +1063,16 @@ preview, а не только raw count.
   - видно, что сейчас реально billable отключён и весь слой остаётся `report_only`;
   - там же живут preliminary thresholds и правило `live + quality gate`.
 - `rate_card`
-  - честно показывает, что денежная конверсия пока ещё `unpriced`, а не делает вид,
-    что токены уже автоматически переведены в деньги.
+  - честно показывает не только `currency_profile`, но и отдельный
+    `rate_card_binding_model_version`;
+  - truthful statuses теперь такие:
+    - `not_configured`
+    - `read_error`
+    - `parse_error`
+    - `bound_but_unpriced`
+    - `priced_bound`
+  - денежная конверсия включается только в состоянии `priced_bound`, а не просто
+    по одному факту, что где-то в config уже написан `unpriced-v1`.
 - `settlement_contract`
   - публикует statement-version, freeze/close policy, late-arrival policy,
   correction/dispute policy;
@@ -1086,6 +1094,8 @@ preview, а не только raw count.
 - `margin_view`
   - по каждому scope показывает token-side lower bound savings клиента;
   - но деньги и маржа остаются `null`, пока это нельзя доказать.
+  - `margin_contract.rate_card_status` теперь должен совпадать с truthful runtime
+    rate-card binding, а не жить отдельной догадкой.
 - `contractual_evidence_pack`
   - по каждому scope можно выгрузить report-only evidence pack;
   - туда входят `statement_preview`, `reconciliation_preview`, `margin_scope`,
