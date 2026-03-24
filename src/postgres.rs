@@ -3,7 +3,7 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{Client, NoTls, Row};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -648,7 +648,7 @@ pub async fn search_documents_for_namespace(
               AND d.namespace_id = $2
               AND d.search_vector @@ websearch_to_tsquery('simple', $3)
             ORDER BY score DESC, d.relative_path
-            LIMIT $6
+            LIMIT $4
             "#,
             &[&project_id, &namespace_id, &query, &limit],
         )
@@ -676,20 +676,18 @@ pub async fn search_documents_exact_for_namespace(
     query: &str,
     limit: i64,
 ) -> Result<Vec<DocumentHit>> {
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
     let basename_query = exact_match_basename(query);
     let basename_stem_query = exact_match_basename_stem(&basename_query);
     let allow_extensionless_basename_match = basename_query == basename_stem_query;
-    let rows = client
-        .query(
-            r#"
-            WITH normalized AS (
-                SELECT
-                    $3::text AS full_query,
-                    $4::text AS basename_query,
-                    $5::text AS basename_stem_query,
-                    $6::boolean AS allow_extensionless_basename_match
-            ),
-            matches AS (
+    let mut hits = Vec::new();
+
+    hits.extend(
+        client
+            .query(
+                r#"
                 SELECT
                     p.code AS project_code,
                     n.code AS namespace_code,
@@ -703,94 +701,125 @@ pub async fn search_documents_exact_for_namespace(
                 FROM ami.code_documents d
                 JOIN ami.projects p ON p.project_id = d.project_id
                 JOIN ami.namespaces n ON n.namespace_id = d.namespace_id
-                CROSS JOIN normalized
                 WHERE d.project_id = $1
                   AND d.namespace_id = $2
-                  AND d.relative_path = normalized.full_query
-
-                UNION ALL
-
-                SELECT
-                    p.code AS project_code,
-                    n.code AS namespace_code,
-                    d.repo_root,
-                    d.relative_path,
-                    d.language,
-                    d.source_kind,
-                    d.git_commit_sha,
-                    1500.0::real AS score,
-                    LEFT(d.content, 1600) AS snippet
-                FROM ami.code_documents d
-                JOIN ami.projects p ON p.project_id = d.project_id
-                JOIN ami.namespaces n ON n.namespace_id = d.namespace_id
-                CROSS JOIN normalized
-                WHERE d.project_id = $1
-                  AND d.namespace_id = $2
-                  AND d.relative_basename = normalized.basename_query
-                  AND d.relative_path <> normalized.full_query
-
-                UNION ALL
-
-                SELECT
-                    p.code AS project_code,
-                    n.code AS namespace_code,
-                    d.repo_root,
-                    d.relative_path,
-                    d.language,
-                    d.source_kind,
-                    d.git_commit_sha,
-                    1400.0::real AS score,
-                    LEFT(d.content, 1600) AS snippet
-                FROM ami.code_documents d
-                JOIN ami.projects p ON p.project_id = d.project_id
-                JOIN ami.namespaces n ON n.namespace_id = d.namespace_id
-                CROSS JOIN normalized
-                WHERE d.project_id = $1
-                  AND d.namespace_id = $2
-                  AND normalized.allow_extensionless_basename_match
-                  AND d.relative_basename_stem = normalized.basename_stem_query
-                  AND d.relative_path <> normalized.full_query
-                  AND d.relative_basename <> normalized.basename_query
+                  AND d.relative_path = $3
+                ORDER BY length(d.relative_path), d.relative_path
+                LIMIT $4
+                "#,
+                &[&project_id, &namespace_id, &query, &limit],
             )
-            SELECT
-                project_code,
-                namespace_code,
-                repo_root,
-                relative_path,
-                language,
-                source_kind,
-                git_commit_sha,
-                score,
-                snippet
-            FROM matches
-            ORDER BY score DESC, length(relative_path), relative_path
-            LIMIT $7
-            "#,
-            &[
-                &project_id,
-                &namespace_id,
-                &query,
-                &basename_query,
-                &basename_stem_query,
-                &allow_extensionless_basename_match,
-                &limit,
-            ],
-        )
-        .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| DocumentHit {
-            project_code: row.get(0),
-            namespace_code: row.get(1),
-            repo_root: row.get(2),
-            relative_path: row.get(3),
-            language: row.get(4),
-            source_kind: row.get(5),
-            git_commit_sha: row.get(6),
-            score: row.get(7),
-            snippet: row.get(8),
-        })
-        .collect())
+            .await?
+            .into_iter()
+            .map(document_hit_from_row),
+    );
+
+    if (hits.len() as i64) < limit {
+        let remaining = limit - hits.len() as i64;
+        hits.extend(
+            client
+                .query(
+                    r#"
+                    SELECT
+                        p.code AS project_code,
+                        n.code AS namespace_code,
+                        d.repo_root,
+                        d.relative_path,
+                        d.language,
+                        d.source_kind,
+                        d.git_commit_sha,
+                        1500.0::real AS score,
+                        LEFT(d.content, 1600) AS snippet
+                    FROM ami.code_documents d
+                    JOIN ami.projects p ON p.project_id = d.project_id
+                    JOIN ami.namespaces n ON n.namespace_id = d.namespace_id
+                    WHERE d.project_id = $1
+                      AND d.namespace_id = $2
+                      AND d.relative_basename = $3
+                      AND d.relative_path <> $4
+                    ORDER BY length(d.relative_path), d.relative_path
+                    LIMIT $5
+                    "#,
+                    &[
+                        &project_id,
+                        &namespace_id,
+                        &basename_query,
+                        &query,
+                        &remaining,
+                    ],
+                )
+                .await?
+                .into_iter()
+                .map(document_hit_from_row),
+        );
+    }
+
+    if allow_extensionless_basename_match && (hits.len() as i64) < limit {
+        let remaining = limit - hits.len() as i64;
+        hits.extend(
+            client
+                .query(
+                    r#"
+                    SELECT
+                        p.code AS project_code,
+                        n.code AS namespace_code,
+                        d.repo_root,
+                        d.relative_path,
+                        d.language,
+                        d.source_kind,
+                        d.git_commit_sha,
+                        1400.0::real AS score,
+                        LEFT(d.content, 1600) AS snippet
+                    FROM ami.code_documents d
+                    JOIN ami.projects p ON p.project_id = d.project_id
+                    JOIN ami.namespaces n ON n.namespace_id = d.namespace_id
+                    WHERE d.project_id = $1
+                      AND d.namespace_id = $2
+                      AND d.relative_basename_stem = $3
+                      AND d.relative_path <> $4
+                      AND d.relative_basename <> $5
+                    ORDER BY length(d.relative_path), d.relative_path
+                    LIMIT $6
+                    "#,
+                    &[
+                        &project_id,
+                        &namespace_id,
+                        &basename_stem_query,
+                        &query,
+                        &basename_query,
+                        &remaining,
+                    ],
+                )
+                .await?
+                .into_iter()
+                .map(document_hit_from_row),
+        );
+    }
+
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.relative_path.len().cmp(&right.relative_path.len()))
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    hits.truncate(limit as usize);
+    Ok(hits)
+}
+
+fn document_hit_from_row(row: Row) -> DocumentHit {
+    DocumentHit {
+        project_code: row.get(0),
+        namespace_code: row.get(1),
+        repo_root: row.get(2),
+        relative_path: row.get(3),
+        language: row.get(4),
+        source_kind: row.get(5),
+        git_commit_sha: row.get(6),
+        score: row.get(7),
+        snippet: row.get(8),
+    }
 }
 
 fn exact_match_basename(query: &str) -> String {

@@ -271,14 +271,24 @@ materialize_git_repo() {
         return 1
     fi
 
-    local -a materialized=()
+    local sparse_file="${checkout_dir}/.git/info/sparse-checkout"
+    git -C "${checkout_dir}" sparse-checkout init --no-cone >/dev/null 2>&1
+    : > "${sparse_file}"
     local selected_path=""
     for selected_path in "${selected[@]}"; do
-        mkdir -p "${checkout_dir}/$(dirname "${selected_path}")"
-        if git -C "${checkout_dir}" show "HEAD:${selected_path}" > "${checkout_dir}/${selected_path}" 2>/dev/null; then
+        printf '%s\n' "${selected_path}" >> "${sparse_file}"
+    done
+    if ! git -C "${checkout_dir}" checkout --quiet HEAD >/dev/null 2>&1; then
+        echo "warning: failed to sparse-checkout ${code}" >&2
+        rm -rf "${checkout_dir}"
+        return 1
+    fi
+
+    local -a materialized=()
+    for selected_path in "${selected[@]}"; do
+        if [[ -f "${checkout_dir}/${selected_path}" ]]; then
             materialized+=("${selected_path}")
         else
-            rm -f "${checkout_dir}/${selected_path}"
             echo "warning: failed to materialize ${code}:${selected_path}" >&2
         fi
     done

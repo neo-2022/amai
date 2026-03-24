@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 03:25 MSK
-Ручная сверка guide/docs: 2026-03-24 03:25 MSK
+modified_at: 2026-03-24 04:13 MSK
+Ручная сверка guide/docs: 2026-03-24 04:13 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1577,11 +1577,13 @@ cargo run --release -- verify degradation
 
 Этот runner:
 - сначала materialize-ит repo-pool так, чтобы `expected_paths` указывали только на реально существующие exact relative paths;
+- для внешних git-репозиториев теперь materialize-ит выбранные candidate files через sparse-checkout tracked worktree, а не через `git show > file`, поэтому repo-pool не должен оставлять скрытые `D`-хвосты и ложные cold-quality misses на следующем refresh;
 - для локальных репозиториев использует канонические `project code`, чтобы один и тот же repo не жил в benchmark-пуле под alias и под обычным именем одновременно;
 - перед live indexing canonicalize-ит `repo_root` ещё раз, чтобы внешний repo из manifest не оставлял
   в индексе path-хвосты с `..` и не ломал честный exact-path score;
 - exact document lookup теперь идёт через адресные SQL ветки:
   `relative_path`, `relative_basename`, `relative_basename_stem`, а не через regex-фильтр по всему namespace;
+- тот же exact-path contour теперь честно держит и extensionless basename files вроде `Makefile`, не проваливаясь в broken fallback query;
 - если case-set для локального repo не требует semantic path и держит `limit_semantic_chunks = 0`, manifest может и должен честно ставить `skip_embeddings = true`, чтобы cold contour не платил лишнюю цену за vector layer там, где этот конкретный набор проверок его всё равно не использует;
 - сам индексирует указанные repo из manifest;
 - считает отдельно `cold` и `hot shadow`;
