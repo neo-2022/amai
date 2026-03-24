@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:55 MSK
-Ручная сверка guide/docs: 2026-03-24 11:55 MSK
+modified_at: 2026-03-24 12:03 MSK
+Ручная сверка guide/docs: 2026-03-24 12:03 MSK
 
 # Operations
 
@@ -1618,6 +1618,13 @@ cargo run --release -- verify token-benchmark-suite \
   - `current_session / rolling_window / lifetime`;
   - internal measured lower bound по scope;
   - provider usage / provider cost / drift пока остаются `null`, если truth source ещё не подключён;
+- `margin_contract`
+  - versioned truth-layer для product margin;
+  - current truthful status: money-margin ещё не включён;
+- `margin_view`
+  - `current_session / rolling_window / lifetime`;
+  - customer lower-bound savings в токенах;
+  - money margin fields пока остаются `null`, если rate card и infra cost profile ещё не materialized;
 - `coverage`
   - отдельный truth-layer поверх каждого rollup:
     - `measured_events`
@@ -1681,6 +1688,11 @@ cargo run --release -- verify token-benchmark-suite \
   - `rolling_window`
   - `lifetime`
   - в них видно внутренний lower bound по каждому scope, но внешняя provider сверка и drift остаются пустыми, пока нет real source binding.
+- `margin_view` теперь тоже каноничен:
+  - `current_session`
+  - `rolling_window`
+  - `lifetime`
+  - в нём видно token-side lower bound savings клиента, но денежные поля остаются пустыми, пока нет priced rate card, provider reconciliation и infra cost profile.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе:

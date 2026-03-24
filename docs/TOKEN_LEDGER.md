@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:55 MSK
-Ручная сверка guide/docs: 2026-03-24 11:55 MSK
+modified_at: 2026-03-24 12:03 MSK
+Ручная сверка guide/docs: 2026-03-24 12:03 MSK
 
 # Token Ledger
 
@@ -122,6 +122,8 @@ Ledger не имеет права смешивать:
 - `billing_policy_version`
 - `billing_mode`
 - `reconciliation_contract_version`
+- `margin_model_version`
+- `infra_cost_profile_version`
 - `rate_card_version`
 - `currency_profile`
 - `settlement_status`
@@ -541,6 +543,44 @@ materialized end-to-end.
 - пока reconciliation parser не привязан к canonical ledger;
 
 `Amai` не имеет права подменять внутренний lower bound внешней сверкой “по ощущениям”.
+
+## Margin view и собственная экономика Amai
+
+После reconciliation следующий честный слой — `margin_contract` и `margin_view`.
+
+Зачем они нужны:
+- не путать `customer savings` и `product margin`;
+- не выдавать токеновую экономию клиента за денежную прибыль `Amai`;
+- явно показывать, когда у нас ещё нет rate card или infra cost profile.
+
+Теперь report отдельно публикует:
+- `margin_contract`
+- `margin_view`
+
+`margin_contract` обязан честно отвечать на вопросы:
+- какой versioned margin model сейчас действует;
+- есть ли вообще priced rate card;
+- есть ли infra cost profile;
+- включена ли money-margin арифметика.
+
+Текущий truthful status:
+- `margin_model_version = margin-view-v1`
+- `infra_cost_profile_version = unpriced-infra-v1`
+- `money_margin_enabled = false`
+
+Именно поэтому `margin_view` сейчас обязан выглядеть так:
+- `customer_saved_tokens_lower_bound` заполнен;
+- `customer_saved_amount_lower_bound = null`
+- `amai_infra_cost_amount = null`
+- `margin_amount = null`
+- `savings_to_cost_ratio = null`
+
+Это не “недоделанная формула”, а truth guardrail:
+- пока rate card остаётся `unpriced`;
+- пока infra cost profile не materialized;
+- пока provider reconciliation не доведён до денежной сверки;
+
+`Amai` не имеет права рисовать даже приблизительную маржу как будто она уже доказана.
 
 ## Preliminary vs stable
 

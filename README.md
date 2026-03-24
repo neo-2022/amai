@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:55 MSK
-Ручная сверка guide/docs: 2026-03-24 11:55 MSK
+modified_at: 2026-03-24 12:03 MSK
+Ручная сверка guide/docs: 2026-03-24 12:03 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1075,6 +1075,12 @@ preview, а не только raw count.
 - `reconciliation_previews`
   - по каждому scope показывают внутренний measured lower bound;
   - но внешние provider usage / cost / drift остаются `null`, пока нет настоящей external truth binding.
+- `margin_contract`
+  - показывает, включена ли вообще money-margin арифметика;
+  - честно фиксирует отсутствие priced rate card и infra cost profile.
+- `margin_view`
+  - по каждому scope показывает token-side lower bound savings клиента;
+  - но деньги и маржа остаются `null`, пока это нельзя доказать.
 - first-class `coverage`
   - у каждого rollup теперь есть не только savings, но и честный охват:
     `measured / included / excluded`;
@@ -1114,6 +1120,12 @@ preview, а не только raw count.
   - там уже видно, что внутренний lower bound по scope есть;
   - но `external_provider_usage_tokens`, `external_provider_cost_amount` и `drift_*`
     остаются пустыми, пока provider export и rate-card ещё не подключены честно.
+- margin view теперь тоже first-class:
+  - `margin_view.current_session / rolling_window / lifetime`
+  - там уже видно `customer_saved_tokens_lower_bound`;
+  - но `customer_saved_amount_lower_bound`, `amai_infra_cost_amount`, `margin_amount`
+    и `savings_to_cost_ratio` остаются пустыми, пока rate card и infra cost profile
+    ещё не materialized честно.
 
 По умолчанию proof/benchmark-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе, используйте:

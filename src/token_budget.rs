@@ -84,6 +84,10 @@ struct TokenBudgetContractConfig {
     billing_mode: String,
     #[serde(default = "default_reconciliation_contract_version")]
     reconciliation_contract_version: String,
+    #[serde(default = "default_margin_model_version")]
+    margin_model_version: String,
+    #[serde(default = "default_infra_cost_profile_version")]
+    infra_cost_profile_version: String,
     #[serde(default = "default_rate_card_version")]
     rate_card_version: String,
     #[serde(default = "default_currency_profile")]
@@ -114,6 +118,8 @@ impl Default for TokenBudgetContractConfig {
             billing_policy_version: default_billing_policy_version(),
             billing_mode: default_billing_mode(),
             reconciliation_contract_version: default_reconciliation_contract_version(),
+            margin_model_version: default_margin_model_version(),
+            infra_cost_profile_version: default_infra_cost_profile_version(),
             rate_card_version: default_rate_card_version(),
             currency_profile: default_currency_profile(),
             settlement_status: default_settlement_status(),
@@ -171,6 +177,8 @@ struct TokenBudgetEvent {
     billing_policy_version: String,
     billing_mode: String,
     reconciliation_contract_version: String,
+    margin_model_version: String,
+    infra_cost_profile_version: String,
     rate_card_version: String,
     currency_profile: String,
     settlement_status: String,
@@ -337,6 +345,14 @@ fn default_reconciliation_contract_version() -> String {
     "provider-reconciliation-v1".to_string()
 }
 
+fn default_margin_model_version() -> String {
+    "margin-view-v1".to_string()
+}
+
+fn default_infra_cost_profile_version() -> String {
+    "unpriced-infra-v1".to_string()
+}
+
 fn default_rate_card_version() -> String {
     "unpriced-v1".to_string()
 }
@@ -370,6 +386,8 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "billing_policy_version": contract.billing_policy_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
+        "margin_model_version": contract.margin_model_version.clone(),
+        "infra_cost_profile_version": contract.infra_cost_profile_version.clone(),
         "rate_card_version": contract.rate_card_version.clone(),
         "currency_profile": contract.currency_profile.clone(),
         "settlement_status": contract.settlement_status.clone(),
@@ -397,6 +415,8 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "billing_policy_version": contract.billing_policy_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
+        "margin_model_version": contract.margin_model_version.clone(),
+        "infra_cost_profile_version": contract.infra_cost_profile_version.clone(),
         "rate_card_version": contract.rate_card_version.clone(),
         "currency_profile": contract.currency_profile.clone(),
         "settlement_status": contract.settlement_status.clone(),
@@ -709,6 +729,90 @@ fn build_reconciliation_preview(
         "external_truth_sources": external_sources.clone(),
         "blocking_reasons": blocking_reasons,
         "note": "Этот preview честно показывает внутренний lower bound по scope, но не делает вид, что он уже сверен с usage/export от внешнего provider."
+    })
+}
+
+fn build_margin_contract_json(
+    contract: &TokenBudgetContractConfig,
+    infra_cost_source: &Value,
+    reconciliation_contract: &Value,
+) -> Value {
+    let rate_card_priced =
+        contract.rate_card_version != "unpriced-v1" && contract.currency_profile != "unpriced";
+    let infra_cost_status = infra_cost_source["status"]
+        .as_str()
+        .unwrap_or("not_configured");
+    let status = if !rate_card_priced {
+        "awaiting_rate_card"
+    } else if infra_cost_status != "configured_existing_path" {
+        "awaiting_infra_cost_profile"
+    } else if reconciliation_contract["ready_for_external_reconciliation"].as_bool() != Some(true) {
+        "awaiting_provider_reconciliation"
+    } else {
+        "configured_inputs_not_yet_priced"
+    };
+
+    json!({
+        "model_version": contract.margin_model_version.clone(),
+        "infra_cost_profile_version": contract.infra_cost_profile_version.clone(),
+        "status": status,
+        "money_margin_enabled": false,
+        "infra_cost_source": infra_cost_source.clone(),
+        "note": "Margin layer требует одновременно priced rate card, provider reconciliation и infra cost profile. Пока хотя бы один из этих truth-sources отсутствует, деньги и маржа остаются null."
+    })
+}
+
+fn build_margin_scope(
+    scope_code: &str,
+    scope_label: &str,
+    statement_preview: &Value,
+    reconciliation_preview: &Value,
+    contract: &TokenBudgetContractConfig,
+    infra_cost_source: &Value,
+) -> Value {
+    let rate_card_priced =
+        contract.rate_card_version != "unpriced-v1" && contract.currency_profile != "unpriced";
+    let infra_cost_status = infra_cost_source["status"]
+        .as_str()
+        .unwrap_or("not_configured");
+    let reconciliation_state = reconciliation_preview["reconciliation_state"]
+        .as_str()
+        .unwrap_or("awaiting_provider_usage_source");
+    let margin_state = if !rate_card_priced {
+        "awaiting_rate_card"
+    } else if infra_cost_status != "configured_existing_path" {
+        "awaiting_infra_cost_profile"
+    } else if reconciliation_state != "external_reconciled" {
+        "awaiting_provider_reconciliation"
+    } else {
+        "configured_inputs_not_yet_priced"
+    };
+    let mut blocking_reasons = Vec::new();
+    if !rate_card_priced {
+        blocking_reasons.push("rate_card_unpriced");
+    }
+    if infra_cost_status != "configured_existing_path" {
+        blocking_reasons.push("infra_cost_profile_missing");
+    }
+    if reconciliation_state != "external_reconciled" {
+        blocking_reasons.push("provider_reconciliation_not_complete");
+    }
+
+    json!({
+        "scope_code": scope_code,
+        "scope_label": scope_label,
+        "margin_state": margin_state,
+        "customer_saved_tokens_lower_bound": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
+        "customer_saved_amount_lower_bound": Value::Null,
+        "amai_infra_cost_amount": Value::Null,
+        "margin_amount": Value::Null,
+        "savings_to_cost_ratio": Value::Null,
+        "currency_profile": contract.currency_profile.clone(),
+        "coverage": statement_preview["coverage"].clone(),
+        "reconciliation_state": reconciliation_preview["reconciliation_state"].clone(),
+        "infra_cost_source": infra_cost_source.clone(),
+        "blocking_reasons": blocking_reasons,
+        "note": "Пока это token-side lower bound: Amai уже знает, сколько токенов клиент сэкономил минимум, но не делает вид, что денежная маржа уже измерена."
     })
 }
 
@@ -1044,6 +1148,13 @@ async fn collect_report(
         &profile.display_name,
     );
     let external_truth_sources = build_external_truth_sources_json(repo_root);
+    let infra_cost_source = configured_external_truth_source(
+        repo_root,
+        "AMAI_INFRA_COST_PROFILE_PATH",
+        "infra_cost_profile",
+        "Профиль собственных infra costs для Amai",
+        false,
+    );
     let current_session_statement_preview = build_statement_preview(
         "current_session",
         "текущая сессия",
@@ -1066,6 +1177,38 @@ async fn collect_report(
         &lifetime_summary,
         &config.contract,
     );
+    let reconciliation_contract =
+        build_reconciliation_contract_json(&config.contract, &external_truth_sources);
+    let current_session_reconciliation_preview = build_reconciliation_preview(
+        "current_session",
+        "текущая сессия",
+        &current_session_statement_preview,
+        &config.contract,
+        &external_truth_sources,
+    );
+    let rolling_window_reconciliation_preview = if profile.rolling_window_hours.is_some() {
+        build_reconciliation_preview(
+            "rolling_window",
+            &format!("окно {}", profile.display_name),
+            &rolling_window_statement_preview,
+            &config.contract,
+            &external_truth_sources,
+        )
+    } else {
+        Value::Null
+    };
+    let lifetime_reconciliation_preview = build_reconciliation_preview(
+        "lifetime",
+        "всё время записи",
+        &lifetime_statement_preview,
+        &config.contract,
+        &external_truth_sources,
+    );
+    let margin_contract = build_margin_contract_json(
+        &config.contract,
+        &infra_cost_source,
+        &reconciliation_contract,
+    );
 
     Ok(json!({
         "token_budget_report": {
@@ -1084,7 +1227,8 @@ async fn collect_report(
             "billing_policy": build_billing_policy_json(&config.contract, &config.measurement),
             "rate_card": build_rate_card_json(&config.contract),
             "settlement_contract": build_settlement_contract_json(&config.contract),
-            "reconciliation_contract": build_reconciliation_contract_json(&config.contract, &external_truth_sources),
+            "reconciliation_contract": reconciliation_contract.clone(),
+            "margin_contract": margin_contract.clone(),
             "filters": {
                 "include_verify_events": include_verify_events,
             },
@@ -1104,30 +1248,44 @@ async fn collect_report(
                 "lifetime": lifetime_statement_preview.clone(),
             },
             "reconciliation_previews": {
-                "current_session": build_reconciliation_preview(
+                "current_session": current_session_reconciliation_preview.clone(),
+                "rolling_window": if profile.rolling_window_hours.is_some() {
+                    rolling_window_reconciliation_preview.clone()
+                } else {
+                    Value::Null
+                },
+                "lifetime": lifetime_reconciliation_preview.clone(),
+            },
+            "margin_view": {
+                "model_version": config.contract.margin_model_version.clone(),
+                "status": margin_contract["status"].clone(),
+                "current_session": build_margin_scope(
                     "current_session",
                     "текущая сессия",
                     &current_session_statement_preview,
+                    &current_session_reconciliation_preview,
                     &config.contract,
-                    &external_truth_sources,
+                    &infra_cost_source,
                 ),
                 "rolling_window": if profile.rolling_window_hours.is_some() {
-                    build_reconciliation_preview(
+                    build_margin_scope(
                         "rolling_window",
                         &format!("окно {}", profile.display_name),
                         &rolling_window_statement_preview,
+                        &rolling_window_reconciliation_preview,
                         &config.contract,
-                        &external_truth_sources,
+                        &infra_cost_source,
                     )
                 } else {
                     Value::Null
                 },
-                "lifetime": build_reconciliation_preview(
+                "lifetime": build_margin_scope(
                     "lifetime",
                     "всё время записи",
                     &lifetime_statement_preview,
+                    &lifetime_reconciliation_preview,
                     &config.contract,
-                    &external_truth_sources,
+                    &infra_cost_source,
                 ),
             },
             "source_breakdown": source_breakdown,
@@ -1557,6 +1715,14 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .unwrap_or("provider-reconciliation-v0")
         .to_string();
+    let margin_model_version = node["contract"]["margin_model_version"]
+        .as_str()
+        .unwrap_or("margin-view-v0")
+        .to_string();
+    let infra_cost_profile_version = node["contract"]["infra_cost_profile_version"]
+        .as_str()
+        .unwrap_or("unpriced-infra-v0")
+        .to_string();
     let rate_card_version = node["contract"]["rate_card_version"]
         .as_str()
         .unwrap_or("unpriced-v0")
@@ -1667,6 +1833,8 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         billing_policy_version,
         billing_mode,
         reconciliation_contract_version,
+        margin_model_version,
+        infra_cost_profile_version,
         rate_card_version,
         currency_profile,
         settlement_status,
@@ -3313,6 +3481,8 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
             "billing_policy_version": event.billing_policy_version.clone(),
             "billing_mode": event.billing_mode.clone(),
             "reconciliation_contract_version": event.reconciliation_contract_version.clone(),
+            "margin_model_version": event.margin_model_version.clone(),
+            "infra_cost_profile_version": event.infra_cost_profile_version.clone(),
             "rate_card_version": event.rate_card_version.clone(),
             "currency_profile": event.currency_profile.clone(),
             "settlement_status": event.settlement_status.clone(),
@@ -4598,15 +4768,16 @@ mod tests {
         MeasurementConfig, NaiveScope, TokenBudgetContractConfig, TokenBudgetEvent,
         apply_reverification_metadata, baseline_strategy_breakdown, build_baseline_contract_json,
         build_billing_policy_json, build_event_payload, build_external_truth_sources_json,
-        build_product_headline, build_rate_card_json, build_reconciliation_contract_json,
-        build_reconciliation_preview, build_settlement_contract_json, build_statement_preview,
-        build_usage_event_schema_json, default_backfill_policy_version,
-        default_baseline_method_version, default_billing_mode, default_billing_policy_version,
-        default_correction_policy_version, default_coverage_model_version,
-        default_currency_profile, default_dedup_contract_version, default_dispute_policy_version,
-        default_event_time_policy_version, default_excluded_taxonomy_version,
-        default_freeze_close_policy_version, default_late_arrival_policy_version,
-        default_quality_method_version, default_rate_card_version,
+        build_margin_contract_json, build_margin_scope, build_product_headline,
+        build_rate_card_json, build_reconciliation_contract_json, build_reconciliation_preview,
+        build_settlement_contract_json, build_statement_preview, build_usage_event_schema_json,
+        default_backfill_policy_version, default_baseline_method_version, default_billing_mode,
+        default_billing_policy_version, default_correction_policy_version,
+        default_coverage_model_version, default_currency_profile, default_dedup_contract_version,
+        default_dispute_policy_version, default_event_time_policy_version,
+        default_excluded_taxonomy_version, default_freeze_close_policy_version,
+        default_infra_cost_profile_version, default_late_arrival_policy_version,
+        default_margin_model_version, default_quality_method_version, default_rate_card_version,
         default_reconciliation_contract_version, default_settlement_statement_version,
         default_settlement_status, derive_baseline_strategy, derive_quality_verdict,
         derive_query_type, derive_traffic_class, event_to_json, followup_queries_related,
@@ -4669,6 +4840,8 @@ mod tests {
                     billing_policy_version: default_billing_policy_version(),
                     billing_mode: default_billing_mode(),
                     reconciliation_contract_version: default_reconciliation_contract_version(),
+                    margin_model_version: default_margin_model_version(),
+                    infra_cost_profile_version: default_infra_cost_profile_version(),
                     rate_card_version: default_rate_card_version(),
                     currency_profile: default_currency_profile(),
                     settlement_status: default_settlement_status(),
@@ -4970,6 +5143,14 @@ mod tests {
             "provider-reconciliation-v1"
         );
         assert_eq!(
+            token_event["contract"]["margin_model_version"],
+            "margin-view-v1"
+        );
+        assert_eq!(
+            token_event["contract"]["infra_cost_profile_version"],
+            "unpriced-infra-v1"
+        );
+        assert_eq!(
             token_event["contract"]["settlement_status"],
             "unsettled_report_only"
         );
@@ -5182,6 +5363,67 @@ mod tests {
                 "provider_rate_card_missing",
                 "billing_policy_report_only",
                 "billable_lower_bound_not_materialized"
+            ])
+        );
+    }
+
+    #[test]
+    fn margin_contract_stays_unknown_without_rate_card_and_infra_cost_profile() {
+        let contract = contract_fixture();
+        let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
+        let reconciliation = build_reconciliation_contract_json(&contract, &sources);
+        let infra_cost_source = json!({
+            "status": "not_configured"
+        });
+        let margin = build_margin_contract_json(&contract, &infra_cost_source, &reconciliation);
+
+        assert_eq!(margin["model_version"], "margin-view-v1");
+        assert_eq!(margin["infra_cost_profile_version"], "unpriced-infra-v1");
+        assert_eq!(margin["status"], "awaiting_rate_card");
+        assert_eq!(margin["money_margin_enabled"], json!(false));
+    }
+
+    #[test]
+    fn margin_scope_keeps_money_values_null_until_inputs_are_real() {
+        let contract = contract_fixture();
+        let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
+        let summary = json!({
+            "coverage": {
+                "completeness_state": "partially_confirmed"
+            },
+            "verified_effective_saved_tokens": 9876
+        });
+        let preview = build_statement_preview("lifetime", "всё время записи", &summary, &contract);
+        let reconciliation = build_reconciliation_preview(
+            "lifetime",
+            "всё время записи",
+            &preview,
+            &contract,
+            &sources,
+        );
+        let infra_cost_source = json!({
+            "status": "not_configured"
+        });
+        let margin = build_margin_scope(
+            "lifetime",
+            "всё время записи",
+            &preview,
+            &reconciliation,
+            &contract,
+            &infra_cost_source,
+        );
+
+        assert_eq!(margin["margin_state"], "awaiting_rate_card");
+        assert_eq!(margin["customer_saved_tokens_lower_bound"], 9876);
+        assert_eq!(margin["customer_saved_amount_lower_bound"], json!(null));
+        assert_eq!(margin["amai_infra_cost_amount"], json!(null));
+        assert_eq!(margin["margin_amount"], json!(null));
+        assert_eq!(
+            margin["blocking_reasons"],
+            json!([
+                "rate_card_unpriced",
+                "infra_cost_profile_missing",
+                "provider_reconciliation_not_complete"
             ])
         );
     }

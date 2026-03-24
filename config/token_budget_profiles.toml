@@ -1,5 +1,5 @@
-modified_at = "2026-03-24 11:55 MSK"
-"Ручная сверка guide/docs" = "2026-03-24 11:55 MSK"
+modified_at = "2026-03-24 12:03 MSK"
+"Ручная сверка guide/docs" = "2026-03-24 12:03 MSK"
 
 default_profile = "local_default"
 
@@ -29,6 +29,8 @@ event_time_policy_version = "client-visible-ingest-v1"
 billing_policy_version = "report-only-v1"
 billing_mode = "report_only"
 reconciliation_contract_version = "provider-reconciliation-v1"
+margin_model_version = "margin-view-v1"
+infra_cost_profile_version = "unpriced-infra-v1"
 rate_card_version = "unpriced-v1"
 currency_profile = "unpriced"
 settlement_status = "unsettled_report_only"
