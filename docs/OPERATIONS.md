@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:29 MSK
-Ручная сверка guide/docs: 2026-03-24 12:29 MSK
+modified_at: 2026-03-24 12:38 MSK
+Ручная сверка guide/docs: 2026-03-24 12:38 MSK
 
 # Operations
 
@@ -1694,6 +1694,7 @@ cargo run --release -- verify token-benchmark-suite \
   - `lifetime`
   - в них видно measured non-billable lower bound по каждому scope;
   - в них отдельно видны `lifecycle_state`, `contractual_state`, `close_barriers`;
+  - в них теперь ещё есть `period` и `adjustment_preview`;
   - billable amount и final amount остаются пустыми, пока settlement layer ещё не materialized.
 - `reconciliation_previews` теперь тоже каноничны:
   - `current_session`

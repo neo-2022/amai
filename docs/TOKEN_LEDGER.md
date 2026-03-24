@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:29 MSK
-Ручная сверка guide/docs: 2026-03-24 12:29 MSK
+modified_at: 2026-03-24 12:38 MSK
+Ручная сверка guide/docs: 2026-03-24 12:38 MSK
 
 # Token Ledger
 
@@ -487,6 +487,8 @@ reporting layers:
 Текущий truthful status:
 - `statement_version = settlement-preview-v1`
 - `settlement_lifecycle_model_version = settlement-lifecycle-v1`
+- `statement_period_governance_version = statement-period-governance-v1`
+- `adjustment_preview_model_version = adjustment-preview-v1`
 - `freeze_close_status = not_enforced_report_only`
 - `late_arrival_status = accepted_until_settlement_exists`
 - `current_operational_state = live_measurement_open`
@@ -500,6 +502,8 @@ reporting layers:
 - lifecycle state;
 - contractual state;
 - close barriers;
+- period window;
+- adjustment preview;
 - и при этом не подсовывать пользователю фальшивую сумму к оплате.
 
 Именно поэтому в текущем runtime:
@@ -509,6 +513,8 @@ reporting layers:
 - `lifecycle_state = measured_non_billable_open`
 - `contractual_state = report_only_preview_open`
 - `close_barriers` прямо перечисляют, почему period нельзя закрыть честно
+- `period.close_at_epoch_ms = null`, пока честного close workflow ещё нет
+- `adjustment_preview.status = not_materialized_report_only`
 
 Это не недостаток UX, а truth guardrail до тех пор, пока реальный billing workflow не
 materialized end-to-end.

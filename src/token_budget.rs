@@ -78,6 +78,10 @@ struct TokenBudgetContractConfig {
     dispute_policy_version: String,
     #[serde(default = "default_settlement_lifecycle_model_version")]
     settlement_lifecycle_model_version: String,
+    #[serde(default = "default_statement_period_governance_version")]
+    statement_period_governance_version: String,
+    #[serde(default = "default_adjustment_preview_model_version")]
+    adjustment_preview_model_version: String,
     #[serde(default = "default_telemetry_surface_split_version")]
     telemetry_surface_split_version: String,
     #[serde(default = "default_event_time_policy_version")]
@@ -121,6 +125,8 @@ impl Default for TokenBudgetContractConfig {
             late_arrival_policy_version: default_late_arrival_policy_version(),
             dispute_policy_version: default_dispute_policy_version(),
             settlement_lifecycle_model_version: default_settlement_lifecycle_model_version(),
+            statement_period_governance_version: default_statement_period_governance_version(),
+            adjustment_preview_model_version: default_adjustment_preview_model_version(),
             telemetry_surface_split_version: default_telemetry_surface_split_version(),
             event_time_policy_version: default_event_time_policy_version(),
             billing_policy_version: default_billing_policy_version(),
@@ -183,6 +189,8 @@ struct TokenBudgetEvent {
     late_arrival_policy_version: String,
     dispute_policy_version: String,
     settlement_lifecycle_model_version: String,
+    statement_period_governance_version: String,
+    adjustment_preview_model_version: String,
     telemetry_surface_split_version: String,
     event_time_policy_version: String,
     billing_policy_version: String,
@@ -345,6 +353,14 @@ fn default_settlement_lifecycle_model_version() -> String {
     "settlement-lifecycle-v1".to_string()
 }
 
+fn default_statement_period_governance_version() -> String {
+    "statement-period-governance-v1".to_string()
+}
+
+fn default_adjustment_preview_model_version() -> String {
+    "adjustment-preview-v1".to_string()
+}
+
 fn default_telemetry_surface_split_version() -> String {
     "tokenonomics-surface-split-v1".to_string()
 }
@@ -407,6 +423,8 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "late_arrival_policy_version": contract.late_arrival_policy_version.clone(),
         "dispute_policy_version": contract.dispute_policy_version.clone(),
         "settlement_lifecycle_model_version": contract.settlement_lifecycle_model_version.clone(),
+        "statement_period_governance_version": contract.statement_period_governance_version.clone(),
+        "adjustment_preview_model_version": contract.adjustment_preview_model_version.clone(),
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
@@ -439,6 +457,8 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "late_arrival_policy_version": contract.late_arrival_policy_version.clone(),
         "dispute_policy_version": contract.dispute_policy_version.clone(),
         "settlement_lifecycle_model_version": contract.settlement_lifecycle_model_version.clone(),
+        "statement_period_governance_version": contract.statement_period_governance_version.clone(),
+        "adjustment_preview_model_version": contract.adjustment_preview_model_version.clone(),
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
@@ -583,6 +603,8 @@ fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value
         "correction_policy_version": contract.correction_policy_version.clone(),
         "dispute_policy_version": contract.dispute_policy_version.clone(),
         "settlement_lifecycle_model_version": contract.settlement_lifecycle_model_version.clone(),
+        "statement_period_governance_version": contract.statement_period_governance_version.clone(),
+        "adjustment_preview_model_version": contract.adjustment_preview_model_version.clone(),
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "settlement_status": contract.settlement_status.clone(),
         "statement_lifecycle": [
@@ -612,6 +634,72 @@ fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value
         "freeze_close_status": "not_enforced_report_only",
         "late_arrival_status": "accepted_until_settlement_exists",
         "note": "Settlement layer пока остаётся report-only preview: freeze/close, invoice-grade adjustments и disputes ещё не materialized как денежный workflow."
+    })
+}
+
+fn build_statement_period_json(
+    scope_code: &str,
+    scope_label: &str,
+    now_epoch_ms: i64,
+    events: &[TokenBudgetEvent],
+    profile: &ResolvedProfile,
+    contract: &TokenBudgetContractConfig,
+) -> Value {
+    let start_epoch_ms = match scope_code {
+        "current_session" | "lifetime" => {
+            events.iter().map(|event| event.occurred_at_epoch_ms).min()
+        }
+        "rolling_window" => profile
+            .rolling_window_hours
+            .map(|hours| now_epoch_ms - (hours as i64 * 60 * 60 * 1000)),
+        _ => None,
+    };
+    let window_anchor = match scope_code {
+        "current_session" => json!({
+            "kind": "session_gap_minutes",
+            "value": profile.session_gap_minutes,
+        }),
+        "rolling_window" => json!({
+            "kind": "rolling_window_hours",
+            "value": profile.rolling_window_hours,
+        }),
+        "lifetime" => json!({
+            "kind": "first_recorded_event",
+            "value": start_epoch_ms,
+        }),
+        _ => Value::Null,
+    };
+
+    json!({
+        "model_version": contract.statement_period_governance_version.clone(),
+        "scope_code": scope_code,
+        "scope_label": scope_label,
+        "event_time_basis": "occurred_at_epoch_ms",
+        "period_start_epoch_ms": start_epoch_ms,
+        "period_end_epoch_ms": now_epoch_ms,
+        "close_at_epoch_ms": Value::Null,
+        "late_arrival_deadline_epoch_ms": Value::Null,
+        "window_anchor": window_anchor,
+        "window_state": "open_report_only",
+        "close_policy_state": "close_not_scheduled_report_only",
+        "late_arrival_policy_state": "accepting_events_until_contractual_close_exists",
+        "note": "Период пока открыт и движется по live event-time: close_at и late-arrival deadline появятся только после реального settlement workflow."
+    })
+}
+
+fn build_adjustment_preview_json(contract: &TokenBudgetContractConfig) -> Value {
+    json!({
+        "model_version": contract.adjustment_preview_model_version.clone(),
+        "status": "not_materialized_report_only",
+        "current_entries_count": 0,
+        "net_tokens_delta": Value::Null,
+        "net_amount_delta": Value::Null,
+        "allowed_future_actions": [
+            "credit_note",
+            "adjustment_entry",
+            "dispute_hold"
+        ],
+        "note": "Корректировки и credit semantics ещё не materialized: report-only слой не переписывает прошлые периоды задним числом."
     })
 }
 
@@ -923,6 +1011,9 @@ fn build_margin_scope(
 fn build_statement_preview(
     scope_code: &str,
     scope_label: &str,
+    now_epoch_ms: i64,
+    events: &[TokenBudgetEvent],
+    profile: &ResolvedProfile,
     summary: &Value,
     contract: &TokenBudgetContractConfig,
 ) -> Value {
@@ -955,6 +1046,15 @@ fn build_statement_preview(
         "late_arrival_mode": "accepting_events_until_contractual_close_exists",
         "correction_mode": "future_credit_or_adjustment_not_materialized",
         "dispute_mode": "not_open_report_only",
+        "period": build_statement_period_json(
+            scope_code,
+            scope_label,
+            now_epoch_ms,
+            events,
+            profile,
+            contract,
+        ),
+        "adjustment_preview": build_adjustment_preview_json(contract),
         "coverage": summary["coverage"],
         "measured_non_billable_lower_bound_tokens": summary["verified_effective_saved_tokens"],
         "billable_lower_bound_tokens": Value::Null,
@@ -1450,6 +1550,9 @@ async fn collect_report(
     let current_session_statement_preview = build_statement_preview(
         "current_session",
         "текущая сессия",
+        now_epoch_ms,
+        &session_events,
+        &profile,
         &current_session_summary,
         &config.contract,
     );
@@ -1457,6 +1560,9 @@ async fn collect_report(
         build_statement_preview(
             "rolling_window",
             &format!("окно {}", profile.display_name),
+            now_epoch_ms,
+            &rolling_window_events,
+            &profile,
             &rolling_window_summary,
             &config.contract,
         )
@@ -1466,6 +1572,9 @@ async fn collect_report(
     let lifetime_statement_preview = build_statement_preview(
         "lifetime",
         "всё время записи",
+        now_epoch_ms,
+        &events,
+        &profile,
         &lifetime_summary,
         &config.contract,
     );
@@ -1996,6 +2105,15 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .unwrap_or("settlement-lifecycle-v0")
         .to_string();
+    let statement_period_governance_version =
+        node["contract"]["statement_period_governance_version"]
+            .as_str()
+            .unwrap_or("statement-period-governance-v0")
+            .to_string();
+    let adjustment_preview_model_version = node["contract"]["adjustment_preview_model_version"]
+        .as_str()
+        .unwrap_or("adjustment-preview-v0")
+        .to_string();
     let telemetry_surface_split_version = node["contract"]["telemetry_surface_split_version"]
         .as_str()
         .unwrap_or("tokenonomics-surface-split-v0")
@@ -2135,6 +2253,8 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         late_arrival_policy_version,
         dispute_policy_version,
         settlement_lifecycle_model_version,
+        statement_period_governance_version,
+        adjustment_preview_model_version,
         telemetry_surface_split_version,
         event_time_policy_version,
         billing_policy_version,
@@ -3786,6 +3906,8 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
             "late_arrival_policy_version": event.late_arrival_policy_version.clone(),
             "dispute_policy_version": event.dispute_policy_version.clone(),
             "settlement_lifecycle_model_version": event.settlement_lifecycle_model_version.clone(),
+            "statement_period_governance_version": event.statement_period_governance_version.clone(),
+            "adjustment_preview_model_version": event.adjustment_preview_model_version.clone(),
             "telemetry_surface_split_version": event.telemetry_surface_split_version.clone(),
             "event_time_policy_version": event.event_time_policy_version.clone(),
             "billing_policy_version": event.billing_policy_version.clone(),
@@ -5083,21 +5205,22 @@ mod tests {
         build_product_headline, build_rate_card_json, build_reconciliation_contract_json,
         build_reconciliation_preview, build_settlement_contract_json, build_statement_preview,
         build_telemetry_surfaces_json, build_usage_event_schema_json, contractual_line_item_json,
-        default_backfill_policy_version, default_baseline_method_version, default_billing_mode,
-        default_billing_policy_version, default_contractual_evidence_pack_version,
-        default_correction_policy_version, default_coverage_model_version,
-        default_currency_profile, default_dedup_contract_version, default_dispute_policy_version,
-        default_event_time_policy_version, default_excluded_taxonomy_version,
-        default_freeze_close_policy_version, default_infra_cost_profile_version,
-        default_late_arrival_policy_version, default_margin_model_version,
-        default_quality_method_version, default_rate_card_version,
+        default_adjustment_preview_model_version, default_backfill_policy_version,
+        default_baseline_method_version, default_billing_mode, default_billing_policy_version,
+        default_contractual_evidence_pack_version, default_correction_policy_version,
+        default_coverage_model_version, default_currency_profile, default_dedup_contract_version,
+        default_dispute_policy_version, default_event_time_policy_version,
+        default_excluded_taxonomy_version, default_freeze_close_policy_version,
+        default_infra_cost_profile_version, default_late_arrival_policy_version,
+        default_margin_model_version, default_quality_method_version, default_rate_card_version,
         default_reconciliation_contract_version, default_settlement_lifecycle_model_version,
         default_settlement_statement_version, default_settlement_status,
-        default_telemetry_surface_split_version, derive_baseline_strategy, derive_quality_verdict,
-        derive_query_type, derive_traffic_class, event_to_json, followup_queries_related,
-        include_traffic_class_in_report, latency_slice_breakdown, needs_live_reverification,
-        parse_snapshot_event, reconcile_followup_recovery, repair_legacy_token_event_payload,
-        report_contract_json, summarize_events,
+        default_statement_period_governance_version, default_telemetry_surface_split_version,
+        derive_baseline_strategy, derive_quality_verdict, derive_query_type, derive_traffic_class,
+        event_to_json, followup_queries_related, include_traffic_class_in_report,
+        latency_slice_breakdown, needs_live_reverification, parse_snapshot_event,
+        reconcile_followup_recovery, repair_legacy_token_event_payload, report_contract_json,
+        summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -5116,6 +5239,16 @@ mod tests {
             include_verify_events_by_default: false,
             preliminary_min_events: 50,
             preliminary_min_baseline_tokens: 100_000,
+        }
+    }
+
+    fn profile_fixture() -> super::ResolvedProfile {
+        super::ResolvedProfile {
+            code: "local_default".to_string(),
+            display_name: "Обычная рабочая машина".to_string(),
+            description: "test".to_string(),
+            session_gap_minutes: 30,
+            rolling_window_hours: Some(24),
         }
     }
 
@@ -5151,6 +5284,8 @@ mod tests {
                     late_arrival_policy_version: default_late_arrival_policy_version(),
                     dispute_policy_version: default_dispute_policy_version(),
                     settlement_lifecycle_model_version: default_settlement_lifecycle_model_version(),
+                    statement_period_governance_version: default_statement_period_governance_version(),
+                    adjustment_preview_model_version: default_adjustment_preview_model_version(),
                     telemetry_surface_split_version: default_telemetry_surface_split_version(),
                     event_time_policy_version: default_event_time_policy_version(),
                     billing_policy_version: default_billing_policy_version(),
@@ -5476,6 +5611,14 @@ mod tests {
             "settlement-lifecycle-v1"
         );
         assert_eq!(
+            token_event["contract"]["statement_period_governance_version"],
+            "statement-period-governance-v1"
+        );
+        assert_eq!(
+            token_event["contract"]["adjustment_preview_model_version"],
+            "adjustment-preview-v1"
+        );
+        assert_eq!(
             token_event["contract"]["telemetry_surface_split_version"],
             "tokenonomics-surface-split-v1"
         );
@@ -5599,6 +5742,7 @@ mod tests {
     #[test]
     fn settlement_contract_and_statement_preview_stay_report_only() {
         let contract = contract_fixture();
+        let profile = profile_fixture();
         let settlement_contract = build_settlement_contract_json(&contract);
         let summary = json!({
             "coverage": {
@@ -5606,8 +5750,21 @@ mod tests {
             },
             "verified_effective_saved_tokens": 1234
         });
-        let preview =
-            build_statement_preview("current_session", "текущая сессия", &summary, &contract);
+        let events = vec![token_event! {
+            occurred_at_epoch_ms: 1_000,
+            naive_tokens: 1400,
+            context_tokens: 166,
+            effective_saved_tokens: 1234,
+        }];
+        let preview = build_statement_preview(
+            "current_session",
+            "текущая сессия",
+            2_000,
+            &events,
+            &profile,
+            &summary,
+            &contract,
+        );
 
         assert_eq!(
             settlement_contract["statement_version"],
@@ -5630,6 +5787,16 @@ mod tests {
         assert_eq!(preview["contractual_state"], "report_only_preview_open");
         assert_eq!(preview["close_readiness"], "not_closeable_report_only");
         assert_eq!(preview["close_barriers"][0], "billing_mode_report_only");
+        assert_eq!(
+            preview["period"]["model_version"],
+            "statement-period-governance-v1"
+        );
+        assert_eq!(preview["period"]["period_start_epoch_ms"], 1_000);
+        assert_eq!(preview["period"]["period_end_epoch_ms"], 2_000);
+        assert_eq!(
+            preview["adjustment_preview"]["status"],
+            "not_materialized_report_only"
+        );
         assert_eq!(preview["measured_non_billable_lower_bound_tokens"], 1234);
         assert_eq!(preview["billable_lower_bound_tokens"], json!(null));
     }
@@ -5680,6 +5847,7 @@ mod tests {
     #[test]
     fn reconciliation_preview_keeps_external_values_null_until_truth_is_bound() {
         let contract = contract_fixture();
+        let profile = profile_fixture();
         let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
         let summary = json!({
             "coverage": {
@@ -5687,8 +5855,21 @@ mod tests {
             },
             "verified_effective_saved_tokens": 4321
         });
-        let preview =
-            build_statement_preview("current_session", "текущая сессия", &summary, &contract);
+        let events = vec![token_event! {
+            occurred_at_epoch_ms: 2_000,
+            naive_tokens: 4500,
+            context_tokens: 179,
+            effective_saved_tokens: 4321,
+        }];
+        let preview = build_statement_preview(
+            "current_session",
+            "текущая сессия",
+            3_000,
+            &events,
+            &profile,
+            &summary,
+            &contract,
+        );
         let reconciliation = build_reconciliation_preview(
             "current_session",
             "текущая сессия",
@@ -5740,6 +5921,7 @@ mod tests {
     #[test]
     fn margin_scope_keeps_money_values_null_until_inputs_are_real() {
         let contract = contract_fixture();
+        let profile = profile_fixture();
         let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
         let summary = json!({
             "coverage": {
@@ -5747,7 +5929,21 @@ mod tests {
             },
             "verified_effective_saved_tokens": 9876
         });
-        let preview = build_statement_preview("lifetime", "всё время записи", &summary, &contract);
+        let events = vec![token_event! {
+            occurred_at_epoch_ms: 5_000,
+            naive_tokens: 10_000,
+            context_tokens: 124,
+            effective_saved_tokens: 9876,
+        }];
+        let preview = build_statement_preview(
+            "lifetime",
+            "всё время записи",
+            9_000,
+            &events,
+            &profile,
+            &summary,
+            &contract,
+        );
         let reconciliation = build_reconciliation_preview(
             "lifetime",
             "всё время записи",

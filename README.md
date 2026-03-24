@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:29 MSK
-Ручная сверка guide/docs: 2026-03-24 12:29 MSK
+modified_at: 2026-03-24 12:38 MSK
+Ручная сверка guide/docs: 2026-03-24 12:38 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1125,6 +1125,8 @@ preview, а не только raw count.
   - `statement_previews.current_session / rolling_window / lifetime`
   - там уже видно measured non-billable lower bound по scope;
   - там теперь ещё явно видны `lifecycle_state`, `contractual_state` и `close_barriers`;
+  - там теперь ещё есть `period` с `period_start / period_end / window_anchor` и
+    `adjustment_preview` для будущих credit/correction semantics;
   - но `billable_lower_bound_tokens` и `final_amount` остаются пустыми, пока billing не
     включён честно.
 - provider reconciliation теперь тоже first-class:
