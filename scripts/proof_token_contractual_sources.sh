@@ -95,6 +95,9 @@ assert payload["provider_usage_binding"]["status"] == "usage_and_cost_bound", pa
 assert payload["provider_invoice_binding"]["status"] == "invoice_bound", payload
 assert payload["infra_cost_profile"]["status"] == "priced_bound", payload
 assert payload["reconciliation_preview"]["reconciliation_state"] == "external_usage_and_invoice_aligned_report_only", payload
+assert payload["reconciliation_preview"]["usage_truth_completeness_state"] == "provider_usage_bound", payload
+assert payload["reconciliation_preview"]["money_truth_completeness_state"] == "provider_cost_and_invoice_bound", payload
+assert payload["reconciliation_preview"]["reconciliation_readiness_state"] == "usage_cost_and_invoice_truth_ready", payload
 assert payload["margin_scope"]["margin_state"] == "priced_preview_report_only", payload
 assert payload["statement_export_preview"]["scope_code"] == "lifetime", payload
 PY

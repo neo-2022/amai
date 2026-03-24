@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:55 MSK
-Ручная сверка guide/docs: 2026-03-24 15:55 MSK
+modified_at: 2026-03-24 16:19 MSK
+Ручная сверка guide/docs: 2026-03-24 16:19 MSK
 
 # Operations
 
@@ -1795,6 +1795,11 @@ cargo run -- context pack \
   - если env-binding не задан, но repo-local файл уже materialized, runtime честно
     поднимает `default_existing_path`;
   - если файла ещё нет, источник остаётся `default_path_missing`;
+  - governance-layer теперь отдельно показывает:
+    - `usage_truth_completeness_state`
+    - `money_truth_completeness_state`
+    - `reconciliation_readiness_state`
+    - `governance_blocking_reasons`
   - в них теперь видно не только lower bound, но и внутренний delivered usage:
     - `internal_delivered_tokens`
     - `internal_recovery_tokens`

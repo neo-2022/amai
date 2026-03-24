@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:55 MSK
-Ручная сверка guide/docs: 2026-03-24 15:55 MSK
+modified_at: 2026-03-24 16:19 MSK
+Ручная сверка guide/docs: 2026-03-24 16:19 MSK
 
 # Token Ledger
 
@@ -653,9 +653,14 @@ Operator-safe report-only команды:
 - готовы ли мы вообще к external reconciliation.
 
 Текущий truthful status:
-- `reconciliation_contract_version = provider-reconciliation-v2`
+- `reconciliation_contract_version = provider-reconciliation-v3`
 - `ready_for_external_reconciliation` теперь зависит от реального bind provider usage export,
   а не от одного факта, что где-то прописан путь;
+- contract теперь ещё отдельно публикует:
+  - `usage_truth_completeness_state`
+  - `money_truth_completeness_state`
+  - `reconciliation_readiness_state`
+  - `governance_blocking_reasons`
 - внутренний lower bound уже materialized;
 - provider sources теперь могут materialize-иться не только через env, но и через repo-local
   default files:
@@ -705,6 +710,10 @@ Customer-facing export bundle:
 Именно поэтому truthful `reconciliation_previews` теперь обязаны выглядеть так:
 - `internal_measured_non_billable_lower_bound_tokens` остаётся про lower bound savings;
 - `internal_provider_billed_tokens` отдельно показывает внутренний delivered usage;
+- отдельный governance-layer теперь показывает:
+  - есть ли уже `usage truth`
+  - есть ли уже `money truth`
+  - дошли ли мы только до usage-bind, до usage+cost truth или уже до invoice-side evidence
 - `drift_tokens` считается только как
   `internal_provider_billed_tokens - external_provider_usage_tokens`;
   - `external_provider_usage_tokens`, `external_provider_cost_amount` и

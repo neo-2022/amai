@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:55 MSK
-Ручная сверка guide/docs: 2026-03-24 15:55 MSK
+modified_at: 2026-03-24 16:19 MSK
+Ручная сверка guide/docs: 2026-03-24 16:19 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1217,6 +1217,15 @@ preview, а не только raw count.
     - `external_usage_drift_report_only`
     - `external_usage_and_invoice_aligned_report_only`
     - `external_usage_and_invoice_drift_report_only`
+  - отдельно materialized governance-layer:
+    - `usage_truth_completeness_state`
+    - `money_truth_completeness_state`
+    - `reconciliation_readiness_state`
+    - `governance_blocking_reasons`
+  - это нужно затем, чтобы не смешивать в одну строку:
+    - отсутствие usage truth
+    - отсутствие money truth
+    - и уже реально найденный drift
   - для operator/debug review теперь есть отдельная команда:
     - `amai observe token-contractual-sources --scope lifetime`
   - она печатает source bindings, reconciliation preview, margin scope и statement export

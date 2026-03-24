@@ -535,7 +535,7 @@ fn default_billing_mode() -> String {
 }
 
 fn default_reconciliation_contract_version() -> String {
-    "provider-reconciliation-v2".to_string()
+    "provider-reconciliation-v3".to_string()
 }
 
 fn default_margin_model_version() -> String {
@@ -1843,6 +1843,112 @@ fn base_reconciliation_blocking_reasons(
     reasons
 }
 
+fn usage_truth_completeness_state(provider_usage_status: &str) -> &'static str {
+    if matches!(
+        provider_usage_status,
+        "not_configured" | "default_path_missing"
+    ) {
+        "awaiting_provider_usage_source"
+    } else if matches!(
+        provider_usage_status,
+        "configured_path_missing" | "read_error" | "parse_error"
+    ) {
+        "provider_usage_source_error"
+    } else if matches!(
+        provider_usage_status,
+        "usage_bound" | "usage_and_cost_bound"
+    ) {
+        "provider_usage_bound"
+    } else {
+        "provider_usage_not_yet_bound"
+    }
+}
+
+fn money_truth_completeness_state(
+    provider_usage_status: &str,
+    rate_card_status: &str,
+    provider_invoice_status: &str,
+) -> &'static str {
+    if !matches!(
+        provider_usage_status,
+        "usage_bound" | "usage_and_cost_bound"
+    ) {
+        "no_external_money_truth"
+    } else if matches!(rate_card_status, "not_configured" | "default_path_missing") {
+        "awaiting_rate_card_source"
+    } else if matches!(
+        rate_card_status,
+        "configured_path_missing" | "read_error" | "parse_error"
+    ) {
+        "provider_rate_card_error"
+    } else if matches!(
+        provider_invoice_status,
+        "configured_path_missing" | "read_error" | "parse_error"
+    ) {
+        "provider_invoice_source_error"
+    } else if provider_invoice_status == "invoice_bound" {
+        "provider_cost_and_invoice_bound"
+    } else if provider_usage_status == "usage_and_cost_bound" {
+        "provider_cost_bound_without_invoice"
+    } else {
+        "rate_card_bound_internal_estimate_only"
+    }
+}
+
+fn reconciliation_readiness_state(
+    usage_truth_completeness_state: &str,
+    money_truth_completeness_state: &str,
+) -> &'static str {
+    match usage_truth_completeness_state {
+        "awaiting_provider_usage_source" => "awaiting_provider_usage_source",
+        "provider_usage_source_error" => "provider_usage_source_error",
+        "provider_usage_not_yet_bound" => "provider_usage_not_yet_bound",
+        _ => match money_truth_completeness_state {
+            "awaiting_rate_card_source" => "usage_truth_bound_not_priced",
+            "provider_rate_card_error" => "usage_truth_bound_rate_card_error",
+            "provider_invoice_source_error" => "usage_cost_truth_ready_invoice_source_error",
+            "provider_cost_and_invoice_bound" => "usage_cost_and_invoice_truth_ready",
+            "provider_cost_bound_without_invoice" => "usage_and_cost_truth_ready",
+            "rate_card_bound_internal_estimate_only" => "usage_truth_bound_internal_estimate_only",
+            _ => "usage_truth_bound_not_priced",
+        },
+    }
+}
+
+fn reconciliation_governance_blocking_reasons(
+    provider_usage_status: &str,
+    rate_card_status: &str,
+    provider_invoice_status: &str,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if matches!(
+        provider_usage_status,
+        "not_configured" | "default_path_missing"
+    ) {
+        reasons.push("provider_usage_source_missing");
+    } else if matches!(
+        provider_usage_status,
+        "configured_path_missing" | "read_error" | "parse_error"
+    ) {
+        reasons.push("provider_usage_source_error");
+    }
+    if matches!(rate_card_status, "not_configured" | "default_path_missing") {
+        reasons.push("provider_rate_card_unpriced");
+    } else if matches!(
+        rate_card_status,
+        "configured_path_missing" | "read_error" | "parse_error"
+    ) {
+        reasons.push("provider_rate_card_error");
+    }
+    if matches!(
+        provider_invoice_status,
+        "configured_path_missing" | "read_error" | "parse_error"
+    ) {
+        reasons.push("provider_invoice_source_error");
+    }
+    reasons
+}
+
 fn load_provider_usage_binding_from_source(source: &Value, rate_card: &Value) -> Value {
     let mut base = json!({
         "status": source["status"].clone(),
@@ -2024,6 +2130,19 @@ fn build_reconciliation_contract_json(
         "not_configured" | "default_path_missing"
     );
     let rate_card_missing = matches!(rate_card_status, "not_configured" | "default_path_missing");
+    let usage_truth_state = usage_truth_completeness_state(provider_usage_status);
+    let money_truth_state = money_truth_completeness_state(
+        provider_usage_status,
+        rate_card_status,
+        provider_invoice_status,
+    );
+    let reconciliation_readiness_state =
+        reconciliation_readiness_state(usage_truth_state, money_truth_state);
+    let governance_blocking_reasons = reconciliation_governance_blocking_reasons(
+        provider_usage_status,
+        rate_card_status,
+        provider_invoice_status,
+    );
     let ready_for_external_reconciliation = matches!(
         provider_usage_status,
         "usage_bound" | "usage_and_cost_bound"
@@ -2053,6 +2172,10 @@ fn build_reconciliation_contract_json(
         "contract_version": contract.reconciliation_contract_version.clone(),
         "status": status,
         "ready_for_external_reconciliation": ready_for_external_reconciliation,
+        "usage_truth_completeness_state": usage_truth_state,
+        "money_truth_completeness_state": money_truth_state,
+        "reconciliation_readiness_state": reconciliation_readiness_state,
+        "governance_blocking_reasons": governance_blocking_reasons,
         "internal_truth_layers": [
             "token_budget_event",
             "usage_event_schema",
@@ -2073,7 +2196,7 @@ fn build_reconciliation_contract_json(
             "provider_rate_card",
             "provider_invoice_export"
         ],
-        "note": "Amai уже меряет внутренний lower bound честно, но external reconciliation должен сравнивать provider usage с внутренними delivered tokens, а не с saved tokens. Это reconciliation contract, а не готовый settlement engine."
+        "note": "Amai уже меряет внутренний lower bound честно, но external reconciliation должен сравнивать provider usage с внутренними delivered tokens, а не с saved tokens. Governance-layer отдельно показывает, дошли ли мы только до usage truth, до usage+cost truth или уже до invoice-side evidence. Это reconciliation contract, а не готовый settlement engine."
     })
 }
 
@@ -2099,6 +2222,18 @@ fn build_reconciliation_preview(
         "not_configured" | "default_path_missing"
     );
     let rate_card_missing = matches!(rate_card_status, "not_configured" | "default_path_missing");
+    let usage_truth_state = usage_truth_completeness_state(provider_usage_status);
+    let money_truth_state = money_truth_completeness_state(
+        provider_usage_status,
+        rate_card_status,
+        provider_invoice_status,
+    );
+    let readiness_state = reconciliation_readiness_state(usage_truth_state, money_truth_state);
+    let governance_blocking_reasons = reconciliation_governance_blocking_reasons(
+        provider_usage_status,
+        rate_card_status,
+        provider_invoice_status,
+    );
     if provider_usage_missing {
         let blocking_reasons =
             base_reconciliation_blocking_reasons(statement_preview, rate_card, true);
@@ -2106,6 +2241,10 @@ fn build_reconciliation_preview(
             "scope_code": scope_code,
             "scope_label": scope_label,
             "reconciliation_state": "awaiting_provider_usage_source",
+            "usage_truth_completeness_state": usage_truth_state,
+            "money_truth_completeness_state": money_truth_state,
+            "reconciliation_readiness_state": readiness_state,
+            "governance_blocking_reasons": governance_blocking_reasons,
             "usage_reconciliation_state": "awaiting_provider_usage_source",
             "invoice_reconciliation_state": if provider_invoice_status == "invoice_bound" {
                 "invoice_bound_without_usage"
@@ -2145,6 +2284,10 @@ fn build_reconciliation_preview(
             "scope_code": scope_code,
             "scope_label": scope_label,
             "reconciliation_state": "provider_usage_source_error",
+            "usage_truth_completeness_state": usage_truth_state,
+            "money_truth_completeness_state": money_truth_state,
+            "reconciliation_readiness_state": readiness_state,
+            "governance_blocking_reasons": governance_blocking_reasons,
             "usage_reconciliation_state": "provider_usage_source_error",
             "invoice_reconciliation_state": if provider_invoice_status == "invoice_bound" {
                 "invoice_bound_without_usage"
@@ -2183,6 +2326,10 @@ fn build_reconciliation_preview(
             "scope_code": scope_code,
             "scope_label": scope_label,
             "reconciliation_state": "awaiting_rate_card_source",
+            "usage_truth_completeness_state": usage_truth_state,
+            "money_truth_completeness_state": money_truth_state,
+            "reconciliation_readiness_state": readiness_state,
+            "governance_blocking_reasons": governance_blocking_reasons,
             "usage_reconciliation_state": "external_usage_bound_report_only",
             "invoice_reconciliation_state": if provider_invoice_status == "invoice_bound" {
                 "invoice_bound_report_only"
@@ -2290,6 +2437,10 @@ fn build_reconciliation_preview(
         "scope_code": scope_code,
         "scope_label": scope_label,
         "reconciliation_state": reconciliation_state,
+        "usage_truth_completeness_state": usage_truth_state,
+        "money_truth_completeness_state": money_truth_state,
+        "reconciliation_readiness_state": readiness_state,
+        "governance_blocking_reasons": governance_blocking_reasons,
         "usage_reconciliation_state": usage_reconciliation_state,
         "invoice_reconciliation_state": invoice_reconciliation_state,
         "coverage": statement_preview["coverage"].clone(),
@@ -2578,6 +2729,10 @@ fn build_contractual_statement_summary(
         "provisional_close_candidate": statement_preview["provisional_close_candidate"].clone(),
         "provisional_close_barriers": statement_preview["provisional_close_barriers"].clone(),
         "billing_close_barriers": statement_preview["billing_close_barriers"].clone(),
+        "usage_truth_completeness_state": reconciliation_preview["usage_truth_completeness_state"].clone(),
+        "money_truth_completeness_state": reconciliation_preview["money_truth_completeness_state"].clone(),
+        "reconciliation_readiness_state": reconciliation_preview["reconciliation_readiness_state"].clone(),
+        "reconciliation_governance_blocking_reasons": reconciliation_preview["governance_blocking_reasons"].clone(),
         "metering_ingest_state": metering_freshness["metering_ingest_state"].clone(),
         "contractual_lag_state": metering_freshness["contractual_lag_state"].clone(),
         "contractual_freshness_state": metering_freshness["contractual_freshness_state"].clone(),
@@ -2845,6 +3000,9 @@ fn build_statement_export_preview(
         "provisional_close_state": contractual_summary["provisional_close_state"].clone(),
         "provisional_close_candidate": contractual_summary["provisional_close_candidate"].clone(),
         "provisional_close_earliest_at_epoch_ms": contractual_summary["provisional_close_earliest_at_epoch_ms"].clone(),
+        "usage_truth_completeness_state": contractual_summary["usage_truth_completeness_state"].clone(),
+        "money_truth_completeness_state": contractual_summary["money_truth_completeness_state"].clone(),
+        "reconciliation_readiness_state": contractual_summary["reconciliation_readiness_state"].clone(),
         "contractual_freshness_state": contractual_summary["contractual_freshness_state"].clone(),
         "reconciliation_state": contractual_summary["reconciliation_state"].clone(),
         "margin_state": contractual_summary["margin_state"].clone(),
@@ -8004,7 +8162,7 @@ mod tests {
         assert_eq!(token_event["contract"]["billing_mode"], "report_only");
         assert_eq!(
             token_event["contract"]["reconciliation_contract_version"],
-            "provider-reconciliation-v2"
+            "provider-reconciliation-v3"
         );
         assert_eq!(
             token_event["contract"]["margin_model_version"],
@@ -8607,9 +8765,21 @@ fixed_scope_cost_amount = 0.01
 
         assert_eq!(
             reconciliation["contract_version"],
-            "provider-reconciliation-v2"
+            "provider-reconciliation-v3"
         );
         assert_eq!(reconciliation["status"], "awaiting_provider_usage_source");
+        assert_eq!(
+            reconciliation["usage_truth_completeness_state"],
+            "awaiting_provider_usage_source"
+        );
+        assert_eq!(
+            reconciliation["money_truth_completeness_state"],
+            "no_external_money_truth"
+        );
+        assert_eq!(
+            reconciliation["reconciliation_readiness_state"],
+            "awaiting_provider_usage_source"
+        );
         assert_eq!(
             reconciliation["ready_for_external_reconciliation"],
             json!(false)
@@ -8680,6 +8850,18 @@ fixed_scope_cost_amount = 0.01
 
         assert_eq!(
             reconciliation["reconciliation_state"],
+            "awaiting_provider_usage_source"
+        );
+        assert_eq!(
+            reconciliation["usage_truth_completeness_state"],
+            "awaiting_provider_usage_source"
+        );
+        assert_eq!(
+            reconciliation["money_truth_completeness_state"],
+            "no_external_money_truth"
+        );
+        assert_eq!(
+            reconciliation["reconciliation_readiness_state"],
             "awaiting_provider_usage_source"
         );
         assert_eq!(
@@ -8892,6 +9074,18 @@ fixed_scope_cost_amount = 0.01
             "external_usage_and_invoice_aligned_report_only"
         );
         assert_eq!(
+            reconciliation["usage_truth_completeness_state"],
+            "provider_usage_bound"
+        );
+        assert_eq!(
+            reconciliation["money_truth_completeness_state"],
+            "provider_cost_and_invoice_bound"
+        );
+        assert_eq!(
+            reconciliation["reconciliation_readiness_state"],
+            "usage_cost_and_invoice_truth_ready"
+        );
+        assert_eq!(
             reconciliation["usage_reconciliation_state"],
             "external_usage_aligned_report_only"
         );
@@ -9058,6 +9252,10 @@ fixed_scope_cost_amount = 0.01
                 "external_provider_cost_amount": 0.12,
                 "external_invoice_amount": 0.13,
                 "drift_tokens": -44,
+                "usage_truth_completeness_state": "provider_usage_bound",
+                "money_truth_completeness_state": "provider_cost_and_invoice_bound",
+                "reconciliation_readiness_state": "usage_cost_and_invoice_truth_ready",
+                "governance_blocking_reasons": [],
                 "reconciliation_state": "external_usage_and_invoice_bound_report_only",
                 "blocking_reasons": ["billing_policy_report_only"]
             }),
@@ -9085,6 +9283,18 @@ fixed_scope_cost_amount = 0.01
         assert_eq!(summary["provisional_close_candidate"], false);
         assert_eq!(summary["provisional_close_earliest_at_epoch_ms"], 4_000);
         assert_eq!(summary["late_arrival_deadline_epoch_ms"], 4_000);
+        assert_eq!(
+            summary["usage_truth_completeness_state"],
+            "provider_usage_bound"
+        );
+        assert_eq!(
+            summary["money_truth_completeness_state"],
+            "provider_cost_and_invoice_bound"
+        );
+        assert_eq!(
+            summary["reconciliation_readiness_state"],
+            "usage_cost_and_invoice_truth_ready"
+        );
         assert_eq!(summary["metering_ingest_state"], "within_slo");
         assert_eq!(summary["contractual_lag_state"], "lag_window_elapsed");
         assert_eq!(summary["contractual_freshness_state"], "stable");
