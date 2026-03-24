@@ -51,7 +51,7 @@ next_step = "Сначала посмотрите готовность машин
 
 [targets.windows_vm_lab]
 display_name = "Windows VM Validation Lab"
-support_level = "foundation_ready"
+support_level = "materialized"
 summary = "Контур для проверки Windows-клиентского пути через виртуальную машину. Это не основной user-path, а отдельная проверочная лаборатория."
 why_choose = [
   "Нужно честно прогнать Windows smoke без бумажных заявлений о поддержке.",
@@ -62,6 +62,6 @@ not_for = [
   "Если вам нужно просто пользоваться Amai прямо сейчас.",
   "Если вам не нужен отдельный Windows validation contour."
 ]
-requires_commands = ["qemu-system-x86_64"]
+requires_commands = ["qemu-system-x86_64", "qemu-img", "xorriso", "genisoimage", "mkfs.fat", "swtpm", "7z"]
 optional_commands = ["ssh"]
-next_step = "Сначала посмотрите готовность машины: cargo run -- deployment preflight --target windows_vm_lab"
+next_step = "Для живого proof: ./scripts/proof_windows_vm_lab.sh --iso-path /path/to/windows.iso"

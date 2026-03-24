@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 19:34 MSK
-Ручная сверка guide/docs: 2026-03-24 19:34 MSK
+modified_at: 2026-03-24 23:20 MSK
+Ручная сверка guide/docs: 2026-03-24 23:20 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -818,7 +818,8 @@ http://127.0.0.1:9464/
   - это следующий server/team deployment layer;
 - `windows_vm_lab`
   - не “ещё один install path”;
-  - это отдельный контур для честной проверки Windows-пути через виртуальную машину.
+  - это уже materialized validation contour для честной проверки Windows-пути через виртуальную машину;
+  - текущий доказанный сценарий там не “поднять локальный Windows stack”, а fail-closed proof, что `install_amai.ps1` на локальной Windows-машине честно отказывает и требует `WSL2` или `--ssh-destination`.
 
 Если хотите разобрать конкретный режим подробнее:
 
@@ -830,6 +831,12 @@ cargo run -- deployment explain --target kubernetes_server
 
 ```bash
 ./scripts/deployment_preflight.sh --target windows_vm_lab
+```
+
+Если хотите прогнать живой Windows proof:
+
+```bash
+./scripts/proof_windows_vm_lab.sh --iso-path /path/to/windows.iso
 ```
 
 ## Два режима установки

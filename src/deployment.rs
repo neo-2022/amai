@@ -308,9 +308,6 @@ mod tests {
     fn loads_future_target() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let target = load_target(repo_root, "windows_vm_lab").expect("target must load");
-        assert!(matches!(
-            target.support_level,
-            SupportLevel::FoundationReady
-        ));
+        assert!(matches!(target.support_level, SupportLevel::Materialized));
     }
 }

@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 00:09 MSK
-Ручная сверка guide/docs: 2026-03-21 00:09 MSK
+modified_at: 2026-03-24 23:20 MSK
+Ручная сверка guide/docs: 2026-03-24 23:20 MSK
 
 # Deployment Targets
 
@@ -99,13 +99,14 @@ cargo run -- deployment explain --target kubernetes_server
 
 Простыми словами:
 - это лаборатория проверки;
-- через неё можно честно валидировать Windows-клиентский путь;
+- через неё теперь уже можно честно валидировать Windows-клиентский путь живым execute-runner-ом;
 - это нужно, чтобы не обещать Windows-поддержку без реального proof.
 
 Когда он нужен:
 - нужно прогнать Windows smoke;
 - нужно проверить install/remove/MCP в Windows-контуре;
 - нужно зафиксировать future support не словами, а проверкой.
+- текущий канонический доказанный сценарий внутри этого контура: локальный `install_amai.ps1` на Windows честно уходит в fail-closed и требует `WSL2` или `--ssh-destination`, а proof собирает это как evidence через VM.
 
 ## Как думать о режиме правильно
 
@@ -118,6 +119,13 @@ cargo run -- deployment explain --target kubernetes_server
   - `kubernetes_server`
 - хотите честно валидировать Windows path:
   - `windows_vm_lab`
+
+Живой вход в этот контур сейчас такой:
+
+```bash
+./scripts/deployment_preflight.sh --target windows_vm_lab
+./scripts/proof_windows_vm_lab.sh --iso-path /path/to/windows.iso
+```
 
 ## Следующий шаг
 

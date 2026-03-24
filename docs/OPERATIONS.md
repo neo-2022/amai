@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 19:34 MSK
-Ручная сверка guide/docs: 2026-03-24 19:34 MSK
+modified_at: 2026-03-24 23:20 MSK
+Ручная сверка guide/docs: 2026-03-24 23:20 MSK
 
 # Operations
 
@@ -510,7 +510,9 @@ cargo run -- deployment explain --target kubernetes_server
 - `kubernetes_server`
   - следующий team/server deployment layer;
 - `windows_vm_lab`
-  - отдельный validation contour для честной Windows-проверки через VM.
+  - отдельный materialized validation contour для честной Windows-проверки через VM;
+  - его живой execute-runner сейчас: `./scripts/proof_windows_vm_lab.sh --iso-path /path/to/windows.iso`;
+  - текущий доказанный результат там не “локальный Windows install path готов”, а честный fail-closed proof для `install_amai.ps1` без `--ssh-destination`.
 
 ## Status
 

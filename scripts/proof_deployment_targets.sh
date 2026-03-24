@@ -9,7 +9,7 @@ cd "${REPO_ROOT}"
 list_output="$(./scripts/deployment_targets.sh)"
 printf '%s\n' "$list_output" | rg '^1\. Local Docker Baseline \(local_docker\) — уже поддержано$' >/dev/null
 printf '%s\n' "$list_output" | rg '^3\. Kubernetes Server Layer \(kubernetes_server\) — задел готов$' >/dev/null
-printf '%s\n' "$list_output" | rg '^4\. Windows VM Validation Lab \(windows_vm_lab\) — задел готов$' >/dev/null
+printf '%s\n' "$list_output" | rg '^4\. Windows VM Validation Lab \(windows_vm_lab\) — уже поддержано$' >/dev/null
 
 docker_output="$(./scripts/deployment_preflight.sh --target local_docker)"
 printf '%s\n' "$docker_output" | rg '^Готовность этой машины: готово к работе$' >/dev/null
@@ -20,5 +20,8 @@ printf '%s\n' "$k8s_output" | rg '^Статус в продукте: задел 
 printf '%s\n' "$k8s_output" | rg 'kubectl: найдено' >/dev/null
 
 windows_output="$(./scripts/deployment_preflight.sh --target windows_vm_lab)"
-printf '%s\n' "$windows_output" | rg '^Статус в продукте: задел уже заложен$' >/dev/null
+printf '%s\n' "$windows_output" | rg '^Статус в продукте: уже поддержано$' >/dev/null
+printf '%s\n' "$windows_output" | rg '^Готовность этой машины: готово к работе$' >/dev/null
 printf '%s\n' "$windows_output" | rg 'qemu-system-x86_64: найдено' >/dev/null
+printf '%s\n' "$windows_output" | rg 'mkfs.fat: найдено' >/dev/null
+printf '%s\n' "$windows_output" | rg 'swtpm: найдено' >/dev/null
