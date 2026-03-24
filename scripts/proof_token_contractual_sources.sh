@@ -11,6 +11,16 @@ internal_provider_billed_tokens="$(
   cargo run --release --quiet -- observe token-report --budget-profile codex_5h --include-verify-events true \
     | jq -r '.token_budget_report.statement_previews.lifetime.internal_provider_billed_tokens'
 )"
+period_start="$(
+  cargo run --release --quiet -- observe token-report --budget-profile codex_5h --include-verify-events true \
+    | jq -r '.token_budget_report.statement_previews.lifetime.period.period_start_epoch_ms'
+)"
+period_end="$(
+  cargo run --release --quiet -- observe token-report --budget-profile codex_5h --include-verify-events true \
+    | jq -r '.token_budget_report.statement_previews.lifetime.period.period_end_epoch_ms'
+)"
+period_start=$((period_start - 600000))
+period_end=$((period_end + 600000))
 
 provider_cost="$(python3 - <<'PY' "$internal_provider_billed_tokens"
 import sys
@@ -19,14 +29,16 @@ print((tokens / 1000.0) * 2.0)
 PY
 )"
 
-cat >"$tmpdir/provider_rate_card.json" <<'JSON'
+cat >"$tmpdir/provider_rate_card.json" <<JSON
 {
   "schema_version": "provider-rate-card-v1",
   "rate_card_version": "proof-rate-card-v1",
   "currency_profile": "USD",
   "provider": "openai",
   "default_input_cost_per_1k_tokens": 2.0,
-  "default_output_cost_per_1k_tokens": 1.0
+  "default_output_cost_per_1k_tokens": 1.0,
+  "effective_from_epoch_ms": $period_start,
+  "effective_to_epoch_ms": $period_end
 }
 JSON
 
@@ -40,7 +52,9 @@ cat >"$tmpdir/provider_usage_export.json" <<JSON
       "scope_code": "lifetime",
       "total_tokens": $internal_provider_billed_tokens,
       "provider_cost_amount": $provider_cost,
-      "currency_profile": "USD"
+      "currency_profile": "USD",
+      "period_start_epoch_ms": $period_start,
+      "period_end_epoch_ms": $period_end
     }
   ]
 }
@@ -56,13 +70,15 @@ cat >"$tmpdir/provider_invoice_export.json" <<JSON
       "scope_code": "lifetime",
       "invoice_amount": $provider_cost,
       "currency_profile": "USD",
-      "invoice_id": "proof-invoice-1"
+      "invoice_id": "proof-invoice-1",
+      "period_start_epoch_ms": $period_start,
+      "period_end_epoch_ms": $period_end
     }
   ]
 }
 JSON
 
-cat >"$tmpdir/infra_cost_profile.json" <<'JSON'
+cat >"$tmpdir/infra_cost_profile.json" <<JSON
 {
   "schema_version": "infra-cost-profile-v1",
   "infra_cost_profile_version": "proof-infra-cost-v1",
@@ -70,7 +86,9 @@ cat >"$tmpdir/infra_cost_profile.json" <<'JSON'
   "provider": "amai",
   "cost_per_1k_internal_billed_tokens": 0.25,
   "cost_per_live_event": 0.0001,
-  "fixed_scope_cost_amount": 0.0
+  "fixed_scope_cost_amount": 0.0,
+  "effective_from_epoch_ms": $period_start,
+  "effective_to_epoch_ms": $period_end
 }
 JSON
 
@@ -98,7 +116,15 @@ assert payload["reconciliation_preview"]["reconciliation_state"] == "external_us
 assert payload["reconciliation_preview"]["usage_truth_completeness_state"] == "provider_usage_bound", payload
 assert payload["reconciliation_preview"]["money_truth_completeness_state"] == "provider_cost_and_invoice_bound", payload
 assert payload["reconciliation_preview"]["reconciliation_readiness_state"] == "usage_cost_and_invoice_truth_ready", payload
+assert payload["reconciliation_preview"]["provider_usage_scope_alignment_state"] == "scope_period_aligned", payload
+assert payload["reconciliation_preview"]["provider_invoice_scope_alignment_state"] == "scope_period_aligned", payload
+assert payload["reconciliation_preview"]["rate_card_scope_alignment_state"] == "scope_period_aligned", payload
+assert payload["reconciliation_preview"]["temporal_truth_state"] == "scope_period_aligned", payload
 assert payload["margin_scope"]["margin_state"] == "priced_preview_report_only", payload
+assert payload["margin_scope"]["margin_confidence_state"] == "aligned_report_only", payload
+assert payload["margin_scope"]["rate_card_scope_alignment_state"] == "scope_period_aligned", payload
+assert payload["margin_scope"]["infra_cost_scope_alignment_state"] == "scope_period_aligned", payload
+assert payload["margin_scope"]["temporal_truth_state"] == "scope_period_aligned", payload
 assert payload["statement_export_preview"]["scope_code"] == "lifetime", payload
 PY
 

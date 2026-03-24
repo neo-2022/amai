@@ -22,17 +22,29 @@ tmpdir = Path(sys.argv[1])
 report = json.loads(Path("/tmp/amai-proof-token-contractual-base.json").read_text())
 root = report["token_budget_report"]
 scopes = []
+earliest_start = None
+latest_end = None
+slack_ms = 600_000
 for scope in ("current_session", "rolling_window", "lifetime"):
     preview = root["statement_previews"].get(scope)
     if not preview:
         continue
     billed = int(preview.get("internal_provider_billed_tokens") or 0)
+    period = preview.get("period") or {}
+    period_start = period.get("period_start_epoch_ms")
+    period_end = period.get("period_end_epoch_ms")
+    if period_start is not None:
+        earliest_start = period_start if earliest_start is None else min(earliest_start, period_start)
+    if period_end is not None:
+        latest_end = period_end if latest_end is None else max(latest_end, period_end)
     scopes.append(
         {
             "scope_code": scope,
             "input_tokens": billed,
             "output_tokens": 0,
             "invoice_amount": round((billed / 1000.0) * 0.01, 12),
+            "period_start_epoch_ms": None if period_start is None else period_start - slack_ms,
+            "period_end_epoch_ms": None if period_end is None else period_end + slack_ms,
         }
     )
 
@@ -45,6 +57,8 @@ for scope in ("current_session", "rolling_window", "lifetime"):
             'provider = "demo-provider"',
             "default_input_cost_per_1k_tokens = 0.01",
             "default_output_cost_per_1k_tokens = 0.02",
+            f"effective_from_epoch_ms = {(earliest_start - slack_ms) if earliest_start is not None else 0}",
+            f"effective_to_epoch_ms = {(latest_end + slack_ms) if latest_end is not None else 0}",
             "",
         ]
     )
@@ -60,6 +74,8 @@ for scope in ("current_session", "rolling_window", "lifetime"):
             "cost_per_1k_internal_billed_tokens = 0.002",
             "cost_per_live_event = 0.0005",
             "fixed_scope_cost_amount = 0.01",
+            f"effective_from_epoch_ms = {(earliest_start - slack_ms) if earliest_start is not None else 0}",
+            f"effective_to_epoch_ms = {(latest_end + slack_ms) if latest_end is not None else 0}",
             "",
         ]
     )
@@ -89,6 +105,8 @@ for scope in ("current_session", "rolling_window", "lifetime"):
                     "invoice_amount": scope["invoice_amount"],
                     "currency_profile": "USD",
                     "invoice_id": f"inv-{scope['scope_code']}",
+                    "period_start_epoch_ms": scope["period_start_epoch_ms"],
+                    "period_end_epoch_ms": scope["period_end_epoch_ms"],
                 }
                 for scope in scopes
             ],
@@ -127,10 +145,19 @@ margin = root["margin_view"][scope]
 statement_export = root["statement_export_previews"][scope]
 
 assert summary["reconciliation_state"] == "external_usage_and_invoice_aligned_report_only", summary
+assert summary["provider_usage_scope_alignment_state"] == "scope_period_aligned", summary
+assert summary["provider_invoice_scope_alignment_state"] == "scope_period_aligned", summary
+assert summary["rate_card_scope_alignment_state"] == "scope_period_aligned", summary
+assert summary["reconciliation_temporal_truth_state"] == "scope_period_aligned", summary
 assert summary["margin_state"] == "priced_preview_report_only", summary
+assert summary["margin_confidence_state"] == "aligned_report_only", summary
+assert summary["margin_temporal_truth_state"] == "scope_period_aligned", summary
 assert summary["external_provider_cost_amount"] is not None, summary
 assert margin["customer_saved_amount_lower_bound"] is not None, margin
 assert margin["amai_infra_cost_amount"] is not None, margin
 assert margin["margin_amount"] is not None, margin
+assert margin["rate_card_scope_alignment_state"] == "scope_period_aligned", margin
+assert margin["infra_cost_scope_alignment_state"] == "scope_period_aligned", margin
+assert margin["temporal_truth_state"] == "scope_period_aligned", margin
 assert statement_export["line_item_surfaces"]["margin_scope"]["margin_state"] == "priced_preview_report_only", statement_export
 PY

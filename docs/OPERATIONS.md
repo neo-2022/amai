@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 17:27 MSK
-Ручная сверка guide/docs: 2026-03-24 17:27 MSK
+modified_at: 2026-03-24 19:11 MSK
+Ручная сверка guide/docs: 2026-03-24 19:11 MSK
 
 # Operations
 
@@ -1831,6 +1831,13 @@ cargo run -- context pack \
     - `internal_provider_billed_tokens`
   - drift по токенам считается только между `internal_provider_billed_tokens` и
     `external_provider_usage_tokens`;
+  - отдельно теперь видны scope-level temporal states:
+    - `provider_usage_scope_alignment_state`
+    - `provider_invoice_scope_alignment_state`
+    - `rate_card_scope_alignment_state`
+    - `temporal_truth_state`
+  - это нужно затем, чтобы provider usage и rate card не выглядели пригодными к period
+    только из-за того, что источник вообще удалось привязать;
   - при реальном source binding там уже могут появляться:
     - `external_provider_usage_tokens`
     - `external_provider_cost_amount`
@@ -1855,9 +1862,16 @@ cargo run -- context pack \
   - в нём видно token-side lower bound savings клиента;
   - при честно привязанном priced rate card он обязан перескочить с `awaiting_rate_card`
     на следующий реальный блокер, а не держаться за старый static contract;
+  - temporal truth теперь тоже first-class:
+    - `margin_confidence_state`
+    - `rate_card_scope_alignment_state`
+    - `infra_cost_scope_alignment_state`
+    - `temporal_truth_state`
   - если честно привязаны `provider usage + rate card + infra cost profile`, он уже имеет право
     materialize-ить `customer_saved_amount_lower_bound`, `amai_infra_cost_amount`,
     `margin_amount` и `savings_to_cost_ratio`;
+  - если priced inputs есть, но их период не покрывает statement scope, state обязан стать
+    `pricing_period_mismatch`, а не притворяться aligned money preview;
   - если provider usage показывает drift, этот drift должен оставаться видимым и в margin-preview.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.

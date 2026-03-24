@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 17:27 MSK
-Ручная сверка guide/docs: 2026-03-24 17:27 MSK
+modified_at: 2026-03-24 19:11 MSK
+Ручная сверка guide/docs: 2026-03-24 19:11 MSK
 
 # Token Ledger
 
@@ -712,7 +712,7 @@ Operator-safe report-only команды:
 - готовы ли мы вообще к external reconciliation.
 
 Текущий truthful status:
-- `reconciliation_contract_version = provider-reconciliation-v3`
+- `reconciliation_contract_version = provider-reconciliation-v4`
 - `ready_for_external_reconciliation` теперь зависит от реального bind provider usage export,
   а не от одного факта, что где-то прописан путь;
 - contract теперь ещё отдельно публикует:
@@ -720,6 +720,15 @@ Operator-safe report-only команды:
   - `money_truth_completeness_state`
   - `reconciliation_readiness_state`
   - `governance_blocking_reasons`
+- scope-level preview теперь ещё отдельно публикует temporal truth:
+  - `provider_usage_scope_alignment_state`
+  - `provider_invoice_scope_alignment_state`
+  - `rate_card_scope_alignment_state`
+  - `temporal_truth_state`
+- эти поля нужны затем, чтобы external truth не считалась честно применимой к scope только
+  потому, что файл уже привязан и арифметика сошлась;
+  - теперь ещё отдельно видно, покрывают ли provider usage, invoice export и rate card
+    именно период текущего statement preview;
 - внутренний lower bound уже materialized;
 - provider sources теперь могут materialize-иться не только через env, но и через repo-local
   default files:
@@ -811,8 +820,8 @@ Customer-facing export bundle:
 - включена ли money-margin арифметика.
 
 Текущий truthful status:
-- `margin_model_version = margin-view-v2`
-- `infra_cost_binding_model_version = infra-cost-binding-v1`
+- `margin_model_version = margin-view-v3`
+- `infra_cost_binding_model_version = infra-cost-binding-v2`
 - `infra_cost_profile_version = unpriced-infra-v1`
 - `money_margin_enabled` включается только после честного bind на
   `priced rate card + provider usage + infra cost profile`;
@@ -821,6 +830,11 @@ Customer-facing export bundle:
   - `external_usage_and_invoice_aligned_report_only`
 - `margin_view` теперь обязан брать priced/unpriced не из static contract label, а из
   настоящего rate-card binding runtime.
+- `margin_view` теперь ещё отдельно публикует:
+  - `margin_confidence_state`
+  - `rate_card_scope_alignment_state`
+  - `infra_cost_scope_alignment_state`
+  - `temporal_truth_state`
 
 Именно поэтому truthful `margin_view` теперь обязан выглядеть в одной из двух форм:
 - до bind внешних truth-sources:
@@ -834,7 +848,11 @@ Customer-facing export bundle:
   - `amai_infra_cost_amount` может быть заполнен;
   - `margin_amount` может быть заполнен;
   - `savings_to_cost_ratio` может быть заполнен;
-  - но state всё равно остаётся `report_only preview`, а не invoice.
+  - но state всё равно остаётся `report_only preview`, а не invoice;
+  - если period truth не подтверждён, state обязан стать:
+    - `priced_preview_temporal_unscoped_report_only`
+    - или `pricing_period_mismatch`
+    а не делать вид, что pricing уже финально пригоден к scope.
 
 Это не “недоделанная формула”, а truth guardrail:
 - пока rate card остаётся `unpriced`;
@@ -888,7 +906,7 @@ Customer-facing export bundle:
 - `line_items.excluded`
 
 Честный смысл этого export сейчас такой:
-- это `contractual-evidence-pack-v4`;
+- это `contractual-evidence-pack-v5`;
 - это всё ещё `report_only tokenonomics`;
 - это не invoice;
 - это не final settlement;
