@@ -1,5 +1,5 @@
-modified_at = "2026-03-24 12:17 MSK"
-"Ручная сверка guide/docs" = "2026-03-24 12:17 MSK"
+modified_at = "2026-03-24 12:29 MSK"
+"Ручная сверка guide/docs" = "2026-03-24 12:29 MSK"
 
 default_profile = "local_default"
 
@@ -25,6 +25,8 @@ correction_policy_version = "report-only-correction-v1"
 freeze_close_policy_version = "freeze-close-v1"
 late_arrival_policy_version = "late-arrival-v1"
 dispute_policy_version = "report-only-dispute-v1"
+settlement_lifecycle_model_version = "settlement-lifecycle-v1"
+telemetry_surface_split_version = "tokenonomics-surface-split-v1"
 event_time_policy_version = "client-visible-ingest-v1"
 billing_policy_version = "report-only-v1"
 billing_mode = "report_only"

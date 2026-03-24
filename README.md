@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:17 MSK
-Ручная сверка guide/docs: 2026-03-24 12:17 MSK
+modified_at: 2026-03-24 12:29 MSK
+Ручная сверка guide/docs: 2026-03-24 12:29 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1068,7 +1068,12 @@ preview, а не только raw count.
 - `settlement_contract`
   - публикует statement-version, freeze/close policy, late-arrival policy,
   correction/dispute policy;
+  - теперь ещё явно публикует `settlement_lifecycle_model_version`,
+    `current_operational_state` и `current_contractual_state`;
   - при этом честно говорит, что это пока только `report_only preview`.
+- `telemetry_surfaces`
+  - явно разводит `operational live telemetry` и `contractual tokenonomics`;
+  - это нужно затем, чтобы dashboard headline и live rollups не принимали за invoice.
 - `reconciliation_contract`
   - публикует, какие внешние truth-sources нужны для будущей сверки с provider;
   - честно показывает, что сейчас они ещё не привязаны к runtime.
@@ -1119,6 +1124,7 @@ preview, а не только raw count.
 - settlement preview теперь тоже first-class:
   - `statement_previews.current_session / rolling_window / lifetime`
   - там уже видно measured non-billable lower bound по scope;
+  - там теперь ещё явно видны `lifecycle_state`, `contractual_state` и `close_barriers`;
   - но `billable_lower_bound_tokens` и `final_amount` остаются пустыми, пока billing не
     включён честно.
 - provider reconciliation теперь тоже first-class:

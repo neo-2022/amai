@@ -76,6 +76,10 @@ struct TokenBudgetContractConfig {
     late_arrival_policy_version: String,
     #[serde(default = "default_dispute_policy_version")]
     dispute_policy_version: String,
+    #[serde(default = "default_settlement_lifecycle_model_version")]
+    settlement_lifecycle_model_version: String,
+    #[serde(default = "default_telemetry_surface_split_version")]
+    telemetry_surface_split_version: String,
     #[serde(default = "default_event_time_policy_version")]
     event_time_policy_version: String,
     #[serde(default = "default_billing_policy_version")]
@@ -116,6 +120,8 @@ impl Default for TokenBudgetContractConfig {
             freeze_close_policy_version: default_freeze_close_policy_version(),
             late_arrival_policy_version: default_late_arrival_policy_version(),
             dispute_policy_version: default_dispute_policy_version(),
+            settlement_lifecycle_model_version: default_settlement_lifecycle_model_version(),
+            telemetry_surface_split_version: default_telemetry_surface_split_version(),
             event_time_policy_version: default_event_time_policy_version(),
             billing_policy_version: default_billing_policy_version(),
             billing_mode: default_billing_mode(),
@@ -176,6 +182,8 @@ struct TokenBudgetEvent {
     freeze_close_policy_version: String,
     late_arrival_policy_version: String,
     dispute_policy_version: String,
+    settlement_lifecycle_model_version: String,
+    telemetry_surface_split_version: String,
     event_time_policy_version: String,
     billing_policy_version: String,
     billing_mode: String,
@@ -333,6 +341,14 @@ fn default_dispute_policy_version() -> String {
     "report-only-dispute-v1".to_string()
 }
 
+fn default_settlement_lifecycle_model_version() -> String {
+    "settlement-lifecycle-v1".to_string()
+}
+
+fn default_telemetry_surface_split_version() -> String {
+    "tokenonomics-surface-split-v1".to_string()
+}
+
 fn default_event_time_policy_version() -> String {
     "client-visible-ingest-v1".to_string()
 }
@@ -390,6 +406,8 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "freeze_close_policy_version": contract.freeze_close_policy_version.clone(),
         "late_arrival_policy_version": contract.late_arrival_policy_version.clone(),
         "dispute_policy_version": contract.dispute_policy_version.clone(),
+        "settlement_lifecycle_model_version": contract.settlement_lifecycle_model_version.clone(),
+        "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
@@ -420,6 +438,8 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "freeze_close_policy_version": contract.freeze_close_policy_version.clone(),
         "late_arrival_policy_version": contract.late_arrival_policy_version.clone(),
         "dispute_policy_version": contract.dispute_policy_version.clone(),
+        "settlement_lifecycle_model_version": contract.settlement_lifecycle_model_version.clone(),
+        "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
@@ -562,18 +582,92 @@ fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value
         "late_arrival_policy_version": contract.late_arrival_policy_version.clone(),
         "correction_policy_version": contract.correction_policy_version.clone(),
         "dispute_policy_version": contract.dispute_policy_version.clone(),
+        "settlement_lifecycle_model_version": contract.settlement_lifecycle_model_version.clone(),
+        "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "settlement_status": contract.settlement_status.clone(),
         "statement_lifecycle": [
-            "measured",
-            "verified",
-            "measured_non_billable",
-            "billable_not_enabled",
-            "settled_not_materialized",
-            "closed_not_materialized"
+            {
+                "code": "live_measurement_open",
+                "surface": "operational",
+                "meaning": "Live token rollup ещё открыт и меняется по мере новых событий."
+            },
+            {
+                "code": "report_only_preview_open",
+                "surface": "contractual",
+                "meaning": "Есть contractual preview, но billing и закрытие периода ещё не включены."
+            },
+            {
+                "code": "close_blocked_report_only",
+                "surface": "contractual",
+                "meaning": "Период нельзя честно закрыть: settlement остаётся report-only."
+            },
+            {
+                "code": "closed_with_adjustments_reserved",
+                "surface": "future_reserved",
+                "meaning": "Будущий invoice-grade слой должен использовать отдельные adjustment/credit semantics, а не тихую перезапись."
+            }
         ],
+        "current_operational_state": "live_measurement_open",
+        "current_contractual_state": "report_only_preview_open",
         "freeze_close_status": "not_enforced_report_only",
         "late_arrival_status": "accepted_until_settlement_exists",
         "note": "Settlement layer пока остаётся report-only preview: freeze/close, invoice-grade adjustments и disputes ещё не materialized как денежный workflow."
+    })
+}
+
+fn build_telemetry_surfaces_json(contract: &TokenBudgetContractConfig) -> Value {
+    json!({
+        "model_version": contract.telemetry_surface_split_version.clone(),
+        "operational_surface": {
+            "code": "engineering_live_telemetry",
+            "intended_consumers": [
+                "dashboard",
+                "observability",
+                "engineers"
+            ],
+            "fields": [
+                "headline",
+                "current_session",
+                "rolling_window",
+                "lifetime",
+                "source_breakdown",
+                "query_slices",
+                "baseline_strategy_slices",
+                "temperature_slices"
+            ],
+            "not_for": [
+                "invoice",
+                "settlement",
+                "customer_billing"
+            ]
+        },
+        "contractual_surface": {
+            "code": "report_only_tokenonomics_contract",
+            "intended_consumers": [
+                "customer_review",
+                "audit",
+                "finance_preparation"
+            ],
+            "fields": [
+                "usage_event_schema",
+                "baseline_contract",
+                "billing_policy",
+                "rate_card",
+                "settlement_contract",
+                "statement_previews",
+                "reconciliation_contract",
+                "reconciliation_previews",
+                "margin_contract",
+                "margin_view",
+                "contractual_evidence_pack"
+            ],
+            "state": "report_only_preview",
+            "not_for": [
+                "live_latency_tuning",
+                "hot_path_benchmarking"
+            ]
+        },
+        "note": "Operational telemetry и contractual tokenonomics intentionally split: dashboard live rollups нельзя трактовать как invoice или закрытый statement."
     })
 }
 
@@ -832,13 +926,35 @@ fn build_statement_preview(
     summary: &Value,
     contract: &TokenBudgetContractConfig,
 ) -> Value {
+    let mut close_barriers = vec![
+        "billing_mode_report_only".to_string(),
+        "external_reconciliation_not_bound".to_string(),
+        "rate_card_unpriced".to_string(),
+    ];
+    if summary["coverage"]["completeness_state"].as_str() != Some("confirmed") {
+        close_barriers.push("coverage_not_final".to_string());
+    }
+    if summary["verified_effective_saved_tokens"]
+        .as_i64()
+        .unwrap_or(0)
+        <= 0
+    {
+        close_barriers.push("no_positive_verified_lower_bound".to_string());
+    }
     json!({
         "scope_code": scope_code,
         "scope_label": scope_label,
         "statement_status": "report_only_preview",
+        "lifecycle_state": "measured_non_billable_open",
+        "operational_state": "live_measurement_open",
+        "contractual_state": "report_only_preview_open",
         "close_readiness": "not_closeable_report_only",
+        "close_candidate": false,
+        "close_barriers": close_barriers,
         "freeze_status": "open",
-        "late_arrival_mode": "accepting_events",
+        "late_arrival_mode": "accepting_events_until_contractual_close_exists",
+        "correction_mode": "future_credit_or_adjustment_not_materialized",
+        "dispute_mode": "not_open_report_only",
         "coverage": summary["coverage"],
         "measured_non_billable_lower_bound_tokens": summary["verified_effective_saved_tokens"],
         "billable_lower_bound_tokens": Value::Null,
@@ -1403,6 +1519,7 @@ async fn collect_report(
             "billing_policy": build_billing_policy_json(&config.contract, &config.measurement),
             "rate_card": build_rate_card_json(&config.contract),
             "settlement_contract": build_settlement_contract_json(&config.contract),
+            "telemetry_surfaces": build_telemetry_surfaces_json(&config.contract),
             "reconciliation_contract": reconciliation_contract.clone(),
             "margin_contract": margin_contract.clone(),
             "filters": {
@@ -1875,6 +1992,14 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .unwrap_or("report-only-dispute-v0")
         .to_string();
+    let settlement_lifecycle_model_version = node["contract"]["settlement_lifecycle_model_version"]
+        .as_str()
+        .unwrap_or("settlement-lifecycle-v0")
+        .to_string();
+    let telemetry_surface_split_version = node["contract"]["telemetry_surface_split_version"]
+        .as_str()
+        .unwrap_or("tokenonomics-surface-split-v0")
+        .to_string();
     let event_time_policy_version = node["contract"]["event_time_policy_version"]
         .as_str()
         .unwrap_or("client-visible-ingest-v0")
@@ -2009,6 +2134,8 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         freeze_close_policy_version,
         late_arrival_policy_version,
         dispute_policy_version,
+        settlement_lifecycle_model_version,
+        telemetry_surface_split_version,
         event_time_policy_version,
         billing_policy_version,
         billing_mode,
@@ -3658,6 +3785,8 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
             "freeze_close_policy_version": event.freeze_close_policy_version.clone(),
             "late_arrival_policy_version": event.late_arrival_policy_version.clone(),
             "dispute_policy_version": event.dispute_policy_version.clone(),
+            "settlement_lifecycle_model_version": event.settlement_lifecycle_model_version.clone(),
+            "telemetry_surface_split_version": event.telemetry_surface_split_version.clone(),
             "event_time_policy_version": event.event_time_policy_version.clone(),
             "billing_policy_version": event.billing_policy_version.clone(),
             "billing_mode": event.billing_mode.clone(),
@@ -4953,16 +5082,18 @@ mod tests {
         build_external_truth_sources_json, build_margin_contract_json, build_margin_scope,
         build_product_headline, build_rate_card_json, build_reconciliation_contract_json,
         build_reconciliation_preview, build_settlement_contract_json, build_statement_preview,
-        build_usage_event_schema_json, contractual_line_item_json, default_backfill_policy_version,
-        default_baseline_method_version, default_billing_mode, default_billing_policy_version,
-        default_contractual_evidence_pack_version, default_correction_policy_version,
-        default_coverage_model_version, default_currency_profile, default_dedup_contract_version,
-        default_dispute_policy_version, default_event_time_policy_version,
-        default_excluded_taxonomy_version, default_freeze_close_policy_version,
-        default_infra_cost_profile_version, default_late_arrival_policy_version,
-        default_margin_model_version, default_quality_method_version, default_rate_card_version,
-        default_reconciliation_contract_version, default_settlement_statement_version,
-        default_settlement_status, derive_baseline_strategy, derive_quality_verdict,
+        build_telemetry_surfaces_json, build_usage_event_schema_json, contractual_line_item_json,
+        default_backfill_policy_version, default_baseline_method_version, default_billing_mode,
+        default_billing_policy_version, default_contractual_evidence_pack_version,
+        default_correction_policy_version, default_coverage_model_version,
+        default_currency_profile, default_dedup_contract_version, default_dispute_policy_version,
+        default_event_time_policy_version, default_excluded_taxonomy_version,
+        default_freeze_close_policy_version, default_infra_cost_profile_version,
+        default_late_arrival_policy_version, default_margin_model_version,
+        default_quality_method_version, default_rate_card_version,
+        default_reconciliation_contract_version, default_settlement_lifecycle_model_version,
+        default_settlement_statement_version, default_settlement_status,
+        default_telemetry_surface_split_version, derive_baseline_strategy, derive_quality_verdict,
         derive_query_type, derive_traffic_class, event_to_json, followup_queries_related,
         include_traffic_class_in_report, latency_slice_breakdown, needs_live_reverification,
         parse_snapshot_event, reconcile_followup_recovery, repair_legacy_token_event_payload,
@@ -5019,6 +5150,8 @@ mod tests {
                     freeze_close_policy_version: default_freeze_close_policy_version(),
                     late_arrival_policy_version: default_late_arrival_policy_version(),
                     dispute_policy_version: default_dispute_policy_version(),
+                    settlement_lifecycle_model_version: default_settlement_lifecycle_model_version(),
+                    telemetry_surface_split_version: default_telemetry_surface_split_version(),
                     event_time_policy_version: default_event_time_policy_version(),
                     billing_policy_version: default_billing_policy_version(),
                     billing_mode: default_billing_mode(),
@@ -5339,6 +5472,14 @@ mod tests {
             "contractual-evidence-pack-v1"
         );
         assert_eq!(
+            token_event["contract"]["settlement_lifecycle_model_version"],
+            "settlement-lifecycle-v1"
+        );
+        assert_eq!(
+            token_event["contract"]["telemetry_surface_split_version"],
+            "tokenonomics-surface-split-v1"
+        );
+        assert_eq!(
             token_event["contract"]["settlement_status"],
             "unsettled_report_only"
         );
@@ -5480,10 +5621,35 @@ mod tests {
             settlement_contract["late_arrival_status"],
             "accepted_until_settlement_exists"
         );
+        assert_eq!(
+            settlement_contract["current_contractual_state"],
+            "report_only_preview_open"
+        );
         assert_eq!(preview["statement_status"], "report_only_preview");
+        assert_eq!(preview["lifecycle_state"], "measured_non_billable_open");
+        assert_eq!(preview["contractual_state"], "report_only_preview_open");
         assert_eq!(preview["close_readiness"], "not_closeable_report_only");
+        assert_eq!(preview["close_barriers"][0], "billing_mode_report_only");
         assert_eq!(preview["measured_non_billable_lower_bound_tokens"], 1234);
         assert_eq!(preview["billable_lower_bound_tokens"], json!(null));
+    }
+
+    #[test]
+    fn telemetry_surfaces_split_operational_and_contractual_fields() {
+        let surfaces = build_telemetry_surfaces_json(&contract_fixture());
+        assert_eq!(surfaces["model_version"], "tokenonomics-surface-split-v1");
+        assert_eq!(
+            surfaces["operational_surface"]["code"],
+            "engineering_live_telemetry"
+        );
+        assert_eq!(
+            surfaces["contractual_surface"]["state"],
+            "report_only_preview"
+        );
+        let contractual_fields = surfaces["contractual_surface"]["fields"]
+            .as_array()
+            .expect("contractual fields");
+        assert!(contractual_fields.contains(&json!("contractual_evidence_pack")));
     }
 
     #[test]

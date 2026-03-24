@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:17 MSK
-Ручная сверка guide/docs: 2026-03-24 12:17 MSK
+modified_at: 2026-03-24 12:29 MSK
+Ручная сверка guide/docs: 2026-03-24 12:29 MSK
 
 # Operations
 
@@ -1609,7 +1609,11 @@ cargo run --release -- verify token-benchmark-suite \
   - freeze/close policy version;
   - late-arrival policy version;
   - correction/dispute policy versions;
+  - explicit `current_operational_state / current_contractual_state`;
   - current truthful status: `report_only preview`;
+- `telemetry_surfaces`
+  - явный split между live engineering telemetry и contractual tokenonomics;
+  - это защищает от подмены dashboard-графика customer billing-витриной;
 - `reconciliation_contract`
   - versioned contract для будущей сверки internal lower bound с provider truth;
   - список обязательных и optional external sources;
@@ -1688,7 +1692,9 @@ cargo run --release -- verify token-benchmark-suite \
   - `current_session`
   - `rolling_window`
   - `lifetime`
-  - в них видно measured non-billable lower bound по каждому scope, но billable amount и final amount остаются пустыми, пока settlement layer ещё не materialized.
+  - в них видно measured non-billable lower bound по каждому scope;
+  - в них отдельно видны `lifecycle_state`, `contractual_state`, `close_barriers`;
+  - billable amount и final amount остаются пустыми, пока settlement layer ещё не materialized.
 - `reconciliation_previews` теперь тоже каноничны:
   - `current_session`
   - `rolling_window`

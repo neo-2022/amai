@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:17 MSK
-Ручная сверка guide/docs: 2026-03-24 12:17 MSK
+modified_at: 2026-03-24 12:29 MSK
+Ручная сверка guide/docs: 2026-03-24 12:29 MSK
 
 # Token Ledger
 
@@ -486,23 +486,51 @@ reporting layers:
 
 Текущий truthful status:
 - `statement_version = settlement-preview-v1`
+- `settlement_lifecycle_model_version = settlement-lifecycle-v1`
 - `freeze_close_status = not_enforced_report_only`
 - `late_arrival_status = accepted_until_settlement_exists`
+- `current_operational_state = live_measurement_open`
+- `current_contractual_state = report_only_preview_open`
 - corrections/disputes пока не invoice-grade, а только report-only semantics
 
 `statement_previews` нужны затем, чтобы по каждому scope показать:
 - measured non-billable lower bound;
 - coverage;
 - settlement status;
+- lifecycle state;
+- contractual state;
+- close barriers;
 - и при этом не подсовывать пользователю фальшивую сумму к оплате.
 
 Именно поэтому в текущем runtime:
 - `billable_lower_bound_tokens = null`
 - `final_amount = null`
 - `statement_status = report_only_preview`
+- `lifecycle_state = measured_non_billable_open`
+- `contractual_state = report_only_preview_open`
+- `close_barriers` прямо перечисляют, почему period нельзя закрыть честно
 
 Это не недостаток UX, а truth guardrail до тех пор, пока реальный billing workflow не
 materialized end-to-end.
+
+## Contractual vs operational surfaces
+
+Сильный measuring engine ещё не даёт права смешивать инженерную телеметрию и contractual
+метрики для клиента.
+
+Поэтому report теперь должен публиковать отдельный `telemetry_surfaces`.
+
+Его смысл такой:
+- `operational_surface`
+  - live dashboard и observability для инженеров;
+- `contractual_surface`
+  - report-only tokenonomics contract для review, audit и будущего settlement.
+
+Текущий truthful status:
+- `telemetry_surface_split_version = tokenonomics-surface-split-v1`
+- dashboard headline и live rollups нельзя трактовать как invoice;
+- contractual export должен идти через `statement_previews`, `reconciliation_previews`,
+  `margin_view` и `contractual_evidence_pack`, а не через operational live-card.
 
 ## Provider reconciliation и внешний truth source
 
