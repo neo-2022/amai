@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:38 MSK
-Ручная сверка guide/docs: 2026-03-24 12:38 MSK
+modified_at: 2026-03-24 12:50 MSK
+Ручная сверка guide/docs: 2026-03-24 12:50 MSK
 
 # Token Ledger
 
@@ -514,10 +514,48 @@ reporting layers:
 - `contractual_state = report_only_preview_open`
 - `close_barriers` прямо перечисляют, почему period нельзя закрыть честно
 - `period.close_at_epoch_ms = null`, пока честного close workflow ещё нет
-- `adjustment_preview.status = not_materialized_report_only`
+- `adjustment_preview.status = not_configured`, пока registry source ещё не подключён
 
 Это не недостаток UX, а truth guardrail до тех пор, пока реальный billing workflow не
 materialized end-to-end.
+
+## Adjustment schema и report-only registry
+
+После period governance следующий честный слой — не “исправим потом как удобно”, а
+отдельные `adjustment_request_schema` и `adjustment_registry`.
+
+Зачем они нужны:
+- corrections/disputes должны жить отдельными entries;
+- прошлый period нельзя quietly переписывать задним числом;
+- customer-facing audit должен видеть, есть ли вообще pending/applied/disputed corrections.
+
+Теперь report отдельно публикует:
+- `adjustment_request_schema`
+- `adjustment_registry`
+
+`adjustment_request_schema` обязан честно отвечать на вопросы:
+- какие поля обязательны для future correction/credit/dispute entry;
+- какие `kind` и `status` разрешены;
+- можно ли делать ретро-перезапись старого statement.
+
+Текущий truthful status:
+- `adjustment_request_schema_version = adjustment-request-v1`
+- `retroactive_rewrite_policy = forbidden_use_adjustment_entries`
+
+`adjustment_registry` обязан честно отвечать на вопросы:
+- есть ли вообще source registry;
+- сколько entries уже есть;
+- сколько из них pending/applied/disputed;
+- какой у них per-scope hash.
+
+Текущий truthful status без подключённого источника:
+- `adjustment_registry_version = adjustment-registry-v1`
+- `status = not_configured`
+- `entries_count = 0`
+- `registry_hash = null`
+
+Именно поэтому `adjustment_preview` внутри `statement_previews` теперь читает registry-слой,
+а не рисует credits “по ощущениям”.
 
 ## Contractual vs operational surfaces
 

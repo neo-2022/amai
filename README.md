@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:38 MSK
-Ручная сверка guide/docs: 2026-03-24 12:38 MSK
+modified_at: 2026-03-24 12:50 MSK
+Ручная сверка guide/docs: 2026-03-24 12:50 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1129,6 +1129,11 @@ preview, а не только raw count.
     `adjustment_preview` для будущих credit/correction semantics;
   - но `billable_lower_bound_tokens` и `final_amount` остаются пустыми, пока billing не
     включён честно.
+- correction/dispute слой теперь тоже versioned:
+  - `adjustment_request_schema` публикует allowed kinds/statuses и запрет на тихую
+    ретро-перезапись прошлого period;
+  - `adjustment_registry` публикует status источника и per-scope counts/hashes;
+  - пока registry не подключён, этот слой честно остаётся `not_configured`.
 - provider reconciliation теперь тоже first-class:
   - `reconciliation_previews.current_session / rolling_window / lifetime`
   - там уже видно, что внутренний lower bound по scope есть;

@@ -82,6 +82,10 @@ struct TokenBudgetContractConfig {
     statement_period_governance_version: String,
     #[serde(default = "default_adjustment_preview_model_version")]
     adjustment_preview_model_version: String,
+    #[serde(default = "default_adjustment_request_schema_version")]
+    adjustment_request_schema_version: String,
+    #[serde(default = "default_adjustment_registry_version")]
+    adjustment_registry_version: String,
     #[serde(default = "default_telemetry_surface_split_version")]
     telemetry_surface_split_version: String,
     #[serde(default = "default_event_time_policy_version")]
@@ -127,6 +131,8 @@ impl Default for TokenBudgetContractConfig {
             settlement_lifecycle_model_version: default_settlement_lifecycle_model_version(),
             statement_period_governance_version: default_statement_period_governance_version(),
             adjustment_preview_model_version: default_adjustment_preview_model_version(),
+            adjustment_request_schema_version: default_adjustment_request_schema_version(),
+            adjustment_registry_version: default_adjustment_registry_version(),
             telemetry_surface_split_version: default_telemetry_surface_split_version(),
             event_time_policy_version: default_event_time_policy_version(),
             billing_policy_version: default_billing_policy_version(),
@@ -157,6 +163,30 @@ struct ResolvedProfile {
     description: String,
     session_gap_minutes: u64,
     rolling_window_hours: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct AdjustmentRegistryFile {
+    #[serde(default)]
+    adjustments: Vec<AdjustmentRegistryEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AdjustmentRegistryEntry {
+    adjustment_id: String,
+    scope_code: String,
+    kind: String,
+    status: String,
+    reason_code: String,
+    created_at_epoch_ms: i64,
+    #[serde(default)]
+    tokens_delta: Option<i64>,
+    #[serde(default)]
+    amount_delta: Option<f64>,
+    #[serde(default)]
+    currency_profile: Option<String>,
+    #[serde(default)]
+    related_statement_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +221,8 @@ struct TokenBudgetEvent {
     settlement_lifecycle_model_version: String,
     statement_period_governance_version: String,
     adjustment_preview_model_version: String,
+    adjustment_request_schema_version: String,
+    adjustment_registry_version: String,
     telemetry_surface_split_version: String,
     event_time_policy_version: String,
     billing_policy_version: String,
@@ -361,6 +393,14 @@ fn default_adjustment_preview_model_version() -> String {
     "adjustment-preview-v1".to_string()
 }
 
+fn default_adjustment_request_schema_version() -> String {
+    "adjustment-request-v1".to_string()
+}
+
+fn default_adjustment_registry_version() -> String {
+    "adjustment-registry-v1".to_string()
+}
+
 fn default_telemetry_surface_split_version() -> String {
     "tokenonomics-surface-split-v1".to_string()
 }
@@ -425,6 +465,8 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "settlement_lifecycle_model_version": contract.settlement_lifecycle_model_version.clone(),
         "statement_period_governance_version": contract.statement_period_governance_version.clone(),
         "adjustment_preview_model_version": contract.adjustment_preview_model_version.clone(),
+        "adjustment_request_schema_version": contract.adjustment_request_schema_version.clone(),
+        "adjustment_registry_version": contract.adjustment_registry_version.clone(),
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
@@ -459,6 +501,8 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "settlement_lifecycle_model_version": contract.settlement_lifecycle_model_version.clone(),
         "statement_period_governance_version": contract.statement_period_governance_version.clone(),
         "adjustment_preview_model_version": contract.adjustment_preview_model_version.clone(),
+        "adjustment_request_schema_version": contract.adjustment_request_schema_version.clone(),
+        "adjustment_registry_version": contract.adjustment_registry_version.clone(),
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
@@ -687,11 +731,214 @@ fn build_statement_period_json(
     })
 }
 
-fn build_adjustment_preview_json(contract: &TokenBudgetContractConfig) -> Value {
+fn build_adjustment_request_schema_json(contract: &TokenBudgetContractConfig) -> Value {
+    json!({
+        "schema_version": contract.adjustment_request_schema_version.clone(),
+        "required_fields": [
+            "adjustment_id",
+            "scope_code",
+            "kind",
+            "status",
+            "reason_code",
+            "created_at_epoch_ms"
+        ],
+        "allowed_kinds": [
+            "credit_note",
+            "adjustment_entry",
+            "dispute_hold"
+        ],
+        "allowed_statuses": [
+            "requested",
+            "pending_review",
+            "approved_but_unapplied",
+            "applied_report_only",
+            "disputed",
+            "rejected"
+        ],
+        "retroactive_rewrite_policy": "forbidden_use_adjustment_entries",
+        "note": "Adjustment request schema существует затем, чтобы corrections/disputes materialize-ились отдельными entries, а не тихой перезаписью старого statement."
+    })
+}
+
+fn adjustment_entry_json(entry: &AdjustmentRegistryEntry) -> Value {
+    json!({
+        "adjustment_id": entry.adjustment_id,
+        "scope_code": entry.scope_code,
+        "kind": entry.kind,
+        "status": entry.status,
+        "reason_code": entry.reason_code,
+        "created_at_epoch_ms": entry.created_at_epoch_ms,
+        "tokens_delta": entry.tokens_delta,
+        "amount_delta": entry.amount_delta,
+        "currency_profile": entry.currency_profile,
+        "related_statement_id": entry.related_statement_id,
+    })
+}
+
+fn build_adjustment_registry_json(repo_root: &Path, contract: &TokenBudgetContractConfig) -> Value {
+    let source = configured_external_truth_source(
+        repo_root,
+        "AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH",
+        "token_adjustment_registry",
+        "Report-only registry для correction/credit/dispute entries",
+        false,
+    );
+
+    let mut base = json!({
+        "schema_version": contract.adjustment_registry_version.clone(),
+        "request_schema_version": contract.adjustment_request_schema_version.clone(),
+        "source": source.clone(),
+        "status": source["status"].clone(),
+        "entries_count": 0,
+        "pending_entries_count": 0,
+        "applied_entries_count": 0,
+        "disputed_entries_count": 0,
+        "registry_hash": Value::Null,
+        "scopes": {
+            "current_session": {
+                "entries_count": 0,
+                "pending_entries_count": 0,
+                "applied_entries_count": 0,
+                "disputed_entries_count": 0,
+                "scope_hash": Value::Null,
+            },
+            "rolling_window": {
+                "entries_count": 0,
+                "pending_entries_count": 0,
+                "applied_entries_count": 0,
+                "disputed_entries_count": 0,
+                "scope_hash": Value::Null,
+            },
+            "lifetime": {
+                "entries_count": 0,
+                "pending_entries_count": 0,
+                "applied_entries_count": 0,
+                "disputed_entries_count": 0,
+                "scope_hash": Value::Null,
+            }
+        },
+        "note": "Adjustment registry пока optional: без него report-only tokenonomics не переписывает прошлые периоды и не притворяется credit workflow."
+    });
+
+    let source_status = source["status"].as_str().unwrap_or("unknown");
+    if source_status != "configured_existing_path" {
+        return base;
+    }
+
+    let Some(path) = source["path"].as_str() else {
+        return base;
+    };
+
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) => {
+            base["status"] = Value::String("read_error".to_string());
+            base["read_error"] = Value::String(error.to_string());
+            return base;
+        }
+    };
+    let registry = match serde_json::from_str::<AdjustmentRegistryFile>(&content) {
+        Ok(registry) => registry,
+        Err(error) => {
+            base["status"] = Value::String("parse_error".to_string());
+            base["parse_error"] = Value::String(error.to_string());
+            return base;
+        }
+    };
+
+    let entries = registry
+        .adjustments
+        .iter()
+        .map(adjustment_entry_json)
+        .collect::<Vec<_>>();
+
+    let mut scope_map = serde_json::Map::new();
+    for scope_code in ["current_session", "rolling_window", "lifetime"] {
+        let scope_entries = registry
+            .adjustments
+            .iter()
+            .filter(|entry| entry.scope_code == scope_code)
+            .map(adjustment_entry_json)
+            .collect::<Vec<_>>();
+        let pending_entries_count = scope_entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry["status"].as_str(),
+                    Some("requested" | "pending_review" | "approved_but_unapplied")
+                )
+            })
+            .count();
+        let applied_entries_count = scope_entries
+            .iter()
+            .filter(|entry| entry["status"].as_str() == Some("applied_report_only"))
+            .count();
+        let disputed_entries_count = scope_entries
+            .iter()
+            .filter(|entry| entry["status"].as_str() == Some("disputed"))
+            .count();
+        scope_map.insert(
+            scope_code.to_string(),
+            json!({
+                "entries_count": scope_entries.len(),
+                "pending_entries_count": pending_entries_count,
+                "applied_entries_count": applied_entries_count,
+                "disputed_entries_count": disputed_entries_count,
+                "scope_hash": hash_line_items(&scope_entries).ok(),
+            }),
+        );
+    }
+
+    let pending_entries_count = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry["status"].as_str(),
+                Some("requested" | "pending_review" | "approved_but_unapplied")
+            )
+        })
+        .count();
+    let applied_entries_count = entries
+        .iter()
+        .filter(|entry| entry["status"].as_str() == Some("applied_report_only"))
+        .count();
+    let disputed_entries_count = entries
+        .iter()
+        .filter(|entry| entry["status"].as_str() == Some("disputed"))
+        .count();
+
+    base["status"] = Value::String("loaded".to_string());
+    base["entries_count"] = json!(entries.len());
+    base["pending_entries_count"] = json!(pending_entries_count);
+    base["applied_entries_count"] = json!(applied_entries_count);
+    base["disputed_entries_count"] = json!(disputed_entries_count);
+    base["registry_hash"] =
+        Value::String(hash_line_items(&entries).unwrap_or_else(|_| "hash_error".to_string()));
+    base["scopes"] = Value::Object(scope_map);
+    base
+}
+
+fn build_adjustment_preview_json(
+    scope_code: &str,
+    contract: &TokenBudgetContractConfig,
+    adjustment_registry: &Value,
+) -> Value {
+    let scope_summary = &adjustment_registry["scopes"][scope_code];
     json!({
         "model_version": contract.adjustment_preview_model_version.clone(),
-        "status": "not_materialized_report_only",
-        "current_entries_count": 0,
+        "request_schema_version": contract.adjustment_request_schema_version.clone(),
+        "registry_version": contract.adjustment_registry_version.clone(),
+        "registry_status": adjustment_registry["status"].clone(),
+        "status": match adjustment_registry["status"].as_str() {
+            Some("loaded") => "loaded_report_only",
+            Some(other) => other,
+            None => "unknown",
+        },
+        "current_entries_count": scope_summary["entries_count"].clone(),
+        "pending_entries_count": scope_summary["pending_entries_count"].clone(),
+        "applied_entries_count": scope_summary["applied_entries_count"].clone(),
+        "disputed_entries_count": scope_summary["disputed_entries_count"].clone(),
+        "scope_hash": scope_summary["scope_hash"].clone(),
         "net_tokens_delta": Value::Null,
         "net_amount_delta": Value::Null,
         "allowed_future_actions": [
@@ -699,7 +946,7 @@ fn build_adjustment_preview_json(contract: &TokenBudgetContractConfig) -> Value 
             "adjustment_entry",
             "dispute_hold"
         ],
-        "note": "Корректировки и credit semantics ещё не materialized: report-only слой не переписывает прошлые периоды задним числом."
+        "note": "Корректировки и credit semantics materialize-ятся отдельным registry слоем: report-only preview не переписывает прошлые statement задним числом."
     })
 }
 
@@ -747,6 +994,8 @@ fn build_telemetry_surfaces_json(contract: &TokenBudgetContractConfig) -> Value 
                 "reconciliation_previews",
                 "margin_contract",
                 "margin_view",
+                "adjustment_request_schema",
+                "adjustment_registry",
                 "contractual_evidence_pack"
             ],
             "state": "report_only_preview",
@@ -1016,6 +1265,7 @@ fn build_statement_preview(
     profile: &ResolvedProfile,
     summary: &Value,
     contract: &TokenBudgetContractConfig,
+    adjustment_registry: &Value,
 ) -> Value {
     let mut close_barriers = vec![
         "billing_mode_report_only".to_string(),
@@ -1054,7 +1304,11 @@ fn build_statement_preview(
             profile,
             contract,
         ),
-        "adjustment_preview": build_adjustment_preview_json(contract),
+        "adjustment_preview": build_adjustment_preview_json(
+            scope_code,
+            contract,
+            adjustment_registry,
+        ),
         "coverage": summary["coverage"],
         "measured_non_billable_lower_bound_tokens": summary["verified_effective_saved_tokens"],
         "billable_lower_bound_tokens": Value::Null,
@@ -1540,6 +1794,7 @@ async fn collect_report(
         &profile.display_name,
     );
     let external_truth_sources = build_external_truth_sources_json(repo_root);
+    let adjustment_registry = build_adjustment_registry_json(repo_root, &config.contract);
     let infra_cost_source = configured_external_truth_source(
         repo_root,
         "AMAI_INFRA_COST_PROFILE_PATH",
@@ -1555,6 +1810,7 @@ async fn collect_report(
         &profile,
         &current_session_summary,
         &config.contract,
+        &adjustment_registry,
     );
     let rolling_window_statement_preview = if profile.rolling_window_hours.is_some() {
         build_statement_preview(
@@ -1565,6 +1821,7 @@ async fn collect_report(
             &profile,
             &rolling_window_summary,
             &config.contract,
+            &adjustment_registry,
         )
     } else {
         Value::Null
@@ -1577,6 +1834,7 @@ async fn collect_report(
         &profile,
         &lifetime_summary,
         &config.contract,
+        &adjustment_registry,
     );
     let reconciliation_contract =
         build_reconciliation_contract_json(&config.contract, &external_truth_sources);
@@ -1629,6 +1887,8 @@ async fn collect_report(
             "rate_card": build_rate_card_json(&config.contract),
             "settlement_contract": build_settlement_contract_json(&config.contract),
             "telemetry_surfaces": build_telemetry_surfaces_json(&config.contract),
+            "adjustment_request_schema": build_adjustment_request_schema_json(&config.contract),
+            "adjustment_registry": adjustment_registry.clone(),
             "reconciliation_contract": reconciliation_contract.clone(),
             "margin_contract": margin_contract.clone(),
             "filters": {
@@ -2114,6 +2374,14 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .unwrap_or("adjustment-preview-v0")
         .to_string();
+    let adjustment_request_schema_version = node["contract"]["adjustment_request_schema_version"]
+        .as_str()
+        .unwrap_or("adjustment-request-v0")
+        .to_string();
+    let adjustment_registry_version = node["contract"]["adjustment_registry_version"]
+        .as_str()
+        .unwrap_or("adjustment-registry-v0")
+        .to_string();
     let telemetry_surface_split_version = node["contract"]["telemetry_surface_split_version"]
         .as_str()
         .unwrap_or("tokenonomics-surface-split-v0")
@@ -2255,6 +2523,8 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         settlement_lifecycle_model_version,
         statement_period_governance_version,
         adjustment_preview_model_version,
+        adjustment_request_schema_version,
+        adjustment_registry_version,
         telemetry_surface_split_version,
         event_time_policy_version,
         billing_policy_version,
@@ -3908,6 +4178,8 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
             "settlement_lifecycle_model_version": event.settlement_lifecycle_model_version.clone(),
             "statement_period_governance_version": event.statement_period_governance_version.clone(),
             "adjustment_preview_model_version": event.adjustment_preview_model_version.clone(),
+            "adjustment_request_schema_version": event.adjustment_request_schema_version.clone(),
+            "adjustment_registry_version": event.adjustment_registry_version.clone(),
             "telemetry_surface_split_version": event.telemetry_surface_split_version.clone(),
             "event_time_policy_version": event.event_time_policy_version.clone(),
             "billing_policy_version": event.billing_policy_version.clone(),
@@ -5199,13 +5471,15 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
 mod tests {
     use super::{
         MeasurementConfig, NaiveScope, TokenBudgetContractConfig, TokenBudgetEvent,
-        apply_reverification_metadata, baseline_strategy_breakdown, build_baseline_contract_json,
+        apply_reverification_metadata, baseline_strategy_breakdown, build_adjustment_registry_json,
+        build_adjustment_request_schema_json, build_baseline_contract_json,
         build_billing_policy_json, build_contractual_evidence_pack, build_event_payload,
         build_external_truth_sources_json, build_margin_contract_json, build_margin_scope,
         build_product_headline, build_rate_card_json, build_reconciliation_contract_json,
         build_reconciliation_preview, build_settlement_contract_json, build_statement_preview,
         build_telemetry_surfaces_json, build_usage_event_schema_json, contractual_line_item_json,
-        default_adjustment_preview_model_version, default_backfill_policy_version,
+        default_adjustment_preview_model_version, default_adjustment_registry_version,
+        default_adjustment_request_schema_version, default_backfill_policy_version,
         default_baseline_method_version, default_billing_mode, default_billing_policy_version,
         default_contractual_evidence_pack_version, default_correction_policy_version,
         default_coverage_model_version, default_currency_profile, default_dedup_contract_version,
@@ -5252,6 +5526,10 @@ mod tests {
         }
     }
 
+    fn adjustment_registry_fixture(contract: &TokenBudgetContractConfig) -> serde_json::Value {
+        build_adjustment_registry_json(Path::new("/tmp/amai-no-adjustments"), contract)
+    }
+
     macro_rules! token_event {
         ($($field:ident : $value:expr,)+) => {
             {
@@ -5286,6 +5564,8 @@ mod tests {
                     settlement_lifecycle_model_version: default_settlement_lifecycle_model_version(),
                     statement_period_governance_version: default_statement_period_governance_version(),
                     adjustment_preview_model_version: default_adjustment_preview_model_version(),
+                    adjustment_request_schema_version: default_adjustment_request_schema_version(),
+                    adjustment_registry_version: default_adjustment_registry_version(),
                     telemetry_surface_split_version: default_telemetry_surface_split_version(),
                     event_time_policy_version: default_event_time_policy_version(),
                     billing_policy_version: default_billing_policy_version(),
@@ -5619,6 +5899,14 @@ mod tests {
             "adjustment-preview-v1"
         );
         assert_eq!(
+            token_event["contract"]["adjustment_request_schema_version"],
+            "adjustment-request-v1"
+        );
+        assert_eq!(
+            token_event["contract"]["adjustment_registry_version"],
+            "adjustment-registry-v1"
+        );
+        assert_eq!(
             token_event["contract"]["telemetry_surface_split_version"],
             "tokenonomics-surface-split-v1"
         );
@@ -5743,6 +6031,7 @@ mod tests {
     fn settlement_contract_and_statement_preview_stay_report_only() {
         let contract = contract_fixture();
         let profile = profile_fixture();
+        let adjustment_registry = adjustment_registry_fixture(&contract);
         let settlement_contract = build_settlement_contract_json(&contract);
         let summary = json!({
             "coverage": {
@@ -5764,6 +6053,7 @@ mod tests {
             &profile,
             &summary,
             &contract,
+            &adjustment_registry,
         );
 
         assert_eq!(
@@ -5793,10 +6083,7 @@ mod tests {
         );
         assert_eq!(preview["period"]["period_start_epoch_ms"], 1_000);
         assert_eq!(preview["period"]["period_end_epoch_ms"], 2_000);
-        assert_eq!(
-            preview["adjustment_preview"]["status"],
-            "not_materialized_report_only"
-        );
+        assert_eq!(preview["adjustment_preview"]["status"], "not_configured");
         assert_eq!(preview["measured_non_billable_lower_bound_tokens"], 1234);
         assert_eq!(preview["billable_lower_bound_tokens"], json!(null));
     }
@@ -5817,6 +6104,22 @@ mod tests {
             .as_array()
             .expect("contractual fields");
         assert!(contractual_fields.contains(&json!("contractual_evidence_pack")));
+    }
+
+    #[test]
+    fn adjustment_request_schema_and_registry_are_truthful_when_missing() {
+        let contract = contract_fixture();
+        let schema = build_adjustment_request_schema_json(&contract);
+        let registry = adjustment_registry_fixture(&contract);
+
+        assert_eq!(schema["schema_version"], "adjustment-request-v1");
+        assert_eq!(
+            schema["retroactive_rewrite_policy"],
+            "forbidden_use_adjustment_entries"
+        );
+        assert_eq!(registry["schema_version"], "adjustment-registry-v1");
+        assert_eq!(registry["status"], "not_configured");
+        assert_eq!(registry["entries_count"], 0);
     }
 
     #[test]
@@ -5848,6 +6151,7 @@ mod tests {
     fn reconciliation_preview_keeps_external_values_null_until_truth_is_bound() {
         let contract = contract_fixture();
         let profile = profile_fixture();
+        let adjustment_registry = adjustment_registry_fixture(&contract);
         let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
         let summary = json!({
             "coverage": {
@@ -5869,6 +6173,7 @@ mod tests {
             &profile,
             &summary,
             &contract,
+            &adjustment_registry,
         );
         let reconciliation = build_reconciliation_preview(
             "current_session",
@@ -5922,6 +6227,7 @@ mod tests {
     fn margin_scope_keeps_money_values_null_until_inputs_are_real() {
         let contract = contract_fixture();
         let profile = profile_fixture();
+        let adjustment_registry = adjustment_registry_fixture(&contract);
         let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
         let summary = json!({
             "coverage": {
@@ -5943,6 +6249,7 @@ mod tests {
             &profile,
             &summary,
             &contract,
+            &adjustment_registry,
         );
         let reconciliation = build_reconciliation_preview(
             "lifetime",

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:38 MSK
-Ручная сверка guide/docs: 2026-03-24 12:38 MSK
+modified_at: 2026-03-24 12:50 MSK
+Ручная сверка guide/docs: 2026-03-24 12:50 MSK
 
 # Operations
 
@@ -1635,6 +1635,13 @@ cargo run --release -- verify token-benchmark-suite \
     hashes включённых и исключённых line items;
   - raw `query` туда не попадает, только `query_hash` и usage-state поля;
   - это contractual evidence для review/export, но не invoice.
+- `adjustment_request_schema`
+  - versioned request contract для future credit/correction/dispute entries;
+  - запрещает тихую ретро-перезапись прошлого statement;
+- `adjustment_registry`
+  - optional report-only registry;
+  - публикует source status, counts и per-scope hashes;
+  - если путь не задан, честный статус остаётся `not_configured`.
 - `coverage`
   - отдельный truth-layer поверх каждого rollup:
     - `measured_events`
@@ -1696,6 +1703,10 @@ cargo run --release -- verify token-benchmark-suite \
   - в них отдельно видны `lifecycle_state`, `contractual_state`, `close_barriers`;
   - в них теперь ещё есть `period` и `adjustment_preview`;
   - billable amount и final amount остаются пустыми, пока settlement layer ещё не materialized.
+- `adjustment_preview` теперь тоже каноничен:
+  - видно `registry_status`, `pending_entries_count`, `applied_entries_count`,
+    `disputed_entries_count`, `scope_hash`;
+  - без registry этот слой не придумывает credits, а честно показывает `not_configured`.
 - `reconciliation_previews` теперь тоже каноничны:
   - `current_session`
   - `rolling_window`
