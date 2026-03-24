@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:21 MSK
-Ручная сверка guide/docs: 2026-03-24 15:21 MSK
+modified_at: 2026-03-24 15:35 MSK
+Ручная сверка guide/docs: 2026-03-24 15:35 MSK
 
 # Operations
 
@@ -1782,6 +1782,14 @@ cargo run -- context pack \
   - `current_session`
   - `rolling_window`
   - `lifetime`
+  - repo-local sources теперь допускаются как operator-safe truth bindings:
+    - `/home/art/agent-memory-index/state/provider_usage_export.json`
+    - `/home/art/agent-memory-index/state/provider_invoice_export.json`
+    - `/home/art/agent-memory-index/state/provider_rate_card.json`
+    - `/home/art/agent-memory-index/state/infra_cost_profile.json`
+  - если env-binding не задан, но repo-local файл уже materialized, runtime честно
+    поднимает `default_existing_path`;
+  - если файла ещё нет, источник остаётся `default_path_missing`;
   - в них теперь видно не только lower bound, но и внутренний delivered usage:
     - `internal_delivered_tokens`
     - `internal_recovery_tokens`
@@ -1835,6 +1843,13 @@ cargo run --release -- observe token-evidence-pack --scope current_session --out
 
 ```bash
 ./scripts/proof_token_contractual_pricing.sh
+./scripts/proof_token_contractual_sources.sh
+```
+
+Если нужен отдельный operator-safe inspect-layer по provider bindings, reconciliation и margin:
+
+```bash
+cargo run --release -- observe token-contractual-sources --scope lifetime
 ```
 
 Что это даёт:
@@ -1842,6 +1857,11 @@ cargo run --release -- observe token-evidence-pack --scope current_session --out
 - в нём уже есть hashes по included/excluded line items;
 - `statement_preview`, `reconciliation_preview` и `margin_scope` лежат рядом;
 - pack остаётся `report_only`, пока billing/settlement не materialized честно.
+- inspect-layer `token-contractual-sources` не заменяет evidence pack, а нужен затем,
+  чтобы быстро увидеть:
+  - какие truth sources реально bound;
+  - какой `reconciliation_state` сейчас действует;
+  - materialized ли `priced_preview_report_only` в margin.
 
 Если в базе уже есть старые live `token_budget_event`, записанные до quality-gated формата, канонический путь теперь такой:
 

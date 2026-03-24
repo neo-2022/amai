@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:21 MSK
-Ручная сверка guide/docs: 2026-03-24 15:21 MSK
+modified_at: 2026-03-24 15:35 MSK
+Ручная сверка guide/docs: 2026-03-24 15:35 MSK
 
 # Token Ledger
 
@@ -643,10 +643,30 @@ Operator-safe report-only команды:
 - `ready_for_external_reconciliation` теперь зависит от реального bind provider usage export,
   а не от одного факта, что где-то прописан путь;
 - внутренний lower bound уже materialized;
+- provider sources теперь могут materialize-иться не только через env, но и через repo-local
+  default files:
+  - `state/provider_usage_export.json`
+  - `state/provider_invoice_export.json`
+  - `state/provider_rate_card.json`
+  - `state/infra_cost_profile.json`
+- если env-binding не задан и repo-local file ещё не materialized, truthful status теперь
+  `default_path_missing`;
 - при честном runtime bind report теперь отдельно показывает:
   - `provider_usage_binding`
   - `provider_invoice_binding`
   - и те же bindings внутри `reconciliation_contract.external_truth_bindings`.
+
+Operator-safe inspect path:
+
+```bash
+./target/release/amai observe token-contractual-sources --scope lifetime
+```
+
+Эта команда нужна затем, чтобы без парсинга всего token report сразу увидеть:
+- source bindings;
+- reconciliation preview;
+- margin scope;
+- statement export preview.
 
 Именно поэтому truthful `reconciliation_previews` теперь обязаны выглядеть так:
 - `internal_measured_non_billable_lower_bound_tokens` остаётся про lower bound savings;
@@ -694,6 +714,9 @@ Operator-safe report-only команды:
 - `infra_cost_profile_version = unpriced-infra-v1`
 - `money_margin_enabled` включается только после честного bind на
   `priced rate card + provider usage + infra cost profile`;
+- truthful aligned-state для reconciliation теперь тоже отдельный:
+  - `external_usage_aligned_report_only`
+  - `external_usage_and_invoice_aligned_report_only`
 - `margin_view` теперь обязан брать priced/unpriced не из static contract label, а из
   настоящего rate-card binding runtime.
 

@@ -1,6 +1,6 @@
 use crate::cli::{
     ContextPackArgs, ObserveTokenAdjustmentAddArgs, ObserveTokenAdjustmentRegistryArgs,
-    ObserveTokenEvidencePackArgs, ObserveTokenReportArgs,
+    ObserveTokenContractualSourcesArgs, ObserveTokenEvidencePackArgs, ObserveTokenReportArgs,
 };
 use crate::config::{self, AppConfig};
 use crate::language;
@@ -953,7 +953,10 @@ fn bind_rate_card_json_from_source(source: &Value, contract: &TokenBudgetContrac
         "note": "Денежная конверсия включается только после честного bind на versioned rate-card file."
     });
 
-    if source["status"].as_str() != Some("configured_existing_path") {
+    if !matches!(
+        source["status"].as_str(),
+        Some("configured_existing_path" | "default_existing_path")
+    ) {
         return base;
     }
     let Some(path) = source["resolved_path"].as_str() else {
@@ -1000,13 +1003,7 @@ fn bind_rate_card_json_from_source(source: &Value, contract: &TokenBudgetContrac
 }
 
 fn build_rate_card_json(repo_root: &Path, contract: &TokenBudgetContractConfig) -> Value {
-    let source = configured_external_truth_source(
-        repo_root,
-        "AMAI_PROVIDER_RATE_CARD_PATH",
-        "provider_rate_card",
-        "Versioned rate-card для денежной конверcии tokenonomics",
-        true,
-    );
+    let source = configured_provider_rate_card_source(repo_root);
     bind_rate_card_json_from_source(&source, contract)
 }
 
@@ -1030,7 +1027,10 @@ fn bind_infra_cost_profile_json_from_source(
         "note": "Infra cost profile начинает влиять на margin preview только после честного bind на versioned machine-readable profile."
     });
 
-    if source["status"].as_str() != Some("configured_existing_path") {
+    if !matches!(
+        source["status"].as_str(),
+        Some("configured_existing_path" | "default_existing_path")
+    ) {
         return base;
     }
     let Some(path) = source["resolved_path"].as_str() else {
@@ -1081,13 +1081,7 @@ fn bind_infra_cost_profile_json_from_source(
 }
 
 fn build_infra_cost_profile_json(repo_root: &Path, contract: &TokenBudgetContractConfig) -> Value {
-    let source = configured_external_truth_source(
-        repo_root,
-        "AMAI_INFRA_COST_PROFILE_PATH",
-        "infra_cost_profile",
-        "Профиль собственных infra costs для Amai",
-        false,
-    );
+    let source = configured_infra_cost_profile_source(repo_root);
     bind_infra_cost_profile_json_from_source(&source, contract)
 }
 
@@ -1561,27 +1555,9 @@ fn build_telemetry_surfaces_json(contract: &TokenBudgetContractConfig) -> Value 
 
 fn build_external_truth_sources_json(repo_root: &Path) -> Value {
     json!({
-        "provider_usage_export": configured_external_truth_source(
-            repo_root,
-            "AMAI_PROVIDER_USAGE_EXPORT_PATH",
-            "provider_usage_export",
-            "Выгрузка usage/tokens от внешнего model provider",
-            true,
-        ),
-        "provider_invoice_export": configured_external_truth_source(
-            repo_root,
-            "AMAI_PROVIDER_INVOICE_EXPORT_PATH",
-            "provider_invoice_export",
-            "Invoice/export от внешнего provider",
-            false,
-        ),
-        "provider_rate_card": configured_external_truth_source(
-            repo_root,
-            "AMAI_PROVIDER_RATE_CARD_PATH",
-            "provider_rate_card",
-            "Историческая таблица тарифов provider/model",
-            true,
-        ),
+        "provider_usage_export": configured_provider_usage_source(repo_root),
+        "provider_invoice_export": configured_provider_invoice_source(repo_root),
+        "provider_rate_card": configured_provider_rate_card_source(repo_root),
     })
 }
 
@@ -1631,31 +1607,32 @@ fn configured_external_truth_source(
     })
 }
 
-fn adjustment_registry_default_path(repo_root: &Path) -> PathBuf {
-    repo_root.join("state/token_adjustment_registry.json")
-}
-
-fn configured_adjustment_registry_source(
+fn configured_defaultable_external_truth_source(
     repo_root: &Path,
-    contract: &TokenBudgetContractConfig,
+    env_var: &str,
+    code: &str,
+    label: &str,
+    required_for_reconciliation: bool,
+    default_relative_path: &str,
+    note: &str,
 ) -> Value {
     let source = configured_external_truth_source(
         repo_root,
-        "AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH",
-        "token_adjustment_registry",
-        "Report-only registry для correction/credit/dispute entries",
-        false,
+        env_var,
+        code,
+        label,
+        required_for_reconciliation,
     );
     if source["status"].as_str() != Some("not_configured") {
         return source;
     }
-    let default_path = adjustment_registry_default_path(repo_root);
+    let default_path = repo_root.join(default_relative_path);
     let default_exists = default_path.exists();
     json!({
-        "code": "token_adjustment_registry",
-        "label": "Report-only registry для correction/credit/dispute entries",
-        "env_var": "AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH",
-        "required_for_reconciliation": false,
+        "code": code,
+        "label": label,
+        "env_var": env_var,
+        "required_for_reconciliation": required_for_reconciliation,
         "configured_value": Value::Null,
         "resolved_path": default_path.display().to_string(),
         "status": if default_exists {
@@ -1668,9 +1645,97 @@ fn configured_adjustment_registry_source(
         } else {
             "not_configured"
         },
-        "schema_version": contract.adjustment_registry_version.clone(),
-        "note": "Если env-binding не задан, token adjustment registry может жить в repo-local state/token_adjustment_registry.json как operator-safe report-only ledger."
+        "note": note
     })
+}
+
+fn adjustment_registry_default_path(repo_root: &Path) -> PathBuf {
+    repo_root.join("state/token_adjustment_registry.json")
+}
+
+fn provider_usage_default_path(repo_root: &Path) -> PathBuf {
+    repo_root.join("state/provider_usage_export.json")
+}
+
+fn provider_invoice_default_path(repo_root: &Path) -> PathBuf {
+    repo_root.join("state/provider_invoice_export.json")
+}
+
+fn provider_rate_card_default_path(repo_root: &Path) -> PathBuf {
+    repo_root.join("state/provider_rate_card.json")
+}
+
+fn infra_cost_profile_default_path(repo_root: &Path) -> PathBuf {
+    repo_root.join("state/infra_cost_profile.json")
+}
+
+fn configured_adjustment_registry_source(
+    repo_root: &Path,
+    contract: &TokenBudgetContractConfig,
+) -> Value {
+    let source = configured_defaultable_external_truth_source(
+        repo_root,
+        "AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH",
+        "token_adjustment_registry",
+        "Report-only registry для correction/credit/dispute entries",
+        false,
+        "state/token_adjustment_registry.json",
+        "Если env-binding не задан, token adjustment registry может жить в repo-local state/token_adjustment_registry.json как operator-safe report-only ledger.",
+    );
+    if source["status"].as_str() == Some("not_configured") {
+        return source;
+    }
+    let mut enriched = source;
+    enriched["schema_version"] = Value::String(contract.adjustment_registry_version.clone());
+    enriched
+}
+
+fn configured_provider_usage_source(repo_root: &Path) -> Value {
+    configured_defaultable_external_truth_source(
+        repo_root,
+        "AMAI_PROVIDER_USAGE_EXPORT_PATH",
+        "provider_usage_export",
+        "Выгрузка usage/tokens от внешнего model provider",
+        true,
+        "state/provider_usage_export.json",
+        "Если env-binding не задан, provider usage export может жить в repo-local state/provider_usage_export.json как report-only reconciliation source.",
+    )
+}
+
+fn configured_provider_invoice_source(repo_root: &Path) -> Value {
+    configured_defaultable_external_truth_source(
+        repo_root,
+        "AMAI_PROVIDER_INVOICE_EXPORT_PATH",
+        "provider_invoice_export",
+        "Invoice/export от внешнего provider",
+        false,
+        "state/provider_invoice_export.json",
+        "Если env-binding не задан, provider invoice export может жить в repo-local state/provider_invoice_export.json как optional settlement-side evidence source.",
+    )
+}
+
+fn configured_provider_rate_card_source(repo_root: &Path) -> Value {
+    configured_defaultable_external_truth_source(
+        repo_root,
+        "AMAI_PROVIDER_RATE_CARD_PATH",
+        "provider_rate_card",
+        "Versioned rate-card для денежной конверcии tokenonomics",
+        true,
+        "state/provider_rate_card.json",
+        "Если env-binding не задан, provider rate card может жить в repo-local state/provider_rate_card.json как versioned money conversion source.",
+    )
+}
+
+fn configured_infra_cost_profile_source(repo_root: &Path) -> Value {
+    configured_defaultable_external_truth_source(
+        repo_root,
+        "AMAI_INFRA_COST_PROFILE_PATH",
+        "infra_cost_profile",
+        "Профиль собственных infra costs для Amai",
+        false,
+        "state/infra_cost_profile.json",
+        "Если env-binding не задан, infra cost profile может жить в repo-local state/infra_cost_profile.json как report-only margin source.",
+    )
 }
 
 fn provider_usage_total_tokens(entry: &ProviderUsageScopeEntry) -> Option<u64> {
@@ -1748,7 +1813,10 @@ fn load_provider_usage_binding_from_source(source: &Value, rate_card: &Value) ->
         "note": "Provider usage binding должен показывать реальные billed tokens по scope, а не подменять их lower-bound savings."
     });
 
-    if source["status"].as_str() != Some("configured_existing_path") {
+    if !matches!(
+        source["status"].as_str(),
+        Some("configured_existing_path" | "default_existing_path")
+    ) {
         return base;
     }
     let Some(path) = source["resolved_path"].as_str() else {
@@ -1833,7 +1901,10 @@ fn load_provider_invoice_binding_from_source(source: &Value) -> Value {
         "note": "Provider invoice binding остаётся optional: он не подменяет usage truth, а только даёт отдельный settlement-side evidence слой."
     });
 
-    if source["status"].as_str() != Some("configured_existing_path") {
+    if !matches!(
+        source["status"].as_str(),
+        Some("configured_existing_path" | "default_existing_path")
+    ) {
         return base;
     }
     let Some(path) = source["resolved_path"].as_str() else {
@@ -1901,6 +1972,11 @@ fn build_reconciliation_contract_json(
     let provider_invoice_status = provider_invoice_binding["status"]
         .as_str()
         .unwrap_or("not_configured");
+    let provider_usage_missing = matches!(
+        provider_usage_status,
+        "not_configured" | "default_path_missing"
+    );
+    let rate_card_missing = matches!(rate_card_status, "not_configured" | "default_path_missing");
     let ready_for_external_reconciliation = matches!(
         provider_usage_status,
         "usage_bound" | "usage_and_cost_bound"
@@ -1913,14 +1989,14 @@ fn build_reconciliation_contract_json(
         } else {
             "usage_bound_report_only"
         }
-    } else if provider_usage_status == "not_configured" {
+    } else if provider_usage_missing {
         "awaiting_provider_usage_source"
     } else if matches!(
         provider_usage_status,
         "configured_path_missing" | "read_error" | "parse_error"
     ) {
         "provider_usage_source_error"
-    } else if rate_card_status == "not_configured" {
+    } else if rate_card_missing {
         "awaiting_rate_card_source"
     } else {
         "configured_sources_not_yet_bound"
@@ -1971,7 +2047,12 @@ fn build_reconciliation_preview(
     let provider_invoice_status = provider_invoice_binding["status"]
         .as_str()
         .unwrap_or("not_configured");
-    if provider_usage_status == "not_configured" {
+    let provider_usage_missing = matches!(
+        provider_usage_status,
+        "not_configured" | "default_path_missing"
+    );
+    let rate_card_missing = matches!(rate_card_status, "not_configured" | "default_path_missing");
+    if provider_usage_missing {
         let blocking_reasons =
             base_reconciliation_blocking_reasons(statement_preview, rate_card, true);
         return json!({
@@ -2046,7 +2127,7 @@ fn build_reconciliation_preview(
             "blocking_reasons": blocking_reasons,
             "note": "Этот preview честно показывает internal delivered tokens и retrieval lower bound по scope. Drift по токенам считается только между internal delivered usage и external provider usage, а не между provider usage и saved tokens."
         });
-    } else if rate_card_status == "not_configured" {
+    } else if rate_card_missing {
         let mut blocking_reasons =
             base_reconciliation_blocking_reasons(statement_preview, rate_card, false);
         blocking_reasons.retain(|reason| *reason != "provider_rate_card_unpriced");
@@ -2971,6 +3052,67 @@ pub async fn print_evidence_pack(db: &Client, args: &ObserveTokenEvidencePackArg
     } else {
         println!("{}", rendered);
     }
+    Ok(())
+}
+
+pub async fn print_contractual_sources(
+    db: &Client,
+    args: &ObserveTokenContractualSourcesArgs,
+) -> Result<()> {
+    let repo_root = config::discover_repo_root(None)?;
+    let config = load_config(&repo_root)?;
+    let include_verify = args
+        .include_verify_events
+        .unwrap_or(config.measurement.include_verify_events_by_default);
+    let report = collect_report(
+        &repo_root,
+        db,
+        args.budget_profile.as_deref(),
+        include_verify,
+        None,
+    )
+    .await?;
+    let scope_code = args.scope.as_str();
+    let scope_label =
+        report["token_budget_report"]["statement_previews"][scope_code]["scope_label"]
+            .as_str()
+            .ok_or_else(|| {
+                anyhow!("unknown or unavailable scope for token contractual sources: {scope_code}")
+            })?
+            .to_string();
+    let external_truth_sources = if report["token_budget_report"]["external_truth_sources"]
+        .is_null()
+    {
+        report["token_budget_report"]["reconciliation_contract"]["external_truth_sources"].clone()
+    } else {
+        report["token_budget_report"]["external_truth_sources"].clone()
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "token_contractual_sources": {
+                "scope_code": scope_code,
+                "scope_label": scope_label,
+                "external_truth_sources": external_truth_sources,
+                "rate_card": report["token_budget_report"]["rate_card"].clone(),
+                "infra_cost_profile": report["token_budget_report"]["infra_cost_profile"].clone(),
+                "reconciliation_contract": report["token_budget_report"]["reconciliation_contract"].clone(),
+                "provider_usage_binding": report["token_budget_report"]["reconciliation_contract"]["external_truth_bindings"]["provider_usage_export"].clone(),
+                "provider_invoice_binding": report["token_budget_report"]["reconciliation_contract"]["external_truth_bindings"]["provider_invoice_export"].clone(),
+                "statement_preview": report["token_budget_report"]["statement_previews"][scope_code].clone(),
+                "reconciliation_preview": report["token_budget_report"]["reconciliation_previews"][scope_code].clone(),
+                "margin_scope": report["token_budget_report"]["margin_view"][scope_code].clone(),
+                "statement_export_preview": report["token_budget_report"]["statement_export_previews"][scope_code].clone(),
+                "suggested_repo_local_paths": {
+                    "provider_usage_export": provider_usage_default_path(&repo_root).display().to_string(),
+                    "provider_invoice_export": provider_invoice_default_path(&repo_root).display().to_string(),
+                    "provider_rate_card": provider_rate_card_default_path(&repo_root).display().to_string(),
+                    "infra_cost_profile": infra_cost_profile_default_path(&repo_root).display().to_string(),
+                },
+                "note": "Этот inspect-layer нужен затем, чтобы provider truth sources, rate card, reconciliation и margin были видны как отдельный contractual contour, а не прятались внутри большого token report."
+            }
+        }))?
+    );
     Ok(())
 }
 
@@ -7145,7 +7287,8 @@ mod tests {
         build_product_headline, build_rate_card_json, build_reconciliation_contract_json,
         build_reconciliation_preview, build_settlement_contract_json,
         build_statement_export_preview, build_statement_preview, build_telemetry_surfaces_json,
-        build_usage_event_schema_json, contractual_line_item_json,
+        build_usage_event_schema_json, configured_provider_rate_card_source,
+        configured_provider_usage_source, contractual_line_item_json,
         default_adjustment_preview_model_version, default_adjustment_registry_version,
         default_adjustment_request_schema_version, default_backfill_policy_version,
         default_baseline_method_version, default_billing_mode, default_billing_policy_version,
@@ -7165,13 +7308,13 @@ mod tests {
         load_adjustment_registry_from_source, load_provider_invoice_binding_from_source,
         load_provider_usage_binding_from_source, needs_live_reverification,
         parse_infra_cost_profile_file, parse_rate_card_file, parse_snapshot_event,
-        reconcile_followup_recovery, repair_legacy_token_event_payload, report_contract_json,
-        summarize_events,
+        provider_rate_card_default_path, provider_usage_default_path, reconcile_followup_recovery,
+        repair_legacy_token_event_payload, report_contract_json, summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
     use uuid::Uuid;
 
@@ -7748,7 +7891,7 @@ mod tests {
         );
         assert_eq!(billing_policy["required_traffic_class"], "live");
         assert_eq!(billing_policy["preliminary_thresholds"]["min_events"], 50);
-        assert_eq!(rate_card["status"], "not_configured");
+        assert_eq!(rate_card["status"], "default_path_missing");
         assert_eq!(rate_card["money_conversion_enabled"], false);
         assert_eq!(baseline_contract["allowed_classes"][0], "naive_top_files");
         assert_eq!(baseline_contract["disallowed_classes"][0], "entire_repo");
@@ -8109,11 +8252,11 @@ fixed_scope_cost_amount = 0.01
         );
         assert_eq!(
             reconciliation["external_truth_sources"]["provider_usage_export"]["status"],
-            "not_configured"
+            "default_path_missing"
         );
         assert_eq!(
             reconciliation["external_truth_sources"]["provider_rate_card"]["status"],
-            "not_configured"
+            "default_path_missing"
         );
     }
 
@@ -9832,5 +9975,59 @@ fixed_scope_cost_amount = 0.01
                 target_kind: "symbol",
             },
         ));
+    }
+
+    fn unique_test_repo_root(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("amai-token-budget-{name}-{nanos}"))
+    }
+
+    #[test]
+    fn provider_usage_source_uses_repo_local_default_path_when_env_missing() {
+        unsafe {
+            std::env::remove_var("AMAI_PROVIDER_USAGE_EXPORT_PATH");
+        }
+        let repo_root = unique_test_repo_root("provider-usage-default-missing");
+        fs::create_dir_all(&repo_root).expect("create repo root");
+        let source = configured_provider_usage_source(&repo_root);
+        assert_eq!(source["status"], "default_path_missing");
+        assert_eq!(source["binding_status"], "not_configured");
+        assert_eq!(
+            source["resolved_path"],
+            provider_usage_default_path(&repo_root)
+                .display()
+                .to_string()
+        );
+        fs::remove_dir_all(&repo_root).expect("cleanup repo root");
+    }
+
+    #[test]
+    fn provider_rate_card_source_promotes_existing_repo_local_file() {
+        unsafe {
+            std::env::remove_var("AMAI_PROVIDER_RATE_CARD_PATH");
+        }
+        let repo_root = unique_test_repo_root("provider-rate-card-default-existing");
+        let default_path = provider_rate_card_default_path(&repo_root);
+        fs::create_dir_all(default_path.parent().expect("parent")).expect("create state dir");
+        fs::write(
+            &default_path,
+            r#"{
+  "schema_version": "provider-rate-card-v1",
+  "rate_card_version": "test-rate-card-v1",
+  "currency_profile": "USD",
+  "provider": "openai",
+  "default_input_cost_per_1k_tokens": 2.0,
+  "default_output_cost_per_1k_tokens": 1.0
+}"#,
+        )
+        .expect("write rate card");
+        let source = configured_provider_rate_card_source(&repo_root);
+        assert_eq!(source["status"], "default_existing_path");
+        assert_eq!(source["binding_status"], "default_but_unbound");
+        assert_eq!(source["resolved_path"], default_path.display().to_string());
+        fs::remove_dir_all(&repo_root).expect("cleanup repo root");
     }
 }

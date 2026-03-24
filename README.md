@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:21 MSK
-Ручная сверка guide/docs: 2026-03-24 15:21 MSK
+modified_at: 2026-03-24 15:35 MSK
+Ручная сверка guide/docs: 2026-03-24 15:35 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1181,6 +1181,14 @@ preview, а не только raw count.
     отдельными entries со статусами `pending_review / applied_report_only / disputed / rejected`.
 - provider reconciliation теперь тоже first-class:
   - `reconciliation_previews.current_session / rolling_window / lifetime`
+  - repo-local truth sources теперь тоже поддерживаются по умолчанию:
+    - `state/provider_usage_export.json`
+    - `state/provider_invoice_export.json`
+    - `state/provider_rate_card.json`
+    - `state/infra_cost_profile.json`
+  - если env-binding не задан, но repo-local файл уже есть, bind идёт по нему честно;
+  - если файла ещё нет, статус источника теперь честно `default_path_missing`, а не
+    расплывчатое `not_configured`;
   - там теперь отдельно видны:
     - `internal_delivered_tokens`
     - `internal_recovery_tokens`
@@ -1202,6 +1210,10 @@ preview, а не только raw count.
     - `external_usage_drift_report_only`
     - `external_usage_and_invoice_aligned_report_only`
     - `external_usage_and_invoice_drift_report_only`
+  - для operator/debug review теперь есть отдельная команда:
+    - `amai observe token-contractual-sources --scope lifetime`
+  - она печатает source bindings, reconciliation preview, margin scope и statement export
+    preview в одном inspect-layer, без парсинга полного token report.
 - metering freshness теперь тоже first-class:
   - `metering_freshness.current_session / rolling_window / lifetime`
   - она отдельно показывает:
