@@ -400,6 +400,12 @@ async fn main() -> Result<()> {
                 let db = postgres::connect_admin(&cfg).await?;
                 token_budget::print_contractual_sources(&db, &args).await?;
             }
+            ObserveCommand::TokenStatementExport(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                let db = postgres::connect_admin(&cfg).await?;
+                token_budget::print_statement_export_bundle(&db, &args).await?;
+            }
             ObserveCommand::TokenAdjustmentRegistry(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

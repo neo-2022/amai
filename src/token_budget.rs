@@ -1,6 +1,7 @@
 use crate::cli::{
     ContextPackArgs, ObserveTokenAdjustmentAddArgs, ObserveTokenAdjustmentRegistryArgs,
     ObserveTokenContractualSourcesArgs, ObserveTokenEvidencePackArgs, ObserveTokenReportArgs,
+    ObserveTokenStatementExportArgs,
 };
 use crate::config::{self, AppConfig};
 use crate::language;
@@ -2714,15 +2715,16 @@ fn build_statement_export_preview(
         .as_u64()
         .unwrap_or(0);
     let adjustment_status = adjustment_preview["status"].as_str().unwrap_or("unknown");
-    let credit_action_state = if adjustment_status == "not_configured" {
-        "registry_not_configured"
-    } else if pending_entries > 0 {
-        "pending_review"
-    } else if applied_entries > 0 {
-        "applied_report_only_entries_present"
-    } else {
-        "no_credit_entries"
-    };
+    let credit_action_state =
+        if matches!(adjustment_status, "not_configured" | "default_path_missing") {
+            "registry_not_configured"
+        } else if pending_entries > 0 {
+            "pending_review"
+        } else if applied_entries > 0 {
+            "applied_report_only_entries_present"
+        } else {
+            "no_credit_entries"
+        };
     let dispute_action_state = if disputed_entries > 0 {
         "open_dispute_entries"
     } else {
@@ -2985,6 +2987,75 @@ pub async fn print_report(db: &Client, args: &ObserveTokenReportArgs) -> Result<
     Ok(())
 }
 
+fn select_scope_events(
+    events: &[TokenBudgetEvent],
+    profile: &ResolvedProfile,
+    scope_code: &str,
+    now_epoch_ms: i64,
+) -> Result<(String, Vec<TokenBudgetEvent>)> {
+    match scope_code {
+        "current_session" => Ok((
+            "текущая сессия".to_string(),
+            current_session_events(
+                events,
+                profile.session_gap_minutes.saturating_mul(60_000) as i64,
+            ),
+        )),
+        "rolling_window" => {
+            let hours = profile
+                .rolling_window_hours
+                .ok_or_else(|| anyhow!("selected budget profile has no rolling window"))?;
+            let lower_bound = now_epoch_ms.saturating_sub((hours as i64).saturating_mul(3_600_000));
+            Ok((
+                format!("окно {}", profile.display_name),
+                events
+                    .iter()
+                    .filter(|event| event.created_at_epoch_ms >= lower_bound)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ))
+        }
+        "lifetime" => Ok(("всё время записи".to_string(), events.to_vec())),
+        _ => bail!("unknown scope for token export surface: {scope_code}"),
+    }
+}
+
+fn build_contractual_sources_value(
+    report: &Value,
+    repo_root: &Path,
+    scope_code: &str,
+    scope_label: &str,
+) -> Value {
+    let external_truth_sources = if report["token_budget_report"]["external_truth_sources"]
+        .is_null()
+    {
+        report["token_budget_report"]["reconciliation_contract"]["external_truth_sources"].clone()
+    } else {
+        report["token_budget_report"]["external_truth_sources"].clone()
+    };
+    json!({
+        "scope_code": scope_code,
+        "scope_label": scope_label,
+        "external_truth_sources": external_truth_sources,
+        "rate_card": report["token_budget_report"]["rate_card"].clone(),
+        "infra_cost_profile": report["token_budget_report"]["infra_cost_profile"].clone(),
+        "reconciliation_contract": report["token_budget_report"]["reconciliation_contract"].clone(),
+        "provider_usage_binding": report["token_budget_report"]["reconciliation_contract"]["external_truth_bindings"]["provider_usage_export"].clone(),
+        "provider_invoice_binding": report["token_budget_report"]["reconciliation_contract"]["external_truth_bindings"]["provider_invoice_export"].clone(),
+        "statement_preview": report["token_budget_report"]["statement_previews"][scope_code].clone(),
+        "reconciliation_preview": report["token_budget_report"]["reconciliation_previews"][scope_code].clone(),
+        "margin_scope": report["token_budget_report"]["margin_view"][scope_code].clone(),
+        "statement_export_preview": report["token_budget_report"]["statement_export_previews"][scope_code].clone(),
+        "suggested_repo_local_paths": {
+            "provider_usage_export": provider_usage_default_path(repo_root).display().to_string(),
+            "provider_invoice_export": provider_invoice_default_path(repo_root).display().to_string(),
+            "provider_rate_card": provider_rate_card_default_path(repo_root).display().to_string(),
+            "infra_cost_profile": infra_cost_profile_default_path(repo_root).display().to_string(),
+        },
+        "note": "Этот inspect-layer нужен затем, чтобы provider truth sources, rate card, reconciliation и margin были видны как отдельный contractual contour, а не прятались внутри большого token report."
+    })
+}
+
 pub async fn print_evidence_pack(db: &Client, args: &ObserveTokenEvidencePackArgs) -> Result<()> {
     let repo_root = config::discover_repo_root(None)?;
     let config = load_config(&repo_root)?;
@@ -3005,31 +3076,8 @@ pub async fn print_evidence_pack(db: &Client, args: &ObserveTokenEvidencePackArg
     let events = reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
     let now_epoch_ms = current_epoch_ms()?;
     let scope_code = args.scope.as_str();
-    let (scope_label, scoped_events) = match scope_code {
-        "current_session" => (
-            "текущая сессия".to_string(),
-            current_session_events(
-                &events,
-                profile.session_gap_minutes.saturating_mul(60_000) as i64,
-            ),
-        ),
-        "rolling_window" => {
-            let hours = profile
-                .rolling_window_hours
-                .ok_or_else(|| anyhow!("selected budget profile has no rolling window"))?;
-            let lower_bound = now_epoch_ms.saturating_sub((hours as i64).saturating_mul(3_600_000));
-            (
-                format!("окно {}", profile.display_name),
-                events
-                    .iter()
-                    .filter(|event| event.created_at_epoch_ms >= lower_bound)
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            )
-        }
-        "lifetime" => ("всё время записи".to_string(), events.clone()),
-        _ => bail!("unknown scope for token evidence pack: {scope_code}"),
-    };
+    let (scope_label, scoped_events) =
+        select_scope_events(&events, &profile, scope_code, now_epoch_ms)?;
 
     let pack = build_contractual_evidence_pack(
         &report,
@@ -3080,39 +3128,120 @@ pub async fn print_contractual_sources(
                 anyhow!("unknown or unavailable scope for token contractual sources: {scope_code}")
             })?
             .to_string();
-    let external_truth_sources = if report["token_budget_report"]["external_truth_sources"]
-        .is_null()
-    {
-        report["token_budget_report"]["reconciliation_contract"]["external_truth_sources"].clone()
-    } else {
-        report["token_budget_report"]["external_truth_sources"].clone()
-    };
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "token_contractual_sources": {
-                "scope_code": scope_code,
-                "scope_label": scope_label,
-                "external_truth_sources": external_truth_sources,
-                "rate_card": report["token_budget_report"]["rate_card"].clone(),
-                "infra_cost_profile": report["token_budget_report"]["infra_cost_profile"].clone(),
-                "reconciliation_contract": report["token_budget_report"]["reconciliation_contract"].clone(),
-                "provider_usage_binding": report["token_budget_report"]["reconciliation_contract"]["external_truth_bindings"]["provider_usage_export"].clone(),
-                "provider_invoice_binding": report["token_budget_report"]["reconciliation_contract"]["external_truth_bindings"]["provider_invoice_export"].clone(),
-                "statement_preview": report["token_budget_report"]["statement_previews"][scope_code].clone(),
-                "reconciliation_preview": report["token_budget_report"]["reconciliation_previews"][scope_code].clone(),
-                "margin_scope": report["token_budget_report"]["margin_view"][scope_code].clone(),
-                "statement_export_preview": report["token_budget_report"]["statement_export_previews"][scope_code].clone(),
-                "suggested_repo_local_paths": {
-                    "provider_usage_export": provider_usage_default_path(&repo_root).display().to_string(),
-                    "provider_invoice_export": provider_invoice_default_path(&repo_root).display().to_string(),
-                    "provider_rate_card": provider_rate_card_default_path(&repo_root).display().to_string(),
-                    "infra_cost_profile": infra_cost_profile_default_path(&repo_root).display().to_string(),
-                },
-                "note": "Этот inspect-layer нужен затем, чтобы provider truth sources, rate card, reconciliation и margin были видны как отдельный contractual contour, а не прятались внутри большого token report."
-            }
+            "token_contractual_sources": build_contractual_sources_value(
+                &report,
+                &repo_root,
+                scope_code,
+                &scope_label,
+            )
         }))?
     );
+    Ok(())
+}
+
+pub async fn print_statement_export_bundle(
+    db: &Client,
+    args: &ObserveTokenStatementExportArgs,
+) -> Result<()> {
+    let repo_root = config::discover_repo_root(None)?;
+    let config = load_config(&repo_root)?;
+    let include_verify = args
+        .include_verify_events
+        .unwrap_or(config.measurement.include_verify_events_by_default);
+    let profile = resolve_profile(&config, args.budget_profile.as_deref(), &repo_root)?;
+    let report = collect_report(
+        &repo_root,
+        db,
+        args.budget_profile.as_deref(),
+        include_verify,
+        None,
+    )
+    .await?;
+    let mut events = load_events(db, include_verify, None).await?;
+    events.sort_by_key(|event| event.created_at_epoch_ms);
+    let events = reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
+    let now_epoch_ms = current_epoch_ms()?;
+    let scope_code = args.scope.as_str();
+    let (scope_label, scoped_events) =
+        select_scope_events(&events, &profile, scope_code, now_epoch_ms)?;
+    let evidence_pack = build_contractual_evidence_pack(
+        &report,
+        scope_code,
+        &scope_label,
+        &scoped_events,
+        &config.contract,
+        &profile,
+        include_verify,
+        now_epoch_ms,
+    )?;
+    let contractual_sources =
+        build_contractual_sources_value(&report, &repo_root, scope_code, &scope_label);
+    let statement_export_preview =
+        report["token_budget_report"]["statement_export_previews"][scope_code].clone();
+    if statement_export_preview.is_null() {
+        bail!("unknown or unavailable scope for token statement export: {scope_code}");
+    }
+    let bundle = json!({
+        "token_statement_export_bundle": {
+            "bundle_version": "token-statement-export-bundle-v1",
+            "generated_at_epoch_ms": now_epoch_ms,
+            "scope_code": scope_code,
+            "scope_label": scope_label,
+            "report_only": true,
+            "statement_preview_id": statement_export_preview["statement_preview_id"].clone(),
+            "files": {
+                "manifest": "manifest.json",
+                "statement_export_preview": "statement_export_preview.json",
+                "contractual_evidence_pack": "contractual_evidence_pack.json",
+                "token_contractual_sources": "token_contractual_sources.json",
+            },
+            "statement_export_preview": statement_export_preview.clone(),
+            "contractual_evidence_pack": evidence_pack["contractual_evidence_pack"].clone(),
+            "token_contractual_sources": contractual_sources,
+            "note": "Этот bundle собирает customer-facing statement preview, evidence pack и contractual sources в один report-only export surface. Он пригоден для review/audit, но не для invoice."
+        }
+    });
+    if let Some(output_dir) = &args.output_dir {
+        fs::create_dir_all(output_dir)
+            .with_context(|| format!("failed to create {}", output_dir.display()))?;
+        let root = &bundle["token_statement_export_bundle"];
+        let manifest = json!({
+            "bundle_version": root["bundle_version"].clone(),
+            "generated_at_epoch_ms": root["generated_at_epoch_ms"].clone(),
+            "scope_code": root["scope_code"].clone(),
+            "scope_label": root["scope_label"].clone(),
+            "report_only": root["report_only"].clone(),
+            "statement_preview_id": root["statement_preview_id"].clone(),
+            "files": root["files"].clone(),
+            "note": root["note"].clone(),
+        });
+        let files = [
+            ("manifest.json", manifest),
+            (
+                "statement_export_preview.json",
+                root["statement_export_preview"].clone(),
+            ),
+            (
+                "contractual_evidence_pack.json",
+                root["contractual_evidence_pack"].clone(),
+            ),
+            (
+                "token_contractual_sources.json",
+                root["token_contractual_sources"].clone(),
+            ),
+        ];
+        for (name, payload) in files {
+            let path = output_dir.join(name);
+            fs::write(&path, serde_json::to_string_pretty(&payload)?)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+        println!("{}", output_dir.display());
+    } else {
+        println!("{}", serde_json::to_string_pretty(&bundle)?);
+    }
     Ok(())
 }
 

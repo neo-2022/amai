@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:35 MSK
-Ручная сверка guide/docs: 2026-03-24 15:35 MSK
+modified_at: 2026-03-24 15:43 MSK
+Ручная сверка guide/docs: 2026-03-24 15:43 MSK
 
 # Token Ledger
 
@@ -667,6 +667,26 @@ Operator-safe inspect path:
 - reconciliation preview;
 - margin scope;
 - statement export preview.
+
+Customer-facing export bundle:
+
+```bash
+./target/release/amai observe token-statement-export \
+  --scope lifetime \
+  --output-dir /tmp/amai-token-statement
+```
+
+Этот bundle materialize-ит отдельные файлы:
+- `manifest.json`
+- `statement_export_preview.json`
+- `contractual_evidence_pack.json`
+- `token_contractual_sources.json`
+
+Смысл bundle:
+- дать stable review/export surface;
+- не заставлять клиента или инженера собирать statement/evidence/source bindings вручную;
+- сохранить truth guardrail: bundle остаётся `report_only`, даже если hashes и previews уже
+  готовы.
 
 Именно поэтому truthful `reconciliation_previews` теперь обязаны выглядеть так:
 - `internal_measured_non_billable_lower_bound_tokens` остаётся про lower bound savings;

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:35 MSK
-Ручная сверка guide/docs: 2026-03-24 15:35 MSK
+modified_at: 2026-03-24 15:43 MSK
+Ручная сверка guide/docs: 2026-03-24 15:43 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1214,6 +1214,15 @@ preview, а не только raw count.
     - `amai observe token-contractual-sources --scope lifetime`
   - она печатает source bindings, reconciliation preview, margin scope и statement export
     preview в одном inspect-layer, без парсинга полного token report.
+  - поверх этого теперь есть и отдельный export-bundle:
+    - `amai observe token-statement-export --scope lifetime --output-dir /tmp/amai-token-statement`
+  - он materialize-ит в один каталог:
+    - `manifest.json`
+    - `statement_export_preview.json`
+    - `contractual_evidence_pack.json`
+    - `token_contractual_sources.json`
+  - это уже customer-facing review surface с hashes и contract states, но всё ещё строго
+    `report_only`, а не invoice.
 - metering freshness теперь тоже first-class:
   - `metering_freshness.current_session / rolling_window / lifetime`
   - она отдельно показывает:

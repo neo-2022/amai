@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:35 MSK
-Ручная сверка guide/docs: 2026-03-24 15:35 MSK
+modified_at: 2026-03-24 15:43 MSK
+Ручная сверка guide/docs: 2026-03-24 15:43 MSK
 
 # Operations
 
@@ -1852,6 +1852,14 @@ cargo run --release -- observe token-evidence-pack --scope current_session --out
 cargo run --release -- observe token-contractual-sources --scope lifetime
 ```
 
+Если нужен customer-facing export bundle с manifest и готовыми JSON-файлами:
+
+```bash
+cargo run --release -- observe token-statement-export \
+  --scope lifetime \
+  --output-dir /tmp/amai-token-statement
+```
+
 Что это даёт:
 - на выходе один JSON-пакет для review/export;
 - в нём уже есть hashes по included/excluded line items;
@@ -1862,6 +1870,12 @@ cargo run --release -- observe token-contractual-sources --scope lifetime
   - какие truth sources реально bound;
   - какой `reconciliation_state` сейчас действует;
   - materialized ли `priced_preview_report_only` в margin.
+- export bundle `token-statement-export` нужен затем, чтобы customer-facing review не
+  собирать вручную из нескольких команд:
+  - `manifest.json` даёт stable identity и список файлов;
+  - `statement_export_preview.json` даёт compact review summary;
+  - `contractual_evidence_pack.json` даёт line-item evidence;
+  - `token_contractual_sources.json` даёт bindings и source-side explainability.
 
 Если в базе уже есть старые live `token_budget_event`, записанные до quality-gated формата, канонический путь теперь такой:
 

@@ -167,6 +167,7 @@ pub enum ObserveCommand {
     TokenReport(ObserveTokenReportArgs),
     TokenEvidencePack(ObserveTokenEvidencePackArgs),
     TokenContractualSources(ObserveTokenContractualSourcesArgs),
+    TokenStatementExport(ObserveTokenStatementExportArgs),
     TokenAdjustmentRegistry(ObserveTokenAdjustmentRegistryArgs),
     TokenAdjustmentAdd(ObserveTokenAdjustmentAddArgs),
     CleanupSnapshots(ObserveCleanupSnapshotsArgs),
@@ -711,6 +712,18 @@ pub struct ObserveTokenContractualSourcesArgs {
     pub budget_profile: Option<String>,
     #[arg(long)]
     pub include_verify_events: Option<bool>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveTokenStatementExportArgs {
+    #[arg(long, default_value = "lifetime")]
+    pub scope: String,
+    #[arg(long)]
+    pub budget_profile: Option<String>,
+    #[arg(long)]
+    pub include_verify_events: Option<bool>,
+    #[arg(long)]
+    pub output_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
