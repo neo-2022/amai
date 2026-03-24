@@ -617,8 +617,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         latest_clean_benchmark_snapshot(&db, "retrieval_load_cold", "load_verification").await?;
     let latest_token_benchmark =
         postgres::latest_observability_snapshot(&db, "token_benchmark").await?;
-    let latest_cold_path_benchmark =
-        postgres::latest_observability_snapshot(&db, "cold_path_benchmark").await?;
+    let latest_cold_path_benchmark = latest_dashboard_cold_benchmark_snapshot(&db).await?;
     let cold_path_benchmark_progress = read_live_cold_benchmark_progress(&repo_root);
     let cold_path_benchmark_progress =
         enrich_live_cold_benchmark_progress(&db, cold_path_benchmark_progress).await?;
@@ -1046,6 +1045,16 @@ async fn latest_clean_benchmark_snapshot(
     Ok((latest_clean, latest_raw))
 }
 
+async fn latest_dashboard_cold_benchmark_snapshot(
+    db: &tokio_postgres::Client,
+) -> Result<Option<Value>> {
+    let rows =
+        postgres::list_observability_snapshots_by_kinds(db, &["cold_path_benchmark"], Some(64))
+            .await?;
+    let payloads: Vec<Value> = rows.into_iter().map(|row| row.payload).collect();
+    Ok(select_latest_dashboard_cold_benchmark_snapshot(&payloads))
+}
+
 fn select_latest_clean_benchmark_snapshot(
     payloads: &[Value],
     expected_root: &str,
@@ -1054,6 +1063,52 @@ fn select_latest_clean_benchmark_snapshot(
         .iter()
         .find(|payload| benchmark_payload_contaminated(payload, expected_root) == Some(false))
         .cloned()
+}
+
+fn select_latest_dashboard_cold_benchmark_snapshot(payloads: &[Value]) -> Option<Value> {
+    payloads
+        .iter()
+        .find(|payload| {
+            benchmark_payload_contaminated(payload, "cold_benchmark") == Some(false)
+                && cold_benchmark_dashboard_scope(payload) == Some("canonical")
+        })
+        .cloned()
+        .or_else(|| {
+            payloads
+                .iter()
+                .find(|payload| {
+                    benchmark_payload_contaminated(payload, "cold_benchmark") == Some(false)
+                })
+                .cloned()
+        })
+}
+
+fn cold_benchmark_dashboard_scope(payload: &Value) -> Option<&str> {
+    let root = payload.get("cold_benchmark")?;
+    if let Some(scope) = root["dashboard_scope"]["class"].as_str() {
+        return Some(scope);
+    }
+    let profile_name = root["profile"]["display_name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if profile_name.contains("proof") {
+        return Some("proof");
+    }
+    let sample_count = root["machine_readable_summary"]["sample_count"].as_u64()?;
+    let repo_count = root["machine_readable_summary"]["repo_count"].as_u64()?;
+    let query_slice_count = root["machine_readable_summary"]["query_slice_count"].as_u64()?;
+    let min_sample_count = root["profile"]["min_sample_count"].as_u64()?;
+    let min_repo_count = root["profile"]["min_repo_count"].as_u64()?;
+    let min_query_slice_count = root["profile"]["min_query_slice_count"].as_u64()?;
+    if sample_count >= min_sample_count
+        && repo_count >= min_repo_count
+        && query_slice_count >= min_query_slice_count
+    {
+        Some("canonical")
+    } else {
+        Some("smoke")
+    }
 }
 
 fn profile_thresholds_json(profile: &ObservabilityProfile) -> Value {
@@ -3294,6 +3349,46 @@ mod tests {
             "load_verification",
         );
         assert_eq!(selected, Some(clean));
+    }
+
+    #[test]
+    fn select_latest_dashboard_cold_benchmark_prefers_canonical_over_newer_proof() {
+        let proof = json!({
+            "_observability": { "source_class": "benchmark" },
+            "cold_benchmark": {
+                "profile": {
+                    "display_name": "Local Proof Cold Contour",
+                    "min_sample_count": 1000,
+                    "min_repo_count": 75,
+                    "min_query_slice_count": 200
+                },
+                "machine_readable_summary": {
+                    "sample_count": 9,
+                    "repo_count": 4,
+                    "query_slice_count": 9
+                }
+            }
+        });
+        let canonical = json!({
+            "_observability": { "source_class": "benchmark" },
+            "cold_benchmark": {
+                "profile": {
+                    "display_name": "Large Real-Repos Cold Contour",
+                    "min_sample_count": 1000,
+                    "min_repo_count": 75,
+                    "min_query_slice_count": 200
+                },
+                "machine_readable_summary": {
+                    "sample_count": 1105,
+                    "repo_count": 75,
+                    "query_slice_count": 221
+                }
+            }
+        });
+
+        let selected =
+            super::select_latest_dashboard_cold_benchmark_snapshot(&[proof, canonical.clone()]);
+        assert_eq!(selected, Some(canonical));
     }
 
     #[test]

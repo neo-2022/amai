@@ -160,6 +160,23 @@ struct CycleSummary {
     hot: Distribution,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColdBenchmarkDashboardScope {
+    Canonical,
+    Proof,
+    Smoke,
+}
+
+impl ColdBenchmarkDashboardScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Canonical => "canonical",
+            Self::Proof => "proof",
+            Self::Smoke => "smoke",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SafetyEvent {
     kind: String,
@@ -438,6 +455,12 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
     let measured_query_slice_count = query_coverage["query_slice_count"]
         .as_u64()
         .unwrap_or_default();
+    let dashboard_scope = classify_cold_benchmark_dashboard_scope(
+        &manifest.profile,
+        cold_distribution.sample_count as u64,
+        measured_repo_count,
+        measured_query_slice_count,
+    );
     let verdict = determine_verdict(
         &manifest.profile,
         &cold_distribution,
@@ -586,6 +609,17 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
                 "thermal_stop_count": thermal_stop_count,
                 "cleanup_actions_count": cleanup_actions_count,
             },
+            "dashboard_scope": {
+                "class": dashboard_scope.as_str(),
+                "canonical_for_dashboard": dashboard_scope == ColdBenchmarkDashboardScope::Canonical,
+                "reason": cold_benchmark_dashboard_scope_reason(
+                    dashboard_scope,
+                    &manifest.profile,
+                    cold_distribution.sample_count as u64,
+                    measured_repo_count,
+                    measured_query_slice_count,
+                ),
+            },
             "canonical_eval": canonical_eval,
             "indexed_repos": indexed_repos.iter().map(indexed_repo_to_json).collect::<Vec<_>>(),
         },
@@ -602,6 +636,49 @@ pub async fn run(cfg: &AppConfig, db: &mut Client, args: &VerifyColdPathArgs) ->
 
 fn default_local_strict() -> String {
     "local_strict".to_string()
+}
+
+fn classify_cold_benchmark_dashboard_scope(
+    profile: &ColdBenchmarkProfile,
+    sample_count: u64,
+    repo_count: u64,
+    query_slice_count: u64,
+) -> ColdBenchmarkDashboardScope {
+    let profile_name = profile.display_name.to_ascii_lowercase();
+    if profile_name.contains("proof") {
+        return ColdBenchmarkDashboardScope::Proof;
+    }
+    if sample_count >= profile.min_sample_count
+        && repo_count >= profile.min_repo_count
+        && query_slice_count >= profile.min_query_slice_count
+    {
+        ColdBenchmarkDashboardScope::Canonical
+    } else {
+        ColdBenchmarkDashboardScope::Smoke
+    }
+}
+
+fn cold_benchmark_dashboard_scope_reason(
+    scope: ColdBenchmarkDashboardScope,
+    profile: &ColdBenchmarkProfile,
+    sample_count: u64,
+    repo_count: u64,
+    query_slice_count: u64,
+) -> String {
+    match scope {
+        ColdBenchmarkDashboardScope::Canonical => format!(
+            "Этот прогон покрывает полную витринную планку cold benchmark: выборка {sample_count}/{}, репозитории {repo_count}/{}, query slices {query_slice_count}/{}.",
+            profile.min_sample_count, profile.min_repo_count, profile.min_query_slice_count
+        ),
+        ColdBenchmarkDashboardScope::Proof => {
+            "Этот прогон помечен как proof/smoke contour и не должен перетирать основную cold витрину."
+                .to_string()
+        }
+        ColdBenchmarkDashboardScope::Smoke => format!(
+            "Этот прогон не дотянул до полной витринной планки cold benchmark: выборка {sample_count}/{}, репозитории {repo_count}/{}, query slices {query_slice_count}/{}.",
+            profile.min_sample_count, profile.min_repo_count, profile.min_query_slice_count
+        ),
+    }
 }
 
 fn resolve_relative_path(repo_root: &Path, path: &Path) -> PathBuf {
@@ -1940,10 +2017,11 @@ fn read_max_temperature_celsius() -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColdBenchmarkCase, ColdBenchmarkManifest, ColdBenchmarkProfile, ColdBenchmarkRepo,
-        CycleSummary, IndexedRepoSummary, QualityScore, RepoRuntime,
-        build_cold_benchmark_canonical_eval, build_live_progress_payload, cold_sample_eval_verdict,
-        determine_verdict, distribution_from_f64, evaluate_case, should_index_repo_for_case,
+        ColdBenchmarkCase, ColdBenchmarkDashboardScope, ColdBenchmarkManifest,
+        ColdBenchmarkProfile, ColdBenchmarkRepo, CycleSummary, IndexedRepoSummary, QualityScore,
+        RepoRuntime, build_cold_benchmark_canonical_eval, build_live_progress_payload,
+        classify_cold_benchmark_dashboard_scope, cold_sample_eval_verdict, determine_verdict,
+        distribution_from_f64, evaluate_case, should_index_repo_for_case,
     };
     use crate::cli::VerifyColdPathArgs;
     use crate::cold_benchmark::item_matches_case;
@@ -2228,6 +2306,60 @@ mod tests {
         assert_eq!(
             determine_verdict(&profile, &distribution, &quality, 1, 1, 1.0, None),
             "PARTIALLY MET"
+        );
+    }
+
+    #[test]
+    fn dashboard_scope_marks_proof_profiles_as_noncanonical() {
+        let profile = ColdBenchmarkProfile {
+            display_name: "Local Proof Cold Contour".to_string(),
+            summary: "proof".to_string(),
+            target_p50_ms: 2.0,
+            target_p95_ms: 5.0,
+            target_p99_ms: 10.0,
+            target_max_ms: 15.0,
+            min_precision: 0.997,
+            min_target_hit_rate: 0.997,
+            min_recall: 0.997,
+            min_sample_count: 1000,
+            min_repo_count: 75,
+            min_query_slice_count: 200,
+            max_duration_seconds: 10.0,
+            max_leakage: 0,
+            max_error_rate: 0.0,
+        };
+        assert_eq!(
+            classify_cold_benchmark_dashboard_scope(&profile, 1105, 75, 221),
+            ColdBenchmarkDashboardScope::Proof
+        );
+    }
+
+    #[test]
+    fn dashboard_scope_marks_coverage_complete_runs_as_canonical() {
+        let profile = ColdBenchmarkProfile {
+            display_name: "Large Real-Repos Cold Contour".to_string(),
+            summary: "full".to_string(),
+            target_p50_ms: 2.0,
+            target_p95_ms: 5.0,
+            target_p99_ms: 10.0,
+            target_max_ms: 15.0,
+            min_precision: 0.997,
+            min_target_hit_rate: 0.997,
+            min_recall: 0.997,
+            min_sample_count: 1000,
+            min_repo_count: 75,
+            min_query_slice_count: 200,
+            max_duration_seconds: 10.0,
+            max_leakage: 0,
+            max_error_rate: 0.0,
+        };
+        assert_eq!(
+            classify_cold_benchmark_dashboard_scope(&profile, 1105, 75, 221),
+            ColdBenchmarkDashboardScope::Canonical
+        );
+        assert_eq!(
+            classify_cold_benchmark_dashboard_scope(&profile, 50, 4, 10),
+            ColdBenchmarkDashboardScope::Smoke
         );
     }
 

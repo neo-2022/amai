@@ -2656,14 +2656,14 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
         if cold_live_running {
             "Контур данных: cold_path_benchmark_progress.cold_benchmark_progress. Сейчас реально идёт живой cold benchmark: цифры ниже частичные, обновляются по мере прогона и не подменяют финальный сохранённый snapshot.".to_string()
         } else {
-            "Контур данных: latest_cold_path_benchmark.cold_benchmark. Это последний честный end-to-end cold benchmark по реальным репозиториям и query slices.".to_string()
+            "Контур данных: latest_cold_path_benchmark.cold_benchmark. Это последний честный полноразмерный end-to-end cold benchmark по реальным репозиториям и query slices; proof/smoke прогоны эту витрину не перетирают.".to_string()
         },
         cold_status,
         Some(source_label(
             if cold_live_running {
                 "Источник: live progress cold_path_benchmark_progress.cold_benchmark_progress. Финальный snapshot latest_cold_path_benchmark обновится после завершения этого прогона"
             } else {
-                "Источник: benchmark snapshot latest_cold_path_benchmark.cold_benchmark. Live-данные страницы сюда не подмешиваются"
+                "Источник: coverage-qualified benchmark snapshot latest_cold_path_benchmark.cold_benchmark. Live-данные страницы сюда не подмешиваются"
             },
             if cold_live_running {
                 snapshot["captured_at_epoch_ms"].as_u64()
