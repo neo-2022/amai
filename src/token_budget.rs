@@ -1,11 +1,14 @@
-use crate::cli::{ContextPackArgs, ObserveTokenEvidencePackArgs, ObserveTokenReportArgs};
+use crate::cli::{
+    ContextPackArgs, ObserveTokenAdjustmentAddArgs, ObserveTokenAdjustmentRegistryArgs,
+    ObserveTokenEvidencePackArgs, ObserveTokenReportArgs,
+};
 use crate::config::{self, AppConfig};
 use crate::language;
 use crate::postgres::{self, ObservabilitySnapshotRecord};
 use crate::retrieval;
 use anyhow::{Context, Result, anyhow, bail};
 use ignore::WalkBuilder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -183,13 +186,13 @@ struct ResolvedProfile {
     rolling_window_hours: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 struct AdjustmentRegistryFile {
     #[serde(default)]
     adjustments: Vec<AdjustmentRegistryEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct AdjustmentRegistryEntry {
     adjustment_id: String,
     scope_code: String,
@@ -1224,6 +1227,29 @@ fn adjustment_entry_json(entry: &AdjustmentRegistryEntry) -> Value {
     })
 }
 
+fn adjustment_status_matches(status: Option<&str>, expected: &[&str]) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+    expected.iter().any(|candidate| *candidate == status)
+}
+
+fn sum_adjustment_tokens(entries: &[Value], statuses: &[&str]) -> i64 {
+    entries
+        .iter()
+        .filter(|entry| adjustment_status_matches(entry["status"].as_str(), statuses))
+        .map(|entry| entry["tokens_delta"].as_i64().unwrap_or(0))
+        .sum()
+}
+
+fn sum_adjustment_amount(entries: &[Value], statuses: &[&str]) -> f64 {
+    entries
+        .iter()
+        .filter(|entry| adjustment_status_matches(entry["status"].as_str(), statuses))
+        .map(|entry| entry["amount_delta"].as_f64().unwrap_or(0.0))
+        .sum()
+}
+
 fn load_adjustment_registry_from_source(
     source: &Value,
     contract: &TokenBudgetContractConfig,
@@ -1265,7 +1291,10 @@ fn load_adjustment_registry_from_source(
     });
 
     let source_status = source["status"].as_str().unwrap_or("unknown");
-    if source_status != "configured_existing_path" {
+    if !matches!(
+        source_status,
+        "configured_existing_path" | "default_existing_path"
+    ) {
         return base;
     }
 
@@ -1309,19 +1338,21 @@ fn load_adjustment_registry_from_source(
         let pending_entries_count = scope_entries
             .iter()
             .filter(|entry| {
-                matches!(
+                adjustment_status_matches(
                     entry["status"].as_str(),
-                    Some("requested" | "pending_review" | "approved_but_unapplied")
+                    &["requested", "pending_review", "approved_but_unapplied"],
                 )
             })
             .count();
         let applied_entries_count = scope_entries
             .iter()
-            .filter(|entry| entry["status"].as_str() == Some("applied_report_only"))
+            .filter(|entry| {
+                adjustment_status_matches(entry["status"].as_str(), &["applied_report_only"])
+            })
             .count();
         let disputed_entries_count = scope_entries
             .iter()
-            .filter(|entry| entry["status"].as_str() == Some("disputed"))
+            .filter(|entry| adjustment_status_matches(entry["status"].as_str(), &["disputed"]))
             .count();
         scope_map.insert(
             scope_code.to_string(),
@@ -1330,6 +1361,30 @@ fn load_adjustment_registry_from_source(
                 "pending_entries_count": pending_entries_count,
                 "applied_entries_count": applied_entries_count,
                 "disputed_entries_count": disputed_entries_count,
+                "pending_tokens_delta": sum_adjustment_tokens(
+                    &scope_entries,
+                    &["requested", "pending_review", "approved_but_unapplied"],
+                ),
+                "pending_amount_delta": sum_adjustment_amount(
+                    &scope_entries,
+                    &["requested", "pending_review", "approved_but_unapplied"],
+                ),
+                "applied_tokens_delta": sum_adjustment_tokens(
+                    &scope_entries,
+                    &["applied_report_only"],
+                ),
+                "applied_amount_delta": sum_adjustment_amount(
+                    &scope_entries,
+                    &["applied_report_only"],
+                ),
+                "disputed_tokens_delta": sum_adjustment_tokens(
+                    &scope_entries,
+                    &["disputed"],
+                ),
+                "disputed_amount_delta": sum_adjustment_amount(
+                    &scope_entries,
+                    &["disputed"],
+                ),
                 "scope_hash": hash_line_items(&scope_entries).ok(),
             }),
         );
@@ -1338,27 +1393,47 @@ fn load_adjustment_registry_from_source(
     let pending_entries_count = entries
         .iter()
         .filter(|entry| {
-            matches!(
+            adjustment_status_matches(
                 entry["status"].as_str(),
-                Some("requested" | "pending_review" | "approved_but_unapplied")
+                &["requested", "pending_review", "approved_but_unapplied"],
             )
         })
         .count();
     let applied_entries_count = entries
         .iter()
-        .filter(|entry| entry["status"].as_str() == Some("applied_report_only"))
+        .filter(|entry| {
+            adjustment_status_matches(entry["status"].as_str(), &["applied_report_only"])
+        })
         .count();
     let disputed_entries_count = entries
         .iter()
-        .filter(|entry| entry["status"].as_str() == Some("disputed"))
+        .filter(|entry| adjustment_status_matches(entry["status"].as_str(), &["disputed"]))
         .count();
 
     base["status"] = Value::String("loaded".to_string());
-    base["source"]["binding_status"] = Value::String("loaded".to_string());
+    base["source"]["binding_status"] = Value::String(if source_status == "default_existing_path" {
+        "default_loaded".to_string()
+    } else {
+        "loaded".to_string()
+    });
     base["entries_count"] = json!(entries.len());
     base["pending_entries_count"] = json!(pending_entries_count);
     base["applied_entries_count"] = json!(applied_entries_count);
     base["disputed_entries_count"] = json!(disputed_entries_count);
+    base["pending_tokens_delta"] = json!(sum_adjustment_tokens(
+        &entries,
+        &["requested", "pending_review", "approved_but_unapplied"],
+    ));
+    base["pending_amount_delta"] = json!(sum_adjustment_amount(
+        &entries,
+        &["requested", "pending_review", "approved_but_unapplied"],
+    ));
+    base["applied_tokens_delta"] =
+        json!(sum_adjustment_tokens(&entries, &["applied_report_only"],));
+    base["applied_amount_delta"] =
+        json!(sum_adjustment_amount(&entries, &["applied_report_only"],));
+    base["disputed_tokens_delta"] = json!(sum_adjustment_tokens(&entries, &["disputed"]));
+    base["disputed_amount_delta"] = json!(sum_adjustment_amount(&entries, &["disputed"]));
     base["registry_hash"] =
         Value::String(hash_line_items(&entries).unwrap_or_else(|_| "hash_error".to_string()));
     base["scopes"] = Value::Object(scope_map);
@@ -1366,13 +1441,7 @@ fn load_adjustment_registry_from_source(
 }
 
 fn build_adjustment_registry_json(repo_root: &Path, contract: &TokenBudgetContractConfig) -> Value {
-    let source = configured_external_truth_source(
-        repo_root,
-        "AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH",
-        "token_adjustment_registry",
-        "Report-only registry для correction/credit/dispute entries",
-        false,
-    );
+    let source = configured_adjustment_registry_source(repo_root, contract);
     load_adjustment_registry_from_source(&source, contract)
 }
 
@@ -1382,6 +1451,11 @@ fn build_adjustment_preview_json(
     adjustment_registry: &Value,
 ) -> Value {
     let scope_summary = &adjustment_registry["scopes"][scope_code];
+    let pending_entries = scope_summary["pending_entries_count"].as_u64().unwrap_or(0);
+    let applied_entries = scope_summary["applied_entries_count"].as_u64().unwrap_or(0);
+    let disputed_entries = scope_summary["disputed_entries_count"]
+        .as_u64()
+        .unwrap_or(0);
     json!({
         "model_version": contract.adjustment_preview_model_version.clone(),
         "request_schema_version": contract.adjustment_request_schema_version.clone(),
@@ -1397,8 +1471,23 @@ fn build_adjustment_preview_json(
         "applied_entries_count": scope_summary["applied_entries_count"].clone(),
         "disputed_entries_count": scope_summary["disputed_entries_count"].clone(),
         "scope_hash": scope_summary["scope_hash"].clone(),
-        "net_tokens_delta": Value::Null,
-        "net_amount_delta": Value::Null,
+        "pending_tokens_delta": scope_summary["pending_tokens_delta"].clone(),
+        "pending_amount_delta": scope_summary["pending_amount_delta"].clone(),
+        "applied_tokens_delta": scope_summary["applied_tokens_delta"].clone(),
+        "applied_amount_delta": scope_summary["applied_amount_delta"].clone(),
+        "disputed_tokens_delta": scope_summary["disputed_tokens_delta"].clone(),
+        "disputed_amount_delta": scope_summary["disputed_amount_delta"].clone(),
+        "net_tokens_delta": scope_summary["applied_tokens_delta"].clone(),
+        "net_amount_delta": scope_summary["applied_amount_delta"].clone(),
+        "correction_action_state": if disputed_entries > 0 {
+            "dispute_hold_open"
+        } else if pending_entries > 0 {
+            "pending_review"
+        } else if applied_entries > 0 {
+            "applied_report_only"
+        } else {
+            "no_adjustments"
+        },
         "allowed_future_actions": [
             "credit_note",
             "adjustment_entry",
@@ -1539,6 +1628,48 @@ fn configured_external_truth_source(
         "status": status,
         "binding_status": binding_status,
         "note": "Источник может уже существовать как файл, но пока Amai не привязывает его автоматически к canonical reconciliation ledger."
+    })
+}
+
+fn adjustment_registry_default_path(repo_root: &Path) -> PathBuf {
+    repo_root.join("state/token_adjustment_registry.json")
+}
+
+fn configured_adjustment_registry_source(
+    repo_root: &Path,
+    contract: &TokenBudgetContractConfig,
+) -> Value {
+    let source = configured_external_truth_source(
+        repo_root,
+        "AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH",
+        "token_adjustment_registry",
+        "Report-only registry для correction/credit/dispute entries",
+        false,
+    );
+    if source["status"].as_str() != Some("not_configured") {
+        return source;
+    }
+    let default_path = adjustment_registry_default_path(repo_root);
+    let default_exists = default_path.exists();
+    json!({
+        "code": "token_adjustment_registry",
+        "label": "Report-only registry для correction/credit/dispute entries",
+        "env_var": "AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH",
+        "required_for_reconciliation": false,
+        "configured_value": Value::Null,
+        "resolved_path": default_path.display().to_string(),
+        "status": if default_exists {
+            "default_existing_path"
+        } else {
+            "default_path_missing"
+        },
+        "binding_status": if default_exists {
+            "default_but_unbound"
+        } else {
+            "not_configured"
+        },
+        "schema_version": contract.adjustment_registry_version.clone(),
+        "note": "Если env-binding не задан, token adjustment registry может жить в repo-local state/token_adjustment_registry.json как operator-safe report-only ledger."
     })
 }
 
@@ -2221,6 +2352,30 @@ fn build_margin_scope(
     })
 }
 
+fn statement_lifecycle_state(adjustment_preview: &Value) -> &'static str {
+    if adjustment_preview["disputed_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "measured_non_billable_dispute_hold"
+    } else if adjustment_preview["pending_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "measured_non_billable_pending_adjustment"
+    } else if adjustment_preview["applied_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "measured_non_billable_adjusted_report_only"
+    } else {
+        "measured_non_billable_open"
+    }
+}
+
 fn build_contractual_statement_summary(
     scope_code: &str,
     scope_label: &str,
@@ -2249,6 +2404,7 @@ fn build_contractual_statement_summary(
         "latest_ingest_lag_ms": metering_freshness["latest_ingest_lag_ms"].clone(),
         "p95_ingest_lag_ms": metering_freshness["p95_ingest_lag_ms"].clone(),
         "measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
+        "adjusted_measured_non_billable_lower_bound_tokens": statement_preview["adjusted_measured_non_billable_lower_bound_tokens"].clone(),
         "billable_lower_bound_tokens": statement_preview["billable_lower_bound_tokens"].clone(),
         "internal_provider_billed_tokens": reconciliation_preview["internal_provider_billed_tokens"].clone(),
         "internal_provider_cost_estimate_amount": reconciliation_preview["internal_provider_cost_estimate_amount"].clone(),
@@ -2260,6 +2416,10 @@ fn build_contractual_statement_summary(
         "invoice_drift_amount": reconciliation_preview["invoice_drift_amount"].clone(),
         "reconciliation_state": reconciliation_preview["reconciliation_state"].clone(),
         "margin_state": margin_scope["margin_state"].clone(),
+        "adjustment_state": statement_preview["adjustment_preview"]["correction_action_state"].clone(),
+        "pending_adjustment_entries_count": statement_preview["adjustment_preview"]["pending_entries_count"].clone(),
+        "applied_adjustment_entries_count": statement_preview["adjustment_preview"]["applied_entries_count"].clone(),
+        "disputed_adjustment_entries_count": statement_preview["adjustment_preview"]["disputed_entries_count"].clone(),
         "close_barriers": statement_preview["close_barriers"].clone(),
         "blocking_reasons": combine_reason_arrays(&[
             &statement_preview["close_barriers"],
@@ -2310,20 +2470,52 @@ fn build_statement_preview(
     if metering_freshness["metering_ingest_state"].as_str() == Some("lagging") {
         close_barriers.push("metering_pipeline_lagging".to_string());
     }
+    let adjustment_preview =
+        build_adjustment_preview_json(scope_code, contract, adjustment_registry);
+    if adjustment_preview["pending_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        close_barriers.push("pending_adjustment_review".to_string());
+    }
+    if adjustment_preview["disputed_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        close_barriers.push("dispute_hold_open".to_string());
+    }
+    let measured_non_billable_lower_bound_tokens = summary["verified_effective_saved_tokens"]
+        .as_i64()
+        .unwrap_or(0);
+    let applied_tokens_delta = adjustment_preview["applied_tokens_delta"]
+        .as_i64()
+        .unwrap_or(0);
+    let lifecycle_state = statement_lifecycle_state(&adjustment_preview);
     json!({
         "scope_code": scope_code,
         "scope_label": scope_label,
         "statement_status": "report_only_preview",
-        "lifecycle_state": "measured_non_billable_open",
+        "lifecycle_state": lifecycle_state,
         "operational_state": "live_measurement_open",
-        "contractual_state": "report_only_preview_open",
+        "contractual_state": match lifecycle_state {
+            "measured_non_billable_dispute_hold" => "report_only_preview_dispute_hold",
+            "measured_non_billable_pending_adjustment" => "report_only_preview_pending_adjustment",
+            "measured_non_billable_adjusted_report_only" => "report_only_preview_adjusted",
+            _ => "report_only_preview_open",
+        },
         "close_readiness": "not_closeable_report_only",
         "close_candidate": false,
         "close_barriers": close_barriers,
         "freeze_status": "open",
         "late_arrival_mode": "accepting_events_until_contractual_close_exists",
-        "correction_mode": "future_credit_or_adjustment_not_materialized",
-        "dispute_mode": "not_open_report_only",
+        "correction_mode": adjustment_preview["correction_action_state"].clone(),
+        "dispute_mode": if adjustment_preview["disputed_entries_count"].as_u64().unwrap_or(0) > 0 {
+            Value::String("open_dispute_hold_report_only".to_string())
+        } else {
+            Value::String("not_open_report_only".to_string())
+        },
         "period": build_statement_period_json(
             scope_code,
             scope_label,
@@ -2332,18 +2524,16 @@ fn build_statement_preview(
             profile,
             contract,
         ),
-        "adjustment_preview": build_adjustment_preview_json(
-            scope_code,
-            contract,
-            adjustment_registry,
-        ),
+        "adjustment_preview": adjustment_preview.clone(),
         "coverage": summary["coverage"],
         "freshness": metering_freshness.clone(),
         "internal_delivered_tokens": summary["delivered_tokens"],
         "internal_recovery_tokens": summary["recovery_tokens"],
         "internal_provider_billed_tokens": summary["delivered_tokens"].as_u64().unwrap_or(0)
             .saturating_add(summary["recovery_tokens"].as_u64().unwrap_or(0)),
-        "measured_non_billable_lower_bound_tokens": summary["verified_effective_saved_tokens"],
+        "measured_non_billable_lower_bound_tokens": measured_non_billable_lower_bound_tokens,
+        "adjusted_measured_non_billable_lower_bound_tokens": measured_non_billable_lower_bound_tokens
+            .saturating_add(applied_tokens_delta),
         "billable_lower_bound_tokens": Value::Null,
         "final_amount": Value::Null,
         "currency_profile": rate_card["bound_currency_profile"]
@@ -2436,6 +2626,9 @@ fn build_statement_export_preview(
     let pending_entries = adjustment_preview["pending_entries_count"]
         .as_u64()
         .unwrap_or(0);
+    let applied_entries = adjustment_preview["applied_entries_count"]
+        .as_u64()
+        .unwrap_or(0);
     let disputed_entries = adjustment_preview["disputed_entries_count"]
         .as_u64()
         .unwrap_or(0);
@@ -2444,6 +2637,8 @@ fn build_statement_export_preview(
         "registry_not_configured"
     } else if pending_entries > 0 {
         "pending_review"
+    } else if applied_entries > 0 {
+        "applied_report_only_entries_present"
     } else {
         "no_credit_entries"
     };
@@ -2542,6 +2737,153 @@ fn build_contractual_evidence_pack(
             "note": "Это contractual evidence pack для report-only tokenonomics: он доказывает состав измеренного scope, но не превращает lower bound в invoice."
         }
     }))
+}
+
+fn validate_adjustment_scope(scope: &str) -> Result<()> {
+    if matches!(scope, "current_session" | "rolling_window" | "lifetime") {
+        Ok(())
+    } else {
+        bail!(
+            "unsupported adjustment scope {} (expected current_session, rolling_window or lifetime)",
+            scope
+        )
+    }
+}
+
+fn validate_adjustment_kind(kind: &str) -> Result<()> {
+    if matches!(kind, "credit_note" | "adjustment_entry" | "dispute_hold") {
+        Ok(())
+    } else {
+        bail!(
+            "unsupported adjustment kind {} (expected credit_note, adjustment_entry or dispute_hold)",
+            kind
+        )
+    }
+}
+
+fn validate_adjustment_status(status: &str) -> Result<()> {
+    if matches!(
+        status,
+        "requested"
+            | "pending_review"
+            | "approved_but_unapplied"
+            | "applied_report_only"
+            | "disputed"
+            | "rejected"
+    ) {
+        Ok(())
+    } else {
+        bail!(
+            "unsupported adjustment status {} (expected requested, pending_review, approved_but_unapplied, applied_report_only, disputed or rejected)",
+            status
+        )
+    }
+}
+
+fn adjustment_registry_write_path(repo_root: &Path) -> PathBuf {
+    std::env::var("AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                repo_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| adjustment_registry_default_path(repo_root))
+}
+
+fn load_adjustment_registry_file_for_write(path: &Path) -> Result<AdjustmentRegistryFile> {
+    if !path.exists() {
+        return Ok(AdjustmentRegistryFile::default());
+    }
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read adjustment registry {}", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse adjustment registry {}", path.display()))
+}
+
+fn write_adjustment_registry_file(path: &Path, registry: &AdjustmentRegistryFile) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create parent directory for adjustment registry {}",
+                path.display()
+            )
+        })?;
+    }
+    let content =
+        serde_json::to_string_pretty(registry).context("failed to encode adjustment registry")?;
+    fs::write(path, content)
+        .with_context(|| format!("failed to write adjustment registry {}", path.display()))
+}
+
+pub async fn print_adjustment_registry(args: &ObserveTokenAdjustmentRegistryArgs) -> Result<()> {
+    if let Some(scope) = args.scope.as_deref() {
+        validate_adjustment_scope(scope)?;
+    }
+    let repo_root = config::discover_repo_root(None)?;
+    let config = load_config(&repo_root)?;
+    let registry = build_adjustment_registry_json(&repo_root, &config.contract);
+    let payload = if let Some(scope) = args.scope.as_deref() {
+        json!({
+            "token_adjustment_registry": registry,
+            "scope_code": scope,
+            "scope_summary": registry["scopes"][scope].clone(),
+            "adjustment_request_schema": build_adjustment_request_schema_json(&config.contract),
+        })
+    } else {
+        json!({
+            "token_adjustment_registry": registry,
+            "adjustment_request_schema": build_adjustment_request_schema_json(&config.contract),
+        })
+    };
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+pub async fn add_adjustment_entry(args: &ObserveTokenAdjustmentAddArgs) -> Result<()> {
+    validate_adjustment_scope(&args.scope)?;
+    validate_adjustment_kind(&args.kind)?;
+    validate_adjustment_status(&args.status)?;
+    let repo_root = config::discover_repo_root(None)?;
+    let config = load_config(&repo_root)?;
+    let path = adjustment_registry_write_path(&repo_root);
+    let mut registry = load_adjustment_registry_file_for_write(&path)?;
+    let entry = AdjustmentRegistryEntry {
+        adjustment_id: args
+            .adjustment_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        scope_code: args.scope.clone(),
+        kind: args.kind.clone(),
+        status: args.status.clone(),
+        reason_code: args.reason_code.clone(),
+        created_at_epoch_ms: current_epoch_ms()?,
+        tokens_delta: args.tokens_delta,
+        amount_delta: args.amount_delta,
+        currency_profile: args.currency_profile.clone(),
+        related_statement_id: args.related_statement_id.clone(),
+    };
+    registry.adjustments.push(entry.clone());
+    write_adjustment_registry_file(&path, &registry)?;
+    let registry_preview = build_adjustment_registry_json(&repo_root, &config.contract);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "token_adjustment_add": {
+                "registry_path": path.display().to_string(),
+                "entry": adjustment_entry_json(&entry),
+                "scope_summary": registry_preview["scopes"][args.scope.as_str()].clone(),
+                "registry_status": registry_preview["status"].clone(),
+                "request_schema_version": config.contract.adjustment_request_schema_version,
+                "note": "Adjustment entry materialized отдельно от token events: historical usage не переписывается, а correction/dispute живёт как отдельный registry layer."
+            }
+        }))?
+    );
+    Ok(())
 }
 
 pub async fn print_report(db: &Client, args: &ObserveTokenReportArgs) -> Result<()> {
@@ -7699,7 +8041,10 @@ fixed_scope_cost_amount = 0.01
         );
         assert_eq!(preview["period"]["period_start_epoch_ms"], 1_000);
         assert_eq!(preview["period"]["period_end_epoch_ms"], 2_000);
-        assert_eq!(preview["adjustment_preview"]["status"], "not_configured");
+        assert_eq!(
+            preview["adjustment_preview"]["status"],
+            "default_path_missing"
+        );
         assert_eq!(preview["measured_non_billable_lower_bound_tokens"], 1234);
         assert_eq!(preview["billable_lower_bound_tokens"], json!(null));
     }
@@ -7734,7 +8079,7 @@ fixed_scope_cost_amount = 0.01
             "forbidden_use_adjustment_entries"
         );
         assert_eq!(registry["schema_version"], "adjustment-registry-v1");
-        assert_eq!(registry["status"], "not_configured");
+        assert_eq!(registry["status"], "default_path_missing");
         assert_eq!(registry["entries_count"], 0);
     }
 

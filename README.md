@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 14:52 MSK
-Ручная сверка guide/docs: 2026-03-24 14:52 MSK
+modified_at: 2026-03-24 15:21 MSK
+Ручная сверка guide/docs: 2026-03-24 15:21 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1170,7 +1170,15 @@ preview, а не только raw count.
   - `adjustment_request_schema` публикует allowed kinds/statuses и запрет на тихую
     ретро-перезапись прошлого period;
   - `adjustment_registry` публикует status источника и per-scope counts/hashes;
-  - пока registry не подключён, этот слой честно остаётся `not_configured`.
+  - по умолчанию registry ищется в repo-local
+    `state/token_adjustment_registry.json`;
+  - если env-binding не задан и repo-local файл ещё не materialized, этот слой честно
+    остаётся `default_path_missing`, а не притворяется уже живым credit workflow;
+  - для operator-safe report-only entries теперь есть явные команды:
+    - `amai observe token-adjustment-registry --scope lifetime`
+    - `amai observe token-adjustment-add --scope lifetime --kind adjustment_entry --status pending_review --reason-code ...`
+  - прошлые periods по-прежнему нельзя тихо переписывать задним числом: adjustments живут
+    отдельными entries со статусами `pending_review / applied_report_only / disputed / rejected`.
 - provider reconciliation теперь тоже first-class:
   - `reconciliation_previews.current_session / rolling_window / lifetime`
   - там теперь отдельно видны:

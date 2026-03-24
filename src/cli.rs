@@ -166,6 +166,8 @@ pub enum ObserveCommand {
     Guardrails,
     TokenReport(ObserveTokenReportArgs),
     TokenEvidencePack(ObserveTokenEvidencePackArgs),
+    TokenAdjustmentRegistry(ObserveTokenAdjustmentRegistryArgs),
+    TokenAdjustmentAdd(ObserveTokenAdjustmentAddArgs),
     CleanupSnapshots(ObserveCleanupSnapshotsArgs),
     CleanupArtifacts(ObserveCleanupArtifactsArgs),
     RepairTokenLedger(ObserveRepairTokenLedgerArgs),
@@ -698,6 +700,34 @@ pub struct ObserveTokenEvidencePackArgs {
     pub include_verify_events: Option<bool>,
     #[arg(long)]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveTokenAdjustmentRegistryArgs {
+    #[arg(long)]
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveTokenAdjustmentAddArgs {
+    #[arg(long)]
+    pub scope: String,
+    #[arg(long, default_value = "adjustment_entry")]
+    pub kind: String,
+    #[arg(long, default_value = "requested")]
+    pub status: String,
+    #[arg(long)]
+    pub reason_code: String,
+    #[arg(long)]
+    pub tokens_delta: Option<i64>,
+    #[arg(long)]
+    pub amount_delta: Option<f64>,
+    #[arg(long)]
+    pub currency_profile: Option<String>,
+    #[arg(long)]
+    pub related_statement_id: Option<String>,
+    #[arg(long)]
+    pub adjustment_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]

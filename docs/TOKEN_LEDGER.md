@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 14:52 MSK
-Ручная сверка guide/docs: 2026-03-24 14:52 MSK
+modified_at: 2026-03-24 15:21 MSK
+Ручная сверка guide/docs: 2026-03-24 15:21 MSK
 
 # Token Ledger
 
@@ -538,7 +538,8 @@ reporting layers:
 - `contractual_state = report_only_preview_open`
 - `close_barriers` прямо перечисляют, почему period нельзя закрыть честно
 - `period.close_at_epoch_ms = null`, пока честного close workflow ещё нет
-- `adjustment_preview.status = not_configured`, пока registry source ещё не подключён
+- `adjustment_preview.status = default_path_missing`, пока repo-local registry файл ещё
+  не materialized
 
 Это не недостаток UX, а truth guardrail до тех пор, пока реальный billing workflow не
 materialized end-to-end.
@@ -574,9 +575,26 @@ materialized end-to-end.
 
 Текущий truthful status без подключённого источника:
 - `adjustment_registry_version = adjustment-registry-v1`
-- `status = not_configured`
+- `resolved_path = /home/art/agent-memory-index/state/token_adjustment_registry.json`
+- `status = default_path_missing`
 - `entries_count = 0`
 - `registry_hash = null`
+
+Operator-safe report-only команды:
+
+```bash
+./target/release/amai observe token-adjustment-registry --scope lifetime
+./target/release/amai observe token-adjustment-add \
+  --scope lifetime \
+  --kind adjustment_entry \
+  --status pending_review \
+  --reason-code contaminated_live_session
+```
+
+Смысл этих команд:
+- registry можно materialize-ить без денежного settlement;
+- entries живут отдельным слоем, а не тихой перезаписью старого report;
+- `applied_report_only` влияет на preview как adjustment ledger, но не превращает его в invoice.
 
 Именно поэтому `adjustment_preview` внутри `statement_previews` теперь читает registry-слой,
 а не рисует credits “по ощущениям”.

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 14:52 MSK
-Ручная сверка guide/docs: 2026-03-24 14:52 MSK
+modified_at: 2026-03-24 15:21 MSK
+Ручная сверка guide/docs: 2026-03-24 15:21 MSK
 
 # Operations
 
@@ -1689,7 +1689,16 @@ cargo run -- context pack \
 - `adjustment_registry`
   - optional report-only registry;
   - публикует source status, counts и per-scope hashes;
-  - если путь не задан, честный статус остаётся `not_configured`.
+  - по умолчанию registry ищется в repo-local
+    `/home/art/agent-memory-index/state/token_adjustment_registry.json`;
+  - если env `AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH` не задан и repo-local файл ещё не
+    materialized, честный статус остаётся `default_path_missing`;
+  - operator-safe команды:
+    - `./target/release/amai observe token-adjustment-registry --scope lifetime`
+    - `./target/release/amai observe token-adjustment-add --scope lifetime --kind adjustment_entry --status pending_review --reason-code ...`
+  - adjustments живут отдельными entries со статусами
+    `pending_review / approved_but_unapplied / applied_report_only / disputed / rejected`
+    и не дают quietly переписывать старый period.
 - `coverage`
   - отдельный truth-layer поверх каждого rollup:
     - `measured_events`
@@ -1767,7 +1776,8 @@ cargo run -- context pack \
 - `adjustment_preview` теперь тоже каноничен:
   - видно `registry_status`, `pending_entries_count`, `applied_entries_count`,
     `disputed_entries_count`, `scope_hash`;
-  - без registry этот слой не придумывает credits, а честно показывает `not_configured`.
+  - без materialized registry file этот слой не придумывает credits, а честно показывает
+    `default_path_missing`.
 - `reconciliation_previews` теперь тоже каноничны:
   - `current_session`
   - `rolling_window`

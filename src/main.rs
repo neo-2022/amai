@@ -394,6 +394,16 @@ async fn main() -> Result<()> {
                 let db = postgres::connect_admin(&cfg).await?;
                 token_budget::print_evidence_pack(&db, &args).await?;
             }
+            ObserveCommand::TokenAdjustmentRegistry(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                token_budget::print_adjustment_registry(&args).await?;
+            }
+            ObserveCommand::TokenAdjustmentAdd(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                token_budget::add_adjustment_entry(&args).await?;
+            }
             ObserveCommand::CleanupSnapshots(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
