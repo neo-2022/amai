@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 16:37 MSK
-Ручная сверка guide/docs: 2026-03-24 16:37 MSK
+modified_at: 2026-03-24 16:40 MSK
+Ручная сверка guide/docs: 2026-03-24 16:40 MSK
 
 # Operations
 
@@ -1896,7 +1896,9 @@ cargo run --release -- observe token-statement-export \
 - double right click по любой карточке, независимо от `front/back`, переводит её в
   full-screen mode;
 - повторный double right click возвращает её обратно;
-- mobile path обязан иметь отдельный explicit control, а не имитировать эти жесты.
+- mobile path использует прямое touch-отображение этих же жестов:
+  - двойной тап одним пальцем = double left click = flip front/back;
+  - двойной тап двумя пальцами = double right click = full-screen toggle.
 
 Это нужно учитывать заранее:
 
