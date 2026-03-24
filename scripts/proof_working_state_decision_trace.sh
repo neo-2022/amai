@@ -10,6 +10,7 @@ cargo run --release --quiet -- context pack \
   --namespace review \
   --query "shared_runtime_marker" \
   --retrieval-mode local_plus_related \
+  --token-source-kind proof_context_pack \
   --limit-documents 8 \
   --limit-symbols 8 \
   --limit-chunks 8 \

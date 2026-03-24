@@ -77,6 +77,7 @@ cargo run --quiet -- context pack \
   --namespace continuity \
   --query "Continuity snapshot" \
   --retrieval-mode local_strict \
+  --token-source-kind proof_context_pack \
   --limit-documents 3 \
   --limit-symbols 0 \
   --limit-chunks 3 \

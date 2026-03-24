@@ -52,7 +52,8 @@ cargo run --quiet -- context pack \
   --project project_alpha \
   --namespace review \
   --query "beta_only_token" \
-  --retrieval-mode local_strict > /tmp/amai-proof-local-strict.json
+  --retrieval-mode local_strict \
+  --token-source-kind proof_context_pack > /tmp/amai-proof-local-strict.json
 
 python3 - <<'PY'
 import json
@@ -67,7 +68,8 @@ cargo run --quiet -- context pack \
   --project project_alpha \
   --namespace review \
   --query "shared_runtime_marker" \
-  --retrieval-mode local_plus_related > /tmp/amai-proof-related.json
+  --retrieval-mode local_plus_related \
+  --token-source-kind proof_context_pack > /tmp/amai-proof-related.json
 
 python3 - <<'PY'
 import json

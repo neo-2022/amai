@@ -148,7 +148,7 @@ pub async fn build_context_pack(
     let mut prepared = prepare_context_pack(cfg, db, args).await?;
     ensure_context_pack_persisted(cfg, db, args, &mut prepared).await?;
     cache_context_pack_entry(cfg, args, &prepared, true)?;
-    record_context_pack_token_budget_event(db, prepared.payload.as_ref()).await?;
+    record_context_pack_token_budget_event(db, prepared.payload.as_ref(), args).await?;
     if prepared.cache_hit {
         eprintln!(
             "context pack cache hit: {} :: scope={}",
@@ -218,7 +218,7 @@ pub async fn execute_context_pack_capture_with_options(
 ) -> Result<ContextPackResult> {
     if let Some(cached) = try_execute_context_pack_fast_cached(cfg, args, persist)? {
         if track_token_usage {
-            record_context_pack_token_budget_event(db, &cached.payload).await?;
+            record_context_pack_token_budget_event(db, &cached.payload, args).await?;
         }
         return Ok(cached);
     }
@@ -229,7 +229,7 @@ pub async fn execute_context_pack_capture_with_options(
     let durably_persisted = persist || prepared.durably_persisted;
     cache_context_pack_entry(cfg, args, &prepared, durably_persisted)?;
     if track_token_usage {
-        record_context_pack_token_budget_event(db, prepared.payload.as_ref()).await?;
+        record_context_pack_token_budget_event(db, prepared.payload.as_ref(), args).await?;
     }
     Ok(ContextPackResult {
         payload: prepared.payload.as_ref().clone(),
@@ -237,11 +237,15 @@ pub async fn execute_context_pack_capture_with_options(
     })
 }
 
-async fn record_context_pack_token_budget_event(db: &Client, payload: &Value) -> Result<()> {
+async fn record_context_pack_token_budget_event(
+    db: &Client,
+    payload: &Value,
+    args: &ContextPackArgs,
+) -> Result<()> {
     if !payload.is_object() {
         return Ok(());
     }
-    token_budget::record_live_context_pack_event(db, payload).await?;
+    token_budget::record_context_pack_event(db, payload, &args.token_source_kind).await?;
     working_state::record_context_pack_event(db, payload).await
 }
 

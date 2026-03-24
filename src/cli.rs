@@ -357,6 +357,12 @@ pub struct ContextPackArgs {
     pub limit_chunks: usize,
     #[arg(long, default_value_t = 8)]
     pub limit_semantic_chunks: usize,
+    #[arg(
+        long,
+        default_value = "live_context_pack",
+        help = "Token ledger source kind for this context-pack call. Use proof_/verify_ prefixes for engineering runs so they do not contaminate live tokenonomics."
+    )]
+    pub token_source_kind: String,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 14:31 MSK
-Ручная сверка guide/docs: 2026-03-24 14:31 MSK
+modified_at: 2026-03-24 14:52 MSK
+Ручная сверка guide/docs: 2026-03-24 14:52 MSK
 
 # Operations
 
@@ -1533,6 +1533,22 @@ cargo run --release -- verify token-benchmark-suite \
 ```bash
 ./scripts/proof_token_ledger.sh
 ```
+
+Если нужен прямой `context pack` именно как engineering probe, а не как живой пользовательский
+запрос, задавайте source kind явно:
+
+```bash
+cargo run -- context pack \
+  --project project_alpha \
+  --namespace review \
+  --query "shared_runtime_marker" \
+  --retrieval-mode local_plus_related \
+  --token-source-kind proof_context_pack
+```
+
+Иначе оператор сам создаст `live_context_pack` событие и испортит текущую session-card. Это не
+исправляется молча задним числом: pre-fix загрязнение старой сессии остаётся историческим фактом
+до нового session window или отдельного repair/reverify контура.
 
 Что показывает этот contour:
 - `headline`

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 14:31 MSK
-Ручная сверка guide/docs: 2026-03-24 14:31 MSK
+modified_at: 2026-03-24 14:52 MSK
+Ручная сверка guide/docs: 2026-03-24 14:52 MSK
 
 # Token Ledger
 
@@ -71,6 +71,19 @@ Ledger не имеет права смешивать:
 - `traffic_class = live`
 
 Все остальные режимы разрешены только как отдельный engineering view.
+
+Для прямого `context pack` это теперь управляется и на уровне event contract:
+- обычный пользовательский вызов по умолчанию пишет `source_kind = live_context_pack`;
+- инженерные прогоны обязаны идти через `proof_*` или `verify_*` source kind;
+- для этого у CLI теперь есть явный флаг:
+  - `--token-source-kind proof_context_pack`
+  - `--token-source-kind verify_context_pack`
+
+Это важно не как косметика, а как truth guardrail:
+- новый proof-run больше не должен сам по себе загрязнять live tokenonomics;
+- если старая текущая сессия уже успела нахватать `live_context_pack` ещё до этого разделения,
+  она честно остаётся загрязнённой до нового session window или явного repair/reverify path;
+- тихо переписывать такую историю задним числом запрещено.
 
 ## Обязательные поля события
 

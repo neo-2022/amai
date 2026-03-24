@@ -822,6 +822,7 @@ async fn run_case(
         limit_symbols: case.limit_symbols.unwrap_or(4),
         limit_chunks: case.limit_chunks.unwrap_or(4),
         limit_semantic_chunks: case.limit_semantic_chunks.unwrap_or(4),
+        token_source_kind: "benchmark_cold_context_pack".to_string(),
     };
     let started = Instant::now();
     let pack =

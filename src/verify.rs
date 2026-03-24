@@ -258,6 +258,7 @@ pub async fn run_accuracy(
             limit_symbols: 8,
             limit_chunks: 8,
             limit_semantic_chunks: 8,
+            token_source_kind: "verify_context_pack".to_string(),
         },
         false,
         false,
@@ -274,6 +275,7 @@ pub async fn run_accuracy(
         limit_symbols: 8,
         limit_chunks: 8,
         limit_semantic_chunks: 8,
+        token_source_kind: "verify_context_pack".to_string(),
     };
     let mut related_pack =
         retrieval::execute_context_pack_capture_with_options(cfg, db, &related_args, false, false)
@@ -292,6 +294,7 @@ pub async fn run_accuracy(
             limit_symbols: 8,
             limit_chunks: 8,
             limit_semantic_chunks: 8,
+            token_source_kind: "verify_context_pack".to_string(),
         },
         false,
         false,
@@ -311,6 +314,7 @@ pub async fn run_accuracy(
             limit_symbols: 8,
             limit_chunks: 8,
             limit_semantic_chunks: 8,
+            token_source_kind: "verify_context_pack".to_string(),
         },
         false,
         false,
@@ -329,6 +333,7 @@ pub async fn run_accuracy(
             limit_symbols: 8,
             limit_chunks: 8,
             limit_semantic_chunks: 8,
+            token_source_kind: "verify_context_pack".to_string(),
         },
         false,
         false,
@@ -1078,6 +1083,7 @@ pub async fn run_token_benchmark_suite(
                     limit_symbols: args.limit_symbols,
                     limit_chunks: args.limit_chunks,
                     limit_semantic_chunks: args.limit_semantic_chunks,
+                    token_source_kind: "verify_context_pack".to_string(),
                 },
                 tokenizer: args.tokenizer.clone(),
                 naive_limit_files: args.naive_limit_files,
@@ -1257,6 +1263,7 @@ pub async fn run_text_compare(
             limit_symbols: args.limit_symbols,
             limit_chunks: args.limit_chunks,
             limit_semantic_chunks: args.limit_semantic_chunks,
+            token_source_kind: "verify_context_pack".to_string(),
         };
         let pack =
             retrieval::execute_context_pack_capture_with_options(cfg, db, &context, false, false)

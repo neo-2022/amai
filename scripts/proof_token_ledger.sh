@@ -11,13 +11,15 @@ cargo run --release --quiet -- context pack \
   --namespace review \
   --query "shared_runtime_marker" \
   --retrieval-mode local_plus_related \
+  --token-source-kind proof_context_pack \
   --limit-documents 8 \
   --limit-symbols 8 \
   --limit-chunks 8 \
   --limit-semantic-chunks 8 >/tmp/amai-proof-context-pack.out
 
 cargo run --release --quiet -- observe token-report \
-  --budget-profile codex_5h >/tmp/amai-proof-token-ledger.out
+  --budget-profile codex_5h \
+  --include-verify-events true >/tmp/amai-proof-token-ledger.out
 
 python3 - <<'PY'
 import json
@@ -32,7 +34,7 @@ assert root["lifetime"]["events_total"] >= 1, root["lifetime"]
 assert root["lifetime"]["total_saved_tokens"] > 0, root["lifetime"]
 assert root["lifetime"]["savings_percent"] > 0, root["lifetime"]
 assert any(
-    item["source_kind"] in {"live_context_pack", "verify_token_benchmark"}
+    item["source_kind"] in {"proof_context_pack", "verify_token_benchmark"}
     for item in root["source_breakdown"]
 ), root["source_breakdown"]
 PY

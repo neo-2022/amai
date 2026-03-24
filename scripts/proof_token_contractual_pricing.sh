@@ -10,7 +10,8 @@ trap 'rm -rf "$tmpdir"' EXIT
 ./scripts/proof_token_ledger.sh >/tmp/amai-proof-token-contractual-bootstrap.out
 
 cargo run --release --quiet -- observe token-report \
-  --budget-profile codex_5h >/tmp/amai-proof-token-contractual-base.json
+  --budget-profile codex_5h \
+  --include-verify-events true >/tmp/amai-proof-token-contractual-base.json
 
 python3 - <<'PY' "$tmpdir"
 import json
@@ -102,7 +103,8 @@ AMAI_PROVIDER_USAGE_EXPORT_PATH="$tmpdir/provider_usage.json" \
 AMAI_PROVIDER_INVOICE_EXPORT_PATH="$tmpdir/provider_invoice.json" \
 AMAI_INFRA_COST_PROFILE_PATH="$tmpdir/infra_cost_profile.toml" \
   cargo run --release --quiet -- observe token-report \
-  --budget-profile codex_5h >/tmp/amai-proof-token-contractual-priced.json
+  --budget-profile codex_5h \
+  --include-verify-events true >/tmp/amai-proof-token-contractual-priced.json
 
 python3 - <<'PY'
 import json

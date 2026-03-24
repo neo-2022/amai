@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 14:31 MSK
-Ручная сверка guide/docs: 2026-03-24 14:31 MSK
+modified_at: 2026-03-24 14:52 MSK
+Ручная сверка guide/docs: 2026-03-24 14:52 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1230,6 +1230,22 @@ preview, а не только raw count.
 ```bash
 ./scripts/token_report.sh --include-verify-events true
 ```
+
+Если вы запускаете прямой `context pack` не как пользовательский live-запрос, а как proof/verify
+контур, обязательно задавайте source kind явно:
+
+```bash
+cargo run -- context pack \
+  --project project_alpha \
+  --namespace review \
+  --query "shared_runtime_marker" \
+  --retrieval-mode local_plus_related \
+  --token-source-kind proof_context_pack
+```
+
+Это нужно затем, чтобы engineering-run не записывался как `live_context_pack` и не портил
+карточки живой tokenonomics текущей сессии. Старые события, уже записанные как `live` до этого
+разделения, сами не исчезают: для них нужен новый session window или явный repair/reverify path.
 
 Если у вас есть старые исторические `token_budget_event`, записанные ещё старым форматом, `Amai` умеет подтянуть их до нового качества без ручного SQL:
 

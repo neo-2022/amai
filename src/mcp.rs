@@ -1713,6 +1713,7 @@ async fn tool_warm_cache(cfg: &AppConfig, args: WarmCacheToolArgs) -> Result<Val
             limit_symbols: args.limit_symbols,
             limit_chunks: args.limit_chunks,
             limit_semantic_chunks: args.limit_semantic_chunks,
+            token_source_kind: "proof_warmup_context_pack".to_string(),
         };
         let stats = retrieval::execute_context_pack(cfg, &mut db, &context, true).await?;
         warmed.push(json!({
@@ -2858,6 +2859,7 @@ impl ContextPackToolArgs {
             limit_symbols: self.limit_symbols,
             limit_chunks: self.limit_chunks,
             limit_semantic_chunks: self.limit_semantic_chunks,
+            token_source_kind: "live_context_pack".to_string(),
         }
     }
 }

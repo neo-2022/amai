@@ -2757,34 +2757,36 @@ pub async fn collect_default_report_with_overrides(
     .await
 }
 
-pub async fn record_live_context_pack_event(db: &Client, payload: &Value) -> Result<()> {
+pub async fn record_context_pack_event(
+    db: &Client,
+    payload: &Value,
+    source_kind: &str,
+) -> Result<()> {
     let repo_root = config::discover_repo_root(None)?;
     let config = load_config(&repo_root)?;
-    let profile = resolve_profile(&config, None, &repo_root)?;
+    let traffic_class = derive_traffic_class(source_kind);
+    let payload_origin = if traffic_class == "live" {
+        "context_pack_token_budget"
+    } else {
+        source_kind
+    };
     let mut event = build_event_payload(
         payload,
         &config.measurement,
         &config.contract,
-        "live_context_pack",
-        "context_pack_token_budget",
+        source_kind,
+        payload_origin,
     )?;
-    enrich_live_event_payload(db, &mut event, &profile).await?;
+    if traffic_class == "live" {
+        let profile = resolve_profile(&config, None, &repo_root)?;
+        enrich_live_event_payload(db, &mut event, &profile).await?;
+    }
     let _ = postgres::insert_observability_snapshot(db, "token_budget_event", &event).await?;
     Ok(())
 }
 
 pub async fn record_verify_context_pack_event(db: &Client, payload: &Value) -> Result<()> {
-    let repo_root = config::discover_repo_root(None)?;
-    let config = load_config(&repo_root)?;
-    let event = build_event_payload(
-        payload,
-        &config.measurement,
-        &config.contract,
-        "verify_context_pack",
-        "verify_context_pack",
-    )?;
-    let _ = postgres::insert_observability_snapshot(db, "token_budget_event", &event).await?;
-    Ok(())
+    record_context_pack_event(db, payload, "verify_context_pack").await
 }
 
 pub async fn record_verify_benchmark_event(db: &Client, benchmark_payload: &Value) -> Result<()> {
@@ -4007,6 +4009,7 @@ async fn reverify_live_event_payload(
         limit_symbols: 8,
         limit_chunks: 8,
         limit_semantic_chunks: 8,
+        token_source_kind: "proof_reverify_context_pack".to_string(),
     };
 
     let result =
