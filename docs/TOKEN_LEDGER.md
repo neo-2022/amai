@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:43 MSK
-Ручная сверка guide/docs: 2026-03-24 15:43 MSK
+modified_at: 2026-03-24 15:48 MSK
+Ручная сверка guide/docs: 2026-03-24 15:48 MSK
 
 # Token Ledger
 
@@ -589,12 +589,19 @@ Operator-safe report-only команды:
   --kind adjustment_entry \
   --status pending_review \
   --reason-code contaminated_live_session
+./target/release/amai observe token-adjustment-add \
+  --scope lifetime \
+  --status pending_review \
+  --reason-code contaminated_live_session \
+  --resolve-related-statement-id
 ```
 
 Смысл этих команд:
 - registry можно materialize-ить без денежного settlement;
 - entries живут отдельным слоем, а не тихой перезаписью старого report;
 - `applied_report_only` влияет на preview как adjustment ledger, но не превращает его в invoice.
+- `--resolve-related-statement-id` нужен затем, чтобы correction entry честно ссылался на
+  актуальный `statement_preview_id` без ручного копирования из другого отчёта.
 
 Именно поэтому `adjustment_preview` внутри `statement_previews` теперь читает registry-слой,
 а не рисует credits “по ощущениям”.

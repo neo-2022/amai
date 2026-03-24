@@ -750,6 +750,12 @@ pub struct ObserveTokenAdjustmentAddArgs {
     pub currency_profile: Option<String>,
     #[arg(long)]
     pub related_statement_id: Option<String>,
+    #[arg(long, default_value_t = false)]
+    pub resolve_related_statement_id: bool,
+    #[arg(long)]
+    pub budget_profile: Option<String>,
+    #[arg(long)]
+    pub include_verify_events: Option<bool>,
     #[arg(long)]
     pub adjustment_id: Option<String>,
 }

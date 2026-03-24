@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:43 MSK
-Ручная сверка guide/docs: 2026-03-24 15:43 MSK
+modified_at: 2026-03-24 15:48 MSK
+Ручная сверка guide/docs: 2026-03-24 15:48 MSK
 
 # Operations
 
@@ -1694,8 +1694,11 @@ cargo run -- context pack \
   - если env `AMAI_TOKEN_ADJUSTMENT_REGISTRY_PATH` не задан и repo-local файл ещё не
     materialized, честный статус остаётся `default_path_missing`;
   - operator-safe команды:
-    - `./target/release/amai observe token-adjustment-registry --scope lifetime`
-    - `./target/release/amai observe token-adjustment-add --scope lifetime --kind adjustment_entry --status pending_review --reason-code ...`
+  - `./target/release/amai observe token-adjustment-registry --scope lifetime`
+  - `./target/release/amai observe token-adjustment-add --scope lifetime --kind adjustment_entry --status pending_review --reason-code ...`
+  - если нужно сразу связать correction entry с текущим `statement_preview_id`, теперь есть
+    autofill-path:
+    - `./target/release/amai observe token-adjustment-add --scope lifetime --status pending_review --reason-code ... --resolve-related-statement-id`
   - adjustments живут отдельными entries со статусами
     `pending_review / approved_but_unapplied / applied_report_only / disputed / rejected`
     и не дают quietly переписывать старый period.

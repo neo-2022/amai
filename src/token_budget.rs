@@ -2903,6 +2903,30 @@ fn write_adjustment_registry_file(path: &Path, registry: &AdjustmentRegistryFile
         .with_context(|| format!("failed to write adjustment registry {}", path.display()))
 }
 
+async fn resolve_statement_preview_id_for_scope(
+    repo_root: &Path,
+    config: &TokenBudgetConfigFile,
+    budget_profile: Option<&str>,
+    include_verify_events: Option<bool>,
+    scope: &str,
+) -> Result<String> {
+    let cfg = AppConfig::from_env()?;
+    let db = postgres::connect_admin(&cfg).await?;
+    let report = collect_report(
+        repo_root,
+        &db,
+        budget_profile,
+        include_verify_events.unwrap_or(config.measurement.include_verify_events_by_default),
+        None,
+    )
+    .await?;
+    let statement_preview_id =
+        report["token_budget_report"]["statement_export_previews"][scope]["statement_preview_id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("statement preview id unavailable for scope {scope}"))?;
+    Ok(statement_preview_id.to_string())
+}
+
 pub async fn print_adjustment_registry(args: &ObserveTokenAdjustmentRegistryArgs) -> Result<()> {
     if let Some(scope) = args.scope.as_deref() {
         validate_adjustment_scope(scope)?;
@@ -2933,6 +2957,23 @@ pub async fn add_adjustment_entry(args: &ObserveTokenAdjustmentAddArgs) -> Resul
     validate_adjustment_status(&args.status)?;
     let repo_root = config::discover_repo_root(None)?;
     let config = load_config(&repo_root)?;
+    let related_statement_id = match (
+        args.related_statement_id.as_ref(),
+        args.resolve_related_statement_id,
+    ) {
+        (Some(explicit), _) => Some(explicit.clone()),
+        (None, true) => Some(
+            resolve_statement_preview_id_for_scope(
+                &repo_root,
+                &config,
+                args.budget_profile.as_deref(),
+                args.include_verify_events,
+                &args.scope,
+            )
+            .await?,
+        ),
+        (None, false) => None,
+    };
     let path = adjustment_registry_write_path(&repo_root);
     let mut registry = load_adjustment_registry_file_for_write(&path)?;
     let entry = AdjustmentRegistryEntry {
@@ -2948,7 +2989,7 @@ pub async fn add_adjustment_entry(args: &ObserveTokenAdjustmentAddArgs) -> Resul
         tokens_delta: args.tokens_delta,
         amount_delta: args.amount_delta,
         currency_profile: args.currency_profile.clone(),
-        related_statement_id: args.related_statement_id.clone(),
+        related_statement_id: related_statement_id.clone(),
     };
     registry.adjustments.push(entry.clone());
     write_adjustment_registry_file(&path, &registry)?;
@@ -2961,6 +3002,7 @@ pub async fn add_adjustment_entry(args: &ObserveTokenAdjustmentAddArgs) -> Resul
                 "entry": adjustment_entry_json(&entry),
                 "scope_summary": registry_preview["scopes"][args.scope.as_str()].clone(),
                 "registry_status": registry_preview["status"].clone(),
+                "resolved_related_statement_id": related_statement_id,
                 "request_schema_version": config.contract.adjustment_request_schema_version,
                 "note": "Adjustment entry materialized отдельно от token events: historical usage не переписывается, а correction/dispute живёт как отдельный registry layer."
             }

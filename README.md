@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:43 MSK
-Ручная сверка guide/docs: 2026-03-24 15:43 MSK
+modified_at: 2026-03-24 15:48 MSK
+Ручная сверка guide/docs: 2026-03-24 15:48 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1177,6 +1177,9 @@ preview, а не только raw count.
   - для operator-safe report-only entries теперь есть явные команды:
     - `amai observe token-adjustment-registry --scope lifetime`
     - `amai observe token-adjustment-add --scope lifetime --kind adjustment_entry --status pending_review --reason-code ...`
+    - если correction должен быть привязан к текущему statement preview, теперь можно
+      не вытаскивать id вручную:
+      - `amai observe token-adjustment-add --scope lifetime --status pending_review --reason-code ... --resolve-related-statement-id`
   - прошлые periods по-прежнему нельзя тихо переписывать задним числом: adjustments живут
     отдельными entries со статусами `pending_review / applied_report_only / disputed / rejected`.
 - provider reconciliation теперь тоже first-class:
