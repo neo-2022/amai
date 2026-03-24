@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:31 MSK
-Ручная сверка guide/docs: 2026-03-24 11:31 MSK
+modified_at: 2026-03-24 11:55 MSK
+Ручная сверка guide/docs: 2026-03-24 11:55 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1067,8 +1067,14 @@ preview, а не только raw count.
     что токены уже автоматически переведены в деньги.
 - `settlement_contract`
   - публикует statement-version, freeze/close policy, late-arrival policy,
-    correction/dispute policy;
+  correction/dispute policy;
   - при этом честно говорит, что это пока только `report_only preview`.
+- `reconciliation_contract`
+  - публикует, какие внешние truth-sources нужны для будущей сверки с provider;
+  - честно показывает, что сейчас они ещё не привязаны к runtime.
+- `reconciliation_previews`
+  - по каждому scope показывают внутренний measured lower bound;
+  - но внешние provider usage / cost / drift остаются `null`, пока нет настоящей external truth binding.
 - first-class `coverage`
   - у каждого rollup теперь есть не только savings, но и честный охват:
     `measured / included / excluded`;
@@ -1103,6 +1109,11 @@ preview, а не только raw count.
   - там уже видно measured non-billable lower bound по scope;
   - но `billable_lower_bound_tokens` и `final_amount` остаются пустыми, пока billing не
     включён честно.
+- provider reconciliation теперь тоже first-class:
+  - `reconciliation_previews.current_session / rolling_window / lifetime`
+  - там уже видно, что внутренний lower bound по scope есть;
+  - но `external_provider_usage_tokens`, `external_provider_cost_amount` и `drift_*`
+    остаются пустыми, пока provider export и rate-card ещё не подключены честно.
 
 По умолчанию proof/benchmark-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе, используйте:

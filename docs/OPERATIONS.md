@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:31 MSK
-Ручная сверка guide/docs: 2026-03-24 11:31 MSK
+modified_at: 2026-03-24 11:55 MSK
+Ручная сверка guide/docs: 2026-03-24 11:55 MSK
 
 # Operations
 
@@ -1610,6 +1610,14 @@ cargo run --release -- verify token-benchmark-suite \
   - late-arrival policy version;
   - correction/dispute policy versions;
   - current truthful status: `report_only preview`;
+- `reconciliation_contract`
+  - versioned contract для будущей сверки internal lower bound с provider truth;
+  - список обязательных и optional external sources;
+  - current truthful status: external truth ещё не bound в runtime;
+- `reconciliation_previews`
+  - `current_session / rolling_window / lifetime`;
+  - internal measured lower bound по scope;
+  - provider usage / provider cost / drift пока остаются `null`, если truth source ещё не подключён;
 - `coverage`
   - отдельный truth-layer поверх каждого rollup:
     - `measured_events`
@@ -1668,6 +1676,11 @@ cargo run --release -- verify token-benchmark-suite \
   - `rolling_window`
   - `lifetime`
   - в них видно measured non-billable lower bound по каждому scope, но billable amount и final amount остаются пустыми, пока settlement layer ещё не materialized.
+- `reconciliation_previews` теперь тоже каноничны:
+  - `current_session`
+  - `rolling_window`
+  - `lifetime`
+  - в них видно внутренний lower bound по каждому scope, но внешняя provider сверка и drift остаются пустыми, пока нет real source binding.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе:

@@ -82,6 +82,8 @@ struct TokenBudgetContractConfig {
     billing_policy_version: String,
     #[serde(default = "default_billing_mode")]
     billing_mode: String,
+    #[serde(default = "default_reconciliation_contract_version")]
+    reconciliation_contract_version: String,
     #[serde(default = "default_rate_card_version")]
     rate_card_version: String,
     #[serde(default = "default_currency_profile")]
@@ -111,6 +113,7 @@ impl Default for TokenBudgetContractConfig {
             event_time_policy_version: default_event_time_policy_version(),
             billing_policy_version: default_billing_policy_version(),
             billing_mode: default_billing_mode(),
+            reconciliation_contract_version: default_reconciliation_contract_version(),
             rate_card_version: default_rate_card_version(),
             currency_profile: default_currency_profile(),
             settlement_status: default_settlement_status(),
@@ -167,6 +170,7 @@ struct TokenBudgetEvent {
     event_time_policy_version: String,
     billing_policy_version: String,
     billing_mode: String,
+    reconciliation_contract_version: String,
     rate_card_version: String,
     currency_profile: String,
     settlement_status: String,
@@ -329,6 +333,10 @@ fn default_billing_mode() -> String {
     "report_only".to_string()
 }
 
+fn default_reconciliation_contract_version() -> String {
+    "provider-reconciliation-v1".to_string()
+}
+
 fn default_rate_card_version() -> String {
     "unpriced-v1".to_string()
 }
@@ -361,6 +369,7 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
+        "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "rate_card_version": contract.rate_card_version.clone(),
         "currency_profile": contract.currency_profile.clone(),
         "settlement_status": contract.settlement_status.clone(),
@@ -387,6 +396,7 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
+        "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "rate_card_version": contract.rate_card_version.clone(),
         "currency_profile": contract.currency_profile.clone(),
         "settlement_status": contract.settlement_status.clone(),
@@ -534,6 +544,171 @@ fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value
         "freeze_close_status": "not_enforced_report_only",
         "late_arrival_status": "accepted_until_settlement_exists",
         "note": "Settlement layer пока остаётся report-only preview: freeze/close, invoice-grade adjustments и disputes ещё не materialized как денежный workflow."
+    })
+}
+
+fn build_external_truth_sources_json(repo_root: &Path) -> Value {
+    json!({
+        "provider_usage_export": configured_external_truth_source(
+            repo_root,
+            "AMAI_PROVIDER_USAGE_EXPORT_PATH",
+            "provider_usage_export",
+            "Выгрузка usage/tokens от внешнего model provider",
+            true,
+        ),
+        "provider_invoice_export": configured_external_truth_source(
+            repo_root,
+            "AMAI_PROVIDER_INVOICE_EXPORT_PATH",
+            "provider_invoice_export",
+            "Invoice/export от внешнего provider",
+            false,
+        ),
+        "provider_rate_card": configured_external_truth_source(
+            repo_root,
+            "AMAI_PROVIDER_RATE_CARD_PATH",
+            "provider_rate_card",
+            "Историческая таблица тарифов provider/model",
+            true,
+        ),
+    })
+}
+
+fn configured_external_truth_source(
+    repo_root: &Path,
+    env_var: &str,
+    code: &str,
+    label: &str,
+    required_for_reconciliation: bool,
+) -> Value {
+    let configured_value = std::env::var(env_var)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let resolved_path = configured_value.as_ref().map(|raw| {
+        let candidate = PathBuf::from(raw);
+        if candidate.is_absolute() {
+            candidate
+        } else {
+            repo_root.join(candidate)
+        }
+    });
+    let path_exists = resolved_path
+        .as_ref()
+        .map(|path| path.exists())
+        .unwrap_or(false);
+    let status = match (configured_value.as_ref(), path_exists) {
+        (None, _) => "not_configured",
+        (Some(_), false) => "configured_path_missing",
+        (Some(_), true) => "configured_existing_path",
+    };
+    let binding_status = match status {
+        "not_configured" => "not_configured",
+        "configured_path_missing" => "configured_path_missing",
+        "configured_existing_path" => "configured_but_unbound",
+        _ => "unknown",
+    };
+    json!({
+        "code": code,
+        "label": label,
+        "env_var": env_var,
+        "required_for_reconciliation": required_for_reconciliation,
+        "configured_value": configured_value,
+        "resolved_path": resolved_path.map(|path| path.display().to_string()),
+        "status": status,
+        "binding_status": binding_status,
+        "note": "Источник может уже существовать как файл, но пока Amai не привязывает его автоматически к canonical reconciliation ledger."
+    })
+}
+
+fn build_reconciliation_contract_json(
+    contract: &TokenBudgetContractConfig,
+    external_sources: &Value,
+) -> Value {
+    let provider_usage_status = external_sources["provider_usage_export"]["status"]
+        .as_str()
+        .unwrap_or("not_configured");
+    let rate_card_status = external_sources["provider_rate_card"]["status"]
+        .as_str()
+        .unwrap_or("not_configured");
+    let status = match (provider_usage_status, rate_card_status) {
+        ("configured_existing_path", "configured_existing_path") => {
+            "configured_sources_not_yet_bound"
+        }
+        ("configured_existing_path", _) => "awaiting_rate_card_source",
+        _ => "awaiting_provider_usage_source",
+    };
+
+    json!({
+        "contract_version": contract.reconciliation_contract_version.clone(),
+        "status": status,
+        "ready_for_external_reconciliation": false,
+        "internal_truth_layers": [
+            "token_budget_event",
+            "usage_event_schema",
+            "statement_previews",
+            "agent_cycle_economics"
+        ],
+        "canonical_internal_scope": "retrieval savings floor + partial whole-agent-cycle lower bound",
+        "external_truth_sources": external_sources.clone(),
+        "required_sources": [
+            "provider_usage_export",
+            "provider_rate_card"
+        ],
+        "optional_sources": [
+            "provider_invoice_export"
+        ],
+        "note": "Amai уже меряет внутренний lower bound честно, но внешний provider truth пока не привязан к runtime. Это reconciliation contract, а не готовый settlement engine."
+    })
+}
+
+fn build_reconciliation_preview(
+    scope_code: &str,
+    scope_label: &str,
+    statement_preview: &Value,
+    contract: &TokenBudgetContractConfig,
+    external_sources: &Value,
+) -> Value {
+    let provider_usage_status = external_sources["provider_usage_export"]["status"]
+        .as_str()
+        .unwrap_or("not_configured");
+    let rate_card_status = external_sources["provider_rate_card"]["status"]
+        .as_str()
+        .unwrap_or("not_configured");
+    let reconciliation_state = match (provider_usage_status, rate_card_status) {
+        ("configured_existing_path", "configured_existing_path") => {
+            "configured_sources_not_yet_bound"
+        }
+        ("configured_existing_path", _) => "awaiting_rate_card_source",
+        _ => "awaiting_provider_usage_source",
+    };
+    let mut blocking_reasons = Vec::new();
+    if provider_usage_status != "configured_existing_path" {
+        blocking_reasons.push("provider_usage_source_missing");
+    }
+    if rate_card_status != "configured_existing_path" {
+        blocking_reasons.push("provider_rate_card_missing");
+    }
+    if contract.billing_mode == "report_only" {
+        blocking_reasons.push("billing_policy_report_only");
+    }
+    if statement_preview["billable_lower_bound_tokens"].is_null() {
+        blocking_reasons.push("billable_lower_bound_not_materialized");
+    }
+
+    json!({
+        "scope_code": scope_code,
+        "scope_label": scope_label,
+        "reconciliation_state": reconciliation_state,
+        "coverage": statement_preview["coverage"].clone(),
+        "internal_measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
+        "billable_lower_bound_tokens": statement_preview["billable_lower_bound_tokens"].clone(),
+        "external_provider_usage_tokens": Value::Null,
+        "external_provider_cost_amount": Value::Null,
+        "drift_tokens": Value::Null,
+        "drift_amount": Value::Null,
+        "currency_profile": contract.currency_profile.clone(),
+        "external_truth_sources": external_sources.clone(),
+        "blocking_reasons": blocking_reasons,
+        "note": "Этот preview честно показывает внутренний lower bound по scope, но не делает вид, что он уже сверен с usage/export от внешнего provider."
     })
 }
 
@@ -868,6 +1043,29 @@ async fn collect_report(
         &events,
         &profile.display_name,
     );
+    let external_truth_sources = build_external_truth_sources_json(repo_root);
+    let current_session_statement_preview = build_statement_preview(
+        "current_session",
+        "текущая сессия",
+        &current_session_summary,
+        &config.contract,
+    );
+    let rolling_window_statement_preview = if profile.rolling_window_hours.is_some() {
+        build_statement_preview(
+            "rolling_window",
+            &format!("окно {}", profile.display_name),
+            &rolling_window_summary,
+            &config.contract,
+        )
+    } else {
+        Value::Null
+    };
+    let lifetime_statement_preview = build_statement_preview(
+        "lifetime",
+        "всё время записи",
+        &lifetime_summary,
+        &config.contract,
+    );
 
     Ok(json!({
         "token_budget_report": {
@@ -886,6 +1084,7 @@ async fn collect_report(
             "billing_policy": build_billing_policy_json(&config.contract, &config.measurement),
             "rate_card": build_rate_card_json(&config.contract),
             "settlement_contract": build_settlement_contract_json(&config.contract),
+            "reconciliation_contract": build_reconciliation_contract_json(&config.contract, &external_truth_sources),
             "filters": {
                 "include_verify_events": include_verify_events,
             },
@@ -896,27 +1095,39 @@ async fn collect_report(
             "lifetime": lifetime_summary,
             "agent_cycle_economics": agent_cycle_economics,
             "statement_previews": {
-                "current_session": build_statement_preview(
+                "current_session": current_session_statement_preview.clone(),
+                "rolling_window": if profile.rolling_window_hours.is_some() {
+                    rolling_window_statement_preview.clone()
+                } else {
+                    Value::Null
+                },
+                "lifetime": lifetime_statement_preview.clone(),
+            },
+            "reconciliation_previews": {
+                "current_session": build_reconciliation_preview(
                     "current_session",
                     "текущая сессия",
-                    &current_session_summary,
+                    &current_session_statement_preview,
                     &config.contract,
+                    &external_truth_sources,
                 ),
                 "rolling_window": if profile.rolling_window_hours.is_some() {
-                    build_statement_preview(
+                    build_reconciliation_preview(
                         "rolling_window",
                         &format!("окно {}", profile.display_name),
-                        &rolling_window_summary,
+                        &rolling_window_statement_preview,
                         &config.contract,
+                        &external_truth_sources,
                     )
                 } else {
                     Value::Null
                 },
-                "lifetime": build_statement_preview(
+                "lifetime": build_reconciliation_preview(
                     "lifetime",
                     "всё время записи",
-                    &lifetime_summary,
+                    &lifetime_statement_preview,
                     &config.contract,
+                    &external_truth_sources,
                 ),
             },
             "source_breakdown": source_breakdown,
@@ -1342,6 +1553,10 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .unwrap_or("report_only")
         .to_string();
+    let reconciliation_contract_version = node["contract"]["reconciliation_contract_version"]
+        .as_str()
+        .unwrap_or("provider-reconciliation-v0")
+        .to_string();
     let rate_card_version = node["contract"]["rate_card_version"]
         .as_str()
         .unwrap_or("unpriced-v0")
@@ -1451,6 +1666,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         event_time_policy_version,
         billing_policy_version,
         billing_mode,
+        reconciliation_contract_version,
         rate_card_version,
         currency_profile,
         settlement_status,
@@ -3096,6 +3312,7 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
             "event_time_policy_version": event.event_time_policy_version.clone(),
             "billing_policy_version": event.billing_policy_version.clone(),
             "billing_mode": event.billing_mode.clone(),
+            "reconciliation_contract_version": event.reconciliation_contract_version.clone(),
             "rate_card_version": event.rate_card_version.clone(),
             "currency_profile": event.currency_profile.clone(),
             "settlement_status": event.settlement_status.clone(),
@@ -4380,8 +4597,9 @@ mod tests {
     use super::{
         MeasurementConfig, NaiveScope, TokenBudgetContractConfig, TokenBudgetEvent,
         apply_reverification_metadata, baseline_strategy_breakdown, build_baseline_contract_json,
-        build_billing_policy_json, build_event_payload, build_product_headline,
-        build_rate_card_json, build_settlement_contract_json, build_statement_preview,
+        build_billing_policy_json, build_event_payload, build_external_truth_sources_json,
+        build_product_headline, build_rate_card_json, build_reconciliation_contract_json,
+        build_reconciliation_preview, build_settlement_contract_json, build_statement_preview,
         build_usage_event_schema_json, default_backfill_policy_version,
         default_baseline_method_version, default_billing_mode, default_billing_policy_version,
         default_correction_policy_version, default_coverage_model_version,
@@ -4389,14 +4607,16 @@ mod tests {
         default_event_time_policy_version, default_excluded_taxonomy_version,
         default_freeze_close_policy_version, default_late_arrival_policy_version,
         default_quality_method_version, default_rate_card_version,
-        default_settlement_statement_version, default_settlement_status, derive_baseline_strategy,
-        derive_quality_verdict, derive_query_type, derive_traffic_class, event_to_json,
-        followup_queries_related, include_traffic_class_in_report, latency_slice_breakdown,
-        needs_live_reverification, parse_snapshot_event, reconcile_followup_recovery,
-        repair_legacy_token_event_payload, summarize_events,
+        default_reconciliation_contract_version, default_settlement_statement_version,
+        default_settlement_status, derive_baseline_strategy, derive_quality_verdict,
+        derive_query_type, derive_traffic_class, event_to_json, followup_queries_related,
+        include_traffic_class_in_report, latency_slice_breakdown, needs_live_reverification,
+        parse_snapshot_event, reconcile_followup_recovery, repair_legacy_token_event_payload,
+        summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
+    use std::path::Path;
     use uuid::Uuid;
 
     fn contract_fixture() -> TokenBudgetContractConfig {
@@ -4448,6 +4668,7 @@ mod tests {
                     event_time_policy_version: default_event_time_policy_version(),
                     billing_policy_version: default_billing_policy_version(),
                     billing_mode: default_billing_mode(),
+                    reconciliation_contract_version: default_reconciliation_contract_version(),
                     rate_card_version: default_rate_card_version(),
                     currency_profile: default_currency_profile(),
                     settlement_status: default_settlement_status(),
@@ -4745,6 +4966,10 @@ mod tests {
         );
         assert_eq!(token_event["contract"]["billing_mode"], "report_only");
         assert_eq!(
+            token_event["contract"]["reconciliation_contract_version"],
+            "provider-reconciliation-v1"
+        );
+        assert_eq!(
             token_event["contract"]["settlement_status"],
             "unsettled_report_only"
         );
@@ -4890,6 +5115,75 @@ mod tests {
         assert_eq!(preview["close_readiness"], "not_closeable_report_only");
         assert_eq!(preview["measured_non_billable_lower_bound_tokens"], 1234);
         assert_eq!(preview["billable_lower_bound_tokens"], json!(null));
+    }
+
+    #[test]
+    fn reconciliation_contract_is_truthful_without_external_sources() {
+        let contract = contract_fixture();
+        let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
+        let reconciliation = build_reconciliation_contract_json(&contract, &sources);
+
+        assert_eq!(
+            reconciliation["contract_version"],
+            "provider-reconciliation-v1"
+        );
+        assert_eq!(reconciliation["status"], "awaiting_provider_usage_source");
+        assert_eq!(
+            reconciliation["ready_for_external_reconciliation"],
+            json!(false)
+        );
+        assert_eq!(
+            reconciliation["external_truth_sources"]["provider_usage_export"]["status"],
+            "not_configured"
+        );
+        assert_eq!(
+            reconciliation["external_truth_sources"]["provider_rate_card"]["status"],
+            "not_configured"
+        );
+    }
+
+    #[test]
+    fn reconciliation_preview_keeps_external_values_null_until_truth_is_bound() {
+        let contract = contract_fixture();
+        let sources = build_external_truth_sources_json(Path::new("/tmp/amai-no-sources"));
+        let summary = json!({
+            "coverage": {
+                "completeness_state": "partially_confirmed"
+            },
+            "verified_effective_saved_tokens": 4321
+        });
+        let preview =
+            build_statement_preview("current_session", "текущая сессия", &summary, &contract);
+        let reconciliation = build_reconciliation_preview(
+            "current_session",
+            "текущая сессия",
+            &preview,
+            &contract,
+            &sources,
+        );
+
+        assert_eq!(
+            reconciliation["reconciliation_state"],
+            "awaiting_provider_usage_source"
+        );
+        assert_eq!(
+            reconciliation["internal_measured_non_billable_lower_bound_tokens"],
+            4321
+        );
+        assert_eq!(
+            reconciliation["external_provider_usage_tokens"],
+            json!(null)
+        );
+        assert_eq!(reconciliation["drift_tokens"], json!(null));
+        assert_eq!(
+            reconciliation["blocking_reasons"],
+            json!([
+                "provider_usage_source_missing",
+                "provider_rate_card_missing",
+                "billing_policy_report_only",
+                "billable_lower_bound_not_materialized"
+            ])
+        );
     }
 
     #[test]

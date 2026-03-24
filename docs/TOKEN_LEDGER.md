@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:31 MSK
-Ручная сверка guide/docs: 2026-03-24 11:31 MSK
+modified_at: 2026-03-24 11:55 MSK
+Ручная сверка guide/docs: 2026-03-24 11:55 MSK
 
 # Token Ledger
 
@@ -121,6 +121,7 @@ Ledger не имеет права смешивать:
 - `event_time_policy_version`
 - `billing_policy_version`
 - `billing_mode`
+- `reconciliation_contract_version`
 - `rate_card_version`
 - `currency_profile`
 - `settlement_status`
@@ -500,6 +501,46 @@ reporting layers:
 
 Это не недостаток UX, а truth guardrail до тех пор, пока реальный billing workflow не
 materialized end-to-end.
+
+## Provider reconciliation и внешний truth source
+
+После settlement-preview следующий честный слой — не “сразу деньги”, а явный
+`reconciliation_contract`.
+
+Зачем он нужен:
+- не делать вид, что внутренний lower bound уже сверен с provider usage;
+- не терять разницу между `internal measured truth` и `external billing truth`;
+- не скрывать, каких файлов и каких policy слоёв ещё не хватает до money-grade режима.
+
+Теперь report отдельно публикует:
+- `reconciliation_contract`
+- `reconciliation_previews`
+
+`reconciliation_contract` обязан честно отвечать на вопросы:
+- какие внутренние truth layers уже есть;
+- какие внешние sources нужны для сверки;
+- какие из них обязательны;
+- готовы ли мы вообще к external reconciliation.
+
+Текущий truthful status:
+- `reconciliation_contract_version = provider-reconciliation-v1`
+- `ready_for_external_reconciliation = false`
+- внутренний lower bound уже materialized;
+- provider usage export, invoice export и rate card пока ещё не привязаны к runtime автоматически.
+
+Именно поэтому `reconciliation_previews` сейчас обязаны оставаться такими:
+- `internal_measured_non_billable_lower_bound_tokens` заполнен;
+- `external_provider_usage_tokens = null`
+- `external_provider_cost_amount = null`
+- `drift_tokens = null`
+- `drift_amount = null`
+
+Это не пробел в арифметике, а truth guardrail:
+- пока внешний источник не подключён;
+- пока rate card не materialized;
+- пока reconciliation parser не привязан к canonical ledger;
+
+`Amai` не имеет права подменять внутренний lower bound внешней сверкой “по ощущениям”.
 
 ## Preliminary vs stable
 
