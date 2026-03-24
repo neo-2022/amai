@@ -122,6 +122,8 @@ struct TokenBudgetContractConfig {
     contractual_evidence_pack_version: String,
     #[serde(default = "default_contractual_statement_export_version")]
     contractual_statement_export_version: String,
+    #[serde(default = "default_settlement_report_preview_version")]
+    settlement_report_preview_version: String,
     #[serde(default = "default_rate_card_version")]
     rate_card_version: String,
     #[serde(default = "default_currency_profile")]
@@ -166,6 +168,7 @@ impl Default for TokenBudgetContractConfig {
             infra_cost_profile_version: default_infra_cost_profile_version(),
             contractual_evidence_pack_version: default_contractual_evidence_pack_version(),
             contractual_statement_export_version: default_contractual_statement_export_version(),
+            settlement_report_preview_version: default_settlement_report_preview_version(),
             rate_card_version: default_rate_card_version(),
             currency_profile: default_currency_profile(),
             settlement_status: default_settlement_status(),
@@ -571,11 +574,15 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v9".to_string()
+    "contractual-evidence-pack-v10".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v9".to_string()
+    "contractual-statement-export-v10".to_string()
+}
+
+fn default_settlement_report_preview_version() -> String {
+    "settlement-report-preview-v1".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -625,6 +632,7 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "infra_cost_profile_version": contract.infra_cost_profile_version.clone(),
         "contractual_evidence_pack_version": contract.contractual_evidence_pack_version.clone(),
         "contractual_statement_export_version": contract.contractual_statement_export_version.clone(),
+        "settlement_report_preview_version": contract.settlement_report_preview_version.clone(),
         "rate_card_version": contract.rate_card_version.clone(),
         "currency_profile": contract.currency_profile.clone(),
         "settlement_status": contract.settlement_status.clone(),
@@ -666,6 +674,7 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "infra_cost_profile_version": contract.infra_cost_profile_version.clone(),
         "contractual_evidence_pack_version": contract.contractual_evidence_pack_version.clone(),
         "contractual_statement_export_version": contract.contractual_statement_export_version.clone(),
+        "settlement_report_preview_version": contract.settlement_report_preview_version.clone(),
         "rate_card_version": contract.rate_card_version.clone(),
         "currency_profile": contract.currency_profile.clone(),
         "settlement_status": contract.settlement_status.clone(),
@@ -1232,6 +1241,7 @@ fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value
         "settlement_lifecycle_model_version": contract.settlement_lifecycle_model_version.clone(),
         "statement_period_governance_version": contract.statement_period_governance_version.clone(),
         "adjustment_preview_model_version": contract.adjustment_preview_model_version.clone(),
+        "settlement_report_preview_version": contract.settlement_report_preview_version.clone(),
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "settlement_status": contract.settlement_status.clone(),
         "current_materialized_boundary": "measured_report_only",
@@ -4185,6 +4195,113 @@ fn hash_line_items(items: &[Value]) -> Result<String> {
     Ok(hex_sha256(&bytes))
 }
 
+fn build_settlement_report_preview(
+    contract: &TokenBudgetContractConfig,
+    statement_export_preview: &Value,
+) -> Value {
+    let statement_preview = &statement_export_preview["line_item_surfaces"]["statement_preview"];
+    let period = &statement_preview["period"];
+    let adjustment_preview = &statement_preview["adjustment_preview"];
+    let external_truth_manifest = &statement_export_preview["external_truth_manifest"];
+    let settlement_report_identity = format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}",
+        statement_export_preview["scope_code"]
+            .as_str()
+            .unwrap_or("unknown-scope"),
+        contract.settlement_report_preview_version,
+        statement_export_preview["statement_preview_id"]
+            .as_str()
+            .unwrap_or("missing-statement-id"),
+        statement_export_preview["included_events_hash"]
+            .as_str()
+            .unwrap_or("missing-included-hash"),
+        statement_export_preview["excluded_events_hash"]
+            .as_str()
+            .unwrap_or("missing-excluded-hash"),
+        contract.billing_policy_version,
+        contract.reconciliation_contract_version,
+        external_truth_manifest["manifest_hash"]
+            .as_str()
+            .unwrap_or("missing-truth-manifest"),
+    );
+    let review_grade_state = if statement_export_preview["settlement_stage"].as_str()
+        == Some("measured_review_ready_report_only")
+    {
+        "review_ready_report_only"
+    } else if statement_export_preview["provisional_close_candidate"].as_bool() == Some(true) {
+        "provisionally_stable_report_only"
+    } else {
+        "provisional_report_only"
+    };
+
+    json!({
+        "model_version": contract.settlement_report_preview_version.clone(),
+        "settlement_report_id": hex_sha256(settlement_report_identity.as_bytes()),
+        "statement_preview_id": statement_export_preview["statement_preview_id"].clone(),
+        "scope_code": statement_export_preview["scope_code"].clone(),
+        "scope_label": statement_export_preview["scope_label"].clone(),
+        "period_kind": period["period_kind"].clone(),
+        "period_start_epoch_ms": period["period_start_epoch_ms"].clone(),
+        "period_end_epoch_ms": period["period_end_epoch_ms"].clone(),
+        "provisional_close_earliest_at_epoch_ms": statement_export_preview["provisional_close_earliest_at_epoch_ms"].clone(),
+        "late_arrival_deadline_epoch_ms": period["late_arrival_deadline_epoch_ms"].clone(),
+        "settlement_stage": statement_export_preview["settlement_stage"].clone(),
+        "settlement_stage_family": statement_export_preview["settlement_stage_family"].clone(),
+        "next_settlement_stage_candidate": statement_export_preview["next_settlement_stage_candidate"].clone(),
+        "next_settlement_stage_blockers": statement_export_preview["next_settlement_stage_blockers"].clone(),
+        "coverage_state": statement_export_preview["coverage_state"].clone(),
+        "contractual_freshness_state": statement_export_preview["contractual_freshness_state"].clone(),
+        "usage_truth_completeness_state": statement_export_preview["usage_truth_completeness_state"].clone(),
+        "rate_card_truth_completeness_state": statement_export_preview["rate_card_truth_completeness_state"].clone(),
+        "money_truth_completeness_state": statement_export_preview["money_truth_completeness_state"].clone(),
+        "pricing_truth_completeness_state": statement_export_preview["pricing_truth_completeness_state"].clone(),
+        "reconciliation_readiness_state": statement_export_preview["reconciliation_readiness_state"].clone(),
+        "margin_readiness_state": statement_export_preview["margin_readiness_state"].clone(),
+        "provider_identity_state": statement_export_preview["provider_identity_state"].clone(),
+        "included_events_count": statement_export_preview["included_events_count"].clone(),
+        "excluded_events_count": statement_export_preview["excluded_events_count"].clone(),
+        "included_events_hash": statement_export_preview["included_events_hash"].clone(),
+        "excluded_events_hash": statement_export_preview["excluded_events_hash"].clone(),
+        "measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
+        "adjusted_measured_non_billable_lower_bound_tokens": statement_preview["adjusted_measured_non_billable_lower_bound_tokens"].clone(),
+        "billable_lower_bound_tokens": statement_preview["billable_lower_bound_tokens"].clone(),
+        "final_amount": statement_preview["final_amount"].clone(),
+        "currency_profile": statement_export_preview["currency_profile"].clone(),
+        "external_truth_manifest_hash": external_truth_manifest["manifest_hash"].clone(),
+        "adjustment_summary": {
+            "registry_status": adjustment_preview["registry_status"].clone(),
+            "correction_action_state": adjustment_preview["correction_action_state"].clone(),
+            "pending_entries_count": adjustment_preview["pending_entries_count"].clone(),
+            "applied_entries_count": adjustment_preview["applied_entries_count"].clone(),
+            "disputed_entries_count": adjustment_preview["disputed_entries_count"].clone(),
+            "applied_tokens_delta": adjustment_preview["applied_tokens_delta"].clone(),
+            "applied_amount_delta": adjustment_preview["applied_amount_delta"].clone(),
+        },
+        "policy_versions": {
+            "settlement_statement_version": contract.settlement_statement_version.clone(),
+            "settlement_report_preview_version": contract.settlement_report_preview_version.clone(),
+            "billing_policy_version": contract.billing_policy_version.clone(),
+            "freeze_close_policy_version": contract.freeze_close_policy_version.clone(),
+            "late_arrival_policy_version": contract.late_arrival_policy_version.clone(),
+            "correction_policy_version": contract.correction_policy_version.clone(),
+            "dispute_policy_version": contract.dispute_policy_version.clone(),
+            "settlement_lifecycle_model_version": contract.settlement_lifecycle_model_version.clone(),
+            "statement_period_governance_version": contract.statement_period_governance_version.clone(),
+            "adjustment_preview_model_version": contract.adjustment_preview_model_version.clone(),
+            "adjustment_registry_version": contract.adjustment_registry_version.clone(),
+            "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
+            "margin_model_version": contract.margin_model_version.clone(),
+            "rate_card_binding_model_version": contract.rate_card_binding_model_version.clone(),
+            "infra_cost_binding_model_version": contract.infra_cost_binding_model_version.clone(),
+        },
+        "review_grade_state": review_grade_state,
+        "report_only": true,
+        "invoice_grade": false,
+        "blocking_reasons": statement_export_preview["blocking_reasons"].clone(),
+        "note": "Settlement report preview собирает period anchors, hashes, policy snapshot и truth states в один review-grade object. Он пригоден для audit/review, но не является invoice или финальным settlement amount."
+    })
+}
+
 fn build_statement_export_preview(
     report: &Value,
     scope_code: &str,
@@ -4238,7 +4355,7 @@ fn build_statement_export_preview(
         "no_open_disputes"
     };
 
-    Ok(json!({
+    let mut preview = json!({
         "model_version": contract.contractual_statement_export_version.clone(),
         "scope_code": scope_code,
         "scope_label": scope_label,
@@ -4301,6 +4418,7 @@ fn build_statement_export_preview(
             "redaction_policy": "raw_query_text_removed_keep_query_hash_and_token_state",
             "customer_visible_sections": [
                 "statement_preview_id",
+                "settlement_report_preview",
                 "contractual_state",
                 "coverage_state",
                 "external_truth_manifest",
@@ -4330,7 +4448,9 @@ fn build_statement_export_preview(
             "margin_scope": margin_scope,
         },
         "note": "Это stable export preview для customer review: hashes и scope states уже зафиксированы, но invoice-grade settlement всё ещё не materialized."
-    }))
+    });
+    preview["settlement_report_preview"] = build_settlement_report_preview(contract, &preview);
+    Ok(preview)
 }
 
 fn build_contractual_evidence_pack(
@@ -4349,6 +4469,8 @@ fn build_contractual_evidence_pack(
     let reconciliation_preview =
         report["token_budget_report"]["reconciliation_previews"][scope_code].clone();
     let margin_scope = report["token_budget_report"]["margin_view"][scope_code].clone();
+    let statement_export_preview =
+        report["token_budget_report"]["statement_export_previews"][scope_code].clone();
 
     Ok(json!({
         "contractual_evidence_pack": {
@@ -4384,6 +4506,7 @@ fn build_contractual_evidence_pack(
         "pricing_truth_completeness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["pricing_truth_completeness_state"].clone(),
         "margin_readiness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["margin_readiness_state"].clone(),
         "external_truth_manifest": report["token_budget_report"]["external_truth_manifest"].clone(),
+        "settlement_report_preview": statement_export_preview["settlement_report_preview"].clone(),
         "export_semantics": {
             "surface_kind": "customer_evidence_pack_report_only",
             "self_serve_state": "self_serve_ready_report_only",
@@ -4394,6 +4517,7 @@ fn build_contractual_evidence_pack(
                 "truth_guardrail",
                 "contract_versions",
                 "external_truth_manifest",
+                "settlement_report_preview",
                 "statement_preview",
                 "reconciliation_preview",
                 "margin_scope",
@@ -4685,6 +4809,7 @@ fn build_contractual_sources_value(
         "reconciliation_preview": report["token_budget_report"]["reconciliation_previews"][scope_code].clone(),
         "margin_scope": report["token_budget_report"]["margin_view"][scope_code].clone(),
         "statement_export_preview": report["token_budget_report"]["statement_export_previews"][scope_code].clone(),
+        "settlement_report_preview": report["token_budget_report"]["settlement_report_previews"][scope_code].clone(),
         "transactional_statuses": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["transactional_statuses"].clone(),
         "customer_contractual_boundary": {
             "surface_kind": "customer_contractual_sources_report_only",
@@ -4832,7 +4957,7 @@ pub async fn print_statement_export_bundle(
     }
     let bundle = json!({
         "token_statement_export_bundle": {
-            "bundle_version": "token-statement-export-bundle-v1",
+            "bundle_version": "token-statement-export-bundle-v2",
             "generated_at_epoch_ms": now_epoch_ms,
             "scope_code": scope_code,
             "scope_label": scope_label,
@@ -4840,10 +4965,12 @@ pub async fn print_statement_export_bundle(
             "statement_preview_id": statement_export_preview["statement_preview_id"].clone(),
             "files": {
                 "manifest": "manifest.json",
+                "settlement_report_preview": "settlement_report_preview.json",
                 "statement_export_preview": "statement_export_preview.json",
                 "contractual_evidence_pack": "contractual_evidence_pack.json",
                 "token_contractual_sources": "token_contractual_sources.json",
             },
+        "settlement_report_preview": statement_export_preview["settlement_report_preview"].clone(),
         "statement_export_preview": statement_export_preview.clone(),
         "contractual_evidence_pack": evidence_pack["contractual_evidence_pack"].clone(),
         "token_contractual_sources": contractual_sources,
@@ -4876,6 +5003,10 @@ pub async fn print_statement_export_bundle(
         });
         let files = [
             ("manifest.json", manifest),
+            (
+                "settlement_report_preview.json",
+                root["settlement_report_preview"].clone(),
+            ),
             (
                 "statement_export_preview.json",
                 root["statement_export_preview"].clone(),
@@ -5459,6 +5590,15 @@ async fn collect_report(
         &config.contract,
         include_verify_events,
     )?;
+    let current_session_settlement_report_preview =
+        current_session_statement_export["settlement_report_preview"].clone();
+    let rolling_window_settlement_report_preview = if profile.rolling_window_hours.is_some() {
+        rolling_window_statement_export["settlement_report_preview"].clone()
+    } else {
+        Value::Null
+    };
+    let lifetime_settlement_report_preview =
+        lifetime_statement_export["settlement_report_preview"].clone();
 
     Ok(json!({
         "token_budget_report": {
@@ -5543,6 +5683,11 @@ async fn collect_report(
                 "current_session": current_session_statement_export,
                 "rolling_window": rolling_window_statement_export,
                 "lifetime": lifetime_statement_export,
+            },
+            "settlement_report_previews": {
+                "current_session": current_session_settlement_report_preview,
+                "rolling_window": rolling_window_settlement_report_preview,
+                "lifetime": lifetime_settlement_report_preview,
             },
             "source_breakdown": source_breakdown,
             "query_slices": query_slices,
@@ -9551,7 +9696,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v9"
+            "contractual-evidence-pack-v10"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -11461,7 +11606,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v9");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v10");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -11520,6 +11665,21 @@ effective_to_epoch_ms = 2000
         assert_eq!(preview["credit_action_state"], "registry_not_configured");
         assert_eq!(preview["dispute_action_state"], "no_open_disputes");
         assert_eq!(preview["evidence_pack_available"], true);
+        assert_eq!(
+            preview["settlement_report_preview"]["model_version"],
+            "settlement-report-preview-v1"
+        );
+        assert_eq!(
+            preview["settlement_report_preview"]["scope_code"],
+            "current_session"
+        );
+        assert!(
+            preview["settlement_report_preview"]["settlement_report_id"]
+                .as_str()
+                .unwrap_or("")
+                .len()
+                > 10
+        );
         assert_eq!(
             preview["suitability"]["surfaces"]["product_kpi"]["state"],
             "provisional_lower_bound_with_coverage"
@@ -11607,6 +11767,14 @@ effective_to_epoch_ms = 2000
                         }
                     }
                 },
+                "statement_export_previews": {
+                    "lifetime": {
+                        "settlement_report_preview": {
+                            "model_version": "settlement-report-preview-v1",
+                            "settlement_report_id": "preview-hash"
+                        }
+                    }
+                },
                 "external_truth_manifest": {
                     "manifest_hash": "truth-hash"
                 }
@@ -11653,7 +11821,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v9");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v10");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -11697,6 +11865,14 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             payload["external_truth_manifest"]["manifest_hash"],
             "truth-hash"
+        );
+        assert_eq!(
+            payload["settlement_report_preview"]["model_version"],
+            "settlement-report-preview-v1"
+        );
+        assert_eq!(
+            payload["settlement_report_preview"]["settlement_report_id"],
+            "preview-hash"
         );
         assert!(
             payload["included_events_hash"]

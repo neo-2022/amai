@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 22:22 MSK
-Ручная сверка guide/docs: 2026-03-24 22:22 MSK
+modified_at: 2026-03-24 19:17 MSK
+Ручная сверка guide/docs: 2026-03-24 19:17 MSK
 
 # Operations
 
@@ -1688,8 +1688,8 @@ cargo run -- context pack \
     притворяться нормой;
 - `contractual_evidence_pack`
   - report-only export по `current_session / rolling_window / lifetime`;
-  - содержит `statement_preview`, `reconciliation_preview`, `margin_scope`,
-    hashes включённых и исключённых line items;
+  - содержит `settlement_report_preview`, `statement_preview`,
+    `reconciliation_preview`, `margin_scope`, hashes включённых и исключённых line items;
   - raw `query` туда не попадает, только `query_hash` и usage-state поля;
   - это contractual evidence для review/export, но не invoice.
 - `statement_export_previews`
@@ -1700,6 +1700,11 @@ cargo run -- context pack \
   - теперь ещё публикует `suitability`, чтобы contractual export и будущий billing
     не смешивались в одну шкалу пригодности;
   - это bridge между live report и full contractual evidence pack.
+- `settlement_report_previews`
+  - отдельный review-grade settlement object по каждому scope;
+  - собирает period anchors, hashes, policy versions и truth states в один stable surface;
+  - нужен затем, чтобы audit/export опирался на один объект, а не на смесь из preview,
+    pack и источников.
 - `adjustment_request_schema`
   - versioned request contract для future credit/correction/dispute entries;
   - запрещает тихую ретро-перезапись прошлого statement;

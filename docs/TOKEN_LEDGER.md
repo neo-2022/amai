@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 22:22 MSK
-Ручная сверка guide/docs: 2026-03-24 22:22 MSK
+modified_at: 2026-03-24 19:17 MSK
+Ручная сверка guide/docs: 2026-03-24 19:17 MSK
 
 # Token Ledger
 
@@ -770,6 +770,7 @@ Customer-facing export bundle:
 
 Этот bundle materialize-ит отдельные файлы:
 - `manifest.json`
+- `settlement_report_preview.json`
 - `statement_export_preview.json`
 - `contractual_evidence_pack.json`
 - `token_contractual_sources.json`
@@ -937,7 +938,7 @@ Customer-facing export bundle:
 - `line_items.excluded`
 
 Честный смысл этого export сейчас такой:
-- это `contractual-evidence-pack-v9`;
+- это `contractual-evidence-pack-v10`;
 - это всё ещё `report_only tokenonomics`;
 - это не invoice;
 - это не final settlement;
@@ -986,6 +987,7 @@ Hashes по line items нужны затем, чтобы:
 
 Поверх полного pack теперь нужен и отдельный:
 - `statement_export_previews.current_session / rolling_window / lifetime`
+- `settlement_report_previews.current_session / rolling_window / lifetime`
 
 У `statement_export_preview` теперь ещё отдельно публикуются pricing-source поля:
 - `rate_card_status`
@@ -998,6 +1000,8 @@ Hashes по line items нужны затем, чтобы:
 
 Это не дублирование, а отдельный слой:
 - preview даёт компактный `statement_preview_id`;
+- preview теперь ещё несёт готовый `settlement_report_preview`, чтобы review/export не
+  собирал period anchors, hashes и policy snapshot вручную;
 - preview теперь ещё несёт `settlement_stage`, `settlement_stage_family` и `next_settlement_stage_candidate`;
 - preview теперь ещё несёт `transactional_statuses`, чтобы export не путал уже materialized
   measured/report-only стадии с будущими reserved billing стадиями;

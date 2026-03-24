@@ -180,6 +180,8 @@ assert margin["infra_cost_scope_alignment_state"] == "scope_period_aligned", mar
 assert margin["provider_identity_state"] == "provider_identity_aligned", margin
 assert margin["temporal_truth_state"] == "scope_period_aligned", margin
 assert statement_export["rate_card_version"] == "demo-priced-v1", statement_export
+assert statement_export["settlement_report_preview"]["model_version"] == "settlement-report-preview-v1", statement_export
+assert statement_export["settlement_report_preview"]["settlement_report_id"], statement_export
 assert statement_export["rate_card_provider"] == "demo-provider", statement_export
 assert statement_export["rate_card_currency_profile"] == "USD", statement_export
 assert statement_export["line_item_surfaces"]["margin_scope"]["margin_state"] == "priced_preview_report_only", statement_export

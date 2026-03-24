@@ -122,6 +122,8 @@ assert payload["reconciliation_preview"]["usage_truth_completeness_state"] == "p
 assert payload["reconciliation_preview"]["money_truth_completeness_state"] == "provider_cost_and_invoice_bound", payload
 assert payload["reconciliation_preview"]["reconciliation_readiness_state"] == "usage_cost_and_invoice_truth_ready", payload
 assert payload["statement_export_preview"]["rate_card_status"] == "priced_bound", payload
+assert payload["settlement_report_preview"]["model_version"] == "settlement-report-preview-v1", payload
+assert payload["settlement_report_preview"]["settlement_report_id"], payload
 assert payload["statement_export_preview"]["rate_card_truth_completeness_state"] == "rate_card_priced_bound", payload
 assert payload["statement_export_preview"]["rate_card_version"] == "proof-rate-card-v1", payload
 assert payload["statement_export_preview"]["rate_card_provider"] == "openai", payload

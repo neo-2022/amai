@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 22:22 MSK
-Ручная сверка guide/docs: 2026-03-24 22:22 MSK
+modified_at: 2026-03-24 19:17 MSK
+Ручная сверка guide/docs: 2026-03-24 19:17 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1130,14 +1130,16 @@ preview, а не только raw count.
     rate-card binding, а не жить отдельной догадкой.
 - `contractual_evidence_pack`
   - по каждому scope можно выгрузить report-only evidence pack;
-  - туда входят `statement_preview`, `reconciliation_preview`, `margin_scope`,
-    hashes включённых/исключённых line items и сами line items без сырого текста запроса;
+  - туда входят `settlement_report_preview`, `statement_preview`,
+    `reconciliation_preview`, `margin_scope`, hashes включённых/исключённых line items
+    и сами line items без сырого текста запроса;
   - это нужно затем, чтобы customer-facing audit/export не подменялся dashboard-экраном;
   - но это по-прежнему не invoice и не готовый settlement.
 - `statement_export_previews`
   - по каждому scope теперь есть стабильный export-preview слой;
   - он публикует:
     - `statement_preview_id`
+    - `settlement_report_preview`
     - `included_events_hash`
     - `excluded_events_hash`
     - `provisional_close_state`
@@ -1149,6 +1151,16 @@ preview, а не только raw count.
     а не сразу с full evidence pack.
   - export preview теперь ещё несёт `suitability`, чтобы review/export и будущие
     money-facing surface-ы не путались между собой.
+- `settlement_report_previews`
+  - по каждому scope теперь есть отдельный review-grade settlement object;
+  - он собирает в одном месте:
+    - period anchors
+    - `included_events_hash / excluded_events_hash`
+    - policy versions
+    - truth/completeness states
+    - adjustment summary
+  - это нужно затем, чтобы audit/export держались на одном стабильном объекте,
+    а не на разрозненных полях из нескольких поверхностей.
 - first-class `coverage`
   - у каждого rollup теперь есть не только savings, но и честный охват:
     `measured / included / excluded`;
@@ -1296,6 +1308,7 @@ preview, а не только raw count.
   - поверх этого теперь есть и отдельный export-bundle:
     - `amai observe token-statement-export --scope lifetime --output-dir /tmp/amai-token-statement`
   - он materialize-ит в один каталог:
+    - `settlement_report_preview.json`
     - `manifest.json`
     - `statement_export_preview.json`
     - `contractual_evidence_pack.json`
