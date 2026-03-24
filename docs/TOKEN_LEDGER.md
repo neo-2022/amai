@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:23 MSK
-Ручная сверка guide/docs: 2026-03-24 11:23 MSK
+modified_at: 2026-03-24 11:31 MSK
+Ручная сверка guide/docs: 2026-03-24 11:31 MSK
 
 # Token Ledger
 
@@ -465,6 +465,41 @@ reporting layers:
 - metering уже сильный;
 - fairness/policy contract уже machine-readable;
 - pricing и settlement пока ещё не materialized как money-facing layer.
+
+## Settlement preview, freeze/close и late arrivals
+
+До invoice-grade tokenonomics нельзя перескакивать через settlement semantics.
+
+Поэтому report теперь должен публиковать:
+- `settlement_contract`
+- `statement_previews`
+
+`settlement_contract` обязан честно отвечать на вопросы:
+- какая версия statement preview сейчас действует;
+- какая freeze/close policy используется;
+- как трактуются late arrivals;
+- какой correction/dispute policy сейчас materialized;
+- закрыт ли уже реальный денежный workflow или это всё ещё report-only preview.
+
+Текущий truthful status:
+- `statement_version = settlement-preview-v1`
+- `freeze_close_status = not_enforced_report_only`
+- `late_arrival_status = accepted_until_settlement_exists`
+- corrections/disputes пока не invoice-grade, а только report-only semantics
+
+`statement_previews` нужны затем, чтобы по каждому scope показать:
+- measured non-billable lower bound;
+- coverage;
+- settlement status;
+- и при этом не подсовывать пользователю фальшивую сумму к оплате.
+
+Именно поэтому в текущем runtime:
+- `billable_lower_bound_tokens = null`
+- `final_amount = null`
+- `statement_status = report_only_preview`
+
+Это не недостаток UX, а truth guardrail до тех пор, пока реальный billing workflow не
+materialized end-to-end.
 
 ## Preliminary vs stable
 

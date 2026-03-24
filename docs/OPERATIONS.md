@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:23 MSK
-Ручная сверка guide/docs: 2026-03-24 11:23 MSK
+modified_at: 2026-03-24 11:31 MSK
+Ручная сверка guide/docs: 2026-03-24 11:31 MSK
 
 # Operations
 
@@ -1604,6 +1604,12 @@ cargo run --release -- verify token-benchmark-suite \
 - `rate_card`
   - rate-card version и currency profile;
   - `money_conversion_enabled = false`, пока pricing engine ещё не materialized;
+- `settlement_contract`
+  - statement version;
+  - freeze/close policy version;
+  - late-arrival policy version;
+  - correction/dispute policy versions;
+  - current truthful status: `report_only preview`;
 - `coverage`
   - отдельный truth-layer поверх каждого rollup:
     - `measured_events`
@@ -1657,6 +1663,11 @@ cargo run --release -- verify token-benchmark-suite \
 - `baseline_strategy_slices` теперь тоже каноничны:
   - для каждого baseline класса видно `events_count`, `counted_events`,
     `verified_effective_savings_pct`, `quality_ok_rate`, `coverage`.
+- `statement_previews` теперь тоже каноничны:
+  - `current_session`
+  - `rolling_window`
+  - `lifetime`
+  - в них видно measured non-billable lower bound по каждому scope, но billable amount и final amount остаются пустыми, пока settlement layer ещё не materialized.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе:

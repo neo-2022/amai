@@ -1,5 +1,5 @@
-modified_at = "2026-03-24 11:17 MSK"
-"Ручная сверка guide/docs" = "2026-03-24 11:17 MSK"
+modified_at = "2026-03-24 11:31 MSK"
+"Ручная сверка guide/docs" = "2026-03-24 11:31 MSK"
 
 default_profile = "local_default"
 
@@ -11,6 +11,7 @@ include_verify_events_by_default = false
 
 [contract]
 usage_event_schema_version = "billing-usage-event-v1"
+settlement_statement_version = "settlement-preview-v1"
 metering_event_schema_version = "token-budget-event-v2"
 usage_lifecycle_model_version = "usage-lifecycle-v1"
 baseline_method_version = "retrieval-baseline-v1"
@@ -21,6 +22,9 @@ excluded_taxonomy_version = "token-excluded-usage-v1"
 dedup_contract_version = "event-id-source-kind-v1"
 backfill_policy_version = "report-only-backfill-v1"
 correction_policy_version = "report-only-correction-v1"
+freeze_close_policy_version = "freeze-close-v1"
+late_arrival_policy_version = "late-arrival-v1"
+dispute_policy_version = "report-only-dispute-v1"
 event_time_policy_version = "client-visible-ingest-v1"
 billing_policy_version = "report-only-v1"
 billing_mode = "report_only"

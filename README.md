@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:23 MSK
-Ручная сверка guide/docs: 2026-03-24 11:23 MSK
+modified_at: 2026-03-24 11:31 MSK
+Ручная сверка guide/docs: 2026-03-24 11:31 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1065,6 +1065,10 @@ preview, а не только raw count.
 - `rate_card`
   - честно показывает, что денежная конверсия пока ещё `unpriced`, а не делает вид,
     что токены уже автоматически переведены в деньги.
+- `settlement_contract`
+  - публикует statement-version, freeze/close policy, late-arrival policy,
+    correction/dispute policy;
+  - при этом честно говорит, что это пока только `report_only preview`.
 - first-class `coverage`
   - у каждого rollup теперь есть не только savings, но и честный охват:
     `measured / included / excluded`;
@@ -1094,6 +1098,11 @@ preview, а не только raw count.
 - baseline fairness теперь тоже first-class:
   - `baseline_strategy_slices` показывают, какой baseline реально использовался и
     как по нему выглядит verified/coverage contour.
+- settlement preview теперь тоже first-class:
+  - `statement_previews.current_session / rolling_window / lifetime`
+  - там уже видно measured non-billable lower bound по scope;
+  - но `billable_lower_bound_tokens` и `final_amount` остаются пустыми, пока billing не
+    включён честно.
 
 По умолчанию proof/benchmark-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе, используйте:

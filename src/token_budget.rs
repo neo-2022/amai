@@ -48,6 +48,8 @@ struct MeasurementConfig {
 struct TokenBudgetContractConfig {
     #[serde(default = "default_usage_event_schema_version")]
     usage_event_schema_version: String,
+    #[serde(default = "default_settlement_statement_version")]
+    settlement_statement_version: String,
     #[serde(default = "default_metering_event_schema_version")]
     metering_event_schema_version: String,
     #[serde(default = "default_usage_lifecycle_model_version")]
@@ -68,6 +70,12 @@ struct TokenBudgetContractConfig {
     backfill_policy_version: String,
     #[serde(default = "default_correction_policy_version")]
     correction_policy_version: String,
+    #[serde(default = "default_freeze_close_policy_version")]
+    freeze_close_policy_version: String,
+    #[serde(default = "default_late_arrival_policy_version")]
+    late_arrival_policy_version: String,
+    #[serde(default = "default_dispute_policy_version")]
+    dispute_policy_version: String,
     #[serde(default = "default_event_time_policy_version")]
     event_time_policy_version: String,
     #[serde(default = "default_billing_policy_version")]
@@ -86,6 +94,7 @@ impl Default for TokenBudgetContractConfig {
     fn default() -> Self {
         Self {
             usage_event_schema_version: default_usage_event_schema_version(),
+            settlement_statement_version: default_settlement_statement_version(),
             metering_event_schema_version: default_metering_event_schema_version(),
             usage_lifecycle_model_version: default_usage_lifecycle_model_version(),
             baseline_method_version: default_baseline_method_version(),
@@ -96,6 +105,9 @@ impl Default for TokenBudgetContractConfig {
             dedup_contract_version: default_dedup_contract_version(),
             backfill_policy_version: default_backfill_policy_version(),
             correction_policy_version: default_correction_policy_version(),
+            freeze_close_policy_version: default_freeze_close_policy_version(),
+            late_arrival_policy_version: default_late_arrival_policy_version(),
+            dispute_policy_version: default_dispute_policy_version(),
             event_time_policy_version: default_event_time_policy_version(),
             billing_policy_version: default_billing_policy_version(),
             billing_mode: default_billing_mode(),
@@ -139,6 +151,7 @@ struct TokenBudgetEvent {
     traffic_class: String,
     measurement_scope: String,
     usage_event_schema_version: String,
+    settlement_statement_version: String,
     metering_event_schema_version: String,
     usage_lifecycle_model_version: String,
     baseline_method_version: String,
@@ -148,6 +161,9 @@ struct TokenBudgetEvent {
     dedup_contract_version: String,
     backfill_policy_version: String,
     correction_policy_version: String,
+    freeze_close_policy_version: String,
+    late_arrival_policy_version: String,
+    dispute_policy_version: String,
     event_time_policy_version: String,
     billing_policy_version: String,
     billing_mode: String,
@@ -245,6 +261,10 @@ fn default_usage_event_schema_version() -> String {
     "billing-usage-event-v1".to_string()
 }
 
+fn default_settlement_statement_version() -> String {
+    "settlement-preview-v1".to_string()
+}
+
 fn default_metering_event_schema_version() -> String {
     "token-budget-event-v2".to_string()
 }
@@ -285,6 +305,18 @@ fn default_correction_policy_version() -> String {
     "report-only-correction-v1".to_string()
 }
 
+fn default_freeze_close_policy_version() -> String {
+    "freeze-close-v1".to_string()
+}
+
+fn default_late_arrival_policy_version() -> String {
+    "late-arrival-v1".to_string()
+}
+
+fn default_dispute_policy_version() -> String {
+    "report-only-dispute-v1".to_string()
+}
+
 fn default_event_time_policy_version() -> String {
     "client-visible-ingest-v1".to_string()
 }
@@ -312,6 +344,7 @@ fn default_settlement_status() -> String {
 fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
     json!({
         "usage_event_schema_version": contract.usage_event_schema_version.clone(),
+        "settlement_statement_version": contract.settlement_statement_version.clone(),
         "metering_event_schema_version": contract.metering_event_schema_version.clone(),
         "usage_lifecycle_model_version": contract.usage_lifecycle_model_version.clone(),
         "baseline_method_version": contract.baseline_method_version.clone(),
@@ -322,6 +355,9 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "dedup_contract_version": contract.dedup_contract_version.clone(),
         "backfill_policy_version": contract.backfill_policy_version.clone(),
         "correction_policy_version": contract.correction_policy_version.clone(),
+        "freeze_close_policy_version": contract.freeze_close_policy_version.clone(),
+        "late_arrival_policy_version": contract.late_arrival_policy_version.clone(),
+        "dispute_policy_version": contract.dispute_policy_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
@@ -335,6 +371,7 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
 fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
     json!({
         "usage_event_schema_version": contract.usage_event_schema_version.clone(),
+        "settlement_statement_version": contract.settlement_statement_version.clone(),
         "metering_event_schema_version": contract.metering_event_schema_version.clone(),
         "usage_lifecycle_model_version": contract.usage_lifecycle_model_version.clone(),
         "baseline_method_version": contract.baseline_method_version.clone(),
@@ -344,6 +381,9 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "dedup_contract_version": contract.dedup_contract_version.clone(),
         "backfill_policy_version": contract.backfill_policy_version.clone(),
         "correction_policy_version": contract.correction_policy_version.clone(),
+        "freeze_close_policy_version": contract.freeze_close_policy_version.clone(),
+        "late_arrival_policy_version": contract.late_arrival_policy_version.clone(),
+        "dispute_policy_version": contract.dispute_policy_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
@@ -472,6 +512,51 @@ fn build_rate_card_json(contract: &TokenBudgetContractConfig) -> Value {
         "money_conversion_enabled": money_conversion_enabled,
         "status": if money_conversion_enabled { "priced" } else { "unpriced" },
         "note": "Денежная конверсия пока отключена: savings считаются в токенах и lower-bound semantics уже materialized, но rate-card ещё не введён."
+    })
+}
+
+fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value {
+    json!({
+        "statement_version": contract.settlement_statement_version.clone(),
+        "freeze_close_policy_version": contract.freeze_close_policy_version.clone(),
+        "late_arrival_policy_version": contract.late_arrival_policy_version.clone(),
+        "correction_policy_version": contract.correction_policy_version.clone(),
+        "dispute_policy_version": contract.dispute_policy_version.clone(),
+        "settlement_status": contract.settlement_status.clone(),
+        "statement_lifecycle": [
+            "measured",
+            "verified",
+            "measured_non_billable",
+            "billable_not_enabled",
+            "settled_not_materialized",
+            "closed_not_materialized"
+        ],
+        "freeze_close_status": "not_enforced_report_only",
+        "late_arrival_status": "accepted_until_settlement_exists",
+        "note": "Settlement layer пока остаётся report-only preview: freeze/close, invoice-grade adjustments и disputes ещё не materialized как денежный workflow."
+    })
+}
+
+fn build_statement_preview(
+    scope_code: &str,
+    scope_label: &str,
+    summary: &Value,
+    contract: &TokenBudgetContractConfig,
+) -> Value {
+    json!({
+        "scope_code": scope_code,
+        "scope_label": scope_label,
+        "statement_status": "report_only_preview",
+        "close_readiness": "not_closeable_report_only",
+        "freeze_status": "open",
+        "late_arrival_mode": "accepting_events",
+        "coverage": summary["coverage"],
+        "measured_non_billable_lower_bound_tokens": summary["verified_effective_saved_tokens"],
+        "billable_lower_bound_tokens": Value::Null,
+        "final_amount": Value::Null,
+        "currency_profile": contract.currency_profile.clone(),
+        "settlement_status": contract.settlement_status.clone(),
+        "note": "Это preview measured lower bound для scope, а не закрытый statement и не сумма к оплате."
     })
 }
 
@@ -800,6 +885,7 @@ async fn collect_report(
             "baseline_contract": build_baseline_contract_json(&config.contract),
             "billing_policy": build_billing_policy_json(&config.contract, &config.measurement),
             "rate_card": build_rate_card_json(&config.contract),
+            "settlement_contract": build_settlement_contract_json(&config.contract),
             "filters": {
                 "include_verify_events": include_verify_events,
             },
@@ -809,6 +895,30 @@ async fn collect_report(
             "rolling_window": rolling_window_summary,
             "lifetime": lifetime_summary,
             "agent_cycle_economics": agent_cycle_economics,
+            "statement_previews": {
+                "current_session": build_statement_preview(
+                    "current_session",
+                    "текущая сессия",
+                    &current_session_summary,
+                    &config.contract,
+                ),
+                "rolling_window": if profile.rolling_window_hours.is_some() {
+                    build_statement_preview(
+                        "rolling_window",
+                        &format!("окно {}", profile.display_name),
+                        &rolling_window_summary,
+                        &config.contract,
+                    )
+                } else {
+                    Value::Null
+                },
+                "lifetime": build_statement_preview(
+                    "lifetime",
+                    "всё время записи",
+                    &lifetime_summary,
+                    &config.contract,
+                ),
+            },
             "source_breakdown": source_breakdown,
             "query_slices": query_slices,
             "baseline_strategy_slices": baseline_strategy_slices,
@@ -1168,6 +1278,10 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .unwrap_or("billing-usage-event-v0")
         .to_string();
+    let settlement_statement_version = node["contract"]["settlement_statement_version"]
+        .as_str()
+        .unwrap_or("settlement-preview-v0")
+        .to_string();
     let metering_event_schema_version = node["contract"]["metering_event_schema_version"]
         .as_str()
         .unwrap_or("token-budget-event-v1")
@@ -1203,6 +1317,18 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
     let correction_policy_version = node["contract"]["correction_policy_version"]
         .as_str()
         .unwrap_or("report-only-correction-v0")
+        .to_string();
+    let freeze_close_policy_version = node["contract"]["freeze_close_policy_version"]
+        .as_str()
+        .unwrap_or("freeze-close-v0")
+        .to_string();
+    let late_arrival_policy_version = node["contract"]["late_arrival_policy_version"]
+        .as_str()
+        .unwrap_or("late-arrival-v0")
+        .to_string();
+    let dispute_policy_version = node["contract"]["dispute_policy_version"]
+        .as_str()
+        .unwrap_or("report-only-dispute-v0")
         .to_string();
     let event_time_policy_version = node["contract"]["event_time_policy_version"]
         .as_str()
@@ -1309,6 +1435,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         traffic_class,
         measurement_scope,
         usage_event_schema_version,
+        settlement_statement_version,
         metering_event_schema_version,
         usage_lifecycle_model_version,
         baseline_method_version,
@@ -1318,6 +1445,9 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         dedup_contract_version,
         backfill_policy_version,
         correction_policy_version,
+        freeze_close_policy_version,
+        late_arrival_policy_version,
+        dispute_policy_version,
         event_time_policy_version,
         billing_policy_version,
         billing_mode,
@@ -2950,6 +3080,7 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
         "contract".to_string(),
         json!({
             "usage_event_schema_version": event.usage_event_schema_version.clone(),
+            "settlement_statement_version": event.settlement_statement_version.clone(),
             "metering_event_schema_version": event.metering_event_schema_version.clone(),
             "usage_lifecycle_model_version": event.usage_lifecycle_model_version.clone(),
             "baseline_method_version": event.baseline_method_version.clone(),
@@ -2959,6 +3090,9 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
             "dedup_contract_version": event.dedup_contract_version.clone(),
             "backfill_policy_version": event.backfill_policy_version.clone(),
             "correction_policy_version": event.correction_policy_version.clone(),
+            "freeze_close_policy_version": event.freeze_close_policy_version.clone(),
+            "late_arrival_policy_version": event.late_arrival_policy_version.clone(),
+            "dispute_policy_version": event.dispute_policy_version.clone(),
             "event_time_policy_version": event.event_time_policy_version.clone(),
             "billing_policy_version": event.billing_policy_version.clone(),
             "billing_mode": event.billing_mode.clone(),
@@ -4247,16 +4381,19 @@ mod tests {
         MeasurementConfig, NaiveScope, TokenBudgetContractConfig, TokenBudgetEvent,
         apply_reverification_metadata, baseline_strategy_breakdown, build_baseline_contract_json,
         build_billing_policy_json, build_event_payload, build_product_headline,
-        build_rate_card_json, build_usage_event_schema_json, default_backfill_policy_version,
+        build_rate_card_json, build_settlement_contract_json, build_statement_preview,
+        build_usage_event_schema_json, default_backfill_policy_version,
         default_baseline_method_version, default_billing_mode, default_billing_policy_version,
         default_correction_policy_version, default_coverage_model_version,
-        default_currency_profile, default_dedup_contract_version,
+        default_currency_profile, default_dedup_contract_version, default_dispute_policy_version,
         default_event_time_policy_version, default_excluded_taxonomy_version,
-        default_quality_method_version, default_rate_card_version, default_settlement_status,
-        derive_baseline_strategy, derive_quality_verdict, derive_query_type, derive_traffic_class,
-        event_to_json, followup_queries_related, include_traffic_class_in_report,
-        latency_slice_breakdown, needs_live_reverification, parse_snapshot_event,
-        reconcile_followup_recovery, repair_legacy_token_event_payload, summarize_events,
+        default_freeze_close_policy_version, default_late_arrival_policy_version,
+        default_quality_method_version, default_rate_card_version,
+        default_settlement_statement_version, default_settlement_status, derive_baseline_strategy,
+        derive_quality_verdict, derive_query_type, derive_traffic_class, event_to_json,
+        followup_queries_related, include_traffic_class_in_report, latency_slice_breakdown,
+        needs_live_reverification, parse_snapshot_event, reconcile_followup_recovery,
+        repair_legacy_token_event_payload, summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -4295,6 +4432,7 @@ mod tests {
                     traffic_class: "live".to_string(),
                     measurement_scope: "retrieval_lower_bound".to_string(),
                     usage_event_schema_version: "billing-usage-event-v1".to_string(),
+                    settlement_statement_version: default_settlement_statement_version(),
                     metering_event_schema_version: "token-budget-event-v2".to_string(),
                     usage_lifecycle_model_version: "usage-lifecycle-v1".to_string(),
                     baseline_method_version: default_baseline_method_version(),
@@ -4304,6 +4442,9 @@ mod tests {
                     dedup_contract_version: default_dedup_contract_version(),
                     backfill_policy_version: default_backfill_policy_version(),
                     correction_policy_version: default_correction_policy_version(),
+                    freeze_close_policy_version: default_freeze_close_policy_version(),
+                    late_arrival_policy_version: default_late_arrival_policy_version(),
+                    dispute_policy_version: default_dispute_policy_version(),
                     event_time_policy_version: default_event_time_policy_version(),
                     billing_policy_version: default_billing_policy_version(),
                     billing_mode: default_billing_mode(),
@@ -4718,6 +4859,37 @@ mod tests {
         assert_eq!(rate_card["money_conversion_enabled"], false);
         assert_eq!(baseline_contract["allowed_classes"][0], "naive_top_files");
         assert_eq!(baseline_contract["disallowed_classes"][0], "entire_repo");
+    }
+
+    #[test]
+    fn settlement_contract_and_statement_preview_stay_report_only() {
+        let contract = contract_fixture();
+        let settlement_contract = build_settlement_contract_json(&contract);
+        let summary = json!({
+            "coverage": {
+                "completeness_state": "partially_confirmed"
+            },
+            "verified_effective_saved_tokens": 1234
+        });
+        let preview =
+            build_statement_preview("current_session", "текущая сессия", &summary, &contract);
+
+        assert_eq!(
+            settlement_contract["statement_version"],
+            "settlement-preview-v1"
+        );
+        assert_eq!(
+            settlement_contract["freeze_close_status"],
+            "not_enforced_report_only"
+        );
+        assert_eq!(
+            settlement_contract["late_arrival_status"],
+            "accepted_until_settlement_exists"
+        );
+        assert_eq!(preview["statement_status"], "report_only_preview");
+        assert_eq!(preview["close_readiness"], "not_closeable_report_only");
+        assert_eq!(preview["measured_non_billable_lower_bound_tokens"], 1234);
+        assert_eq!(preview["billable_lower_bound_tokens"], json!(null));
     }
 
     #[test]
