@@ -147,8 +147,11 @@ assert root["reconciliation_contract"]["source_requirements"]["unready_optional_
 assert root["external_truth_manifest"]["manifest_hash"], root["external_truth_manifest"]
 assert root["external_truth_manifest"]["entries"]["provider_rate_card"]["source_sha256"], root["external_truth_manifest"]
 assert root["margin_contract"]["status"] == "priced_preview_report_only", root["margin_contract"]
-assert root["margin_contract"]["model_version"] == "margin-view-v7", root["margin_contract"]
+assert root["margin_contract"]["model_version"] == "margin-view-v8", root["margin_contract"]
 assert root["margin_contract"]["pricing_truth_completeness_state"] == "pricing_truth_ready", root["margin_contract"]
+assert root["margin_contract"]["customer_savings_money_truth_completeness_state"] == "customer_savings_lower_bound_ready_report_only", root["margin_contract"]
+assert root["margin_contract"]["amai_cost_truth_completeness_state"] == "amai_cost_preview_ready_report_only", root["margin_contract"]
+assert root["margin_contract"]["margin_truth_completeness_state"] == "margin_preview_amounts_ready_report_only", root["margin_contract"]
 assert root["margin_contract"]["provider_identity_state"] == "provider_identity_aligned", root["margin_contract"]
 assert root["margin_contract"]["money_margin_enabled"] is True, root["margin_contract"]
 assert root["margin_contract"]["source_requirements"]["required_sources_for_margin_truth"] == ["infra_cost_profile", "provider_rate_card", "provider_usage_export"], root["margin_contract"]
@@ -183,6 +186,9 @@ assert summary["rate_card_truth_completeness_state"] == "rate_card_priced_bound"
 assert summary["provider_cost_truth_completeness_state"] == "provider_cost_bound", summary
 assert summary["invoice_evidence_completeness_state"] == "provider_invoice_bound", summary
 assert summary["pricing_truth_completeness_state"] == "pricing_truth_ready", summary
+assert summary["customer_savings_money_truth_completeness_state"] == "customer_savings_lower_bound_ready_report_only", summary
+assert summary["amai_cost_truth_completeness_state"] == "amai_cost_preview_ready_report_only", summary
+assert summary["margin_truth_completeness_state"] == "margin_preview_amounts_ready_report_only", summary
 assert summary["required_sources_for_margin_truth"] == ["infra_cost_profile", "provider_rate_card", "provider_usage_export"], summary
 assert summary["unready_required_sources_for_margin_truth"] == [], summary
 assert summary["reconciliation_temporal_truth_state"] == "scope_period_aligned", summary
@@ -200,10 +206,16 @@ assert margin["rate_card_scope_alignment_state"] == "scope_period_aligned", marg
 assert margin["infra_cost_scope_alignment_state"] == "scope_period_aligned", margin
 assert margin["provider_identity_state"] == "provider_identity_aligned", margin
 assert margin["temporal_truth_state"] == "scope_period_aligned", margin
+assert margin["customer_savings_money_truth_completeness_state"] == "customer_savings_lower_bound_ready_report_only", margin
+assert margin["amai_cost_truth_completeness_state"] == "amai_cost_preview_ready_report_only", margin
+assert margin["margin_truth_completeness_state"] == "margin_preview_amounts_ready_report_only", margin
 assert statement_export["rate_card_version"] == "demo-priced-v1", statement_export
 assert statement_export["provider_cost_truth_completeness_state"] == "provider_cost_bound", statement_export
 assert statement_export["invoice_evidence_completeness_state"] == "provider_invoice_bound", statement_export
-assert statement_export["settlement_report_preview"]["model_version"] == "settlement-report-preview-v3", statement_export
+assert statement_export["customer_savings_money_truth_completeness_state"] == "customer_savings_lower_bound_ready_report_only", statement_export
+assert statement_export["amai_cost_truth_completeness_state"] == "amai_cost_preview_ready_report_only", statement_export
+assert statement_export["margin_truth_completeness_state"] == "margin_preview_amounts_ready_report_only", statement_export
+assert statement_export["settlement_report_preview"]["model_version"] == "settlement-report-preview-v4", statement_export
 assert statement_export["required_sources_for_usage_truth"] == ["provider_usage_export"], statement_export
 assert statement_export["required_sources_for_margin_truth"] == ["infra_cost_profile", "provider_rate_card", "provider_usage_export"], statement_export
 assert statement_export["settlement_report_preview"]["settlement_report_id"], statement_export

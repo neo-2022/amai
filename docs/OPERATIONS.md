@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 00:05 MSK
-Ручная сверка guide/docs: 2026-03-25 00:05 MSK
+modified_at: 2026-03-25 00:18 MSK
+Ручная сверка guide/docs: 2026-03-25 00:18 MSK
 
 # Operations
 
@@ -1707,7 +1707,12 @@ cargo run -- context pack \
   - `rate_card_status` обязан повторять runtime status настоящего rate-card binding;
   - теперь ещё отдельно публикуются `required_sources_for_margin_truth` и
     `unready_required_sources_for_margin_truth`, чтобы margin-blocker был виден не только как
-    общий state, но и как нехватка конкретных sources.
+    общий state, но и как нехватка конкретных sources;
+  - отдельно раскладываются:
+    - `customer_savings_money_truth_completeness_state`
+    - `amai_cost_truth_completeness_state`
+    - `margin_truth_completeness_state`
+    чтобы readiness margin не выглядела одной широкой меткой.
 - `margin_view`
   - `current_session / rolling_window / lifetime`;
   - customer lower-bound savings в токенах;

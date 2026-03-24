@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 00:05 MSK
-Ручная сверка guide/docs: 2026-03-25 00:05 MSK
+modified_at: 2026-03-25 00:18 MSK
+Ручная сверка guide/docs: 2026-03-25 00:18 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1161,7 +1161,13 @@ preview, а не только raw count.
   - показывает, включена ли вообще money-margin арифметика;
   - честно фиксирует отсутствие priced rate card и infra cost profile;
   - теперь ещё отдельно публикует `required_sources_for_margin_truth` и
-    `unready_required_sources_for_margin_truth`.
+    `unready_required_sources_for_margin_truth`;
+  - отдельно раскладывает:
+    - `customer_savings_money_truth_completeness_state`
+    - `amai_cost_truth_completeness_state`
+    - `margin_truth_completeness_state`
+    чтобы было видно, готова ли денежная нижняя граница savings, готова ли оценка
+    собственного infra cost и готов ли их общий margin preview.
 - `margin_view`
   - по каждому scope показывает token-side lower bound savings клиента;
   - но деньги и маржа остаются `null`, пока это нельзя доказать.

@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 00:05 MSK
-Ручная сверка guide/docs: 2026-03-25 00:05 MSK
+modified_at: 2026-03-25 00:18 MSK
+Ручная сверка guide/docs: 2026-03-25 00:18 MSK
 
 # Token Ledger
 
@@ -839,11 +839,17 @@ Customer-facing export bundle:
 - включена ли money-margin арифметика.
 
 Текущий truthful status:
-- `margin_model_version = margin-view-v7`
+- `margin_model_version = margin-view-v8`
 - `infra_cost_binding_model_version = infra-cost-binding-v3`
 - `infra_cost_profile_version = unpriced-infra-v1`
 - `money_margin_enabled` включается только после честного bind на
   `priced rate card + provider usage + infra cost profile`;
+- margin layer теперь отдельно раскладывает:
+  - `customer_savings_money_truth_completeness_state`
+  - `amai_cost_truth_completeness_state`
+  - `margin_truth_completeness_state`
+  чтобы было видно не только готов ли весь preview, но и готова ли уже денежная нижняя граница
+  savings для клиента и готова ли оценка собственного infra cost;
 - truthful aligned-state для reconciliation теперь тоже отдельный:
   - `external_usage_aligned_report_only`
   - `external_usage_and_invoice_aligned_report_only`
@@ -953,7 +959,7 @@ Customer-facing export bundle:
 - `line_items.excluded`
 
 Честный смысл этого export сейчас такой:
-- это `contractual-evidence-pack-v12`;
+- это `contractual-evidence-pack-v13`;
 - это всё ещё `report_only tokenonomics`;
 - это не invoice;
 - это не final settlement;

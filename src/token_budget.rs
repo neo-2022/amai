@@ -566,7 +566,7 @@ fn default_reconciliation_contract_version() -> String {
 }
 
 fn default_margin_model_version() -> String {
-    "margin-view-v7".to_string()
+    "margin-view-v8".to_string()
 }
 
 fn default_infra_cost_profile_version() -> String {
@@ -574,15 +574,15 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v12".to_string()
+    "contractual-evidence-pack-v13".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v12".to_string()
+    "contractual-statement-export-v13".to_string()
 }
 
 fn default_settlement_report_preview_version() -> String {
-    "settlement-report-preview-v3".to_string()
+    "settlement-report-preview-v4".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -2437,6 +2437,69 @@ fn pricing_truth_completeness_state(
     }
 }
 
+fn customer_savings_money_truth_completeness_state(rate_card_truth_state: &str) -> &'static str {
+    match rate_card_truth_state {
+        "provider_rate_card_error" => "customer_savings_money_truth_source_error",
+        "awaiting_rate_card_source" | "rate_card_not_yet_bound" => "awaiting_rate_card_source",
+        "rate_card_bound_unpriced" => "rate_card_bound_unpriced",
+        "rate_card_priced_bound" => "customer_savings_lower_bound_ready_report_only",
+        _ => "customer_savings_money_truth_not_yet_bound",
+    }
+}
+
+fn amai_cost_truth_completeness_state(infra_cost_truth_state: &str) -> &'static str {
+    match infra_cost_truth_state {
+        "infra_cost_profile_error" => "amai_cost_truth_source_error",
+        "awaiting_infra_cost_profile" | "infra_cost_profile_not_yet_bound" => {
+            "awaiting_infra_cost_profile"
+        }
+        "infra_cost_profile_bound_unpriced" => "infra_cost_profile_bound_unpriced",
+        "infra_cost_profile_priced_bound" => "amai_cost_preview_ready_report_only",
+        _ => "amai_cost_truth_not_yet_bound",
+    }
+}
+
+fn margin_truth_completeness_state(
+    customer_savings_truth_state: &str,
+    amai_cost_truth_state: &str,
+) -> &'static str {
+    if matches!(
+        customer_savings_truth_state,
+        "customer_savings_money_truth_source_error"
+    ) || matches!(amai_cost_truth_state, "amai_cost_truth_source_error")
+    {
+        "margin_truth_source_error"
+    } else if customer_savings_truth_state == "customer_savings_lower_bound_ready_report_only"
+        && amai_cost_truth_state == "amai_cost_preview_ready_report_only"
+    {
+        "margin_preview_amounts_ready_report_only"
+    } else if matches!(
+        customer_savings_truth_state,
+        "awaiting_rate_card_source" | "customer_savings_money_truth_not_yet_bound"
+    ) && matches!(
+        amai_cost_truth_state,
+        "awaiting_infra_cost_profile" | "amai_cost_truth_not_yet_bound"
+    ) {
+        "awaiting_rate_card_and_infra_cost_profile"
+    } else if matches!(
+        customer_savings_truth_state,
+        "awaiting_rate_card_source" | "customer_savings_money_truth_not_yet_bound"
+    ) {
+        "awaiting_rate_card_source"
+    } else if matches!(
+        amai_cost_truth_state,
+        "awaiting_infra_cost_profile" | "amai_cost_truth_not_yet_bound"
+    ) {
+        "awaiting_infra_cost_profile"
+    } else if customer_savings_truth_state == "rate_card_bound_unpriced"
+        || amai_cost_truth_state == "infra_cost_profile_bound_unpriced"
+    {
+        "margin_truth_bound_unpriced"
+    } else {
+        "margin_truth_partially_bound"
+    }
+}
+
 fn reconciliation_readiness_state(
     usage_truth_completeness_state: &str,
     provider_cost_truth_completeness_state: &str,
@@ -3335,6 +3398,11 @@ fn build_margin_contract_json(
     let infra_cost_truth_state = infra_cost_truth_completeness_state(infra_cost_status);
     let pricing_truth_state =
         pricing_truth_completeness_state(rate_card_truth_state, infra_cost_truth_state);
+    let customer_savings_truth_state =
+        customer_savings_money_truth_completeness_state(rate_card_truth_state);
+    let amai_cost_truth_state = amai_cost_truth_completeness_state(infra_cost_truth_state);
+    let margin_truth_state =
+        margin_truth_completeness_state(customer_savings_truth_state, amai_cost_truth_state);
     let provider_status = reconciliation_contract["status"]
         .as_str()
         .unwrap_or("awaiting_provider_usage_source");
@@ -3385,6 +3453,9 @@ fn build_margin_contract_json(
         "rate_card_truth_completeness_state": rate_card_truth_state,
         "infra_cost_truth_completeness_state": infra_cost_truth_state,
         "pricing_truth_completeness_state": pricing_truth_state,
+        "customer_savings_money_truth_completeness_state": customer_savings_truth_state,
+        "amai_cost_truth_completeness_state": amai_cost_truth_state,
+        "margin_truth_completeness_state": margin_truth_state,
         "margin_readiness_state": status,
         "rate_card_status": rate_card["status"].clone(),
         "rate_card_temporal_scope_state": rate_card["temporal_scope_state"].clone(),
@@ -3423,6 +3494,11 @@ fn build_margin_scope(
     let infra_cost_truth_state = infra_cost_truth_completeness_state(infra_cost_status);
     let pricing_truth_state =
         pricing_truth_completeness_state(rate_card_truth_state, infra_cost_truth_state);
+    let customer_savings_truth_state =
+        customer_savings_money_truth_completeness_state(rate_card_truth_state);
+    let amai_cost_truth_state = amai_cost_truth_completeness_state(infra_cost_truth_state);
+    let margin_truth_state =
+        margin_truth_completeness_state(customer_savings_truth_state, amai_cost_truth_state);
     let reconciliation_state = reconciliation_preview["reconciliation_state"]
         .as_str()
         .unwrap_or("awaiting_provider_usage_source");
@@ -3598,6 +3674,9 @@ fn build_margin_scope(
         "rate_card_truth_completeness_state": rate_card_truth_state,
         "infra_cost_truth_completeness_state": infra_cost_truth_state,
         "pricing_truth_completeness_state": pricing_truth_state,
+        "customer_savings_money_truth_completeness_state": customer_savings_truth_state,
+        "amai_cost_truth_completeness_state": amai_cost_truth_state,
+        "margin_truth_completeness_state": margin_truth_state,
         "provider_usage_scope_alignment_state": provider_usage_alignment_state,
         "rate_card_scope_alignment_state": rate_card_alignment_state,
         "infra_cost_scope_alignment_state": infra_cost_alignment_state,
@@ -4184,102 +4263,347 @@ fn build_contractual_statement_summary(
         margin_scope,
         metering_freshness,
     );
-    json!({
-        "scope_code": scope_code,
-        "scope_label": scope_label,
-        "contractual_state": statement_preview["contractual_state"].clone(),
-        "settlement_stage": statement_preview["settlement_stage"].clone(),
-        "settlement_stage_family": statement_preview["settlement_stage_family"].clone(),
-        "next_settlement_stage_candidate": statement_preview["next_settlement_stage_candidate"].clone(),
-        "next_settlement_stage_blockers": statement_preview["next_settlement_stage_blockers"].clone(),
-        "future_reserved_settlement_stages": statement_preview["future_reserved_settlement_stages"].clone(),
-        "transactional_statuses": statement_preview["transactional_statuses"].clone(),
-        "coverage_state": statement_preview["coverage"]["completeness_state"].clone(),
-        "provisional_close_state": statement_preview["provisional_close_state"].clone(),
-        "provisional_close_candidate": statement_preview["provisional_close_candidate"].clone(),
-        "provisional_close_barriers": statement_preview["provisional_close_barriers"].clone(),
-        "billing_close_barriers": statement_preview["billing_close_barriers"].clone(),
-        "usage_truth_completeness_state": reconciliation_preview["usage_truth_completeness_state"].clone(),
-        "rate_card_truth_completeness_state": reconciliation_preview["rate_card_truth_completeness_state"].clone(),
-        "provider_cost_truth_completeness_state": reconciliation_preview["provider_cost_truth_completeness_state"].clone(),
-        "invoice_evidence_completeness_state": reconciliation_preview["invoice_evidence_completeness_state"].clone(),
-        "money_truth_completeness_state": reconciliation_preview["money_truth_completeness_state"].clone(),
-        "reconciliation_readiness_state": reconciliation_preview["reconciliation_readiness_state"].clone(),
-        "required_sources_for_usage_truth": reconciliation_preview["required_sources_for_usage_truth"].clone(),
-        "required_sources_for_cost_truth": reconciliation_preview["required_sources_for_cost_truth"].clone(),
-        "optional_sources_for_invoice_evidence": reconciliation_preview["optional_sources_for_invoice_evidence"].clone(),
-        "unready_required_sources_for_usage_truth": reconciliation_preview["unready_required_sources_for_usage_truth"].clone(),
-        "unready_required_sources_for_cost_truth": reconciliation_preview["unready_required_sources_for_cost_truth"].clone(),
-        "unready_optional_sources_for_invoice_evidence": reconciliation_preview["unready_optional_sources_for_invoice_evidence"].clone(),
-        "reconciliation_governance_blocking_reasons": reconciliation_preview["governance_blocking_reasons"].clone(),
-        "rate_card_status": rate_card_binding["status"].clone(),
-        "rate_card_version": rate_card_binding["bound_rate_card_version"].clone(),
-        "rate_card_provider": rate_card_binding["provider"].clone(),
-        "rate_card_currency_profile": rate_card_binding["bound_currency_profile"].clone(),
-        "provider_usage_provider": provider_usage_binding["provider"].clone(),
-        "provider_invoice_provider": provider_invoice_binding["provider"].clone(),
-        "provider_usage_scope_alignment_state": reconciliation_preview["provider_usage_scope_alignment_state"].clone(),
-        "provider_invoice_scope_alignment_state": reconciliation_preview["provider_invoice_scope_alignment_state"].clone(),
-        "rate_card_scope_alignment_state": reconciliation_preview["rate_card_scope_alignment_state"].clone(),
-        "rate_card_provider_alignment_state": reconciliation_preview["rate_card_provider_alignment_state"].clone(),
-        "invoice_provider_alignment_state": reconciliation_preview["invoice_provider_alignment_state"].clone(),
-        "provider_identity_state": reconciliation_preview["provider_identity_state"].clone(),
-        "reconciliation_temporal_truth_state": reconciliation_preview["temporal_truth_state"].clone(),
-        "metering_ingest_state": metering_freshness["metering_ingest_state"].clone(),
-        "contractual_lag_state": metering_freshness["contractual_lag_state"].clone(),
-        "contractual_freshness_state": metering_freshness["contractual_freshness_state"].clone(),
-        "can_treat_scope_as_stable": metering_freshness["can_treat_scope_as_stable"].clone(),
-        "latest_event_age_ms": metering_freshness["latest_event_age_ms"].clone(),
-        "latest_ingest_lag_ms": metering_freshness["latest_ingest_lag_ms"].clone(),
-        "p95_ingest_lag_ms": metering_freshness["p95_ingest_lag_ms"].clone(),
-        "provisional_close_earliest_at_epoch_ms": statement_preview["period"]["provisional_close_earliest_at_epoch_ms"].clone(),
-        "late_arrival_deadline_epoch_ms": statement_preview["period"]["late_arrival_deadline_epoch_ms"].clone(),
-        "measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
-        "adjusted_measured_non_billable_lower_bound_tokens": statement_preview["adjusted_measured_non_billable_lower_bound_tokens"].clone(),
-        "billable_lower_bound_tokens": statement_preview["billable_lower_bound_tokens"].clone(),
-        "internal_provider_billed_tokens": reconciliation_preview["internal_provider_billed_tokens"].clone(),
-        "internal_provider_cost_estimate_amount": reconciliation_preview["internal_provider_cost_estimate_amount"].clone(),
-        "external_provider_usage_tokens": reconciliation_preview["external_provider_usage_tokens"].clone(),
-        "external_provider_cost_amount": reconciliation_preview["external_provider_cost_amount"].clone(),
-        "external_invoice_amount": reconciliation_preview["external_invoice_amount"].clone(),
-        "drift_tokens": reconciliation_preview["drift_tokens"].clone(),
-        "drift_amount": reconciliation_preview["drift_amount"].clone(),
-        "invoice_drift_amount": reconciliation_preview["invoice_drift_amount"].clone(),
-        "reconciliation_state": reconciliation_preview["reconciliation_state"].clone(),
-        "margin_state": margin_scope["margin_state"].clone(),
-        "margin_confidence_state": margin_scope["margin_confidence_state"].clone(),
-        "margin_readiness_state": margin_scope["margin_readiness_state"].clone(),
-        "infra_cost_truth_completeness_state": margin_scope["infra_cost_truth_completeness_state"].clone(),
-        "pricing_truth_completeness_state": margin_scope["pricing_truth_completeness_state"].clone(),
-        "required_sources_for_margin_truth": margin_scope["required_sources_for_margin_truth"].clone(),
-        "optional_sources_for_margin_invoice_evidence": margin_scope["optional_sources_for_invoice_evidence"].clone(),
-        "unready_required_sources_for_margin_truth": margin_scope["unready_required_sources_for_margin_truth"].clone(),
-        "margin_provider_identity_state": margin_scope["provider_identity_state"].clone(),
-        "margin_temporal_truth_state": margin_scope["temporal_truth_state"].clone(),
-        "infra_cost_scope_alignment_state": margin_scope["infra_cost_scope_alignment_state"].clone(),
-        "margin_blocking_reasons": margin_scope["blocking_reasons"].clone(),
-        "adjustment_state": statement_preview["adjustment_preview"]["correction_action_state"].clone(),
-        "pending_adjustment_entries_count": statement_preview["adjustment_preview"]["pending_entries_count"].clone(),
-        "applied_adjustment_entries_count": statement_preview["adjustment_preview"]["applied_entries_count"].clone(),
-        "disputed_adjustment_entries_count": statement_preview["adjustment_preview"]["disputed_entries_count"].clone(),
-        "close_barriers": statement_preview["close_barriers"].clone(),
-        "blocking_reasons": combine_reason_arrays(&[
+    let mut summary = serde_json::Map::new();
+    let mut insert = |key: &str, value: Value| {
+        summary.insert(key.to_string(), value);
+    };
+
+    insert("scope_code", json!(scope_code));
+    insert("scope_label", json!(scope_label));
+    insert(
+        "contractual_state",
+        statement_preview["contractual_state"].clone(),
+    );
+    insert(
+        "settlement_stage",
+        statement_preview["settlement_stage"].clone(),
+    );
+    insert(
+        "settlement_stage_family",
+        statement_preview["settlement_stage_family"].clone(),
+    );
+    insert(
+        "next_settlement_stage_candidate",
+        statement_preview["next_settlement_stage_candidate"].clone(),
+    );
+    insert(
+        "next_settlement_stage_blockers",
+        statement_preview["next_settlement_stage_blockers"].clone(),
+    );
+    insert(
+        "future_reserved_settlement_stages",
+        statement_preview["future_reserved_settlement_stages"].clone(),
+    );
+    insert(
+        "transactional_statuses",
+        statement_preview["transactional_statuses"].clone(),
+    );
+    insert(
+        "coverage_state",
+        statement_preview["coverage"]["completeness_state"].clone(),
+    );
+    insert(
+        "provisional_close_state",
+        statement_preview["provisional_close_state"].clone(),
+    );
+    insert(
+        "provisional_close_candidate",
+        statement_preview["provisional_close_candidate"].clone(),
+    );
+    insert(
+        "provisional_close_barriers",
+        statement_preview["provisional_close_barriers"].clone(),
+    );
+    insert(
+        "billing_close_barriers",
+        statement_preview["billing_close_barriers"].clone(),
+    );
+    insert(
+        "usage_truth_completeness_state",
+        reconciliation_preview["usage_truth_completeness_state"].clone(),
+    );
+    insert(
+        "rate_card_truth_completeness_state",
+        reconciliation_preview["rate_card_truth_completeness_state"].clone(),
+    );
+    insert(
+        "provider_cost_truth_completeness_state",
+        reconciliation_preview["provider_cost_truth_completeness_state"].clone(),
+    );
+    insert(
+        "invoice_evidence_completeness_state",
+        reconciliation_preview["invoice_evidence_completeness_state"].clone(),
+    );
+    insert(
+        "money_truth_completeness_state",
+        reconciliation_preview["money_truth_completeness_state"].clone(),
+    );
+    insert(
+        "reconciliation_readiness_state",
+        reconciliation_preview["reconciliation_readiness_state"].clone(),
+    );
+    insert(
+        "required_sources_for_usage_truth",
+        reconciliation_preview["required_sources_for_usage_truth"].clone(),
+    );
+    insert(
+        "required_sources_for_cost_truth",
+        reconciliation_preview["required_sources_for_cost_truth"].clone(),
+    );
+    insert(
+        "optional_sources_for_invoice_evidence",
+        reconciliation_preview["optional_sources_for_invoice_evidence"].clone(),
+    );
+    insert(
+        "unready_required_sources_for_usage_truth",
+        reconciliation_preview["unready_required_sources_for_usage_truth"].clone(),
+    );
+    insert(
+        "unready_required_sources_for_cost_truth",
+        reconciliation_preview["unready_required_sources_for_cost_truth"].clone(),
+    );
+    insert(
+        "unready_optional_sources_for_invoice_evidence",
+        reconciliation_preview["unready_optional_sources_for_invoice_evidence"].clone(),
+    );
+    insert(
+        "reconciliation_governance_blocking_reasons",
+        reconciliation_preview["governance_blocking_reasons"].clone(),
+    );
+    insert("rate_card_status", rate_card_binding["status"].clone());
+    insert(
+        "rate_card_version",
+        rate_card_binding["bound_rate_card_version"].clone(),
+    );
+    insert("rate_card_provider", rate_card_binding["provider"].clone());
+    insert(
+        "rate_card_currency_profile",
+        rate_card_binding["bound_currency_profile"].clone(),
+    );
+    insert(
+        "provider_usage_provider",
+        provider_usage_binding["provider"].clone(),
+    );
+    insert(
+        "provider_invoice_provider",
+        provider_invoice_binding["provider"].clone(),
+    );
+    insert(
+        "provider_usage_scope_alignment_state",
+        reconciliation_preview["provider_usage_scope_alignment_state"].clone(),
+    );
+    insert(
+        "provider_invoice_scope_alignment_state",
+        reconciliation_preview["provider_invoice_scope_alignment_state"].clone(),
+    );
+    insert(
+        "rate_card_scope_alignment_state",
+        reconciliation_preview["rate_card_scope_alignment_state"].clone(),
+    );
+    insert(
+        "rate_card_provider_alignment_state",
+        reconciliation_preview["rate_card_provider_alignment_state"].clone(),
+    );
+    insert(
+        "invoice_provider_alignment_state",
+        reconciliation_preview["invoice_provider_alignment_state"].clone(),
+    );
+    insert(
+        "provider_identity_state",
+        reconciliation_preview["provider_identity_state"].clone(),
+    );
+    insert(
+        "reconciliation_temporal_truth_state",
+        reconciliation_preview["temporal_truth_state"].clone(),
+    );
+    insert(
+        "metering_ingest_state",
+        metering_freshness["metering_ingest_state"].clone(),
+    );
+    insert(
+        "contractual_lag_state",
+        metering_freshness["contractual_lag_state"].clone(),
+    );
+    insert(
+        "contractual_freshness_state",
+        metering_freshness["contractual_freshness_state"].clone(),
+    );
+    insert(
+        "can_treat_scope_as_stable",
+        metering_freshness["can_treat_scope_as_stable"].clone(),
+    );
+    insert(
+        "latest_event_age_ms",
+        metering_freshness["latest_event_age_ms"].clone(),
+    );
+    insert(
+        "latest_ingest_lag_ms",
+        metering_freshness["latest_ingest_lag_ms"].clone(),
+    );
+    insert(
+        "p95_ingest_lag_ms",
+        metering_freshness["p95_ingest_lag_ms"].clone(),
+    );
+    insert(
+        "provisional_close_earliest_at_epoch_ms",
+        statement_preview["period"]["provisional_close_earliest_at_epoch_ms"].clone(),
+    );
+    insert(
+        "late_arrival_deadline_epoch_ms",
+        statement_preview["period"]["late_arrival_deadline_epoch_ms"].clone(),
+    );
+    insert(
+        "measured_non_billable_lower_bound_tokens",
+        statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
+    );
+    insert(
+        "adjusted_measured_non_billable_lower_bound_tokens",
+        statement_preview["adjusted_measured_non_billable_lower_bound_tokens"].clone(),
+    );
+    insert(
+        "billable_lower_bound_tokens",
+        statement_preview["billable_lower_bound_tokens"].clone(),
+    );
+    insert(
+        "internal_provider_billed_tokens",
+        reconciliation_preview["internal_provider_billed_tokens"].clone(),
+    );
+    insert(
+        "internal_provider_cost_estimate_amount",
+        reconciliation_preview["internal_provider_cost_estimate_amount"].clone(),
+    );
+    insert(
+        "external_provider_usage_tokens",
+        reconciliation_preview["external_provider_usage_tokens"].clone(),
+    );
+    insert(
+        "external_provider_cost_amount",
+        reconciliation_preview["external_provider_cost_amount"].clone(),
+    );
+    insert(
+        "external_invoice_amount",
+        reconciliation_preview["external_invoice_amount"].clone(),
+    );
+    insert(
+        "drift_tokens",
+        reconciliation_preview["drift_tokens"].clone(),
+    );
+    insert(
+        "drift_amount",
+        reconciliation_preview["drift_amount"].clone(),
+    );
+    insert(
+        "invoice_drift_amount",
+        reconciliation_preview["invoice_drift_amount"].clone(),
+    );
+    insert(
+        "reconciliation_state",
+        reconciliation_preview["reconciliation_state"].clone(),
+    );
+    insert("margin_state", margin_scope["margin_state"].clone());
+    insert(
+        "margin_confidence_state",
+        margin_scope["margin_confidence_state"].clone(),
+    );
+    insert(
+        "margin_readiness_state",
+        margin_scope["margin_readiness_state"].clone(),
+    );
+    insert(
+        "infra_cost_truth_completeness_state",
+        margin_scope["infra_cost_truth_completeness_state"].clone(),
+    );
+    insert(
+        "pricing_truth_completeness_state",
+        margin_scope["pricing_truth_completeness_state"].clone(),
+    );
+    insert(
+        "customer_savings_money_truth_completeness_state",
+        margin_scope["customer_savings_money_truth_completeness_state"].clone(),
+    );
+    insert(
+        "amai_cost_truth_completeness_state",
+        margin_scope["amai_cost_truth_completeness_state"].clone(),
+    );
+    insert(
+        "margin_truth_completeness_state",
+        margin_scope["margin_truth_completeness_state"].clone(),
+    );
+    insert(
+        "required_sources_for_margin_truth",
+        margin_scope["required_sources_for_margin_truth"].clone(),
+    );
+    insert(
+        "optional_sources_for_margin_invoice_evidence",
+        margin_scope["optional_sources_for_invoice_evidence"].clone(),
+    );
+    insert(
+        "unready_required_sources_for_margin_truth",
+        margin_scope["unready_required_sources_for_margin_truth"].clone(),
+    );
+    insert(
+        "margin_provider_identity_state",
+        margin_scope["provider_identity_state"].clone(),
+    );
+    insert(
+        "margin_temporal_truth_state",
+        margin_scope["temporal_truth_state"].clone(),
+    );
+    insert(
+        "infra_cost_scope_alignment_state",
+        margin_scope["infra_cost_scope_alignment_state"].clone(),
+    );
+    insert(
+        "margin_blocking_reasons",
+        margin_scope["blocking_reasons"].clone(),
+    );
+    insert(
+        "adjustment_state",
+        statement_preview["adjustment_preview"]["correction_action_state"].clone(),
+    );
+    insert(
+        "pending_adjustment_entries_count",
+        statement_preview["adjustment_preview"]["pending_entries_count"].clone(),
+    );
+    insert(
+        "applied_adjustment_entries_count",
+        statement_preview["adjustment_preview"]["applied_entries_count"].clone(),
+    );
+    insert(
+        "disputed_adjustment_entries_count",
+        statement_preview["adjustment_preview"]["disputed_entries_count"].clone(),
+    );
+    insert(
+        "close_barriers",
+        statement_preview["close_barriers"].clone(),
+    );
+    insert(
+        "blocking_reasons",
+        combine_reason_arrays(&[
             &statement_preview["close_barriers"],
             &statement_preview["next_settlement_stage_blockers"],
             &reconciliation_preview["blocking_reasons"],
             &margin_scope["blocking_reasons"],
             &metering_freshness["blocking_reasons"],
         ]),
-        "suitability": suitability,
-        "customer_review_ready": true,
-        "invoice_ready": false,
-        "currency_profile": statement_preview["currency_profile"].clone(),
-        "note": if settlement_stage == "measured_review_ready_report_only" {
+    );
+    insert("suitability", suitability);
+    insert("customer_review_ready", json!(true));
+    insert("invoice_ready", json!(false));
+    insert(
+        "currency_profile",
+        statement_preview["currency_profile"].clone(),
+    );
+    insert(
+        "note",
+        json!(if settlement_stage == "measured_review_ready_report_only" {
             "Это короткий customer-facing summary поверх statement/reconciliation/margin/freshness previews. Он уже review-ready, но всё ещё остаётся report-only и не является invoice."
         } else {
             "Это короткий customer-facing summary поверх statement/reconciliation/margin/freshness previews. Он пригоден для review и audit, но не для invoice."
-        }
-    })
+        }),
+    );
+
+    Value::Object(summary)
 }
 
 fn build_statement_preview(
@@ -4545,6 +4869,9 @@ fn build_settlement_report_preview(
         "invoice_evidence_completeness_state": statement_export_preview["invoice_evidence_completeness_state"].clone(),
         "money_truth_completeness_state": statement_export_preview["money_truth_completeness_state"].clone(),
         "pricing_truth_completeness_state": statement_export_preview["pricing_truth_completeness_state"].clone(),
+        "customer_savings_money_truth_completeness_state": statement_export_preview["customer_savings_money_truth_completeness_state"].clone(),
+        "amai_cost_truth_completeness_state": statement_export_preview["amai_cost_truth_completeness_state"].clone(),
+        "margin_truth_completeness_state": statement_export_preview["margin_truth_completeness_state"].clone(),
         "reconciliation_readiness_state": statement_export_preview["reconciliation_readiness_state"].clone(),
         "margin_readiness_state": statement_export_preview["margin_readiness_state"].clone(),
         "required_sources_for_usage_truth": statement_export_preview["required_sources_for_usage_truth"].clone(),
@@ -4702,6 +5029,9 @@ fn build_statement_export_preview(
         "margin_readiness_state": contractual_summary["margin_readiness_state"].clone(),
         "infra_cost_truth_completeness_state": contractual_summary["infra_cost_truth_completeness_state"].clone(),
         "pricing_truth_completeness_state": contractual_summary["pricing_truth_completeness_state"].clone(),
+        "customer_savings_money_truth_completeness_state": contractual_summary["customer_savings_money_truth_completeness_state"].clone(),
+        "amai_cost_truth_completeness_state": contractual_summary["amai_cost_truth_completeness_state"].clone(),
+        "margin_truth_completeness_state": contractual_summary["margin_truth_completeness_state"].clone(),
         "required_sources_for_margin_truth": contractual_summary["required_sources_for_margin_truth"].clone(),
         "optional_sources_for_margin_invoice_evidence": contractual_summary["optional_sources_for_margin_invoice_evidence"].clone(),
         "unready_required_sources_for_margin_truth": contractual_summary["unready_required_sources_for_margin_truth"].clone(),
@@ -4822,6 +5152,9 @@ fn build_contractual_evidence_pack(
         "provider_identity_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["provider_identity_state"].clone(),
         "infra_cost_truth_completeness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["infra_cost_truth_completeness_state"].clone(),
         "pricing_truth_completeness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["pricing_truth_completeness_state"].clone(),
+        "customer_savings_money_truth_completeness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["customer_savings_money_truth_completeness_state"].clone(),
+        "amai_cost_truth_completeness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["amai_cost_truth_completeness_state"].clone(),
+        "margin_truth_completeness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["margin_truth_completeness_state"].clone(),
         "required_sources_for_margin_truth": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["required_sources_for_margin_truth"].clone(),
         "optional_sources_for_margin_invoice_evidence": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["optional_sources_for_margin_invoice_evidence"].clone(),
         "unready_required_sources_for_margin_truth": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["unready_required_sources_for_margin_truth"].clone(),
@@ -10014,7 +10347,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["margin_model_version"],
-            "margin-view-v7"
+            "margin-view-v8"
         );
         assert_eq!(
             token_event["contract"]["infra_cost_profile_version"],
@@ -10022,7 +10355,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v12"
+            "contractual-evidence-pack-v13"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -10866,6 +11199,14 @@ effective_to_epoch_ms = 2000
             "awaiting_rate_card_source"
         );
         assert_eq!(
+            reconciliation["provider_cost_truth_completeness_state"],
+            "no_external_cost_truth"
+        );
+        assert_eq!(
+            reconciliation["invoice_evidence_completeness_state"],
+            "no_invoice_evidence_scope"
+        );
+        assert_eq!(
             reconciliation["money_truth_completeness_state"],
             "no_external_money_truth"
         );
@@ -10918,7 +11259,7 @@ effective_to_epoch_ms = 2000
             &reconciliation,
         );
 
-        assert_eq!(margin["model_version"], "margin-view-v7");
+        assert_eq!(margin["model_version"], "margin-view-v8");
         assert_eq!(margin["infra_cost_profile_version"], "unpriced-infra-v1");
         assert_eq!(margin["status"], "awaiting_rate_card");
         assert_eq!(
@@ -10931,6 +11272,18 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             margin["pricing_truth_completeness_state"],
+            "awaiting_rate_card_and_infra_cost_profile"
+        );
+        assert_eq!(
+            margin["customer_savings_money_truth_completeness_state"],
+            "awaiting_rate_card_source"
+        );
+        assert_eq!(
+            margin["amai_cost_truth_completeness_state"],
+            "awaiting_infra_cost_profile"
+        );
+        assert_eq!(
+            margin["margin_truth_completeness_state"],
             "awaiting_rate_card_and_infra_cost_profile"
         );
         assert_eq!(margin["margin_readiness_state"], "awaiting_rate_card");
@@ -11023,6 +11376,18 @@ effective_to_epoch_ms = 2000
         assert_eq!(margin["margin_readiness_state"], "awaiting_pricing_truth");
         assert_eq!(
             margin["pricing_truth_completeness_state"],
+            "awaiting_rate_card_and_infra_cost_profile"
+        );
+        assert_eq!(
+            margin["customer_savings_money_truth_completeness_state"],
+            "awaiting_rate_card_source"
+        );
+        assert_eq!(
+            margin["amai_cost_truth_completeness_state"],
+            "awaiting_infra_cost_profile"
+        );
+        assert_eq!(
+            margin["margin_truth_completeness_state"],
             "awaiting_rate_card_and_infra_cost_profile"
         );
         assert_eq!(margin["customer_saved_tokens_lower_bound"], 9876);
@@ -11300,6 +11665,18 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             margin["margin_readiness_state"],
             "preview_ready_report_only"
+        );
+        assert_eq!(
+            margin["customer_savings_money_truth_completeness_state"],
+            "customer_savings_lower_bound_ready_report_only"
+        );
+        assert_eq!(
+            margin["amai_cost_truth_completeness_state"],
+            "amai_cost_preview_ready_report_only"
+        );
+        assert_eq!(
+            margin["margin_truth_completeness_state"],
+            "margin_preview_amounts_ready_report_only"
         );
         assert_eq!(
             margin["pricing_truth_completeness_state"],
@@ -11704,6 +12081,8 @@ effective_to_epoch_ms = 2000
                 },
                 "usage_truth_completeness_state": "provider_usage_bound",
                 "rate_card_truth_completeness_state": "rate_card_priced_bound",
+                "provider_cost_truth_completeness_state": "provider_cost_bound",
+                "invoice_evidence_completeness_state": "provider_invoice_bound",
                 "money_truth_completeness_state": "provider_cost_and_invoice_bound",
                 "reconciliation_readiness_state": "usage_cost_and_invoice_truth_ready",
                 "governance_blocking_reasons": [],
@@ -11719,6 +12098,9 @@ effective_to_epoch_ms = 2000
                 "margin_readiness_state": "awaiting_pricing_truth",
                 "infra_cost_truth_completeness_state": "awaiting_infra_cost_profile",
                 "pricing_truth_completeness_state": "awaiting_infra_cost_profile",
+                "customer_savings_money_truth_completeness_state": "customer_savings_lower_bound_ready_report_only",
+                "amai_cost_truth_completeness_state": "awaiting_infra_cost_profile",
+                "margin_truth_completeness_state": "awaiting_infra_cost_profile",
                 "provider_identity_state": "provider_identity_aligned",
                 "temporal_truth_state": "scope_period_aligned",
                 "infra_cost_scope_alignment_state": "scope_period_aligned",
@@ -11768,6 +12150,14 @@ effective_to_epoch_ms = 2000
             "rate_card_priced_bound"
         );
         assert_eq!(
+            summary["provider_cost_truth_completeness_state"],
+            "provider_cost_bound"
+        );
+        assert_eq!(
+            summary["invoice_evidence_completeness_state"],
+            "provider_invoice_bound"
+        );
+        assert_eq!(
             summary["money_truth_completeness_state"],
             "provider_cost_and_invoice_bound"
         );
@@ -11811,6 +12201,18 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             summary["pricing_truth_completeness_state"],
+            "awaiting_infra_cost_profile"
+        );
+        assert_eq!(
+            summary["customer_savings_money_truth_completeness_state"],
+            "customer_savings_lower_bound_ready_report_only"
+        );
+        assert_eq!(
+            summary["amai_cost_truth_completeness_state"],
+            "awaiting_infra_cost_profile"
+        );
+        assert_eq!(
+            summary["margin_truth_completeness_state"],
             "awaiting_infra_cost_profile"
         );
         assert_eq!(
@@ -11925,6 +12327,8 @@ effective_to_epoch_ms = 2000
                         "unready_optional_sources_for_invoice_evidence": ["provider_invoice_export"],
                         "rate_card_status": "priced_bound",
                         "rate_card_truth_completeness_state": "rate_card_priced_bound",
+                        "provider_cost_truth_completeness_state": null,
+                        "invoice_evidence_completeness_state": null,
                         "rate_card_version": "demo-priced-v1",
                         "rate_card_provider": "demo-provider",
                         "rate_card_currency_profile": "USD",
@@ -11944,6 +12348,9 @@ effective_to_epoch_ms = 2000
                         "margin_readiness_state": "awaiting_pricing_truth",
                         "infra_cost_truth_completeness_state": "awaiting_infra_cost_profile",
                         "pricing_truth_completeness_state": "awaiting_infra_cost_profile",
+                        "customer_savings_money_truth_completeness_state": null,
+                        "amai_cost_truth_completeness_state": null,
+                        "margin_truth_completeness_state": null,
                         "required_sources_for_margin_truth": ["infra_cost_profile", "provider_rate_card", "provider_usage_export"],
                         "optional_sources_for_margin_invoice_evidence": ["provider_invoice_export"],
                         "unready_required_sources_for_margin_truth": ["infra_cost_profile", "provider_rate_card", "provider_usage_export"],
@@ -12002,7 +12409,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v12");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v13");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -12042,6 +12449,12 @@ effective_to_epoch_ms = 2000
             "awaiting_infra_cost_profile"
         );
         assert_eq!(
+            preview["customer_savings_money_truth_completeness_state"],
+            json!(null)
+        );
+        assert_eq!(preview["amai_cost_truth_completeness_state"], json!(null));
+        assert_eq!(preview["margin_truth_completeness_state"], json!(null));
+        assert_eq!(
             preview["margin_blocking_reasons"],
             json!(["rate_card_unpriced"])
         );
@@ -12068,7 +12481,7 @@ effective_to_epoch_ms = 2000
         assert_eq!(preview["evidence_pack_available"], true);
         assert_eq!(
             preview["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v3"
+            "settlement-report-preview-v4"
         );
         assert_eq!(
             preview["required_sources_for_usage_truth"],
@@ -12167,6 +12580,8 @@ effective_to_epoch_ms = 2000
                             }
                         },
                         "rate_card_truth_completeness_state": "rate_card_priced_bound",
+                        "provider_cost_truth_completeness_state": null,
+                        "invoice_evidence_completeness_state": null,
                         "required_sources_for_usage_truth": ["provider_usage_export"],
                         "required_sources_for_cost_truth": ["provider_rate_card", "provider_usage_export"],
                         "optional_sources_for_invoice_evidence": ["provider_invoice_export"],
@@ -12175,6 +12590,9 @@ effective_to_epoch_ms = 2000
                         "unready_optional_sources_for_invoice_evidence": ["provider_invoice_export"],
                         "infra_cost_truth_completeness_state": "awaiting_infra_cost_profile",
                         "pricing_truth_completeness_state": "awaiting_infra_cost_profile",
+                        "customer_savings_money_truth_completeness_state": null,
+                        "amai_cost_truth_completeness_state": null,
+                        "margin_truth_completeness_state": null,
                         "required_sources_for_margin_truth": ["infra_cost_profile", "provider_rate_card", "provider_usage_export"],
                         "optional_sources_for_margin_invoice_evidence": ["provider_invoice_export"],
                         "unready_required_sources_for_margin_truth": ["infra_cost_profile", "provider_rate_card"],
@@ -12192,7 +12610,7 @@ effective_to_epoch_ms = 2000
                 "statement_export_previews": {
                     "lifetime": {
                         "settlement_report_preview": {
-                            "model_version": "settlement-report-preview-v3",
+                            "model_version": "settlement-report-preview-v4",
                             "settlement_report_id": "preview-hash"
                         }
                     }
@@ -12243,7 +12661,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v12");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v13");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -12278,6 +12696,12 @@ effective_to_epoch_ms = 2000
             payload["pricing_truth_completeness_state"],
             "awaiting_infra_cost_profile"
         );
+        assert_eq!(
+            payload["customer_savings_money_truth_completeness_state"],
+            json!(null)
+        );
+        assert_eq!(payload["amai_cost_truth_completeness_state"], json!(null));
+        assert_eq!(payload["margin_truth_completeness_state"], json!(null));
         assert_eq!(payload["margin_readiness_state"], "awaiting_pricing_truth");
         assert_eq!(
             payload["export_semantics"]["surface_kind"],
@@ -12295,7 +12719,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             payload["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v3"
+            "settlement-report-preview-v4"
         );
         assert_eq!(
             payload["required_sources_for_usage_truth"],
