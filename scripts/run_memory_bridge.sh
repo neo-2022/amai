@@ -13,4 +13,5 @@ if [[ -x "${repo_root}/target/debug/memory" ]]; then
   exec "${repo_root}/target/debug/memory" "$@"
 fi
 
-exec cargo run --quiet --manifest-path "${repo_root}/Cargo.toml" --bin memory -- "$@"
+printf '%s\n' "Amai memory bridge requires a built binary. Run 'cargo build --release' in ${repo_root} or set AMAI_BRIDGE_BINARY explicitly." >&2
+exit 1

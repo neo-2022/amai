@@ -4,11 +4,20 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 $hasStackProfile = $false
+$hasRemoteDestination = $false
 foreach ($arg in $args) {
     $value = [string]$arg
     if ($value -eq "--stack-profile" -or $value.StartsWith("--stack-profile=")) {
         $hasStackProfile = $true
     }
+    if ($value -eq "--ssh-destination" -or $value.StartsWith("--ssh-destination=")) {
+        $hasRemoteDestination = $true
+    }
+}
+
+if (-not $hasRemoteDestination) {
+    Write-Error "Local Windows bootstrap install is not supported yet. Use WSL2 for a local stack or pass --ssh-destination for a remote Amai host."
+    exit 1
 }
 
 $interactivePrompt = $false

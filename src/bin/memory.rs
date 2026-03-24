@@ -185,41 +185,39 @@ impl BridgePaths {
         )
     }
 
-    fn amai_command(&self) -> Command {
+    fn amai_command(&self) -> Result<Command> {
         if let Ok(path) = env::var("AMAI_BRIDGE_BINARY") {
             let mut command = Command::new(path);
             command.current_dir(&self.amai_root);
-            return command;
+            return Ok(command);
         }
-        let release = self.amai_root.join("target/release/amai");
+        let release = compiled_binary_path(&self.amai_root, "target/release", "amai");
         if release.is_file() {
             let mut command = Command::new(release);
             command.current_dir(&self.amai_root);
-            return command;
+            return Ok(command);
         }
-        let debug = self.amai_root.join("target/debug/amai");
+        let debug = compiled_binary_path(&self.amai_root, "target/debug", "amai");
         if debug.is_file() {
             let mut command = Command::new(debug);
             command.current_dir(&self.amai_root);
-            return command;
+            return Ok(command);
         }
-        let mut command = Command::new("cargo");
-        command
-            .arg("run")
-            .arg("--quiet")
-            .arg("--manifest-path")
-            .arg(self.amai_root.join("Cargo.toml"))
-            .arg("--bin")
-            .arg("amai")
-            .arg("--");
-        command.current_dir(&self.amai_root);
-        command
+        bail!(
+            "failed to find built Amai binary in {}; run cargo build --release or set AMAI_BRIDGE_BINARY explicitly",
+            self.amai_root.display()
+        )
     }
+}
+
+fn compiled_binary_path(repo_root: &Path, directory: &str, stem: &str) -> PathBuf {
+    let suffix = std::env::consts::EXE_SUFFIX;
+    repo_root.join(directory).join(format!("{stem}{suffix}"))
 }
 
 async fn run_context(paths: &BridgePaths, args: &ContextArgs) -> Result<()> {
     let resolved = resolve_project(paths, args.project.clone(), args.repo_root.clone()).await?;
-    let mut command = paths.amai_command();
+    let mut command = paths.amai_command()?;
     apply_default_agent_scope(
         &mut command,
         &resolved.project_code,
@@ -239,7 +237,7 @@ async fn run_context(paths: &BridgePaths, args: &ContextArgs) -> Result<()> {
 async fn run_search(paths: &BridgePaths, args: &SearchArgs) -> Result<()> {
     let resolved = resolve_project(paths, args.project.clone(), args.repo_root.clone()).await?;
     let query = args.query.join(" ");
-    let mut command = paths.amai_command();
+    let mut command = paths.amai_command()?;
     apply_default_agent_scope(
         &mut command,
         &resolved.project_code,
@@ -339,7 +337,7 @@ async fn run_save(paths: &BridgePaths, args: &SaveArgs) -> Result<()> {
     fs::write(&details_path, details)
         .with_context(|| format!("failed to write {}", details_path.display()))?;
 
-    let mut command = paths.amai_command();
+    let mut command = paths.amai_command()?;
     apply_default_agent_scope(
         &mut command,
         &resolved.project_code,
@@ -365,7 +363,7 @@ async fn run_save(paths: &BridgePaths, args: &SaveArgs) -> Result<()> {
 }
 
 fn run_mcp(paths: &BridgePaths, args: &McpArgs) -> Result<()> {
-    let mut command = paths.amai_command();
+    let mut command = paths.amai_command()?;
     command.arg("mcp").arg("serve");
     for arg in &args.passthrough {
         if arg != "serve" {
@@ -848,9 +846,13 @@ fn now_epoch_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_search_hits, decision_trace_summary, is_amai_root, render_save_details};
+    use super::{
+        BridgePaths, build_search_hits, decision_trace_summary, is_amai_root, render_save_details,
+    };
     use serde_json::json;
+    use std::fs;
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn renders_save_details_human_readably() {
@@ -935,5 +937,44 @@ mod tests {
     #[test]
     fn root_check_requires_expected_markers() {
         assert!(!is_amai_root(Path::new("/tmp")));
+    }
+
+    #[test]
+    fn amai_command_requires_built_binary_or_override() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let amai_root = std::env::temp_dir().join(format!("amai-bridge-missing-{unique}"));
+        fs::create_dir_all(&amai_root).expect("temp root");
+        let paths = BridgePaths {
+            amai_root: amai_root.clone(),
+        };
+        let error = paths.amai_command().expect_err("missing binary must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to find built Amai binary")
+        );
+        let _ = fs::remove_dir_all(&amai_root);
+    }
+
+    #[test]
+    fn amai_command_prefers_release_binary_when_present() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let amai_root = std::env::temp_dir().join(format!("amai-bridge-release-{unique}"));
+        let release_dir = amai_root.join("target/release");
+        fs::create_dir_all(&release_dir).expect("release dir");
+        let release_binary = super::compiled_binary_path(&amai_root, "target/release", "amai");
+        fs::write(&release_binary, b"").expect("release binary placeholder");
+        let paths = BridgePaths {
+            amai_root: amai_root.clone(),
+        };
+        let command = paths.amai_command().expect("release command");
+        assert_eq!(command.get_program(), release_binary.as_os_str());
+        let _ = fs::remove_dir_all(&amai_root);
     }
 }

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 19:27 MSK
-Ручная сверка guide/docs: 2026-03-24 19:27 MSK
+modified_at: 2026-03-24 19:34 MSK
+Ручная сверка guide/docs: 2026-03-24 19:34 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -181,6 +181,12 @@ scripts\preflight.cmd
 .\scripts\install_amai.ps1
 ```
 
+Этот wrapper сейчас не делает вид, что умеет честно поднимать локальный Windows stack.
+Если запустить его без `--ssh-destination`, он должен fail-closed и прямо сказать, что для локального stack path пока нужен `WSL2`.
+Безопасный Windows path сейчас такой:
+- локальный stack поднимать в `WSL2`;
+- или использовать этот wrapper только для remote-host onboarding с `--ssh-destination`.
+
 ### Windows CMD
 
 ```bat
@@ -281,17 +287,17 @@ scripts\install_amai.cmd
 ### Windows PowerShell
 
 ```powershell
-.\scripts\install_amai.ps1 --client vscode
-.\scripts\install_amai.ps1 --client cursor
-.\scripts\install_amai.ps1 --client codex
+.\scripts\install_amai.ps1 --ssh-destination ops@example-host --remote-repo-root /srv/amai --client vscode
+.\scripts\install_amai.ps1 --ssh-destination ops@example-host --remote-repo-root /srv/amai --client cursor
+.\scripts\install_amai.ps1 --ssh-destination ops@example-host --remote-repo-root /srv/amai --client codex
 ```
 
 ### Windows CMD
 
 ```bat
-scripts\install_amai.cmd --client vscode
-scripts\install_amai.cmd --client cursor
-scripts\install_amai.cmd --client codex
+scripts\install_amai.cmd --ssh-destination ops@example-host --remote-repo-root /srv/amai --client vscode
+scripts\install_amai.cmd --ssh-destination ops@example-host --remote-repo-root /srv/amai --client cursor
+scripts\install_amai.cmd --ssh-destination ops@example-host --remote-repo-root /srv/amai --client codex
 ```
 
 ## Шаг 5. Что делать дальше

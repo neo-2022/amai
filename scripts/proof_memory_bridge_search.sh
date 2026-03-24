@@ -3,9 +3,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+if [[ ! -x ./target/release/memory || ! -x ./target/release/amai ]]; then
+  cargo build --quiet --release --bin amai --bin memory
+fi
+
 output="$(
   AMAI_REPO_ROOT="$(pwd)" \
-  cargo run --quiet --bin memory -- search continuity --project art --namespace continuity
+  ./target/release/memory search continuity --project art --namespace continuity
 )"
 
 printf '%s\n' "$output" | grep -F "Amai memory search" >/dev/null

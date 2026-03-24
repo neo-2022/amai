@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 19:27 MSK
-Ручная сверка guide/docs: 2026-03-24 19:27 MSK
+modified_at: 2026-03-24 19:34 MSK
+Ручная сверка guide/docs: 2026-03-24 19:34 MSK
 
 # Operations
 
@@ -30,12 +30,21 @@ cd /home/art/agent-memory-index
 - ставит внешний compatibility bridge `memory -> Amai`;
 - пишет готовый MCP config для клиента.
 
+Важно для Windows:
+- `install_amai.ps1` и `install_amai.cmd` больше не должны делать вид, что умеют честно поднимать локальный Windows stack;
+- без `--ssh-destination` этот path должен fail-closed с прямым сообщением про `WSL2`;
+- безопасный Windows вариант сейчас такой:
+  - локальный stack в `WSL2`;
+  - или remote-host onboarding через `--ssh-destination`.
+
 `install_amai.sh` делает ещё один шаг поверх этого:
 - по умолчанию использует `client = auto`;
 - пытается определить, какой клиент наиболее вероятен;
 - работает как более человеческое имя для product install path.
 - если запускать его повторно, он не должен плодить дубликаты, а должен аккуратно пересинхронизировать текущую установку.
 - после локальной установки `~/.local/bin/memory` больше не должен указывать на старый bridge; он должен запускать `Amai` compatibility runner.
+- этот bridge больше не должен уходить в `cargo run` во время обычного runtime;
+  install path теперь обязан опираться на уже собранный release binary.
 - `memory search` через этот bridge теперь обязан печатать не только hits, но и две explainability-строки:
   - `Почему вошло`
   - `Почему часть не вошла`
