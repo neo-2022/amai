@@ -4133,7 +4133,9 @@ fn benchmark_qdrant_live_card(snapshot: &Value) -> Value {
     let from_last_success = benchmark["from_last_success"].as_bool().unwrap_or(false);
     let status = if !configured {
         "unknown"
-    } else if !active || !available {
+    } else if !active {
+        "unknown"
+    } else if !available {
         "alert"
     } else {
         combine_statuses(&[
@@ -4327,7 +4329,9 @@ fn benchmark_qdrant_status_tooltip(snapshot: &Value) -> Option<String> {
     let from_last_success = benchmark["from_last_success"].as_bool().unwrap_or(false);
     let status = if !configured {
         "unknown"
-    } else if !active || !available {
+    } else if !active {
+        "unknown"
+    } else if !available {
         "alert"
     } else {
         combine_statuses(&[
@@ -4608,6 +4612,16 @@ fn with_status_tooltip(mut card: Value, status_tooltip: &str) -> Value {
     card
 }
 
+fn with_status_label(mut card: Value, status_label: &str) -> Value {
+    if let Some(object) = card.as_object_mut() {
+        object.insert(
+            "status_label".to_string(),
+            Value::from(status_label.to_string()),
+        );
+    }
+    card
+}
+
 fn live_latency_compare_card(snapshot: &Value) -> Value {
     let hot = latency_slice(snapshot, "hot");
     let cold = latency_slice(snapshot, "cold");
@@ -4626,7 +4640,7 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
     let overall_status =
         combine_live_compare_status(&[hot_assessment.status, cold_assessment.status]);
 
-    json!({
+    let mut card = json!({
         "kind": "live_compare",
         "title": "Скорость ответа",
         "title_tooltip": "Показывает, как быстро Amai отвечает прямо сейчас в двух обычных ситуациях: когда похожий запрос уже был и когда запрос идёт впервые. Верхние числа — это обычное время ответа в этих двух случаях. Это не сводка по всей работе Amai: сюда не входят сохранённые проверки, служебные прогоны и другие отдельные рабочие линии.",
@@ -4693,7 +4707,11 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
                 }
             ]
         }
-    })
+    });
+    if overall_status == "waiting" {
+        card = with_status_label(card, "идёт накопление выборки");
+    }
+    card
 }
 
 fn working_state_live_card(snapshot: &Value) -> Value {
@@ -4793,7 +4811,8 @@ fn working_state_live_card(snapshot: &Value) -> Value {
         working_state_decision_trace_summary(&restore["latest_decision_trace"], "not_included", "");
     let status = match restore_confidence {
         "high" | "medium" => "pass",
-        _ if events_count.unwrap_or(0) > 0 => "alert",
+        "low" => "alert",
+        _ if events_count.unwrap_or(0) > 0 => "waiting",
         _ => "unknown",
     };
     let has_decision_trace = !included_reasons.is_empty() || !excluded_reasons.is_empty();
@@ -4878,10 +4897,21 @@ fn working_state_live_card(snapshot: &Value) -> Value {
         Some("Показывает, чем Amai действительно занят сейчас именно в текущем репозитории: какая цель активна, какой следующий шаг остаётся обязательным, какая команда была последней и какие файлы ещё в работе. Это не замер скорости ответа, а снимок локальной рабочей линии.".to_string()),
         rows,
     );
+    if status == "waiting" {
+        card = with_status_label(card, "ждём устойчивый снимок");
+    }
     if status != "pass" {
         let tooltip = if status == "alert" {
             format!(
                 "Статус требует внимания по следующим причинам:\n- Уверенность в этом рабочем снимке пока {}.\n- Последний локальный снимок сделан {}.\n- Рабочая линия уже содержит {}, но снимок ещё недостаточно устойчив.\n- Следующий обязательный шаг сейчас: {}.",
+                restore_confidence_human,
+                snapshot_age,
+                format_count_with_word(events_count.unwrap_or(0), "событие", "события", "событий"),
+                next_step
+            )
+        } else if status == "waiting" {
+            format!(
+                "Статус пока не может считаться нормальным по следующим причинам:\n- Уверенность в этом рабочем снимке пока {}.\n- Последний локальный снимок сделан {}.\n- Рабочая линия уже содержит {}, но для устойчивого локального снимка нужно больше подтверждённых событий.\n- Следующий обязательный шаг сейчас: {}.",
                 restore_confidence_human,
                 snapshot_age,
                 format_count_with_word(events_count.unwrap_or(0), "событие", "события", "событий"),
@@ -5372,7 +5402,7 @@ fn assess_live_latency_slice(
 
     if !sample_ok {
         return LiveLatencySliceAssessment {
-            status: "alert",
+            status: "waiting",
             note: if failed_metrics.is_empty() {
                 format!(
                     "По задержке всё хорошо, но выборка ещё мала: {} из > {}.",
@@ -5381,7 +5411,7 @@ fn assess_live_latency_slice(
                 )
             } else {
                 format!(
-                    "Пока рано считать режим зелёным: выборка ещё мала ({} из > {}), а текущие значения ещё не лучше эталона по {}.",
+                    "Пока рано делать строгий вывод: выборка ещё мала ({} из > {}), а текущие значения ещё не лучше эталона по {}.",
                     format_u64(Some(sample_count)),
                     format_u64(Some(targets.sample_count)),
                     failed_metrics.join(", ")
@@ -5428,6 +5458,9 @@ fn combine_live_compare_status(statuses: &[&str]) -> &'static str {
     }
     if statuses.iter().all(|status| *status == "pass") {
         return "pass";
+    }
+    if statuses.contains(&"waiting") {
+        return "waiting";
     }
     "unknown"
 }
@@ -6314,7 +6347,7 @@ mod tests {
             }
         });
         let card = benchmark_qdrant_live_card(&snapshot);
-        assert_eq!(card["status"].as_str(), Some("alert"));
+        assert_eq!(card["status"].as_str(), Some("unknown"));
         assert_eq!(card["status_label"].as_str(), Some("тест не запущен"));
         assert_eq!(card["value"].as_str(), Some("402.57 MiB"));
         assert!(
@@ -6357,6 +6390,7 @@ mod tests {
             }
         });
         let card = benchmark_qdrant_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("unknown"));
         assert_eq!(card["status_label"].as_str(), Some("тест не запущен"));
         assert_eq!(card["value"].as_str(), Some("ещё нет данных"));
         let empty_rows = Vec::new();
@@ -6393,7 +6427,7 @@ mod tests {
             }
         });
         let card = benchmark_qdrant_live_card(&snapshot);
-        assert_eq!(card["status"].as_str(), Some("alert"));
+        assert_eq!(card["status"].as_str(), Some("unknown"));
         assert_eq!(card["status_label"].as_str(), Some("тест не запущен"));
         assert_eq!(card["value"].as_str(), Some("209.53 MiB"));
         assert!(
@@ -6460,8 +6494,11 @@ mod tests {
         });
 
         let card = live_latency_compare_card(&snapshot);
-        assert_eq!(card["status"].as_str(), Some("alert"));
-        assert_eq!(card["status_label"].as_str(), Some("внимание"));
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(
+            card["status_label"].as_str(),
+            Some("идёт накопление выборки")
+        );
         assert!(
             card["metrics"][0]["note"]
                 .as_str()
@@ -6472,7 +6509,7 @@ mod tests {
             card["metrics"][1]["note"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("Пока рано считать режим зелёным")
+                .contains("Пока рано делать строгий вывод")
         );
     }
 
@@ -6709,6 +6746,11 @@ mod tests {
         });
 
         let card = working_state_live_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(
+            card["status_label"].as_str(),
+            Some("ждём устойчивый снимок")
+        );
         let rows = card["rows"].as_array().expect("rows");
         assert!(
             rows.iter()
