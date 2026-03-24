@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 16:40 MSK
-Ручная сверка guide/docs: 2026-03-24 16:40 MSK
+modified_at: 2026-03-24 16:57 MSK
+Ручная сверка guide/docs: 2026-03-24 16:57 MSK
 
 # Operations
 
@@ -1625,6 +1625,21 @@ cargo run -- context pack \
   - current billable state;
   - required traffic class и quality gate;
   - preliminary thresholds;
+  - explicit truth terms:
+    - `savings floor`
+    - `confirmed lower bound`
+    - `retrieval savings floor`
+    - `partial whole-agent-cycle lower bound`
+- `suitability_contract`
+  - versioned truth-layer, который фиксирует пригодность scope для:
+    - `operational_live`
+    - `product_kpi`
+    - `customer_review`
+    - `contractual_export`
+    - `billing_amount`
+    - `compensation_pricing`
+  - negative result тоже может быть suitable для KPI, если рядом честно показаны
+    coverage и completeness state.
 - `rate_card`
   - `rate_card_binding_model_version`, rate-card version и currency profile;
   - truthful statuses:
@@ -1682,6 +1697,8 @@ cargo run -- context pack \
   - compact export-layer поверх statement/reconciliation/margin/freshness;
   - публикует `statement_preview_id`, hashes line items, adjustment/dispute action state
     и готовую команду для on-demand evidence pack;
+  - теперь ещё публикует `suitability`, чтобы contractual export и будущий billing
+    не смешивались в одну шкалу пригодности;
   - это bridge между live report и full contractual evidence pack.
 - `adjustment_request_schema`
   - versioned request contract для future credit/correction/dispute entries;
@@ -1855,6 +1872,7 @@ cargo run --release -- observe token-evidence-pack --scope current_session --out
 ./scripts/proof_token_contractual_pricing.sh
 ./scripts/proof_token_contractual_sources.sh
 ./scripts/proof_token_freeze_close_semantics.sh
+./scripts/proof_token_suitability.sh
 ```
 
 Если нужен отдельный operator-safe inspect-layer по provider bindings, reconciliation и margin:

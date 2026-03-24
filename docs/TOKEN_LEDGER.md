@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 16:19 MSK
-Ручная сверка guide/docs: 2026-03-24 16:19 MSK
+modified_at: 2026-03-24 16:57 MSK
+Ручная сверка guide/docs: 2026-03-24 16:57 MSK
 
 # Token Ledger
 
@@ -471,7 +471,26 @@ reporting layers:
 `billing_policy` нужен затем, чтобы:
 - прямо показывать текущий mode;
 - прямо показывать, что billable layer сейчас ещё отключён;
-- не смешивать measured/report-only semantics с будущим денежным settlement.
+- не смешивать measured/report-only semantics с будущим денежным settlement;
+- отдельно фиксировать truth-термины:
+  - `savings floor`
+  - `confirmed lower bound`
+  - `retrieval savings floor`
+  - `partial whole-agent-cycle lower bound`
+
+Отдельно report теперь должен публиковать и `suitability_contract`.
+
+Он нужен затем, чтобы:
+- не путать отрицательный truthful KPI с непригодностью для review или billing;
+- явно разводить surface-ы:
+  - `operational_live`
+  - `product_kpi`
+  - `customer_review`
+  - `contractual_export`
+  - `billing_amount`
+  - `compensation_pricing`;
+- заставлять любой KPI читаться вместе с `coverage` и `completeness state`, а не как
+  будто это уже полный settlement verdict.
 
 `rate_card` нужен затем, чтобы:
 - не делать вид, что токены уже переведены в деньги;
@@ -550,6 +569,19 @@ reporting layers:
 
 Это не недостаток UX, а truth guardrail до тех пор, пока реальный billing workflow не
 materialized end-to-end.
+
+Теперь поверх preview/report layer ещё живёт и `suitability`:
+- для `product_kpi`
+- для `customer_review`
+- для `contractual_export`
+- для `billing_amount`
+- для `compensation_pricing`
+
+Главный смысл этого слоя:
+- suitability не говорит, хорошая цифра или плохая;
+- suitability говорит, где эту цифру уже можно использовать без подмены смысла;
+- отрицательная экономия тоже может быть truthful product KPI, если confirmed lower bound
+  уже есть и рядом опубликованы coverage/completeness.
 
 ## Adjustment schema и report-only registry
 

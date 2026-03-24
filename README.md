@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 16:40 MSK
-Ручная сверка guide/docs: 2026-03-24 16:40 MSK
+modified_at: 2026-03-24 16:57 MSK
+Ручная сверка guide/docs: 2026-03-24 16:57 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1073,7 +1073,22 @@ preview, а не только raw count.
   - это защищает savings от нечестного раздутого baseline.
 - `billing_policy`
   - видно, что сейчас реально billable отключён и весь слой остаётся `report_only`;
-  - там же живут preliminary thresholds и правило `live + quality gate`.
+  - там же живут preliminary thresholds и правило `live + quality gate`;
+  - отдельно зафиксированы truth-термины:
+    - `savings floor`
+    - `confirmed lower bound`
+    - `retrieval savings floor`
+    - `partial whole-agent-cycle lower bound`
+- `suitability_contract`
+  - отдельный слой пригодности цифры для разных surface-ов:
+    - `operational_live`
+    - `product_kpi`
+    - `customer_review`
+    - `contractual_export`
+    - `billing_amount`
+    - `compensation_pricing`
+  - он отвечает не на вопрос, хорошая цифра или плохая, а на вопрос, где её можно
+    использовать без подмены смысла.
 - `rate_card`
   - честно показывает не только `currency_profile`, но и отдельный
     `rate_card_binding_model_version`;
@@ -1132,6 +1147,8 @@ preview, а не только raw count.
     - `evidence_pack_command`
   - это нужно затем, чтобы customer review/export начинался с компактного preview,
     а не сразу с full evidence pack.
+  - export preview теперь ещё несёт `suitability`, чтобы review/export и будущие
+    money-facing surface-ы не путались между собой.
 - first-class `coverage`
   - у каждого rollup теперь есть не только savings, но и честный охват:
     `measured / included / excluded`;
@@ -1335,6 +1352,7 @@ cargo run --release -- observe token-evidence-pack --scope rolling_window --outp
 
 ```bash
 ./scripts/proof_token_contractual_pricing.sh
+./scripts/proof_token_suitability.sh
 ```
 
 Что важно по правде:

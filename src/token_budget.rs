@@ -108,6 +108,8 @@ struct TokenBudgetContractConfig {
     event_time_policy_version: String,
     #[serde(default = "default_billing_policy_version")]
     billing_policy_version: String,
+    #[serde(default = "default_suitability_model_version")]
+    suitability_model_version: String,
     #[serde(default = "default_billing_mode")]
     billing_mode: String,
     #[serde(default = "default_reconciliation_contract_version")]
@@ -157,6 +159,7 @@ impl Default for TokenBudgetContractConfig {
             telemetry_surface_split_version: default_telemetry_surface_split_version(),
             event_time_policy_version: default_event_time_policy_version(),
             billing_policy_version: default_billing_policy_version(),
+            suitability_model_version: default_suitability_model_version(),
             billing_mode: default_billing_mode(),
             reconciliation_contract_version: default_reconciliation_contract_version(),
             margin_model_version: default_margin_model_version(),
@@ -319,6 +322,7 @@ struct TokenBudgetEvent {
     telemetry_surface_split_version: String,
     event_time_policy_version: String,
     billing_policy_version: String,
+    suitability_model_version: String,
     billing_mode: String,
     reconciliation_contract_version: String,
     margin_model_version: String,
@@ -530,6 +534,10 @@ fn default_billing_policy_version() -> String {
     "report-only-v1".to_string()
 }
 
+fn default_suitability_model_version() -> String {
+    "token-suitability-v1".to_string()
+}
+
 fn default_billing_mode() -> String {
     "report_only".to_string()
 }
@@ -594,6 +602,7 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
+        "suitability_model_version": contract.suitability_model_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "margin_model_version": contract.margin_model_version.clone(),
@@ -634,6 +643,7 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
+        "suitability_model_version": contract.suitability_model_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "margin_model_version": contract.margin_model_version.clone(),
@@ -893,7 +903,10 @@ fn build_billing_policy_json(
         "status": "report_only",
         "settlement_status": contract.settlement_status.clone(),
         "current_billable_state": "disabled_report_only",
-        "confirmed_lower_bound_term": "verified live lower bound",
+        "savings_floor_term": "savings floor",
+        "confirmed_lower_bound_term": "confirmed lower bound",
+        "retrieval_savings_floor_term": "retrieval savings floor",
+        "whole_cycle_term": "partial whole-agent-cycle lower bound",
         "quality_gate_required": true,
         "required_traffic_class": "live",
         "preliminary_thresholds": {
@@ -910,7 +923,55 @@ fn build_billing_policy_json(
             "quality_gate_failed",
             "awaiting_followup_reconciliation"
         ],
-        "note": "Billing semantics пока не активны: lower bound уже измеряется, но current policy остаётся report-only и не превращает savings в денежное начисление."
+        "truth_guardrail": {
+            "retrieval_savings_floor": "real",
+            "partial_whole_agent_cycle_lower_bound": "real",
+            "full_session_economics": "not_fully_measured"
+        },
+        "note": "Billing semantics пока не активны: lower bound уже измеряется, но current policy остаётся report-only и не превращает savings в денежное начисление. confirmed lower bound пригоден для truthful KPI только вместе с coverage и completeness state."
+    })
+}
+
+fn build_suitability_contract_json(contract: &TokenBudgetContractConfig) -> Value {
+    json!({
+        "model_version": contract.suitability_model_version.clone(),
+        "surfaces": [
+            {
+                "code": "operational_live",
+                "meaning": "Инженерный live-contour для наблюдения за текущим потоком. Может показывать и положительный, и отрицательный результат без денежного смысла."
+            },
+            {
+                "code": "product_kpi",
+                "meaning": "Truthful product KPI по confirmed lower bound. Требует confirmed usage и обязан показываться вместе с coverage и completeness state."
+            },
+            {
+                "code": "customer_review",
+                "meaning": "Customer-facing review/report-only слой. Может быть пригоден даже в provisional состоянии, если это прямо показано."
+            },
+            {
+                "code": "contractual_export",
+                "meaning": "Export/evidence surface для review и audit. Это не invoice и не settlement."
+            },
+            {
+                "code": "billing_amount",
+                "meaning": "Будущий money-facing слой. До честного billable close и reconciliation обязан оставаться непригодным."
+            },
+            {
+                "code": "compensation_pricing",
+                "meaning": "Самый строгий слой для success-fee или pay-from-savings. Требует billable lower bound, money truth и final settlement semantics."
+            }
+        ],
+        "required_companions": [
+            "coverage",
+            "completeness_state",
+            "truth_guardrail"
+        ],
+        "truth_guardrail": {
+            "retrieval_savings_floor": "real",
+            "partial_whole_agent_cycle_lower_bound": "real",
+            "full_session_economics": "not_fully_measured"
+        },
+        "note": "Suitability отвечает не на вопрос, хорошая ли цифра, а на вопрос, где её можно использовать без обмана. Отрицательная экономия тоже может быть truthful KPI, если scope и coverage показаны честно."
     })
 }
 
@@ -2705,7 +2766,217 @@ fn freeze_status(
     }
 }
 
+fn reason_strings(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn merged_reason_strings(values: &[&Value]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut merged = Vec::new();
+    for value in values {
+        for reason in reason_strings(value) {
+            if seen.insert(reason.clone()) {
+                merged.push(reason);
+            }
+        }
+    }
+    merged
+}
+
+fn build_scope_suitability(
+    contract: &TokenBudgetContractConfig,
+    statement_preview: &Value,
+    reconciliation_preview: &Value,
+    margin_scope: &Value,
+    metering_freshness: &Value,
+) -> Value {
+    if statement_preview.is_null()
+        || reconciliation_preview.is_null()
+        || margin_scope.is_null()
+        || metering_freshness.is_null()
+    {
+        return Value::Null;
+    }
+
+    let measured_events = statement_preview["coverage"]["measured_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let confirmed_events = statement_preview["coverage"]["included_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let coverage_state = statement_preview["coverage"]["completeness_state"]
+        .as_str()
+        .unwrap_or("empty");
+    let stable = metering_freshness["can_treat_scope_as_stable"].as_bool() == Some(true);
+    let provisional_close_candidate =
+        statement_preview["provisional_close_candidate"].as_bool() == Some(true);
+    let provisional_close_barriers = &statement_preview["provisional_close_barriers"];
+    let billing_close_barriers = &statement_preview["billing_close_barriers"];
+    let governance_blocking_reasons = &reconciliation_preview["governance_blocking_reasons"];
+    let review_reasons = merged_reason_strings(&[
+        provisional_close_barriers,
+        &metering_freshness["blocking_reasons"],
+    ]);
+    let billing_reasons = merged_reason_strings(&[
+        billing_close_barriers,
+        governance_blocking_reasons,
+        &margin_scope["blocking_reasons"],
+    ]);
+    let compensation_reasons = {
+        let mut reasons = billing_reasons.clone();
+        if reconciliation_preview["money_truth_completeness_state"].as_str()
+            != Some("provider_cost_and_invoice_bound")
+            && !reasons.iter().any(|value| value == "money_truth_not_final")
+        {
+            reasons.push("money_truth_not_final".to_string());
+        }
+        if statement_preview["final_amount"].is_null()
+            && !reasons
+                .iter()
+                .any(|value| value == "final_amount_unavailable")
+        {
+            reasons.push("final_amount_unavailable".to_string());
+        }
+        reasons
+    };
+
+    let operational_live = if measured_events == 0 {
+        json!({
+            "usable": false,
+            "state": "empty",
+            "blocking_reasons": ["no_measured_usage_events"]
+        })
+    } else {
+        json!({
+            "usable": true,
+            "state": "live_operational",
+            "blocking_reasons": []
+        })
+    };
+
+    let product_kpi = if confirmed_events == 0 {
+        json!({
+            "usable": false,
+            "state": "awaiting_confirmed_usage",
+            "blocking_reasons": if coverage_state == "empty" {
+                json!(["no_measured_usage_events"])
+            } else {
+                json!(["no_confirmed_usage"])
+            }
+        })
+    } else if stable && provisional_close_candidate {
+        json!({
+            "usable": true,
+            "state": "provisionally_stable_lower_bound_with_coverage",
+            "blocking_reasons": review_reasons
+        })
+    } else {
+        json!({
+            "usable": true,
+            "state": "provisional_lower_bound_with_coverage",
+            "blocking_reasons": review_reasons
+        })
+    };
+
+    let customer_review = if measured_events == 0 {
+        json!({
+            "usable": false,
+            "state": "empty",
+            "blocking_reasons": ["no_measured_usage_events"]
+        })
+    } else if stable && provisional_close_candidate {
+        json!({
+            "usable": true,
+            "state": "review_ready_report_only_provisionally_stable",
+            "blocking_reasons": review_reasons
+        })
+    } else {
+        json!({
+            "usable": true,
+            "state": "review_ready_report_only_provisional",
+            "blocking_reasons": review_reasons
+        })
+    };
+
+    let contractual_export = if measured_events == 0 {
+        json!({
+            "usable": false,
+            "state": "empty",
+            "blocking_reasons": ["no_measured_usage_events"]
+        })
+    } else if stable && provisional_close_candidate {
+        json!({
+            "usable": true,
+            "state": "export_ready_report_only_provisionally_stable",
+            "blocking_reasons": review_reasons
+        })
+    } else {
+        json!({
+            "usable": true,
+            "state": "export_ready_report_only_provisional",
+            "blocking_reasons": review_reasons
+        })
+    };
+
+    let billing_amount = if statement_preview["billable_lower_bound_tokens"].is_null() {
+        json!({
+            "usable": false,
+            "state": "not_billable_report_only",
+            "blocking_reasons": billing_reasons
+        })
+    } else {
+        json!({
+            "usable": true,
+            "state": "billable_ready",
+            "blocking_reasons": billing_reasons
+        })
+    };
+
+    let compensation_pricing = if statement_preview["billable_lower_bound_tokens"].is_null()
+        || statement_preview["final_amount"].is_null()
+        || reconciliation_preview["money_truth_completeness_state"].as_str()
+            != Some("provider_cost_and_invoice_bound")
+    {
+        json!({
+            "usable": false,
+            "state": "not_compensation_ready",
+            "blocking_reasons": compensation_reasons
+        })
+    } else {
+        json!({
+            "usable": true,
+            "state": "compensation_ready",
+            "blocking_reasons": compensation_reasons
+        })
+    };
+
+    json!({
+        "model_version": contract.suitability_model_version.clone(),
+        "surfaces": {
+            "operational_live": operational_live,
+            "product_kpi": product_kpi,
+            "customer_review": customer_review,
+            "contractual_export": contractual_export,
+            "billing_amount": billing_amount,
+            "compensation_pricing": compensation_pricing,
+        },
+        "truth_guardrail": {
+            "retrieval_savings_floor": "real",
+            "partial_whole_agent_cycle_lower_bound": "real",
+            "full_session_economics": "not_fully_measured"
+        },
+        "note": "Suitability не маскирует отрицательную или положительную экономию. Она только фиксирует, где этот scope можно использовать без подмены смысла."
+    })
+}
+
 fn build_contractual_statement_summary(
+    contract: &TokenBudgetContractConfig,
     scope_code: &str,
     scope_label: &str,
     statement_preview: &Value,
@@ -2720,6 +2991,13 @@ fn build_contractual_statement_summary(
     {
         return Value::Null;
     }
+    let suitability = build_scope_suitability(
+        contract,
+        statement_preview,
+        reconciliation_preview,
+        margin_scope,
+        metering_freshness,
+    );
     json!({
         "scope_code": scope_code,
         "scope_label": scope_label,
@@ -2766,6 +3044,7 @@ fn build_contractual_statement_summary(
             &margin_scope["blocking_reasons"],
             &metering_freshness["blocking_reasons"],
         ]),
+        "suitability": suitability,
         "customer_review_ready": true,
         "invoice_ready": false,
         "currency_profile": statement_preview["currency_profile"].clone(),
@@ -3018,6 +3297,7 @@ fn build_statement_export_preview(
         "pending_adjustment_entries_count": pending_entries,
         "disputed_entries_count": disputed_entries,
         "blocking_reasons": contractual_summary["blocking_reasons"].clone(),
+        "suitability": contractual_summary["suitability"].clone(),
         "evidence_pack_available": true,
         "evidence_pack_command": format!(
             "cargo run --release -- observe token-evidence-pack --scope {}{}",
@@ -3074,6 +3354,7 @@ fn build_contractual_evidence_pack(
             "statement_preview": statement_preview,
             "reconciliation_preview": reconciliation_preview,
             "margin_scope": margin_scope,
+            "suitability": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["suitability"].clone(),
             "included_events_count": included_items.len(),
             "excluded_events_count": excluded_items.len(),
             "included_events_hash": hash_line_items(&included_items)?,
@@ -3996,6 +4277,7 @@ async fn collect_report(
         &infra_cost_profile,
     );
     let current_session_contractual_summary = build_contractual_statement_summary(
+        &config.contract,
         "current_session",
         "текущая сессия",
         &current_session_statement_preview,
@@ -4005,6 +4287,7 @@ async fn collect_report(
     );
     let rolling_window_contractual_summary = if profile.rolling_window_hours.is_some() {
         build_contractual_statement_summary(
+            &config.contract,
             "rolling_window",
             &format!("окно {}", profile.display_name),
             &rolling_window_statement_preview,
@@ -4016,6 +4299,7 @@ async fn collect_report(
         Value::Null
     };
     let lifetime_contractual_summary = build_contractual_statement_summary(
+        &config.contract,
         "lifetime",
         "всё время записи",
         &lifetime_statement_preview,
@@ -4116,6 +4400,7 @@ async fn collect_report(
             "metering_freshness_contract": build_metering_freshness_contract_json(&config.contract, &config.measurement),
             "baseline_contract": build_baseline_contract_json(&config.contract),
             "billing_policy": build_billing_policy_json(&config.contract, &config.measurement),
+            "suitability_contract": build_suitability_contract_json(&config.contract),
             "rate_card": rate_card.clone(),
             "settlement_contract": build_settlement_contract_json(&config.contract),
             "telemetry_surfaces": build_telemetry_surfaces_json(&config.contract),
@@ -4631,6 +4916,10 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .unwrap_or("report-only-v0")
         .to_string();
+    let suitability_model_version = node["contract"]["suitability_model_version"]
+        .as_str()
+        .unwrap_or("token-suitability-v0")
+        .to_string();
     let billing_mode = node["contract"]["billing_mode"]
         .as_str()
         .unwrap_or("report_only")
@@ -4767,6 +5056,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         telemetry_surface_split_version,
         event_time_policy_version,
         billing_policy_version,
+        suitability_model_version,
         billing_mode,
         reconciliation_contract_version,
         margin_model_version,
@@ -6425,6 +6715,7 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
             "telemetry_surface_split_version": event.telemetry_surface_split_version.clone(),
             "event_time_policy_version": event.event_time_policy_version.clone(),
             "billing_policy_version": event.billing_policy_version.clone(),
+            "suitability_model_version": event.suitability_model_version.clone(),
             "billing_mode": event.billing_mode.clone(),
             "reconciliation_contract_version": event.reconciliation_contract_version.clone(),
             "margin_model_version": event.margin_model_version.clone(),
@@ -7738,14 +8029,15 @@ mod tests {
         default_rate_card_version, default_reconciliation_contract_version,
         default_settlement_lifecycle_model_version, default_settlement_statement_version,
         default_settlement_status, default_statement_period_governance_version,
-        default_telemetry_surface_split_version, derive_baseline_strategy, derive_quality_verdict,
-        derive_query_type, derive_traffic_class, event_to_json, followup_queries_related,
-        include_traffic_class_in_report, latency_slice_breakdown,
-        load_adjustment_registry_from_source, load_provider_invoice_binding_from_source,
-        load_provider_usage_binding_from_source, needs_live_reverification,
-        parse_infra_cost_profile_file, parse_rate_card_file, parse_snapshot_event,
-        provider_rate_card_default_path, provider_usage_default_path, reconcile_followup_recovery,
-        repair_legacy_token_event_payload, report_contract_json, summarize_events,
+        default_suitability_model_version, default_telemetry_surface_split_version,
+        derive_baseline_strategy, derive_quality_verdict, derive_query_type, derive_traffic_class,
+        event_to_json, followup_queries_related, include_traffic_class_in_report,
+        latency_slice_breakdown, load_adjustment_registry_from_source,
+        load_provider_invoice_binding_from_source, load_provider_usage_binding_from_source,
+        needs_live_reverification, parse_infra_cost_profile_file, parse_rate_card_file,
+        parse_snapshot_event, provider_rate_card_default_path, provider_usage_default_path,
+        reconcile_followup_recovery, repair_legacy_token_event_payload, report_contract_json,
+        summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -7856,6 +8148,7 @@ mod tests {
                     telemetry_surface_split_version: default_telemetry_surface_split_version(),
                     event_time_policy_version: default_event_time_policy_version(),
                     billing_policy_version: default_billing_policy_version(),
+                    suitability_model_version: default_suitability_model_version(),
                     billing_mode: default_billing_mode(),
                     reconciliation_contract_version: default_reconciliation_contract_version(),
                     margin_model_version: default_margin_model_version(),
@@ -8158,6 +8451,10 @@ mod tests {
         assert_eq!(
             token_event["contract"]["billing_policy_version"],
             "report-only-v1"
+        );
+        assert_eq!(
+            token_event["contract"]["suitability_model_version"],
+            "token-suitability-v1"
         );
         assert_eq!(token_event["contract"]["billing_mode"], "report_only");
         assert_eq!(
@@ -9220,7 +9517,9 @@ fixed_scope_cost_amount = 0.01
 
     #[test]
     fn contractual_statement_summary_compacts_statement_reconciliation_and_margin() {
+        let contract = contract_fixture();
         let summary = build_contractual_statement_summary(
+            &contract,
             "current_session",
             "текущая сессия",
             &json!({
@@ -9229,7 +9528,11 @@ fixed_scope_cost_amount = 0.01
                 "provisional_close_candidate": false,
                 "provisional_close_barriers": ["coverage_not_final"],
                 "billing_close_barriers": ["billing_mode_report_only"],
-                "coverage": { "completeness_state": "partially_confirmed" },
+                "coverage": {
+                    "completeness_state": "partially_confirmed",
+                    "measured_events": 3,
+                    "included_events": 1
+                },
                 "period": {
                     "provisional_close_earliest_at_epoch_ms": 4_000,
                     "late_arrival_deadline_epoch_ms": 4_000
@@ -9310,6 +9613,14 @@ fixed_scope_cost_amount = 0.01
         assert_eq!(summary["customer_review_ready"], true);
         assert_eq!(summary["invoice_ready"], false);
         assert_eq!(
+            summary["suitability"]["surfaces"]["product_kpi"]["state"],
+            "provisional_lower_bound_with_coverage"
+        );
+        assert_eq!(
+            summary["suitability"]["surfaces"]["billing_amount"]["state"],
+            "not_billable_report_only"
+        );
+        assert_eq!(
             summary["blocking_reasons"],
             json!(["billing_mode_report_only", "billing_policy_report_only"])
         );
@@ -9379,7 +9690,19 @@ fixed_scope_cost_amount = 0.01
                         "contractual_freshness_state": "provisional_open_window",
                         "reconciliation_state": "awaiting_provider_usage_source",
                         "margin_state": "awaiting_rate_card",
-                        "blocking_reasons": ["late_arrival_window_open"]
+                        "blocking_reasons": ["late_arrival_window_open"],
+                        "suitability": {
+                            "surfaces": {
+                                "product_kpi": {
+                                    "usable": true,
+                                    "state": "provisional_lower_bound_with_coverage"
+                                },
+                                "billing_amount": {
+                                    "usable": false,
+                                    "state": "not_billable_report_only"
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -9422,6 +9745,10 @@ fixed_scope_cost_amount = 0.01
         assert_eq!(preview["credit_action_state"], "registry_not_configured");
         assert_eq!(preview["dispute_action_state"], "no_open_disputes");
         assert_eq!(preview["evidence_pack_available"], true);
+        assert_eq!(
+            preview["suitability"]["surfaces"]["product_kpi"]["state"],
+            "provisional_lower_bound_with_coverage"
+        );
         assert!(preview["statement_preview_id"].as_str().unwrap_or("").len() > 10);
         assert!(preview["included_events_hash"].as_str().unwrap_or("").len() > 10);
         assert!(preview["excluded_events_hash"].as_str().unwrap_or("").len() > 10);
@@ -9478,6 +9805,18 @@ fixed_scope_cost_amount = 0.01
                 "margin_view": {
                     "lifetime": {
                         "margin_state": "awaiting_rate_card"
+                    }
+                },
+                "contractual_statement_summaries": {
+                    "lifetime": {
+                        "suitability": {
+                            "surfaces": {
+                                "contractual_export": {
+                                    "usable": true,
+                                    "state": "export_ready_report_only_provisional"
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -9551,6 +9890,10 @@ fixed_scope_cost_amount = 0.01
         assert_eq!(
             payload["line_items"]["excluded"][0]["usage_state"]["excluded_reason_code"],
             "awaiting_followup_reconciliation"
+        );
+        assert_eq!(
+            payload["suitability"]["surfaces"]["contractual_export"]["state"],
+            "export_ready_report_only_provisional"
         );
     }
 
