@@ -431,7 +431,7 @@ fn default_usage_event_schema_version() -> String {
 }
 
 fn default_settlement_statement_version() -> String {
-    "settlement-preview-v1".to_string()
+    "settlement-preview-v2".to_string()
 }
 
 fn default_metering_event_schema_version() -> String {
@@ -479,11 +479,11 @@ fn default_correction_policy_version() -> String {
 }
 
 fn default_freeze_close_policy_version() -> String {
-    "freeze-close-v1".to_string()
+    "freeze-close-v2".to_string()
 }
 
 fn default_late_arrival_policy_version() -> String {
-    "late-arrival-v1".to_string()
+    "late-arrival-v2".to_string()
 }
 
 fn default_dispute_policy_version() -> String {
@@ -491,11 +491,11 @@ fn default_dispute_policy_version() -> String {
 }
 
 fn default_settlement_lifecycle_model_version() -> String {
-    "settlement-lifecycle-v1".to_string()
+    "settlement-lifecycle-v2".to_string()
 }
 
 fn default_statement_period_governance_version() -> String {
-    "statement-period-governance-v1".to_string()
+    "statement-period-governance-v2".to_string()
 }
 
 fn default_adjustment_preview_model_version() -> String {
@@ -1110,6 +1110,16 @@ fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value
                 "meaning": "Есть contractual preview, но billing и закрытие периода ещё не включены."
             },
             {
+                "code": "report_only_preview_provisionally_stable",
+                "surface": "contractual",
+                "meaning": "Scope уже перестал плыть по late-arrival и ingest lag, но остаётся только report-only preview, а не закрытым statement."
+            },
+            {
+                "code": "report_only_preview_provisional_hold",
+                "surface": "contractual",
+                "meaning": "Scope ещё нельзя даже provisionally считать устойчивым: есть lag, late-arrival окно, coverage gap или adjustment/dispute hold."
+            },
+            {
                 "code": "close_blocked_report_only",
                 "surface": "contractual",
                 "meaning": "Период нельзя честно закрыть: settlement остаётся report-only."
@@ -1122,9 +1132,9 @@ fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value
         ],
         "current_operational_state": "live_measurement_open",
         "current_contractual_state": "report_only_preview_open",
-        "freeze_close_status": "not_enforced_report_only",
-        "late_arrival_status": "accepted_until_settlement_exists",
-        "note": "Settlement layer пока остаётся report-only preview: freeze/close, invoice-grade adjustments и disputes ещё не materialized как денежный workflow."
+        "freeze_close_status": "provisional_report_only",
+        "late_arrival_status": "deadline_from_latest_event_report_only",
+        "note": "Settlement layer остаётся report-only preview: scope уже можно честно маркировать как provisionally stable или provisional hold, но это всё ещё не денежный close workflow и не invoice."
     })
 }
 
@@ -1135,6 +1145,9 @@ fn build_statement_period_json(
     events: &[TokenBudgetEvent],
     profile: &ResolvedProfile,
     contract: &TokenBudgetContractConfig,
+    metering_freshness: &Value,
+    provisional_close_candidate: bool,
+    provisional_close_barriers: &[String],
 ) -> Value {
     let start_epoch_ms = match scope_code {
         "current_session" | "lifetime" => {
@@ -1160,6 +1173,36 @@ fn build_statement_period_json(
         }),
         _ => Value::Null,
     };
+    let latest_event_epoch_ms = metering_freshness["latest_event_occurred_at_epoch_ms"].as_i64();
+    let late_arrival_grace_ms = metering_freshness["late_arrival_grace_ms"].as_i64();
+    let provisional_close_earliest_at_epoch_ms = latest_event_epoch_ms
+        .zip(late_arrival_grace_ms)
+        .map(|(latest, grace)| latest + grace);
+    let window_state = if events.is_empty() {
+        "empty_report_only"
+    } else if metering_freshness["metering_ingest_state"].as_str() == Some("lagging") {
+        "pipeline_lag_open_report_only"
+    } else if metering_freshness["contractual_lag_state"].as_str() == Some("awaiting_late_events") {
+        "open_late_arrival_window_report_only"
+    } else if provisional_close_candidate {
+        "provisionally_stable_report_only"
+    } else {
+        "open_review_hold_report_only"
+    };
+    let close_policy_state = if events.is_empty() {
+        "provisional_close_not_applicable_empty"
+    } else if provisional_close_candidate {
+        "provisional_close_candidate_report_only"
+    } else {
+        "provisional_close_blocked_report_only"
+    };
+    let late_arrival_policy_state = if events.is_empty() {
+        "no_events_report_only"
+    } else if metering_freshness["contractual_lag_state"].as_str() == Some("awaiting_late_events") {
+        "accepting_events_within_provisional_deadline"
+    } else {
+        "provisional_deadline_elapsed"
+    };
 
     json!({
         "model_version": contract.statement_period_governance_version.clone(),
@@ -1169,12 +1212,15 @@ fn build_statement_period_json(
         "period_start_epoch_ms": start_epoch_ms,
         "period_end_epoch_ms": now_epoch_ms,
         "close_at_epoch_ms": Value::Null,
-        "late_arrival_deadline_epoch_ms": Value::Null,
+        "late_arrival_deadline_epoch_ms": provisional_close_earliest_at_epoch_ms,
+        "provisional_close_earliest_at_epoch_ms": provisional_close_earliest_at_epoch_ms,
+        "provisional_close_candidate": provisional_close_candidate,
+        "provisional_close_barriers": provisional_close_barriers,
         "window_anchor": window_anchor,
-        "window_state": "open_report_only",
-        "close_policy_state": "close_not_scheduled_report_only",
-        "late_arrival_policy_state": "accepting_events_until_contractual_close_exists",
-        "note": "Период пока открыт и движется по live event-time: close_at и late-arrival deadline появятся только после реального settlement workflow."
+        "window_state": window_state,
+        "close_policy_state": close_policy_state,
+        "late_arrival_policy_state": late_arrival_policy_state,
+        "note": "Период по-прежнему report-only: close_at остаётся пустым до реального settlement workflow, но provisional deadline и provisional stability уже считаются по latest event и late-arrival policy."
     })
 }
 
@@ -2458,6 +2504,56 @@ fn statement_lifecycle_state(adjustment_preview: &Value) -> &'static str {
     }
 }
 
+fn provisional_close_barriers(
+    summary: &Value,
+    metering_freshness: &Value,
+    adjustment_preview: &Value,
+) -> Vec<String> {
+    let mut barriers = Vec::new();
+    if summary["coverage"]["completeness_state"].as_str() != Some("confirmed") {
+        barriers.push("coverage_not_final".to_string());
+    }
+    if metering_freshness["contractual_lag_state"].as_str() == Some("awaiting_late_events") {
+        barriers.push("late_arrival_window_open".to_string());
+    }
+    if metering_freshness["metering_ingest_state"].as_str() == Some("lagging") {
+        barriers.push("metering_pipeline_lagging".to_string());
+    }
+    if adjustment_preview["pending_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        barriers.push("pending_adjustment_review".to_string());
+    }
+    if adjustment_preview["disputed_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        barriers.push("dispute_hold_open".to_string());
+    }
+    barriers
+}
+
+fn freeze_status(
+    events: &[TokenBudgetEvent],
+    metering_freshness: &Value,
+    provisional_close_candidate: bool,
+) -> &'static str {
+    if events.is_empty() {
+        "empty"
+    } else if metering_freshness["metering_ingest_state"].as_str() == Some("lagging") {
+        "pipeline_lag_open"
+    } else if metering_freshness["contractual_lag_state"].as_str() == Some("awaiting_late_events") {
+        "late_arrival_window_open"
+    } else if provisional_close_candidate {
+        "provisionally_frozen_report_only"
+    } else {
+        "open_review_hold_report_only"
+    }
+}
+
 fn build_contractual_statement_summary(
     scope_code: &str,
     scope_label: &str,
@@ -2478,6 +2574,10 @@ fn build_contractual_statement_summary(
         "scope_label": scope_label,
         "contractual_state": statement_preview["contractual_state"].clone(),
         "coverage_state": statement_preview["coverage"]["completeness_state"].clone(),
+        "provisional_close_state": statement_preview["provisional_close_state"].clone(),
+        "provisional_close_candidate": statement_preview["provisional_close_candidate"].clone(),
+        "provisional_close_barriers": statement_preview["provisional_close_barriers"].clone(),
+        "billing_close_barriers": statement_preview["billing_close_barriers"].clone(),
         "metering_ingest_state": metering_freshness["metering_ingest_state"].clone(),
         "contractual_lag_state": metering_freshness["contractual_lag_state"].clone(),
         "contractual_freshness_state": metering_freshness["contractual_freshness_state"].clone(),
@@ -2485,6 +2585,8 @@ fn build_contractual_statement_summary(
         "latest_event_age_ms": metering_freshness["latest_event_age_ms"].clone(),
         "latest_ingest_lag_ms": metering_freshness["latest_ingest_lag_ms"].clone(),
         "p95_ingest_lag_ms": metering_freshness["p95_ingest_lag_ms"].clone(),
+        "provisional_close_earliest_at_epoch_ms": statement_preview["period"]["provisional_close_earliest_at_epoch_ms"].clone(),
+        "late_arrival_deadline_epoch_ms": statement_preview["period"]["late_arrival_deadline_epoch_ms"].clone(),
         "measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
         "adjusted_measured_non_billable_lower_bound_tokens": statement_preview["adjusted_measured_non_billable_lower_bound_tokens"].clone(),
         "billable_lower_bound_tokens": statement_preview["billable_lower_bound_tokens"].clone(),
@@ -2529,44 +2631,30 @@ fn build_statement_preview(
     reconciliation_contract: &Value,
     metering_freshness: &Value,
 ) -> Value {
-    let mut close_barriers = vec!["billing_mode_report_only".to_string()];
+    let adjustment_preview =
+        build_adjustment_preview_json(scope_code, contract, adjustment_registry);
+    let provisional_close_barriers =
+        provisional_close_barriers(summary, metering_freshness, &adjustment_preview);
+    let provisional_close_candidate = provisional_close_barriers.is_empty();
+    let mut billing_close_barriers = vec!["billing_mode_report_only".to_string()];
     if reconciliation_contract["ready_for_external_reconciliation"].as_bool() != Some(true) {
-        close_barriers.push("external_reconciliation_not_bound".to_string());
+        billing_close_barriers.push("external_reconciliation_not_bound".to_string());
     }
     if rate_card["money_conversion_enabled"].as_bool() != Some(true) {
-        close_barriers.push("rate_card_unpriced".to_string());
-    }
-    if summary["coverage"]["completeness_state"].as_str() != Some("confirmed") {
-        close_barriers.push("coverage_not_final".to_string());
+        billing_close_barriers.push("rate_card_unpriced".to_string());
     }
     if summary["verified_effective_saved_tokens"]
         .as_i64()
         .unwrap_or(0)
         <= 0
     {
-        close_barriers.push("no_positive_verified_lower_bound".to_string());
+        billing_close_barriers.push("no_positive_verified_lower_bound".to_string());
     }
-    if metering_freshness["contractual_lag_state"].as_str() == Some("awaiting_late_events") {
-        close_barriers.push("late_arrival_window_open".to_string());
-    }
-    if metering_freshness["metering_ingest_state"].as_str() == Some("lagging") {
-        close_barriers.push("metering_pipeline_lagging".to_string());
-    }
-    let adjustment_preview =
-        build_adjustment_preview_json(scope_code, contract, adjustment_registry);
-    if adjustment_preview["pending_entries_count"]
-        .as_u64()
-        .unwrap_or(0)
-        > 0
-    {
-        close_barriers.push("pending_adjustment_review".to_string());
-    }
-    if adjustment_preview["disputed_entries_count"]
-        .as_u64()
-        .unwrap_or(0)
-        > 0
-    {
-        close_barriers.push("dispute_hold_open".to_string());
+    let mut close_barriers = billing_close_barriers.clone();
+    for barrier in &provisional_close_barriers {
+        if !close_barriers.contains(barrier) {
+            close_barriers.push(barrier.clone());
+        }
     }
     let measured_non_billable_lower_bound_tokens = summary["verified_effective_saved_tokens"]
         .as_i64()
@@ -2575,6 +2663,11 @@ fn build_statement_preview(
         .as_i64()
         .unwrap_or(0);
     let lifecycle_state = statement_lifecycle_state(&adjustment_preview);
+    let provisional_close_state = if provisional_close_candidate {
+        "report_only_preview_provisionally_stable"
+    } else {
+        "report_only_preview_provisional_hold"
+    };
     json!({
         "scope_code": scope_code,
         "scope_label": scope_label,
@@ -2587,10 +2680,18 @@ fn build_statement_preview(
             "measured_non_billable_adjusted_report_only" => "report_only_preview_adjusted",
             _ => "report_only_preview_open",
         },
-        "close_readiness": "not_closeable_report_only",
+        "close_readiness": if provisional_close_candidate {
+            "provisionally_stable_report_only"
+        } else {
+            "provisionally_blocked_report_only"
+        },
         "close_candidate": false,
+        "provisional_close_state": provisional_close_state,
+        "provisional_close_candidate": provisional_close_candidate,
+        "provisional_close_barriers": provisional_close_barriers,
+        "billing_close_barriers": billing_close_barriers,
         "close_barriers": close_barriers,
-        "freeze_status": "open",
+        "freeze_status": freeze_status(events, metering_freshness, provisional_close_candidate),
         "late_arrival_mode": "accepting_events_until_contractual_close_exists",
         "correction_mode": adjustment_preview["correction_action_state"].clone(),
         "dispute_mode": if adjustment_preview["disputed_entries_count"].as_u64().unwrap_or(0) > 0 {
@@ -2605,6 +2706,9 @@ fn build_statement_preview(
             events,
             profile,
             contract,
+            metering_freshness,
+            provisional_close_candidate,
+            &provisional_close_barriers
         ),
         "adjustment_preview": adjustment_preview.clone(),
         "coverage": summary["coverage"],
@@ -2738,6 +2842,9 @@ fn build_statement_export_preview(
         "statement_preview_id": hex_sha256(export_identity.as_bytes()),
         "contractual_state": contractual_summary["contractual_state"].clone(),
         "coverage_state": contractual_summary["coverage_state"].clone(),
+        "provisional_close_state": contractual_summary["provisional_close_state"].clone(),
+        "provisional_close_candidate": contractual_summary["provisional_close_candidate"].clone(),
+        "provisional_close_earliest_at_epoch_ms": contractual_summary["provisional_close_earliest_at_epoch_ms"].clone(),
         "contractual_freshness_state": contractual_summary["contractual_freshness_state"].clone(),
         "reconciliation_state": contractual_summary["reconciliation_state"].clone(),
         "margin_state": contractual_summary["margin_state"].clone(),
@@ -7913,11 +8020,11 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
-            "settlement-lifecycle-v1"
+            "settlement-lifecycle-v2"
         );
         assert_eq!(
             token_event["contract"]["statement_period_governance_version"],
-            "statement-period-governance-v1"
+            "statement-period-governance-v2"
         );
         assert_eq!(
             token_event["contract"]["adjustment_preview_model_version"],
@@ -8330,15 +8437,15 @@ fixed_scope_cost_amount = 0.01
 
         assert_eq!(
             settlement_contract["statement_version"],
-            "settlement-preview-v1"
+            "settlement-preview-v2"
         );
         assert_eq!(
             settlement_contract["freeze_close_status"],
-            "not_enforced_report_only"
+            "provisional_report_only"
         );
         assert_eq!(
             settlement_contract["late_arrival_status"],
-            "accepted_until_settlement_exists"
+            "deadline_from_latest_event_report_only"
         );
         assert_eq!(
             settlement_contract["current_contractual_state"],
@@ -8347,20 +8454,106 @@ fixed_scope_cost_amount = 0.01
         assert_eq!(preview["statement_status"], "report_only_preview");
         assert_eq!(preview["lifecycle_state"], "measured_non_billable_open");
         assert_eq!(preview["contractual_state"], "report_only_preview_open");
-        assert_eq!(preview["close_readiness"], "not_closeable_report_only");
+        assert_eq!(
+            preview["close_readiness"],
+            "provisionally_blocked_report_only"
+        );
+        assert_eq!(
+            preview["provisional_close_state"],
+            "report_only_preview_provisional_hold"
+        );
+        assert_eq!(preview["provisional_close_candidate"], false);
+        assert_eq!(preview["freeze_status"], "late_arrival_window_open");
         assert_eq!(preview["close_barriers"][0], "billing_mode_report_only");
         assert_eq!(
             preview["period"]["model_version"],
-            "statement-period-governance-v1"
+            "statement-period-governance-v2"
         );
         assert_eq!(preview["period"]["period_start_epoch_ms"], 1_000);
         assert_eq!(preview["period"]["period_end_epoch_ms"], 2_000);
+        assert_eq!(
+            preview["period"]["late_arrival_deadline_epoch_ms"],
+            3_601_000
+        );
+        assert_eq!(
+            preview["period"]["provisional_close_earliest_at_epoch_ms"],
+            3_601_000
+        );
+        assert_eq!(preview["period"]["provisional_close_candidate"], false);
         assert_eq!(
             preview["adjustment_preview"]["status"],
             "default_path_missing"
         );
         assert_eq!(preview["measured_non_billable_lower_bound_tokens"], 1234);
         assert_eq!(preview["billable_lower_bound_tokens"], json!(null));
+    }
+
+    #[test]
+    fn statement_preview_marks_scope_as_provisionally_stable_when_window_elapsed() {
+        let contract = contract_fixture();
+        let profile = profile_fixture();
+        let adjustment_registry = adjustment_registry_fixture(&contract);
+        let rate_card = rate_card_fixture(&contract);
+        let reconciliation_contract = build_reconciliation_contract_json(
+            &contract,
+            &build_external_truth_sources_json(Path::new("/tmp/amai-no-sources")),
+            &provider_usage_binding_fixture(&rate_card),
+            &provider_invoice_binding_fixture(),
+            &rate_card,
+        );
+        let summary = json!({
+            "coverage": {
+                "completeness_state": "confirmed"
+            },
+            "verified_effective_saved_tokens": 777,
+            "delivered_tokens": 200,
+            "recovery_tokens": 0
+        });
+        let events = vec![token_event! {
+            occurred_at_epoch_ms: 1_000,
+            naive_tokens: 977,
+            context_tokens: 200,
+            effective_saved_tokens: 777,
+        }];
+        let freshness =
+            build_metering_freshness_summary(&contract, &measurement_fixture(), 4_000_000, &events);
+        let preview = build_statement_preview(
+            "current_session",
+            "текущая сессия",
+            4_000_000,
+            &events,
+            &profile,
+            &summary,
+            &contract,
+            &adjustment_registry,
+            &rate_card,
+            &reconciliation_contract,
+            &freshness,
+        );
+
+        assert_eq!(
+            preview["provisional_close_state"],
+            "report_only_preview_provisionally_stable"
+        );
+        assert_eq!(preview["provisional_close_candidate"], true);
+        assert_eq!(preview["freeze_status"], "provisionally_frozen_report_only");
+        assert_eq!(
+            preview["close_readiness"],
+            "provisionally_stable_report_only"
+        );
+        assert_eq!(preview["period"]["provisional_close_candidate"], true);
+        assert_eq!(
+            preview["period"]["window_state"],
+            "provisionally_stable_report_only"
+        );
+        assert_eq!(
+            preview["period"]["close_policy_state"],
+            "provisional_close_candidate_report_only"
+        );
+        assert_eq!(
+            preview["period"]["late_arrival_policy_state"],
+            "provisional_deadline_elapsed"
+        );
     }
 
     #[test]
@@ -8838,9 +9031,24 @@ fixed_scope_cost_amount = 0.01
             "текущая сессия",
             &json!({
                 "contractual_state": "report_only_preview_open",
+                "provisional_close_state": "report_only_preview_provisional_hold",
+                "provisional_close_candidate": false,
+                "provisional_close_barriers": ["coverage_not_final"],
+                "billing_close_barriers": ["billing_mode_report_only"],
                 "coverage": { "completeness_state": "partially_confirmed" },
+                "period": {
+                    "provisional_close_earliest_at_epoch_ms": 4_000,
+                    "late_arrival_deadline_epoch_ms": 4_000
+                },
                 "measured_non_billable_lower_bound_tokens": 1234,
+                "adjusted_measured_non_billable_lower_bound_tokens": 1234,
                 "billable_lower_bound_tokens": json!(null),
+                "adjustment_preview": {
+                    "correction_action_state": "no_registry_configured",
+                    "pending_entries_count": 0,
+                    "applied_entries_count": 0,
+                    "disputed_entries_count": 0
+                },
                 "currency_profile": "USD",
                 "close_barriers": ["billing_mode_report_only"]
             }),
@@ -8870,6 +9078,13 @@ fixed_scope_cost_amount = 0.01
 
         assert_eq!(summary["scope_code"], "current_session");
         assert_eq!(summary["coverage_state"], "partially_confirmed");
+        assert_eq!(
+            summary["provisional_close_state"],
+            "report_only_preview_provisional_hold"
+        );
+        assert_eq!(summary["provisional_close_candidate"], false);
+        assert_eq!(summary["provisional_close_earliest_at_epoch_ms"], 4_000);
+        assert_eq!(summary["late_arrival_deadline_epoch_ms"], 4_000);
         assert_eq!(summary["metering_ingest_state"], "within_slo");
         assert_eq!(summary["contractual_lag_state"], "lag_window_elapsed");
         assert_eq!(summary["contractual_freshness_state"], "stable");

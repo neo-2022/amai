@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:48 MSK
-Ручная сверка guide/docs: 2026-03-24 15:48 MSK
+modified_at: 2026-03-24 15:55 MSK
+Ручная сверка guide/docs: 2026-03-24 15:55 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1090,7 +1090,9 @@ preview, а не только raw count.
   correction/dispute policy;
   - теперь ещё явно публикует `settlement_lifecycle_model_version`,
     `current_operational_state` и `current_contractual_state`;
-  - при этом честно говорит, что это пока только `report_only preview`.
+  - freeze/close semantics теперь versioned до `v2`: scope можно честно маркировать как
+    `provisionally stable` или `provisional hold`, но это по-прежнему только
+    `report_only preview`, а не денежный close.
 - `metering_freshness_contract`
   - отдельно публикует ingest warning/SLO и `late_arrival_grace_minutes`;
   - это нужно затем, чтобы freshness и lag semantics не были неявной магией в UI.
@@ -1123,6 +1125,8 @@ preview, а не только raw count.
     - `statement_preview_id`
     - `included_events_hash`
     - `excluded_events_hash`
+    - `provisional_close_state`
+    - `provisional_close_candidate`
     - `credit_action_state`
     - `dispute_action_state`
     - `evidence_pack_command`

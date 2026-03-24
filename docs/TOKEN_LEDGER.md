@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:48 MSK
-Ручная сверка guide/docs: 2026-03-24 15:48 MSK
+modified_at: 2026-03-24 15:55 MSK
+Ручная сверка guide/docs: 2026-03-24 15:55 MSK
 
 # Token Ledger
 
@@ -509,12 +509,12 @@ reporting layers:
 - закрыт ли уже реальный денежный workflow или это всё ещё report-only preview.
 
 Текущий truthful status:
-- `statement_version = settlement-preview-v1`
-- `settlement_lifecycle_model_version = settlement-lifecycle-v1`
-- `statement_period_governance_version = statement-period-governance-v1`
+- `statement_version = settlement-preview-v2`
+- `settlement_lifecycle_model_version = settlement-lifecycle-v2`
+- `statement_period_governance_version = statement-period-governance-v2`
 - `adjustment_preview_model_version = adjustment-preview-v1`
-- `freeze_close_status = not_enforced_report_only`
-- `late_arrival_status = accepted_until_settlement_exists`
+- `freeze_close_status = provisional_report_only`
+- `late_arrival_status = deadline_from_latest_event_report_only`
 - `current_operational_state = live_measurement_open`
 - `current_contractual_state = report_only_preview_open`
 - corrections/disputes пока не invoice-grade, а только report-only semantics
@@ -536,8 +536,15 @@ reporting layers:
 - `statement_status = report_only_preview`
 - `lifecycle_state = measured_non_billable_open`
 - `contractual_state = report_only_preview_open`
+- `provisional_close_state` уже может быть:
+  - `report_only_preview_provisionally_stable`
+  - `report_only_preview_provisional_hold`
+- `provisional_close_candidate` показывает, можно ли уже считать scope устойчивым в report-only
+  смысле, даже если billing ещё не materialized
 - `close_barriers` прямо перечисляют, почему period нельзя закрыть честно
 - `period.close_at_epoch_ms = null`, пока честного close workflow ещё нет
+- `period.provisional_close_earliest_at_epoch_ms` и `period.late_arrival_deadline_epoch_ms`
+  уже публикуются и считаются от `latest_event + late_arrival_grace`
 - `adjustment_preview.status = default_path_missing`, пока repo-local registry файл ещё
   не materialized
 

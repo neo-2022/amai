@@ -1,5 +1,5 @@
-modified_at = "2026-03-24 14:31 MSK"
-"Ручная сверка guide/docs" = "2026-03-24 14:31 MSK"
+modified_at = "2026-03-24 15:55 MSK"
+"Ручная сверка guide/docs" = "2026-03-24 15:55 MSK"
 
 default_profile = "local_default"
 
@@ -14,7 +14,7 @@ late_arrival_grace_minutes = 60
 
 [contract]
 usage_event_schema_version = "billing-usage-event-v1"
-settlement_statement_version = "settlement-preview-v1"
+settlement_statement_version = "settlement-preview-v2"
 metering_event_schema_version = "token-budget-event-v2"
 usage_lifecycle_model_version = "usage-lifecycle-v1"
 baseline_method_version = "retrieval-baseline-v1"
@@ -26,11 +26,11 @@ excluded_taxonomy_version = "token-excluded-usage-v1"
 dedup_contract_version = "event-id-source-kind-v1"
 backfill_policy_version = "report-only-backfill-v1"
 correction_policy_version = "report-only-correction-v1"
-freeze_close_policy_version = "freeze-close-v1"
-late_arrival_policy_version = "late-arrival-v1"
+freeze_close_policy_version = "freeze-close-v2"
+late_arrival_policy_version = "late-arrival-v2"
 dispute_policy_version = "report-only-dispute-v1"
-settlement_lifecycle_model_version = "settlement-lifecycle-v1"
-statement_period_governance_version = "statement-period-governance-v1"
+settlement_lifecycle_model_version = "settlement-lifecycle-v2"
+statement_period_governance_version = "statement-period-governance-v2"
 adjustment_preview_model_version = "adjustment-preview-v1"
 adjustment_request_schema_version = "adjustment-request-v1"
 adjustment_registry_version = "adjustment-registry-v1"

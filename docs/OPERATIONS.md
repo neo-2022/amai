@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 15:48 MSK
-Ручная сверка guide/docs: 2026-03-24 15:48 MSK
+modified_at: 2026-03-24 15:55 MSK
+Ручная сверка guide/docs: 2026-03-24 15:55 MSK
 
 # Operations
 
@@ -1761,7 +1761,9 @@ cargo run -- context pack \
   - `lifetime`
   - в них видно measured non-billable lower bound по каждому scope;
   - в них отдельно видны `lifecycle_state`, `contractual_state`, `close_barriers`;
-  - в них теперь ещё есть `period`, `adjustment_preview` и `freshness`;
+  - в них теперь ещё есть `period`, `adjustment_preview`, `freshness`,
+    `provisional_close_state`, `provisional_close_candidate`,
+    `provisional_close_barriers`, `billing_close_barriers`;
   - billable amount и final amount остаются пустыми, пока settlement layer ещё не materialized.
 - `metering_freshness` теперь тоже канонична:
   - `current_session`
@@ -1847,6 +1849,7 @@ cargo run --release -- observe token-evidence-pack --scope current_session --out
 ```bash
 ./scripts/proof_token_contractual_pricing.sh
 ./scripts/proof_token_contractual_sources.sh
+./scripts/proof_token_freeze_close_semantics.sh
 ```
 
 Если нужен отдельный operator-safe inspect-layer по provider bindings, reconciliation и margin:
