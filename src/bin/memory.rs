@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use dirs::{home_dir, state_dir};
+use native_tls::TlsConnector as NativeTlsConnector;
+use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
@@ -8,7 +10,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio_postgres::NoTls;
+use tokio_postgres::config::{Host, SslMode};
+use tokio_postgres::{Config as PostgresConfig, NoTls};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -418,12 +421,35 @@ async fn resolve_project(
 async fn lookup_project_code(paths: &BridgePaths, working_dir: &Path) -> Result<String> {
     dotenvy::from_path_override(paths.amai_root.join(".env")).ok();
     let dsn = env::var("AMI_POSTGRES_DSN").context("missing AMI_POSTGRES_DSN")?;
-    let (client, connection) = tokio_postgres::connect(&dsn, NoTls)
-        .await
-        .with_context(|| format!("failed to connect to postgres via {dsn}"))?;
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
+    let config: PostgresConfig = dsn
+        .parse()
+        .with_context(|| format!("invalid postgres dsn {}", safe_postgres_descriptor(&dsn)))?;
+    let masked_descriptor = safe_postgres_descriptor_from_config(&config);
+    let ssl_mode = config.get_ssl_mode();
+    let client = match ssl_mode {
+        SslMode::Disable => {
+            let (client, connection) = config.connect(NoTls).await.with_context(|| {
+                format!("failed to connect to postgres via {masked_descriptor}")
+            })?;
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            client
+        }
+        _ => {
+            let connector = NativeTlsConnector::builder()
+                .build()
+                .context("failed to build native TLS connector")?;
+            let connector = MakeTlsConnector::new(connector);
+            let (client, connection) = config.connect(connector).await.with_context(|| {
+                format!("failed to connect to postgres via {masked_descriptor}")
+            })?;
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            client
+        }
+    };
     let rows = client
         .query(
             "SELECT code, repo_root FROM ami.projects ORDER BY length(repo_root) DESC, code ASC",
@@ -443,6 +469,41 @@ async fn lookup_project_code(paths: &BridgePaths, working_dir: &Path) -> Result<
         "failed to resolve project from {}; pass --project <code> explicitly",
         working_dir.display()
     )
+}
+
+fn safe_postgres_descriptor(dsn: &str) -> String {
+    dsn.parse::<PostgresConfig>()
+        .map(|config| safe_postgres_descriptor_from_config(&config))
+        .unwrap_or_else(|_| "postgres://[redacted-invalid-dsn]".to_string())
+}
+
+fn safe_postgres_descriptor_from_config(config: &PostgresConfig) -> String {
+    let user = config.get_user().unwrap_or("unknown");
+    let dbname = config.get_dbname().unwrap_or("postgres");
+    let ssl_mode = match config.get_ssl_mode() {
+        SslMode::Disable => "disable",
+        SslMode::Prefer => "prefer",
+        SslMode::Require => "require",
+        _ => "unknown",
+    };
+    let host = config
+        .get_hosts()
+        .first()
+        .map(postgres_host_label)
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = config.get_ports().first().copied().unwrap_or(5432);
+    format!(
+        "postgres://{}:***@{}:{}/{}?sslmode={}",
+        user, host, port, dbname, ssl_mode
+    )
+}
+
+fn postgres_host_label(host: &Host) -> String {
+    match host {
+        Host::Tcp(host) => host.clone(),
+        #[cfg(unix)]
+        Host::Unix(path) => format!("unix:{}", path.display()),
+    }
 }
 
 fn build_search_hits(payload: &Value) -> Vec<SearchHit> {

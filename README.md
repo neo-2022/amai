@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 19:17 MSK
-Ручная сверка guide/docs: 2026-03-24 19:17 MSK
+modified_at: 2026-03-24 19:27 MSK
+Ручная сверка guide/docs: 2026-03-24 19:27 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -250,6 +250,25 @@ scripts\install_amai.cmd
   - за всё время.
 
 Если `auto-detect` выбрал не тот клиент, можно указать явно.
+
+### Postgres transport и безопасность DSN
+
+`Amai` больше не должен светить пароль из `AMI_POSTGRES_DSN` в текстах ошибок.
+Если `PostgreSQL`-подключение падает, в сообщении должен оставаться только безопасный descriptor:
+- пользователь;
+- host;
+- порт;
+- dbname;
+- `sslmode`;
+- но не пароль.
+
+Сам transport теперь тоже зависит не от жёсткого `NoTls`, а от `sslmode` внутри самого DSN:
+- `sslmode=disable` оставляет plain path без TLS;
+- остальные режимы идут через native TLS connector.
+
+Это важно для двух реальных runtime-path:
+- основной `Amai` binary;
+- compatibility binary `memory`, который сам резолвит project code через `PostgreSQL`.
 
 ### Linux и macOS
 

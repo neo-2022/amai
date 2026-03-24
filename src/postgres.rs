@@ -1,9 +1,12 @@
 use crate::{config::AppConfig, observability_policy};
 use anyhow::{Context, Result, anyhow};
+use native_tls::TlsConnector as NativeTlsConnector;
+use postgres_native_tls::MakeTlsConnector;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use tokio_postgres::{Client, NoTls, Row};
+use tokio_postgres::config::{Host, SslMode};
+use tokio_postgres::{Client, Config as PostgresConfig, NoTls, Row};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -219,15 +222,80 @@ pub async fn connect_app(cfg: &AppConfig) -> Result<Client> {
 }
 
 async fn connect(dsn: &str) -> Result<Client> {
-    let (client, connection) = tokio_postgres::connect(dsn, NoTls)
-        .await
-        .with_context(|| format!("failed to connect to postgres via {dsn}"))?;
-    tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            tracing::error!(?error, "postgres connection task ended with error");
+    let config: PostgresConfig = dsn
+        .parse()
+        .with_context(|| format!("invalid postgres dsn {}", safe_postgres_descriptor(dsn)))?;
+    let masked_descriptor = safe_postgres_descriptor_from_config(&config);
+    let ssl_mode = config.get_ssl_mode();
+    match ssl_mode {
+        SslMode::Disable => {
+            let (client, connection) = config.connect(NoTls).await.with_context(|| {
+                format!("failed to connect to postgres via {masked_descriptor}")
+            })?;
+            tokio::spawn(async move {
+                if let Err(error) = connection.await {
+                    tracing::error!(?error, "postgres connection task ended with error");
+                }
+            });
+            Ok(client)
         }
-    });
-    Ok(client)
+        _ => {
+            let connector = build_tls_connector().with_context(|| {
+                format!("failed to initialize postgres TLS for {masked_descriptor}")
+            })?;
+            let (client, connection) = config.connect(connector).await.with_context(|| {
+                format!("failed to connect to postgres via {masked_descriptor}")
+            })?;
+            tokio::spawn(async move {
+                if let Err(error) = connection.await {
+                    tracing::error!(?error, "postgres connection task ended with error");
+                }
+            });
+            Ok(client)
+        }
+    }
+}
+
+fn build_tls_connector() -> Result<MakeTlsConnector> {
+    let connector = NativeTlsConnector::builder()
+        .build()
+        .context("failed to build native TLS connector")?;
+    Ok(MakeTlsConnector::new(connector))
+}
+
+fn safe_postgres_descriptor(dsn: &str) -> String {
+    dsn.parse::<PostgresConfig>()
+        .map(|config| safe_postgres_descriptor_from_config(&config))
+        .unwrap_or_else(|_| "postgres://[redacted-invalid-dsn]".to_string())
+}
+
+fn safe_postgres_descriptor_from_config(config: &PostgresConfig) -> String {
+    let user = config.get_user().unwrap_or("unknown");
+    let dbname = config.get_dbname().unwrap_or("postgres");
+    let ssl_mode = match config.get_ssl_mode() {
+        SslMode::Disable => "disable",
+        SslMode::Prefer => "prefer",
+        SslMode::Require => "require",
+        _ => "unknown",
+    };
+    let host = config
+        .get_hosts()
+        .first()
+        .map(postgres_host_label)
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = config.get_ports().first().copied().unwrap_or(5432);
+    format!(
+        "postgres://{}:***@{}:{}/{}?sslmode={}",
+        user, host, port, dbname, ssl_mode
+    )
+}
+
+fn postgres_host_label(host: &Host) -> String {
+    match host {
+        Host::Tcp(host) => host.clone(),
+        #[cfg(unix)]
+        Host::Unix(path) => format!("unix:{}", path.display()),
+    }
 }
 
 pub async fn bootstrap_schema(client: &Client, cfg: &AppConfig) -> Result<()> {
@@ -2085,7 +2153,7 @@ mod tests {
     use super::{
         ObservabilityInsertMeta, canonical_repo_root_string, exact_match_basename,
         exact_match_basename_stem, observability_conflict_error, observability_source_class,
-        prepare_observability_payload, validate_observability_update,
+        prepare_observability_payload, safe_postgres_descriptor, validate_observability_update,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -2383,5 +2451,29 @@ mod tests {
             exact_match_basename_stem("CHECKLIST_00_MASTER_ART_REGART"),
             "CHECKLIST_00_MASTER_ART_REGART"
         );
+    }
+
+    #[test]
+    fn safe_postgres_descriptor_masks_password_for_uri_dsn() {
+        let masked = safe_postgres_descriptor(
+            "postgres://art_user:super-secret@example.com:5544/amai?sslmode=require",
+        );
+        assert_eq!(
+            masked,
+            "postgres://art_user:***@example.com:5544/amai?sslmode=require"
+        );
+        assert!(!masked.contains("super-secret"));
+    }
+
+    #[test]
+    fn safe_postgres_descriptor_masks_password_for_keyword_dsn() {
+        let masked = safe_postgres_descriptor(
+            "host=pg.internal port=5433 user=app dbname=amai password=very-secret sslmode=prefer",
+        );
+        assert_eq!(
+            masked,
+            "postgres://app:***@pg.internal:5433/amai?sslmode=prefer"
+        );
+        assert!(!masked.contains("very-secret"));
     }
 }

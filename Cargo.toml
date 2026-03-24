@@ -27,7 +27,9 @@ fastembed = "5.13.0"
 hex = "0.4.3"
 hdf5 = { package = "hdf5-metno", version = "0.12.3", features = ["static"] }
 ignore = "0.4.25"
+native-tls = "0.2.14"
 parquet = { version = "56.2.0", features = ["arrow"] }
+postgres-native-tls = "0.5.2"
 qdrant-client = "1.17.0"
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.33.0", features = ["bundled"] }

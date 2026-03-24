@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 19:17 MSK
-Ручная сверка guide/docs: 2026-03-24 19:17 MSK
+modified_at: 2026-03-24 19:27 MSK
+Ручная сверка guide/docs: 2026-03-24 19:27 MSK
 
 # Operations
 
@@ -111,6 +111,16 @@ cp .env.example .env
   - bind-адрес Rust exporter для Prometheus scrape;
 - `AMI_PROMETHEUS_PORT` и `AMI_GRAFANA_PORT`
   - локальные порты monitoring profile.
+
+Правило для `AMI_POSTGRES_DSN`:
+- пароль из DSN не должен появляться в runtime error messages;
+- безопасный descriptor может показывать только user/host/port/dbname/`sslmode`;
+- transport выбирается по `sslmode`, а не через жёстко вшитый `NoTls`.
+
+Практический смысл:
+- `sslmode=disable` остаётся plain local/dev path;
+- остальные режимы должны поднимать `PostgreSQL` через native TLS connector;
+- то же правило действует и для `memory` compatibility binary, потому что он тоже ходит в `PostgreSQL` для project resolution.
 
 ## Continuity migration from previous toolchain
 
