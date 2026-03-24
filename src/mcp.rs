@@ -1205,7 +1205,7 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
     .await?;
     let token_summary = token_report_summary(&payload);
     let summary = format!(
-        "token report :: metric={} scope={} status={} value_percent={:.3} saved_tokens={} counted={}/{} agent_cycle_scope={} agent_cycle_verified_percent={:.3} contractual_scope={} contractual_state={} coverage={} reconciliation={} margin={} blockers={} note={}",
+        "token report :: metric={} scope={} status={} value_percent={:.3} saved_tokens={} counted={}/{} agent_cycle_scope={} agent_cycle_verified_percent={:.3} contractual_scope={} contractual_state={} coverage={} freshness={} lag={} reconciliation={} margin={} blockers={} note={}",
         token_summary.metric_code,
         token_summary.scope_label,
         token_summary.status,
@@ -1218,6 +1218,8 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
         token_summary.contractual_scope_label,
         token_summary.contractual_state,
         token_summary.contractual_coverage_state,
+        token_summary.contractual_freshness_state,
+        token_summary.contractual_lag_state,
         token_summary.contractual_reconciliation_state,
         token_summary.contractual_margin_state,
         token_summary.contractual_blockers_summary,
@@ -1243,6 +1245,9 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
                 "contractual_scope_label": token_summary.contractual_scope_label,
                 "contractual_state": token_summary.contractual_state,
                 "contractual_coverage_state": token_summary.contractual_coverage_state,
+                "contractual_metering_ingest_state": token_summary.contractual_metering_ingest_state,
+                "contractual_lag_state": token_summary.contractual_lag_state,
+                "contractual_freshness_state": token_summary.contractual_freshness_state,
                 "contractual_reconciliation_state": token_summary.contractual_reconciliation_state,
                 "contractual_margin_state": token_summary.contractual_margin_state,
                 "contractual_blockers_summary": token_summary.contractual_blockers_summary,
@@ -1440,6 +1445,9 @@ struct TokenReportSummary {
     contractual_scope_label: String,
     contractual_state: String,
     contractual_coverage_state: String,
+    contractual_metering_ingest_state: String,
+    contractual_lag_state: String,
+    contractual_freshness_state: String,
     contractual_reconciliation_state: String,
     contractual_margin_state: String,
     contractual_blockers_summary: String,
@@ -1582,6 +1590,18 @@ fn token_report_summary(payload: &Value) -> TokenReportSummary {
             .unwrap_or("unknown")
             .to_string(),
         contractual_coverage_state: contractual_scope["coverage_state"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        contractual_metering_ingest_state: contractual_scope["metering_ingest_state"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        contractual_lag_state: contractual_scope["contractual_lag_state"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        contractual_freshness_state: contractual_scope["contractual_freshness_state"]
             .as_str()
             .unwrap_or("unknown")
             .to_string(),
@@ -3163,6 +3183,9 @@ mod tests {
                         "scope_label": "окно Обычная рабочая машина",
                         "contractual_state": "report_only_preview_open",
                         "coverage_state": "partially_confirmed",
+                        "metering_ingest_state": "soft_lag",
+                        "contractual_lag_state": "awaiting_late_events",
+                        "contractual_freshness_state": "provisional_open_window",
                         "reconciliation_state": "awaiting_provider_usage_source",
                         "margin_state": "awaiting_rate_card",
                         "blocking_reasons": [
@@ -3199,6 +3222,12 @@ mod tests {
         );
         assert_eq!(summary.contractual_state, "report_only_preview_open");
         assert_eq!(summary.contractual_coverage_state, "partially_confirmed");
+        assert_eq!(summary.contractual_metering_ingest_state, "soft_lag");
+        assert_eq!(summary.contractual_lag_state, "awaiting_late_events");
+        assert_eq!(
+            summary.contractual_freshness_state,
+            "provisional_open_window"
+        );
         assert_eq!(
             summary.contractual_reconciliation_state,
             "awaiting_provider_usage_source"

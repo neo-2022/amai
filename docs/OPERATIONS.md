@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:34 MSK
-Ручная сверка guide/docs: 2026-03-24 13:34 MSK
+modified_at: 2026-03-24 13:55 MSK
+Ручная сверка guide/docs: 2026-03-24 13:55 MSK
 
 # Operations
 
@@ -1625,6 +1625,9 @@ cargo run --release -- verify token-benchmark-suite \
   - correction/dispute policy versions;
   - explicit `current_operational_state / current_contractual_state`;
   - current truthful status: `report_only preview`;
+- `metering_freshness_contract`
+  - versioned thresholds для ingest warning/SLO и late-arrival grace;
+  - именно он задаёт честную разницу между pipeline lag и открытым окном поздних событий;
 - `telemetry_surfaces`
   - явный split между live engineering telemetry и contractual tokenonomics;
   - это защищает от подмены dashboard-графика customer billing-витриной;
@@ -1716,8 +1719,21 @@ cargo run --release -- verify token-benchmark-suite \
   - `lifetime`
   - в них видно measured non-billable lower bound по каждому scope;
   - в них отдельно видны `lifecycle_state`, `contractual_state`, `close_barriers`;
-  - в них теперь ещё есть `period` и `adjustment_preview`;
+  - в них теперь ещё есть `period`, `adjustment_preview` и `freshness`;
   - billable amount и final amount остаются пустыми, пока settlement layer ещё не materialized.
+- `metering_freshness` теперь тоже канонична:
+  - `current_session`
+  - `rolling_window`
+  - `lifetime`
+  - отдельно видны:
+    - `metering_ingest_state`
+    - `contractual_lag_state`
+    - `contractual_freshness_state`
+    - `latest_event_age_ms`
+    - `latest_ingest_lag_ms`
+    - `p95_ingest_lag_ms`
+  - это защищает от ложного вывода вида `счётчик старый => pipeline сломан`: теперь
+    pipeline lag и late-arrival window видны раздельно.
 - `adjustment_preview` теперь тоже каноничен:
   - видно `registry_status`, `pending_entries_count`, `applied_entries_count`,
     `disputed_entries_count`, `scope_hash`;
@@ -1743,6 +1759,9 @@ cargo run --release -- verify token-benchmark-suite \
   - `rolling_window`
   - `lifetime`
   - это короткий customer-facing summary поверх `statement + reconciliation + margin`;
+  - теперь ещё и поверх `freshness`;
+  - там отдельно видны `metering_ingest_state`, `contractual_lag_state` и
+    `contractual_freshness_state`;
   - он пригоден для review/audit, но не для invoice.
 - `margin_view` теперь тоже каноничен:
   - `current_session`

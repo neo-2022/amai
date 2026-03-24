@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:34 MSK
-Ручная сверка guide/docs: 2026-03-24 13:34 MSK
+modified_at: 2026-03-24 13:55 MSK
+Ручная сверка guide/docs: 2026-03-24 13:55 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1091,6 +1091,9 @@ preview, а не только raw count.
   - теперь ещё явно публикует `settlement_lifecycle_model_version`,
     `current_operational_state` и `current_contractual_state`;
   - при этом честно говорит, что это пока только `report_only preview`.
+- `metering_freshness_contract`
+  - отдельно публикует ingest warning/SLO и `late_arrival_grace_minutes`;
+  - это нужно затем, чтобы freshness и lag semantics не были неявной магией в UI.
 - `telemetry_surfaces`
   - явно разводит `operational live telemetry` и `contractual tokenonomics`;
   - это нужно затем, чтобы dashboard headline и live rollups не принимали за invoice.
@@ -1147,6 +1150,7 @@ preview, а не только raw count.
   - `statement_previews.current_session / rolling_window / lifetime`
   - там уже видно measured non-billable lower bound по scope;
   - там теперь ещё явно видны `lifecycle_state`, `contractual_state` и `close_barriers`;
+  - там теперь ещё живёт и `freshness`, чтобы было видно ingest health и окно поздних событий;
   - там теперь ещё есть `period` с `period_start / period_end / window_anchor` и
     `adjustment_preview` для будущих credit/correction semantics;
   - но `billable_lower_bound_tokens` и `final_amount` остаются пустыми, пока billing не
@@ -1173,6 +1177,24 @@ preview, а не только raw count.
     - `drift_tokens`
   - `drift_amount` всё ещё остаётся `null`, пока внутренний money-side settlement
     не materialized честно.
+- metering freshness теперь тоже first-class:
+  - `metering_freshness.current_session / rolling_window / lifetime`
+  - она отдельно показывает:
+    - `metering_ingest_state`
+    - `contractual_lag_state`
+    - `contractual_freshness_state`
+    - `latest_event_age_ms`
+    - `latest_ingest_lag_ms`
+    - `p95_ingest_lag_ms`
+  - это важно затем, чтобы customer-facing preview честно различал:
+    - pipeline lag;
+    - и просто ещё открытое окно поздних событий.
+- contractual summary теперь тоже несёт freshness semantics:
+  - `contractual_statement_summaries.*`
+  - там теперь видны `metering_ingest_state`, `contractual_lag_state` и
+    `contractual_freshness_state`;
+  - blocking reasons теперь собираются поверх `statement + reconciliation + margin + freshness`,
+    а не только из одного reconciliation слоя.
 - margin view теперь тоже first-class:
   - `margin_view.current_session / rolling_window / lifetime`
   - там уже видно `customer_saved_tokens_lower_bound`;

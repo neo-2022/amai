@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:34 MSK
-Ручная сверка guide/docs: 2026-03-24 13:34 MSK
+modified_at: 2026-03-24 13:55 MSK
+Ручная сверка guide/docs: 2026-03-24 13:55 MSK
 
 # MCP Integration
 
@@ -265,6 +265,9 @@ cargo build --release
   - `contractual_scope_label`
   - `contractual_state`
   - `contractual_coverage_state`
+  - `contractual_metering_ingest_state`
+  - `contractual_lag_state`
+  - `contractual_freshness_state`
   - `contractual_reconciliation_state`
   - `contractual_margin_state`
   - `contractual_blockers_summary`

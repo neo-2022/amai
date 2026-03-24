@@ -38,6 +38,12 @@ struct MeasurementConfig {
     naive_max_bytes_per_file: usize,
     #[serde(default)]
     include_verify_events_by_default: bool,
+    #[serde(default = "default_metering_ingest_warning_seconds")]
+    metering_ingest_warning_seconds: u64,
+    #[serde(default = "default_metering_ingest_slo_seconds")]
+    metering_ingest_slo_seconds: u64,
+    #[serde(default = "default_late_arrival_grace_minutes")]
+    late_arrival_grace_minutes: u64,
     #[serde(default = "default_preliminary_min_events")]
     preliminary_min_events: u64,
     #[serde(default = "default_preliminary_min_baseline_tokens")]
@@ -60,6 +66,8 @@ struct TokenBudgetContractConfig {
     quality_method_version: String,
     #[serde(default = "default_coverage_model_version")]
     coverage_model_version: String,
+    #[serde(default = "default_metering_freshness_model_version")]
+    metering_freshness_model_version: String,
     #[serde(default = "default_agent_cycle_model_version")]
     agent_cycle_model_version: String,
     #[serde(default = "default_excluded_taxonomy_version")]
@@ -122,6 +130,7 @@ impl Default for TokenBudgetContractConfig {
             baseline_method_version: default_baseline_method_version(),
             quality_method_version: default_quality_method_version(),
             coverage_model_version: default_coverage_model_version(),
+            metering_freshness_model_version: default_metering_freshness_model_version(),
             agent_cycle_model_version: default_agent_cycle_model_version(),
             excluded_taxonomy_version: default_excluded_taxonomy_version(),
             dedup_contract_version: default_dedup_contract_version(),
@@ -269,6 +278,7 @@ struct TokenBudgetEvent {
     baseline_method_version: String,
     quality_method_version: String,
     coverage_model_version: String,
+    metering_freshness_model_version: String,
     excluded_taxonomy_version: String,
     dedup_contract_version: String,
     backfill_policy_version: String,
@@ -380,6 +390,18 @@ fn default_preliminary_min_baseline_tokens() -> u64 {
     100_000
 }
 
+fn default_metering_ingest_warning_seconds() -> u64 {
+    60
+}
+
+fn default_metering_ingest_slo_seconds() -> u64 {
+    300
+}
+
+fn default_late_arrival_grace_minutes() -> u64 {
+    60
+}
+
 fn default_usage_event_schema_version() -> String {
     "billing-usage-event-v1".to_string()
 }
@@ -406,6 +428,10 @@ fn default_quality_method_version() -> String {
 
 fn default_coverage_model_version() -> String {
     "token-coverage-v1".to_string()
+}
+
+fn default_metering_freshness_model_version() -> String {
+    "metering-freshness-v1".to_string()
 }
 
 fn default_agent_cycle_model_version() -> String {
@@ -517,6 +543,7 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "baseline_method_version": contract.baseline_method_version.clone(),
         "quality_method_version": contract.quality_method_version.clone(),
         "coverage_model_version": contract.coverage_model_version.clone(),
+        "metering_freshness_model_version": contract.metering_freshness_model_version.clone(),
         "agent_cycle_model_version": contract.agent_cycle_model_version.clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
@@ -555,6 +582,7 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "baseline_method_version": contract.baseline_method_version.clone(),
         "quality_method_version": contract.quality_method_version.clone(),
         "coverage_model_version": contract.coverage_model_version.clone(),
+        "metering_freshness_model_version": contract.metering_freshness_model_version.clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
         "backfill_policy_version": contract.backfill_policy_version.clone(),
@@ -635,6 +663,164 @@ fn build_usage_event_schema_json(contract: &TokenBudgetContractConfig) -> Value 
             "status": "mutable_snapshot_report_only",
             "note": "До settlement layer corrections остаются report-only snapshot updates, а не invoice-grade credit workflow."
         }
+    })
+}
+
+fn build_metering_freshness_contract_json(
+    contract: &TokenBudgetContractConfig,
+    measurement: &MeasurementConfig,
+) -> Value {
+    json!({
+        "model_version": contract.metering_freshness_model_version.clone(),
+        "ingest_warning_seconds": measurement.metering_ingest_warning_seconds,
+        "ingest_slo_seconds": measurement.metering_ingest_slo_seconds,
+        "late_arrival_grace_minutes": measurement.late_arrival_grace_minutes,
+        "ingest_states": [
+            "empty",
+            "within_slo",
+            "soft_lag",
+            "lagging"
+        ],
+        "contractual_lag_states": [
+            "empty",
+            "awaiting_late_events",
+            "lag_window_elapsed"
+        ],
+        "contractual_freshness_states": [
+            "empty",
+            "provisional_open_window",
+            "stable",
+            "lagging_pipeline"
+        ],
+        "note": "Freshness и lag semantics разделены: ingest state показывает здоровье metering pipeline, а contractual lag state — можно ли уже считать окно стабилизированным без поздних событий."
+    })
+}
+
+fn combine_reason_arrays(values: &[&Value]) -> Value {
+    let mut seen = BTreeSet::new();
+    let mut items = Vec::new();
+    for value in values {
+        let Some(array) = value.as_array() else {
+            continue;
+        };
+        for item in array {
+            let Some(reason) = item.as_str() else {
+                continue;
+            };
+            if seen.insert(reason.to_string()) {
+                items.push(Value::String(reason.to_string()));
+            }
+        }
+    }
+    Value::Array(items)
+}
+
+fn event_ingest_lag_ms(event: &TokenBudgetEvent) -> u64 {
+    event
+        .ingested_at_epoch_ms
+        .saturating_sub(event.occurred_at_epoch_ms)
+        .max(0) as u64
+}
+
+fn build_metering_freshness_summary(
+    contract: &TokenBudgetContractConfig,
+    measurement: &MeasurementConfig,
+    now_epoch_ms: i64,
+    events: &[TokenBudgetEvent],
+) -> Value {
+    if events.is_empty() {
+        return json!({
+            "model_version": contract.metering_freshness_model_version.clone(),
+            "events_count": 0,
+            "metering_ingest_state": "empty",
+            "contractual_lag_state": "empty",
+            "contractual_freshness_state": "empty",
+            "can_treat_scope_as_stable": false,
+            "late_arrival_grace_ms": measurement.late_arrival_grace_minutes.saturating_mul(60_000),
+            "latest_event_occurred_at_epoch_ms": Value::Null,
+            "latest_event_ingested_at_epoch_ms": Value::Null,
+            "latest_event_age_ms": Value::Null,
+            "latest_ingest_lag_ms": Value::Null,
+            "p50_ingest_lag_ms": 0.0,
+            "p95_ingest_lag_ms": 0.0,
+            "max_ingest_lag_ms": 0.0,
+            "negative_ingest_skew_events": 0,
+            "blocking_reasons": ["no_measured_usage_events"],
+        });
+    }
+
+    let latest_event = events
+        .iter()
+        .max_by_key(|event| (event.occurred_at_epoch_ms, event.ingested_at_epoch_ms))
+        .expect("events is not empty");
+    let late_arrival_grace_ms = measurement
+        .late_arrival_grace_minutes
+        .saturating_mul(60_000);
+    let latest_event_age_ms = now_epoch_ms.saturating_sub(latest_event.occurred_at_epoch_ms);
+    let latest_ingest_lag_ms = event_ingest_lag_ms(latest_event);
+    let negative_ingest_skew_events = events
+        .iter()
+        .filter(|event| event.ingested_at_epoch_ms < event.occurred_at_epoch_ms)
+        .count() as u64;
+    let mut lag_values = events
+        .iter()
+        .map(|event| event_ingest_lag_ms(event) as f64)
+        .collect::<Vec<_>>();
+    lag_values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let max_ingest_lag_ms = lag_values.last().copied().unwrap_or_default();
+    let warning_lag_ms = measurement
+        .metering_ingest_warning_seconds
+        .saturating_mul(1000) as f64;
+    let slo_lag_ms = measurement.metering_ingest_slo_seconds.saturating_mul(1000) as f64;
+    let metering_ingest_state = if max_ingest_lag_ms == 0.0 {
+        "within_slo"
+    } else if max_ingest_lag_ms <= warning_lag_ms {
+        "within_slo"
+    } else if max_ingest_lag_ms <= slo_lag_ms {
+        "soft_lag"
+    } else {
+        "lagging"
+    };
+    let contractual_lag_state = if latest_event_age_ms < late_arrival_grace_ms as i64 {
+        "awaiting_late_events"
+    } else {
+        "lag_window_elapsed"
+    };
+    let contractual_freshness_state = if metering_ingest_state == "lagging" {
+        "lagging_pipeline"
+    } else if contractual_lag_state == "awaiting_late_events" {
+        "provisional_open_window"
+    } else {
+        "stable"
+    };
+    let mut blocking_reasons = Vec::new();
+    if metering_ingest_state == "lagging" {
+        blocking_reasons.push("metering_pipeline_lagging");
+    }
+    if contractual_lag_state == "awaiting_late_events" {
+        blocking_reasons.push("late_arrival_window_open");
+    }
+    if negative_ingest_skew_events > 0 {
+        blocking_reasons.push("negative_ingest_clock_skew_detected");
+    }
+
+    json!({
+        "model_version": contract.metering_freshness_model_version.clone(),
+        "events_count": events.len(),
+        "metering_ingest_state": metering_ingest_state,
+        "contractual_lag_state": contractual_lag_state,
+        "contractual_freshness_state": contractual_freshness_state,
+        "can_treat_scope_as_stable": contractual_freshness_state == "stable",
+        "late_arrival_grace_ms": late_arrival_grace_ms,
+        "latest_event_occurred_at_epoch_ms": latest_event.occurred_at_epoch_ms,
+        "latest_event_ingested_at_epoch_ms": latest_event.ingested_at_epoch_ms,
+        "latest_event_age_ms": latest_event_age_ms,
+        "latest_ingest_lag_ms": latest_ingest_lag_ms,
+        "p50_ingest_lag_ms": percentile_from_sorted(&lag_values, 0.50),
+        "p95_ingest_lag_ms": percentile_from_sorted(&lag_values, 0.95),
+        "max_ingest_lag_ms": max_ingest_lag_ms,
+        "negative_ingest_skew_events": negative_ingest_skew_events,
+        "blocking_reasons": blocking_reasons,
     })
 }
 
@@ -1138,10 +1324,12 @@ fn build_telemetry_surfaces_json(contract: &TokenBudgetContractConfig) -> Value 
             ],
             "fields": [
                 "usage_event_schema",
+                "metering_freshness_contract",
                 "baseline_contract",
                 "billing_policy",
                 "rate_card",
                 "settlement_contract",
+                "metering_freshness",
                 "statement_previews",
                 "reconciliation_contract",
                 "reconciliation_previews",
@@ -1680,8 +1868,13 @@ fn build_contractual_statement_summary(
     statement_preview: &Value,
     reconciliation_preview: &Value,
     margin_scope: &Value,
+    metering_freshness: &Value,
 ) -> Value {
-    if statement_preview.is_null() || reconciliation_preview.is_null() || margin_scope.is_null() {
+    if statement_preview.is_null()
+        || reconciliation_preview.is_null()
+        || margin_scope.is_null()
+        || metering_freshness.is_null()
+    {
         return Value::Null;
     }
     json!({
@@ -1689,6 +1882,13 @@ fn build_contractual_statement_summary(
         "scope_label": scope_label,
         "contractual_state": statement_preview["contractual_state"].clone(),
         "coverage_state": statement_preview["coverage"]["completeness_state"].clone(),
+        "metering_ingest_state": metering_freshness["metering_ingest_state"].clone(),
+        "contractual_lag_state": metering_freshness["contractual_lag_state"].clone(),
+        "contractual_freshness_state": metering_freshness["contractual_freshness_state"].clone(),
+        "can_treat_scope_as_stable": metering_freshness["can_treat_scope_as_stable"].clone(),
+        "latest_event_age_ms": metering_freshness["latest_event_age_ms"].clone(),
+        "latest_ingest_lag_ms": metering_freshness["latest_ingest_lag_ms"].clone(),
+        "p95_ingest_lag_ms": metering_freshness["p95_ingest_lag_ms"].clone(),
         "measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
         "billable_lower_bound_tokens": statement_preview["billable_lower_bound_tokens"].clone(),
         "internal_provider_billed_tokens": reconciliation_preview["internal_provider_billed_tokens"].clone(),
@@ -1699,11 +1899,16 @@ fn build_contractual_statement_summary(
         "reconciliation_state": reconciliation_preview["reconciliation_state"].clone(),
         "margin_state": margin_scope["margin_state"].clone(),
         "close_barriers": statement_preview["close_barriers"].clone(),
-        "blocking_reasons": reconciliation_preview["blocking_reasons"].clone(),
+        "blocking_reasons": combine_reason_arrays(&[
+            &statement_preview["close_barriers"],
+            &reconciliation_preview["blocking_reasons"],
+            &margin_scope["blocking_reasons"],
+            &metering_freshness["blocking_reasons"],
+        ]),
         "customer_review_ready": true,
         "invoice_ready": false,
         "currency_profile": statement_preview["currency_profile"].clone(),
-        "note": "Это короткий customer-facing summary поверх statement/reconciliation/margin previews. Он пригоден для review и audit, но не для invoice."
+        "note": "Это короткий customer-facing summary поверх statement/reconciliation/margin/freshness previews. Он пригоден для review и audit, но не для invoice."
     })
 }
 
@@ -1718,6 +1923,7 @@ fn build_statement_preview(
     adjustment_registry: &Value,
     rate_card: &Value,
     reconciliation_contract: &Value,
+    metering_freshness: &Value,
 ) -> Value {
     let mut close_barriers = vec!["billing_mode_report_only".to_string()];
     if reconciliation_contract["ready_for_external_reconciliation"].as_bool() != Some(true) {
@@ -1735,6 +1941,12 @@ fn build_statement_preview(
         <= 0
     {
         close_barriers.push("no_positive_verified_lower_bound".to_string());
+    }
+    if metering_freshness["contractual_lag_state"].as_str() == Some("awaiting_late_events") {
+        close_barriers.push("late_arrival_window_open".to_string());
+    }
+    if metering_freshness["metering_ingest_state"].as_str() == Some("lagging") {
+        close_barriers.push("metering_pipeline_lagging".to_string());
     }
     json!({
         "scope_code": scope_code,
@@ -1764,6 +1976,7 @@ fn build_statement_preview(
             adjustment_registry,
         ),
         "coverage": summary["coverage"],
+        "freshness": metering_freshness.clone(),
         "internal_delivered_tokens": summary["delivered_tokens"],
         "internal_recovery_tokens": summary["recovery_tokens"],
         "internal_provider_billed_tokens": summary["delivered_tokens"].as_u64().unwrap_or(0)
@@ -2254,6 +2467,28 @@ async fn collect_report(
         &events,
         &profile.display_name,
     );
+    let current_session_metering_freshness = build_metering_freshness_summary(
+        &config.contract,
+        &config.measurement,
+        now_epoch_ms,
+        &session_events,
+    );
+    let rolling_window_metering_freshness = if profile.rolling_window_hours.is_some() {
+        build_metering_freshness_summary(
+            &config.contract,
+            &config.measurement,
+            now_epoch_ms,
+            &rolling_window_events,
+        )
+    } else {
+        Value::Null
+    };
+    let lifetime_metering_freshness = build_metering_freshness_summary(
+        &config.contract,
+        &config.measurement,
+        now_epoch_ms,
+        &events,
+    );
     let external_truth_sources = build_external_truth_sources_json(repo_root);
     let rate_card = build_rate_card_json(repo_root, &config.contract);
     let provider_usage_binding = load_provider_usage_binding_from_source(
@@ -2289,6 +2524,7 @@ async fn collect_report(
         &adjustment_registry,
         &rate_card,
         &reconciliation_contract,
+        &current_session_metering_freshness,
     );
     let rolling_window_statement_preview = if profile.rolling_window_hours.is_some() {
         build_statement_preview(
@@ -2302,6 +2538,7 @@ async fn collect_report(
             &adjustment_registry,
             &rate_card,
             &reconciliation_contract,
+            &rolling_window_metering_freshness,
         )
     } else {
         Value::Null
@@ -2317,6 +2554,7 @@ async fn collect_report(
         &adjustment_registry,
         &rate_card,
         &reconciliation_contract,
+        &lifetime_metering_freshness,
     );
     let current_session_reconciliation_preview = build_reconciliation_preview(
         "current_session",
@@ -2392,6 +2630,7 @@ async fn collect_report(
         &current_session_statement_preview,
         &current_session_reconciliation_preview,
         &current_session_margin_scope,
+        &current_session_metering_freshness,
     );
     let rolling_window_contractual_summary = if profile.rolling_window_hours.is_some() {
         build_contractual_statement_summary(
@@ -2400,6 +2639,7 @@ async fn collect_report(
             &rolling_window_statement_preview,
             &rolling_window_reconciliation_preview,
             &rolling_window_margin_scope,
+            &rolling_window_metering_freshness,
         )
     } else {
         Value::Null
@@ -2410,6 +2650,7 @@ async fn collect_report(
         &lifetime_statement_preview,
         &lifetime_reconciliation_preview,
         &lifetime_margin_scope,
+        &lifetime_metering_freshness,
     );
 
     Ok(json!({
@@ -2420,11 +2661,15 @@ async fn collect_report(
                 "description": profile.description,
                 "session_gap_minutes": profile.session_gap_minutes,
                 "rolling_window_hours": profile.rolling_window_hours,
+                "metering_ingest_warning_seconds": config.measurement.metering_ingest_warning_seconds,
+                "metering_ingest_slo_seconds": config.measurement.metering_ingest_slo_seconds,
+                "late_arrival_grace_minutes": config.measurement.late_arrival_grace_minutes,
                 "preliminary_min_events": config.measurement.preliminary_min_events,
                 "preliminary_min_baseline_tokens": config.measurement.preliminary_min_baseline_tokens,
             },
             "contract": report_contract_json(&config.contract),
             "usage_event_schema": build_usage_event_schema_json(&config.contract),
+            "metering_freshness_contract": build_metering_freshness_contract_json(&config.contract, &config.measurement),
             "baseline_contract": build_baseline_contract_json(&config.contract),
             "billing_policy": build_billing_policy_json(&config.contract, &config.measurement),
             "rate_card": rate_card.clone(),
@@ -2445,6 +2690,15 @@ async fn collect_report(
             "rolling_window": rolling_window_summary,
             "lifetime": lifetime_summary,
             "agent_cycle_economics": agent_cycle_economics,
+            "metering_freshness": {
+                "current_session": current_session_metering_freshness.clone(),
+                "rolling_window": if profile.rolling_window_hours.is_some() {
+                    rolling_window_metering_freshness.clone()
+                } else {
+                    Value::Null
+                },
+                "lifetime": lifetime_metering_freshness.clone(),
+            },
             "statement_previews": {
                 "current_session": current_session_statement_preview.clone(),
                 "rolling_window": if profile.rolling_window_hours.is_some() {
@@ -2858,6 +3112,10 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .unwrap_or("token-coverage-v0")
         .to_string();
+    let metering_freshness_model_version = node["contract"]["metering_freshness_model_version"]
+        .as_str()
+        .unwrap_or("metering-freshness-v0")
+        .to_string();
     let excluded_taxonomy_version = node["contract"]["excluded_taxonomy_version"]
         .as_str()
         .unwrap_or("token-excluded-usage-v0")
@@ -3042,6 +3300,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         baseline_method_version,
         quality_method_version,
         coverage_model_version,
+        metering_freshness_model_version,
         excluded_taxonomy_version,
         dedup_contract_version,
         backfill_policy_version,
@@ -4698,6 +4957,7 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
             "baseline_method_version": event.baseline_method_version.clone(),
             "quality_method_version": event.quality_method_version.clone(),
             "coverage_model_version": event.coverage_model_version.clone(),
+            "metering_freshness_model_version": event.metering_freshness_model_version.clone(),
             "excluded_taxonomy_version": event.excluded_taxonomy_version.clone(),
             "dedup_contract_version": event.dedup_contract_version.clone(),
             "backfill_policy_version": event.backfill_policy_version.clone(),
@@ -6008,6 +6268,7 @@ mod tests {
         build_billing_policy_json, build_contractual_evidence_pack,
         build_contractual_statement_summary, build_event_payload,
         build_external_truth_sources_json, build_margin_contract_json, build_margin_scope,
+        build_metering_freshness_contract_json, build_metering_freshness_summary,
         build_product_headline, build_rate_card_json, build_reconciliation_contract_json,
         build_reconciliation_preview, build_settlement_contract_json, build_statement_preview,
         build_telemetry_surfaces_json, build_usage_event_schema_json, contractual_line_item_json,
@@ -6019,18 +6280,18 @@ mod tests {
         default_dispute_policy_version, default_event_time_policy_version,
         default_excluded_taxonomy_version, default_freeze_close_policy_version,
         default_infra_cost_profile_version, default_late_arrival_policy_version,
-        default_margin_model_version, default_quality_method_version,
-        default_rate_card_binding_model_version, default_rate_card_version,
-        default_reconciliation_contract_version, default_settlement_lifecycle_model_version,
-        default_settlement_statement_version, default_settlement_status,
-        default_statement_period_governance_version, default_telemetry_surface_split_version,
-        derive_baseline_strategy, derive_quality_verdict, derive_query_type, derive_traffic_class,
-        event_to_json, followup_queries_related, include_traffic_class_in_report,
-        latency_slice_breakdown, load_adjustment_registry_from_source,
-        load_provider_invoice_binding_from_source, load_provider_usage_binding_from_source,
-        needs_live_reverification, parse_rate_card_file, parse_snapshot_event,
-        reconcile_followup_recovery, repair_legacy_token_event_payload, report_contract_json,
-        summarize_events,
+        default_margin_model_version, default_metering_freshness_model_version,
+        default_quality_method_version, default_rate_card_binding_model_version,
+        default_rate_card_version, default_reconciliation_contract_version,
+        default_settlement_lifecycle_model_version, default_settlement_statement_version,
+        default_settlement_status, default_statement_period_governance_version,
+        default_telemetry_surface_split_version, derive_baseline_strategy, derive_quality_verdict,
+        derive_query_type, derive_traffic_class, event_to_json, followup_queries_related,
+        include_traffic_class_in_report, latency_slice_breakdown,
+        load_adjustment_registry_from_source, load_provider_invoice_binding_from_source,
+        load_provider_usage_binding_from_source, needs_live_reverification, parse_rate_card_file,
+        parse_snapshot_event, reconcile_followup_recovery, repair_legacy_token_event_payload,
+        report_contract_json, summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -6049,6 +6310,9 @@ mod tests {
             naive_limit_files: 5,
             naive_max_bytes_per_file: 16384,
             include_verify_events_by_default: false,
+            metering_ingest_warning_seconds: 60,
+            metering_ingest_slo_seconds: 300,
+            late_arrival_grace_minutes: 60,
             preliminary_min_events: 50,
             preliminary_min_baseline_tokens: 100_000,
         }
@@ -6121,6 +6385,7 @@ mod tests {
                     baseline_method_version: default_baseline_method_version(),
                     quality_method_version: default_quality_method_version(),
                     coverage_model_version: default_coverage_model_version(),
+                    metering_freshness_model_version: default_metering_freshness_model_version(),
                     excluded_taxonomy_version: default_excluded_taxonomy_version(),
                     dedup_contract_version: default_dedup_contract_version(),
                     backfill_policy_version: default_backfill_policy_version(),
@@ -6309,6 +6574,9 @@ mod tests {
             naive_limit_files: 1,
             naive_max_bytes_per_file: 2048,
             include_verify_events_by_default: false,
+            metering_ingest_warning_seconds: 60,
+            metering_ingest_slo_seconds: 300,
+            late_arrival_grace_minutes: 60,
             preliminary_min_events: 50,
             preliminary_min_baseline_tokens: 100_000,
         };
@@ -6579,6 +6847,18 @@ mod tests {
     }
 
     #[test]
+    fn metering_freshness_contract_exposes_lag_thresholds() {
+        let contract = contract_fixture();
+        let measurement = measurement_fixture();
+        let freshness_contract = build_metering_freshness_contract_json(&contract, &measurement);
+
+        assert_eq!(freshness_contract["model_version"], "metering-freshness-v1");
+        assert_eq!(freshness_contract["ingest_warning_seconds"], 60);
+        assert_eq!(freshness_contract["ingest_slo_seconds"], 300);
+        assert_eq!(freshness_contract["late_arrival_grace_minutes"], 60);
+    }
+
+    #[test]
     fn billing_policy_and_rate_card_are_truthful_report_only() {
         let measurement = measurement_fixture();
         let contract = contract_fixture();
@@ -6794,6 +7074,8 @@ default_output_cost_per_1k_tokens = 0.02
             context_tokens: 166,
             effective_saved_tokens: 1234,
         }];
+        let freshness =
+            build_metering_freshness_summary(&contract, &measurement_fixture(), 2_000, &events);
         let preview = build_statement_preview(
             "current_session",
             "текущая сессия",
@@ -6805,6 +7087,7 @@ default_output_cost_per_1k_tokens = 0.02
             &adjustment_registry,
             &rate_card,
             &reconciliation_contract,
+            &freshness,
         );
 
         assert_eq!(
@@ -6935,6 +7218,8 @@ default_output_cost_per_1k_tokens = 0.02
             context_tokens: 179,
             effective_saved_tokens: 4321,
         }];
+        let freshness =
+            build_metering_freshness_summary(&contract, &measurement_fixture(), 3_000, &events);
         let preview = build_statement_preview(
             "current_session",
             "текущая сессия",
@@ -6946,6 +7231,7 @@ default_output_cost_per_1k_tokens = 0.02
             &adjustment_registry,
             &rate_card,
             &reconciliation_contract,
+            &freshness,
         );
         let reconciliation = build_reconciliation_preview(
             "current_session",
@@ -7036,6 +7322,8 @@ default_output_cost_per_1k_tokens = 0.02
             context_tokens: 124,
             effective_saved_tokens: 9876,
         }];
+        let freshness =
+            build_metering_freshness_summary(&contract, &measurement_fixture(), 9_000, &events);
         let preview = build_statement_preview(
             "lifetime",
             "всё время записи",
@@ -7047,6 +7335,7 @@ default_output_cost_per_1k_tokens = 0.02
             &adjustment_registry,
             &rate_card,
             &reconciliation_contract,
+            &freshness,
         );
         let reconciliation = build_reconciliation_preview(
             "lifetime",
@@ -7110,10 +7399,23 @@ default_output_cost_per_1k_tokens = 0.02
             &json!({
                 "margin_state": "awaiting_infra_cost_profile"
             }),
+            &json!({
+                "metering_ingest_state": "within_slo",
+                "contractual_lag_state": "lag_window_elapsed",
+                "contractual_freshness_state": "stable",
+                "can_treat_scope_as_stable": true,
+                "latest_event_age_ms": 3_000,
+                "latest_ingest_lag_ms": 50,
+                "p95_ingest_lag_ms": 50.0,
+                "blocking_reasons": []
+            }),
         );
 
         assert_eq!(summary["scope_code"], "current_session");
         assert_eq!(summary["coverage_state"], "partially_confirmed");
+        assert_eq!(summary["metering_ingest_state"], "within_slo");
+        assert_eq!(summary["contractual_lag_state"], "lag_window_elapsed");
+        assert_eq!(summary["contractual_freshness_state"], "stable");
         assert_eq!(summary["internal_provider_billed_tokens"], 456);
         assert_eq!(summary["external_provider_usage_tokens"], 500);
         assert_eq!(summary["drift_tokens"], -44);
@@ -7122,8 +7424,45 @@ default_output_cost_per_1k_tokens = 0.02
             "external_usage_and_invoice_bound_report_only"
         );
         assert_eq!(summary["margin_state"], "awaiting_infra_cost_profile");
+        assert_eq!(summary["can_treat_scope_as_stable"], true);
         assert_eq!(summary["customer_review_ready"], true);
         assert_eq!(summary["invoice_ready"], false);
+        assert_eq!(
+            summary["blocking_reasons"],
+            json!(["billing_mode_report_only", "billing_policy_report_only"])
+        );
+    }
+
+    #[test]
+    fn metering_freshness_summary_separates_pipeline_lag_and_late_arrival_window() {
+        let contract = contract_fixture();
+        let measurement = measurement_fixture();
+        let summary = build_metering_freshness_summary(
+            &contract,
+            &measurement,
+            120_000,
+            &[
+                token_event! {
+                    occurred_at_epoch_ms: 1_000,
+                    ingested_at_epoch_ms: 1_020,
+                },
+                token_event! {
+                    occurred_at_epoch_ms: 60_000,
+                    ingested_at_epoch_ms: 420_500,
+                },
+            ],
+        );
+
+        assert_eq!(summary["metering_ingest_state"], "lagging");
+        assert_eq!(summary["contractual_lag_state"], "awaiting_late_events");
+        assert_eq!(summary["contractual_freshness_state"], "lagging_pipeline");
+        assert_eq!(summary["can_treat_scope_as_stable"], false);
+        assert_eq!(summary["latest_event_age_ms"], 60_000);
+        assert_eq!(summary["latest_ingest_lag_ms"], 360_500);
+        assert_eq!(
+            summary["blocking_reasons"],
+            json!(["metering_pipeline_lagging", "late_arrival_window_open"])
+        );
     }
 
     #[test]
@@ -7384,6 +7723,9 @@ default_output_cost_per_1k_tokens = 0.02
             naive_limit_files: 5,
             naive_max_bytes_per_file: 16384,
             include_verify_events_by_default: false,
+            metering_ingest_warning_seconds: 60,
+            metering_ingest_slo_seconds: 300,
+            late_arrival_grace_minutes: 60,
             preliminary_min_events: 50,
             preliminary_min_baseline_tokens: 100_000,
         };
@@ -7676,6 +8018,9 @@ default_output_cost_per_1k_tokens = 0.02
             naive_limit_files: 5,
             naive_max_bytes_per_file: 16384,
             include_verify_events_by_default: false,
+            metering_ingest_warning_seconds: 60,
+            metering_ingest_slo_seconds: 300,
+            late_arrival_grace_minutes: 60,
             preliminary_min_events: 50,
             preliminary_min_baseline_tokens: 100_000,
         };
@@ -7746,6 +8091,9 @@ default_output_cost_per_1k_tokens = 0.02
             naive_limit_files: 5,
             naive_max_bytes_per_file: 16384,
             include_verify_events_by_default: false,
+            metering_ingest_warning_seconds: 60,
+            metering_ingest_slo_seconds: 300,
+            late_arrival_grace_minutes: 60,
             preliminary_min_events: 50,
             preliminary_min_baseline_tokens: 100_000,
         };

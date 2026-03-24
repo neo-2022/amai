@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:34 MSK
-Ручная сверка guide/docs: 2026-03-24 13:34 MSK
+modified_at: 2026-03-24 13:55 MSK
+Ручная сверка guide/docs: 2026-03-24 13:55 MSK
 
 # Token Ledger
 
@@ -750,6 +750,49 @@ Hashes по line items нужны затем, чтобы:
 
 До этого threshold метрика должна быть помечена как:
 - `preliminary`
+
+## Metering freshness и contractual lag
+
+Billing-grade tokenonomics не может жить только на суммах savings.
+Нужно отдельно публиковать:
+- насколько жив сам metering pipeline;
+- и закрыто ли уже окно поздних событий.
+
+Для этого в report теперь есть отдельный слой:
+- `metering_freshness_contract`
+- `metering_freshness.current_session / rolling_window / lifetime`
+
+Обязательные поля этого слоя:
+- `metering_ingest_state`
+  - `empty`
+  - `within_slo`
+  - `soft_lag`
+  - `lagging`
+- `contractual_lag_state`
+  - `empty`
+  - `awaiting_late_events`
+  - `lag_window_elapsed`
+- `contractual_freshness_state`
+  - `empty`
+  - `provisional_open_window`
+  - `stable`
+  - `lagging_pipeline`
+- `latest_event_age_ms`
+- `latest_ingest_lag_ms`
+- `p95_ingest_lag_ms`
+
+Это нужно затем, чтобы не путать две разные проблемы:
+- pipeline действительно опаздывает с ingest;
+- или ingest уже нормальный, но окно late-arrival ещё честно открыто.
+
+`statement_preview.close_barriers` теперь тоже обязан учитывать этот слой:
+- `late_arrival_window_open`
+- `metering_pipeline_lagging`
+
+То есть customer-facing statement preview теперь не делает вид, что scope уже
+стабилен, если:
+- события ещё слишком свежие и в окно могут приехать поздние связки;
+- или сам metering pipeline уже вышел за ingest SLO.
 
 ## Cold / warm разрез
 
