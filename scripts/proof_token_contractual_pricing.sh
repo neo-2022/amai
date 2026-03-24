@@ -152,6 +152,10 @@ assert summary["reconciliation_state"] == "external_usage_and_invoice_aligned_re
 assert summary["provider_usage_scope_alignment_state"] == "scope_period_aligned", summary
 assert summary["provider_invoice_scope_alignment_state"] == "scope_period_aligned", summary
 assert summary["rate_card_scope_alignment_state"] == "scope_period_aligned", summary
+assert summary["rate_card_status"] == "priced_bound", summary
+assert summary["rate_card_version"] == "demo-priced-v1", summary
+assert summary["rate_card_provider"] == "demo-provider", summary
+assert summary["rate_card_currency_profile"] == "USD", summary
 assert summary["rate_card_provider_alignment_state"] == "provider_identity_aligned", summary
 assert summary["invoice_provider_alignment_state"] == "provider_identity_aligned", summary
 assert summary["provider_identity_state"] == "provider_identity_aligned", summary
@@ -159,6 +163,7 @@ assert summary["reconciliation_temporal_truth_state"] == "scope_period_aligned",
 assert summary["margin_state"] == "priced_preview_report_only", summary
 assert summary["margin_confidence_state"] == "aligned_report_only", summary
 assert summary["margin_provider_identity_state"] == "provider_identity_aligned", summary
+assert summary["margin_blocking_reasons"] == [], summary
 assert summary["margin_temporal_truth_state"] == "scope_period_aligned", summary
 assert summary["external_provider_cost_amount"] is not None, summary
 assert margin["customer_saved_amount_lower_bound"] is not None, margin
@@ -168,5 +173,8 @@ assert margin["rate_card_scope_alignment_state"] == "scope_period_aligned", marg
 assert margin["infra_cost_scope_alignment_state"] == "scope_period_aligned", margin
 assert margin["provider_identity_state"] == "provider_identity_aligned", margin
 assert margin["temporal_truth_state"] == "scope_period_aligned", margin
+assert statement_export["rate_card_version"] == "demo-priced-v1", statement_export
+assert statement_export["rate_card_provider"] == "demo-provider", statement_export
+assert statement_export["rate_card_currency_profile"] == "USD", statement_export
 assert statement_export["line_item_surfaces"]["margin_scope"]["margin_state"] == "priced_preview_report_only", statement_export
 PY

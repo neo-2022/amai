@@ -571,11 +571,11 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v6".to_string()
+    "contractual-evidence-pack-v7".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v6".to_string()
+    "contractual-statement-export-v7".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -3671,6 +3671,12 @@ fn build_contractual_statement_summary(
     {
         return Value::Null;
     }
+    let rate_card_binding =
+        &reconciliation_preview["external_truth_bindings"]["provider_rate_card"];
+    let provider_usage_binding =
+        &reconciliation_preview["external_truth_bindings"]["provider_usage_export"];
+    let provider_invoice_binding =
+        &reconciliation_preview["external_truth_bindings"]["provider_invoice_export"];
     let settlement_stage = statement_preview["settlement_stage"]
         .as_str()
         .unwrap_or("unknown");
@@ -3700,6 +3706,12 @@ fn build_contractual_statement_summary(
         "money_truth_completeness_state": reconciliation_preview["money_truth_completeness_state"].clone(),
         "reconciliation_readiness_state": reconciliation_preview["reconciliation_readiness_state"].clone(),
         "reconciliation_governance_blocking_reasons": reconciliation_preview["governance_blocking_reasons"].clone(),
+        "rate_card_status": rate_card_binding["status"].clone(),
+        "rate_card_version": rate_card_binding["bound_rate_card_version"].clone(),
+        "rate_card_provider": rate_card_binding["provider"].clone(),
+        "rate_card_currency_profile": rate_card_binding["bound_currency_profile"].clone(),
+        "provider_usage_provider": provider_usage_binding["provider"].clone(),
+        "provider_invoice_provider": provider_invoice_binding["provider"].clone(),
         "provider_usage_scope_alignment_state": reconciliation_preview["provider_usage_scope_alignment_state"].clone(),
         "provider_invoice_scope_alignment_state": reconciliation_preview["provider_invoice_scope_alignment_state"].clone(),
         "rate_card_scope_alignment_state": reconciliation_preview["rate_card_scope_alignment_state"].clone(),
@@ -3733,6 +3745,7 @@ fn build_contractual_statement_summary(
         "margin_provider_identity_state": margin_scope["provider_identity_state"].clone(),
         "margin_temporal_truth_state": margin_scope["temporal_truth_state"].clone(),
         "infra_cost_scope_alignment_state": margin_scope["infra_cost_scope_alignment_state"].clone(),
+        "margin_blocking_reasons": margin_scope["blocking_reasons"].clone(),
         "adjustment_state": statement_preview["adjustment_preview"]["correction_action_state"].clone(),
         "pending_adjustment_entries_count": statement_preview["adjustment_preview"]["pending_entries_count"].clone(),
         "applied_adjustment_entries_count": statement_preview["adjustment_preview"]["applied_entries_count"].clone(),
@@ -4030,6 +4043,12 @@ fn build_statement_export_preview(
         "usage_truth_completeness_state": contractual_summary["usage_truth_completeness_state"].clone(),
         "money_truth_completeness_state": contractual_summary["money_truth_completeness_state"].clone(),
         "reconciliation_readiness_state": contractual_summary["reconciliation_readiness_state"].clone(),
+        "rate_card_status": contractual_summary["rate_card_status"].clone(),
+        "rate_card_version": contractual_summary["rate_card_version"].clone(),
+        "rate_card_provider": contractual_summary["rate_card_provider"].clone(),
+        "rate_card_currency_profile": contractual_summary["rate_card_currency_profile"].clone(),
+        "provider_usage_provider": contractual_summary["provider_usage_provider"].clone(),
+        "provider_invoice_provider": contractual_summary["provider_invoice_provider"].clone(),
         "provider_usage_scope_alignment_state": contractual_summary["provider_usage_scope_alignment_state"].clone(),
         "provider_invoice_scope_alignment_state": contractual_summary["provider_invoice_scope_alignment_state"].clone(),
         "rate_card_scope_alignment_state": contractual_summary["rate_card_scope_alignment_state"].clone(),
@@ -4044,6 +4063,7 @@ fn build_statement_export_preview(
         "margin_provider_identity_state": contractual_summary["margin_provider_identity_state"].clone(),
         "margin_temporal_truth_state": contractual_summary["margin_temporal_truth_state"].clone(),
         "infra_cost_scope_alignment_state": contractual_summary["infra_cost_scope_alignment_state"].clone(),
+        "margin_blocking_reasons": contractual_summary["margin_blocking_reasons"].clone(),
         "export_status": "review_ready_report_only",
         "included_events_count": included_items.len(),
         "excluded_events_count": excluded_items.len(),
@@ -4132,6 +4152,13 @@ fn build_contractual_evidence_pack(
         "next_settlement_stage_candidate": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["next_settlement_stage_candidate"].clone(),
         "next_settlement_stage_blockers": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["next_settlement_stage_blockers"].clone(),
         "transactional_statuses": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["transactional_statuses"].clone(),
+        "rate_card_status": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["rate_card_status"].clone(),
+        "rate_card_version": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["rate_card_version"].clone(),
+        "rate_card_provider": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["rate_card_provider"].clone(),
+        "rate_card_currency_profile": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["rate_card_currency_profile"].clone(),
+        "provider_usage_provider": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["provider_usage_provider"].clone(),
+        "provider_invoice_provider": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["provider_invoice_provider"].clone(),
+        "provider_identity_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["provider_identity_state"].clone(),
         "export_semantics": {
             "surface_kind": "customer_evidence_pack_report_only",
             "self_serve_state": "self_serve_ready_report_only",
@@ -9285,7 +9312,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v6"
+            "contractual-evidence-pack-v7"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -10827,6 +10854,20 @@ effective_to_epoch_ms = 2000
                 "external_provider_cost_amount": 0.12,
                 "external_invoice_amount": 0.13,
                 "drift_tokens": -44,
+                "external_truth_bindings": {
+                    "provider_rate_card": {
+                        "status": "priced_bound",
+                        "bound_rate_card_version": "demo-priced-v1",
+                        "provider": "demo-provider",
+                        "bound_currency_profile": "USD"
+                    },
+                    "provider_usage_export": {
+                        "provider": "demo-provider"
+                    },
+                    "provider_invoice_export": {
+                        "provider": "demo-provider"
+                    }
+                },
                 "usage_truth_completeness_state": "provider_usage_bound",
                 "money_truth_completeness_state": "provider_cost_and_invoice_bound",
                 "reconciliation_readiness_state": "usage_cost_and_invoice_truth_ready",
@@ -10892,6 +10933,12 @@ effective_to_epoch_ms = 2000
             summary["reconciliation_readiness_state"],
             "usage_cost_and_invoice_truth_ready"
         );
+        assert_eq!(summary["rate_card_status"], "priced_bound");
+        assert_eq!(summary["rate_card_version"], "demo-priced-v1");
+        assert_eq!(summary["rate_card_provider"], "demo-provider");
+        assert_eq!(summary["rate_card_currency_profile"], "USD");
+        assert_eq!(summary["provider_usage_provider"], "demo-provider");
+        assert_eq!(summary["provider_invoice_provider"], "demo-provider");
         assert_eq!(
             summary["rate_card_provider_alignment_state"],
             "provider_identity_aligned"
@@ -10919,6 +10966,7 @@ effective_to_epoch_ms = 2000
             summary["margin_provider_identity_state"],
             "provider_identity_aligned"
         );
+        assert_eq!(summary["margin_blocking_reasons"], json!([]));
         assert_eq!(summary["can_treat_scope_as_stable"], true);
         assert_eq!(summary["customer_review_ready"], true);
         assert_eq!(summary["invoice_ready"], false);
@@ -11018,6 +11066,12 @@ effective_to_epoch_ms = 2000
                             }
                         },
                         "coverage_state": "partially_confirmed",
+                        "rate_card_status": "priced_bound",
+                        "rate_card_version": "demo-priced-v1",
+                        "rate_card_provider": "demo-provider",
+                        "rate_card_currency_profile": "USD",
+                        "provider_usage_provider": "demo-provider",
+                        "provider_invoice_provider": "demo-provider",
                         "provider_usage_scope_alignment_state": "scope_period_aligned",
                         "provider_invoice_scope_alignment_state": "scope_period_aligned",
                         "rate_card_scope_alignment_state": "scope_period_aligned",
@@ -11032,6 +11086,7 @@ effective_to_epoch_ms = 2000
                         "margin_provider_identity_state": "provider_identity_aligned",
                         "margin_temporal_truth_state": "scope_period_aligned",
                         "infra_cost_scope_alignment_state": "infra_cost_profile_not_bound",
+                        "margin_blocking_reasons": ["rate_card_unpriced"],
                         "blocking_reasons": ["late_arrival_window_open"],
                         "suitability": {
                             "surfaces": {
@@ -11080,7 +11135,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v6");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v7");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -11096,9 +11151,18 @@ effective_to_epoch_ms = 2000
             preview["provider_identity_state"],
             "provider_identity_aligned"
         );
+        assert_eq!(preview["rate_card_version"], "demo-priced-v1");
+        assert_eq!(preview["rate_card_provider"], "demo-provider");
+        assert_eq!(preview["rate_card_currency_profile"], "USD");
+        assert_eq!(preview["provider_usage_provider"], "demo-provider");
+        assert_eq!(preview["provider_invoice_provider"], "demo-provider");
         assert_eq!(
             preview["margin_provider_identity_state"],
             "provider_identity_aligned"
+        );
+        assert_eq!(
+            preview["margin_blocking_reasons"],
+            json!(["rate_card_unpriced"])
         );
         assert_eq!(
             preview["transactional_statuses"]["review"]["status"],
@@ -11243,7 +11307,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v6");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v7");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"

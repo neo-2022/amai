@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 20:40 MSK
-Ручная сверка guide/docs: 2026-03-24 20:40 MSK
+modified_at: 2026-03-24 21:05 MSK
+Ручная сверка guide/docs: 2026-03-24 21:05 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1318,6 +1318,14 @@ preview, а не только raw count.
   - `contractual_statement_summaries.*`
   - там теперь видны `metering_ingest_state`, `contractual_lag_state` и
     `contractual_freshness_state`;
+  - там теперь ещё отдельно видны pricing source поля:
+    - `rate_card_status`
+    - `rate_card_version`
+    - `rate_card_provider`
+    - `rate_card_currency_profile`
+    - `provider_usage_provider`
+    - `provider_invoice_provider`
+    - `margin_blocking_reasons`
   - blocking reasons теперь собираются поверх `statement + reconciliation + margin + freshness`,
     а не только из одного reconciliation слоя.
 - margin view теперь тоже first-class:

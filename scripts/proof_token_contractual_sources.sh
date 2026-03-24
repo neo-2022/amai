@@ -116,6 +116,10 @@ assert payload["reconciliation_preview"]["reconciliation_state"] == "external_us
 assert payload["reconciliation_preview"]["usage_truth_completeness_state"] == "provider_usage_bound", payload
 assert payload["reconciliation_preview"]["money_truth_completeness_state"] == "provider_cost_and_invoice_bound", payload
 assert payload["reconciliation_preview"]["reconciliation_readiness_state"] == "usage_cost_and_invoice_truth_ready", payload
+assert payload["statement_export_preview"]["rate_card_status"] == "priced_bound", payload
+assert payload["statement_export_preview"]["rate_card_version"] == "proof-rate-card-v1", payload
+assert payload["statement_export_preview"]["rate_card_provider"] == "openai", payload
+assert payload["statement_export_preview"]["rate_card_currency_profile"] == "USD", payload
 assert payload["reconciliation_preview"]["provider_usage_scope_alignment_state"] == "scope_period_aligned", payload
 assert payload["reconciliation_preview"]["provider_invoice_scope_alignment_state"] == "scope_period_aligned", payload
 assert payload["reconciliation_preview"]["rate_card_scope_alignment_state"] == "scope_period_aligned", payload

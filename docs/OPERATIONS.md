@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 20:40 MSK
-Ручная сверка guide/docs: 2026-03-24 20:40 MSK
+modified_at: 2026-03-24 21:05 MSK
+Ручная сверка guide/docs: 2026-03-24 21:05 MSK
 
 # Operations
 
@@ -1868,6 +1868,14 @@ cargo run -- context pack \
     - `infra_cost_scope_alignment_state`
     - `temporal_truth_state`
     - `provider_identity_state`
+  - customer-facing summary/export теперь ещё обязан показывать:
+    - `rate_card_status`
+    - `rate_card_version`
+    - `rate_card_provider`
+    - `rate_card_currency_profile`
+    - `provider_usage_provider`
+    - `provider_invoice_provider`
+    - `margin_blocking_reasons`
   - если честно привязаны `provider usage + rate card + infra cost profile`, он уже имеет право
     materialize-ить `customer_saved_amount_lower_bound`, `amai_infra_cost_amount`,
     `margin_amount` и `savings_to_cost_ratio`;

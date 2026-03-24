@@ -30,9 +30,10 @@ assert manifest["scope_code"] == "lifetime", manifest
 assert statement_export["scope_code"] == "lifetime", statement_export
 assert evidence_pack["scope_code"] == "lifetime", evidence_pack
 assert contractual_sources["scope_code"] == "lifetime", contractual_sources
-assert statement_export["model_version"] == "contractual-statement-export-v6", statement_export
-assert evidence_pack["pack_version"] == "contractual-evidence-pack-v6", evidence_pack
+assert statement_export["model_version"] == "contractual-statement-export-v7", statement_export
+assert evidence_pack["pack_version"] == "contractual-evidence-pack-v7", evidence_pack
 assert statement_export["provider_identity_state"] in {"provider_identity_aligned", "provider_identity_unchecked"}, statement_export
+assert statement_export["rate_card_status"] is not None, statement_export
 assert statement_export["transactional_statuses"]["billable"]["boundary"] == "reserved_future", statement_export
 assert evidence_pack["transactional_statuses"]["measured"]["boundary"] in {"not_started", "measured_report_only"}, evidence_pack
 assert contractual_sources["transactional_statuses"] == evidence_pack["transactional_statuses"], contractual_sources

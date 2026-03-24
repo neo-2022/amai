@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 20:40 MSK
-Ручная сверка guide/docs: 2026-03-24 20:40 MSK
+modified_at: 2026-03-24 21:05 MSK
+Ручная сверка guide/docs: 2026-03-24 21:05 MSK
 
 # Token Ledger
 
@@ -914,7 +914,7 @@ Customer-facing export bundle:
 - `line_items.excluded`
 
 Честный смысл этого export сейчас такой:
-- это `contractual-evidence-pack-v6`;
+- это `contractual-evidence-pack-v7`;
 - это всё ещё `report_only tokenonomics`;
 - это не invoice;
 - это не final settlement;
@@ -937,6 +937,15 @@ Hashes по line items нужны затем, чтобы:
 
 Поверх полного pack теперь нужен и отдельный:
 - `statement_export_previews.current_session / rolling_window / lifetime`
+
+У `statement_export_preview` теперь ещё отдельно публикуются pricing-source поля:
+- `rate_card_status`
+- `rate_card_version`
+- `rate_card_provider`
+- `rate_card_currency_profile`
+- `provider_usage_provider`
+- `provider_invoice_provider`
+- `margin_blocking_reasons`
 
 Это не дублирование, а отдельный слой:
 - preview даёт компактный `statement_preview_id`;
