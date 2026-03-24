@@ -17,6 +17,8 @@ use tokio_postgres::Client;
 use uuid::Uuid;
 
 const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
+const AGENT_CYCLE_MODEL_VERSION: &str = "agent-cycle-lower-bound-v1";
+const AGENT_CYCLE_TIMELINE_MAX_POINTS: usize = 256;
 
 #[derive(Debug, Clone, Deserialize)]
 struct TokenBudgetConfigFile {
@@ -427,6 +429,16 @@ async fn collect_report(
     } else {
         build_product_headline(&lifetime_summary, "всё время записи")
     };
+    let agent_cycle_economics = build_agent_cycle_economics(
+        &config.measurement,
+        now_epoch_ms,
+        &session_events,
+        profile
+            .rolling_window_hours
+            .map(|_| rolling_window_events.as_slice()),
+        &events,
+        &profile.display_name,
+    );
 
     Ok(json!({
         "token_budget_report": {
@@ -447,6 +459,7 @@ async fn collect_report(
             "current_session": current_session_summary,
             "rolling_window": rolling_window_summary,
             "lifetime": lifetime_summary,
+            "agent_cycle_economics": agent_cycle_economics,
             "source_breakdown": source_breakdown,
             "query_slices": query_slices,
             "temperature_slices": temperature_slices,
@@ -1751,6 +1764,221 @@ fn build_product_headline(summary: &Value, scope_label: &str) -> Value {
             "fallback_rate": 0.0,
             "note": "Amai ещё не накопил live-события для этой метрики.",
         })
+    }
+}
+
+fn build_agent_cycle_economics(
+    measurement: &MeasurementConfig,
+    now_epoch_ms: i64,
+    current_session_events: &[TokenBudgetEvent],
+    rolling_window_events: Option<&[TokenBudgetEvent]>,
+    lifetime_events: &[TokenBudgetEvent],
+    rolling_window_label: &str,
+) -> Value {
+    json!({
+        "model_version": AGENT_CYCLE_MODEL_VERSION,
+        "status": "partial_lower_bound",
+        "contract": {
+            "scope": "lower_bound_whole_agent_cycle",
+            "status": "partial_lower_bound",
+            "summary": "Это не весь токеновый бюджет клиента, а подтверждённая нижняя граница полного агентного цикла.",
+            "measured_components": [
+                {
+                    "code": "retrieval_payload",
+                    "label": "Контекст, который Amai реально вернул"
+                },
+                {
+                    "code": "followup_recovery",
+                    "label": "Доуточнения после неполного ответа, которые уже видно в ledger"
+                }
+            ],
+            "missing_components": [
+                {
+                    "code": "client_prompt",
+                    "label": "Токены исходного запроса клиента"
+                },
+                {
+                    "code": "assistant_generation",
+                    "label": "Токены генерации итогового ответа"
+                },
+                {
+                    "code": "tool_overhead_outside_retrieval",
+                    "label": "Tool-step и orchestration вне retrieval-контура"
+                },
+                {
+                    "code": "continuity_restore_outside_retrieval",
+                    "label": "Восстановление continuity, если оно прошло вне token-ledger retrieval-событий"
+                }
+            ],
+            "note": "Линия 'без Amai' здесь пока означает измеренный baseline retrieval-части цикла, а линия 'с Amai' — retrieval плюс уже зафиксированные доуточнения. Это честная нижняя граница, а не полная стоимость всей агентной сессии."
+        },
+        "chart_contract": {
+            "timeline_type": "event_cumulative",
+            "x_axis": "timestamp_epoch_ms",
+            "y_axes": [
+                "without_amai_measured_tokens",
+                "with_amai_measured_tokens",
+                "measured_saved_tokens"
+            ],
+            "series": [
+                "all_live_timeline",
+                "verified_live_timeline"
+            ],
+            "point_limit": AGENT_CYCLE_TIMELINE_MAX_POINTS
+        },
+        "current_session": build_agent_cycle_scope(
+            measurement,
+            now_epoch_ms,
+            "current_session",
+            "текущая сессия",
+            current_session_events,
+            AGENT_CYCLE_TIMELINE_MAX_POINTS / 2,
+        ),
+        "rolling_window": rolling_window_events
+            .map(|events| {
+                build_agent_cycle_scope(
+                    measurement,
+                    now_epoch_ms,
+                    "rolling_window",
+                    &format!("окно {}", rolling_window_label),
+                    events,
+                    AGENT_CYCLE_TIMELINE_MAX_POINTS,
+                )
+            })
+            .unwrap_or(Value::Null),
+        "lifetime": build_agent_cycle_scope(
+            measurement,
+            now_epoch_ms,
+            "lifetime",
+            "всё время записи",
+            lifetime_events,
+            AGENT_CYCLE_TIMELINE_MAX_POINTS,
+        ),
+    })
+}
+
+fn build_agent_cycle_scope(
+    measurement: &MeasurementConfig,
+    now_epoch_ms: i64,
+    scope_code: &str,
+    scope_label: &str,
+    events: &[TokenBudgetEvent],
+    max_points: usize,
+) -> Value {
+    let live_events = events
+        .iter()
+        .filter(|event| event.traffic_class == "live")
+        .cloned()
+        .collect::<Vec<_>>();
+    let summary = summarize_events(&live_events, now_epoch_ms, measurement);
+    let with_amai_measured_tokens = summary["total_context_tokens"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_add(summary["total_recovery_tokens"].as_u64().unwrap_or(0));
+    let verified_with_amai_measured_tokens = summary["verified_delivered_tokens"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_add(summary["verified_recovery_tokens"].as_u64().unwrap_or(0));
+    let verified_share_pct = percent_share(
+        summary["counted_events"].as_u64().unwrap_or(0),
+        summary["events_total"].as_u64().unwrap_or(0),
+    );
+    json!({
+        "scope_code": scope_code,
+        "scope_label": scope_label,
+        "status": "partial_lower_bound",
+        "events_total": summary["events_total"].as_u64().unwrap_or(0),
+        "counted_events": summary["counted_events"].as_u64().unwrap_or(0),
+        "excluded_events_count": summary["excluded_events_count"].as_u64().unwrap_or(0),
+        "verified_share_pct": verified_share_pct,
+        "without_amai_measured_tokens": summary["total_naive_tokens"].as_u64().unwrap_or(0),
+        "with_amai_measured_tokens": with_amai_measured_tokens,
+        "measured_saved_tokens": summary["total_effective_saved_tokens"].as_i64().unwrap_or(0),
+        "measured_saved_pct": summary["effective_savings_pct"].as_f64().unwrap_or(0.0),
+        "verified_without_amai_measured_tokens": summary["verified_baseline_tokens"].as_u64().unwrap_or(0),
+        "verified_with_amai_measured_tokens": verified_with_amai_measured_tokens,
+        "verified_measured_saved_tokens": summary["verified_effective_saved_tokens"].as_i64().unwrap_or(0),
+        "verified_measured_saved_pct": summary["verified_effective_savings_pct"].as_f64().unwrap_or(0.0),
+        "answer_like_counted_events": summary["answer_like_counted_events"].as_u64().unwrap_or(0),
+        "answer_like_rate": summary["answer_like_rate"].as_f64().unwrap_or(0.0),
+        "started_at_epoch_ms": summary["started_at_epoch_ms"].clone(),
+        "ended_at_epoch_ms": summary["ended_at_epoch_ms"].clone(),
+        "all_live_timeline": build_agent_cycle_timeline(&live_events, false, max_points),
+        "verified_live_timeline": build_agent_cycle_timeline(&live_events, true, max_points),
+    })
+}
+
+fn build_agent_cycle_timeline(
+    events: &[TokenBudgetEvent],
+    verified_only: bool,
+    max_points: usize,
+) -> Value {
+    let filtered = events
+        .iter()
+        .filter(|event| !verified_only || event.quality_ok)
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        return Value::Array(Vec::new());
+    }
+
+    let mut without_amai_cumulative = 0_u64;
+    let mut with_amai_cumulative = 0_u64;
+    let mut points = Vec::with_capacity(filtered.len());
+    for (index, event) in filtered.into_iter().enumerate() {
+        without_amai_cumulative = without_amai_cumulative.saturating_add(event.naive_tokens);
+        with_amai_cumulative = with_amai_cumulative
+            .saturating_add(event.context_tokens)
+            .saturating_add(event.recovery_tokens);
+        let measured_saved_tokens = without_amai_cumulative as i64 - with_amai_cumulative as i64;
+        points.push(json!({
+            "point_index": index + 1,
+            "timestamp_epoch_ms": event.created_at_epoch_ms,
+            "event_id": event.event_id,
+            "query_type": event.query_type,
+            "cold_warm_state": event.cold_warm_state,
+            "answer_like": is_answer_like_event(event),
+            "without_amai_measured_tokens": without_amai_cumulative,
+            "with_amai_measured_tokens": with_amai_cumulative,
+            "measured_saved_tokens": measured_saved_tokens,
+            "measured_saved_pct": percent_from_signed(measured_saved_tokens, without_amai_cumulative),
+        }));
+    }
+    downsample_timeline(points, max_points)
+}
+
+fn downsample_timeline(points: Vec<Value>, max_points: usize) -> Value {
+    if points.len() <= max_points || max_points < 2 {
+        return Value::Array(points);
+    }
+
+    let last_index = points.len() - 1;
+    let step = last_index as f64 / (max_points - 1) as f64;
+    let mut sampled = Vec::with_capacity(max_points);
+    let mut last_taken = None::<usize>;
+    for bucket in 0..max_points {
+        let index = if bucket == max_points - 1 {
+            last_index
+        } else {
+            (bucket as f64 * step).round() as usize
+        }
+        .min(last_index);
+        if last_taken == Some(index) {
+            continue;
+        }
+        sampled.push(points[index].clone());
+        last_taken = Some(index);
+    }
+    if last_taken != Some(last_index) {
+        sampled.push(points[last_index].clone());
+    }
+    Value::Array(sampled)
+}
+
+fn percent_share(part: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        part as f64 * 100.0 / total as f64
     }
 }
 
@@ -3613,6 +3841,159 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("старым форматом")
+        );
+    }
+
+    #[test]
+    fn agent_cycle_economics_exposes_partial_lower_bound_and_timelines() {
+        let measurement = MeasurementConfig {
+            tokenizer: "o200k_base".to_string(),
+            naive_limit_files: 5,
+            naive_max_bytes_per_file: 16384,
+            include_verify_events_by_default: false,
+            preliminary_min_events: 50,
+            preliminary_min_baseline_tokens: 100_000,
+        };
+        let events = vec![
+            TokenBudgetEvent {
+                created_at_epoch_ms: 10,
+                event_id: "event-1".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 10,
+                snapshot_kind: "token_budget_event".to_string(),
+                source_kind: "live_context_pack".to_string(),
+                traffic_class: "live".to_string(),
+                project: "art".to_string(),
+                namespace: "continuity".to_string(),
+                query: "first".to_string(),
+                query_hash: "hash-1".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 11.0,
+                saved_tokens: 60,
+                naive_tokens: 100,
+                context_tokens: 40,
+                recovery_tokens: 0,
+                effective_saved_tokens: 60,
+                savings_factor: 2.5,
+                savings_percent: 60.0,
+                effective_savings_percent: 60.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "hybrid_answer_proxy".to_string(),
+                quality_tier: "answer_proxy".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 40,
+                deduped_token_count: 40,
+            },
+            TokenBudgetEvent {
+                created_at_epoch_ms: 20,
+                event_id: "event-2".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 20,
+                snapshot_kind: "token_budget_event".to_string(),
+                source_kind: "live_context_pack".to_string(),
+                traffic_class: "live".to_string(),
+                project: "art".to_string(),
+                namespace: "continuity".to_string(),
+                query: "second".to_string(),
+                query_hash: "hash-2".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: false,
+                cold_warm_state: "warm".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 5.0,
+                saved_tokens: 40,
+                naive_tokens: 100,
+                context_tokens: 60,
+                recovery_tokens: 25,
+                effective_saved_tokens: 15,
+                savings_factor: 1.67,
+                savings_percent: 40.0,
+                effective_savings_percent: 15.0,
+                quality_ok: false,
+                quality_score: 0.4,
+                quality_method: "hybrid_partial_retrieval".to_string(),
+                quality_tier: "partial".to_string(),
+                head_hit_target: false,
+                needed_followup: true,
+                followup_count: 1,
+                followup_of_event_id: Some("event-1".to_string()),
+                resolved_by_event_id: None,
+                fallback_triggered: true,
+                fallback_count: 1,
+                document_hits: 0,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 60,
+                deduped_token_count: 60,
+            },
+        ];
+
+        let economics = super::build_agent_cycle_economics(
+            &measurement,
+            25,
+            &events,
+            Some(&events),
+            &events,
+            "Обычная рабочая машина",
+        );
+
+        assert_eq!(economics["model_version"], super::AGENT_CYCLE_MODEL_VERSION);
+        assert_eq!(economics["status"], "partial_lower_bound");
+        assert_eq!(
+            economics["current_session"]["without_amai_measured_tokens"],
+            200
+        );
+        assert_eq!(
+            economics["current_session"]["with_amai_measured_tokens"],
+            125
+        );
+        assert_eq!(economics["current_session"]["measured_saved_tokens"], 75);
+        assert_eq!(
+            economics["current_session"]["verified_with_amai_measured_tokens"],
+            40
+        );
+        assert_eq!(
+            economics["current_session"]["verified_measured_saved_tokens"],
+            60
+        );
+        assert_eq!(
+            economics["current_session"]["all_live_timeline"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            economics["current_session"]["verified_live_timeline"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
         );
     }
 

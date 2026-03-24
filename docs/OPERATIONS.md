@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 09:16 MSK
-Ручная сверка guide/docs: 2026-03-24 09:16 MSK
+modified_at: 2026-03-24 09:56 MSK
+Ручная сверка guide/docs: 2026-03-24 09:56 MSK
 
 # Operations
 
@@ -650,7 +650,13 @@ cargo run -- mcp serve
   `profile`, `schema_version`, `compatible` и per-service reasons; short summary
   у `amai_observe_snapshot` показывает это как `compatibility=<profile>:ok|drift`.
 - `amai_token_report` теперь тоже отдаёт наружу `token_report_summary`, где уже
-  собраны `scope_label`, `status`, `counted_events / events_count` и `note`.
+  собраны не только `scope_label`, `status`, `counted_events / events_count` и `note`,
+  но и machine-readable summary для `agent_cycle` lower bound:
+  - `agent_cycle_scope_label`
+  - `agent_cycle_status`
+  - `agent_cycle_verified_saved_percent`
+  - `agent_cycle_verified_saved_tokens`
+  - `agent_cycle_note`
 - `amai_context_pack` теперь тоже отдаёт наружу `context_pack_summary`, где уже
   лежат `included_reasons_summary / excluded_reasons_summary` для последнего
   собранного context pack.
@@ -1525,6 +1531,20 @@ cargo run --release -- verify token-benchmark-suite \
   - канонический product KPI:
     - `Verified Effective Savings %`
     - по-русски: `Проверенная реальная экономия`;
+- `agent_cycle_economics`
+  - честная нижняя граница полного агентного цикла;
+  - measured part:
+    - retrieval payload;
+    - follow-up/recovery tokens, которые уже видно в ledger;
+  - missing part:
+    - токены исходного запроса клиента;
+    - токены генерации итогового ответа;
+    - tool-step вне retrieval;
+    - continuity restore вне token-ledger retrieval-событий;
+  - chart contract:
+    - `all_live_timeline`
+    - `verified_live_timeline`
+    - cumulative lines `without_amai_measured_tokens / with_amai_measured_tokens / measured_saved_tokens`;
 - `current_session`
   - токены, сэкономленные в текущей рабочей сессии;
 - `rolling_window`

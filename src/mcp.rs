@@ -1205,7 +1205,7 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
     .await?;
     let token_summary = token_report_summary(&payload);
     let summary = format!(
-        "token report :: metric={} scope={} status={} value_percent={:.3} saved_tokens={} counted={}/{} note={}",
+        "token report :: metric={} scope={} status={} value_percent={:.3} saved_tokens={} counted={}/{} agent_cycle_scope={} agent_cycle_verified_percent={:.3} note={}",
         token_summary.metric_code,
         token_summary.scope_label,
         token_summary.status,
@@ -1213,6 +1213,8 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
         token_summary.saved_tokens,
         token_summary.counted_events,
         token_summary.events_count,
+        token_summary.agent_cycle_scope_label,
+        token_summary.agent_cycle_verified_saved_percent,
         token_summary.note,
     );
     Ok(tool_result(
@@ -1227,6 +1229,11 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
                 "saved_tokens": token_summary.saved_tokens,
                 "events_count": token_summary.events_count,
                 "counted_events": token_summary.counted_events,
+                "agent_cycle_scope_label": token_summary.agent_cycle_scope_label,
+                "agent_cycle_status": token_summary.agent_cycle_status,
+                "agent_cycle_verified_saved_percent": token_summary.agent_cycle_verified_saved_percent,
+                "agent_cycle_verified_saved_tokens": token_summary.agent_cycle_verified_saved_tokens,
+                "agent_cycle_note": token_summary.agent_cycle_note,
                 "note": token_summary.note,
             }
         }),
@@ -1408,6 +1415,11 @@ struct TokenReportSummary {
     saved_tokens: i64,
     events_count: u64,
     counted_events: u64,
+    agent_cycle_scope_label: String,
+    agent_cycle_status: String,
+    agent_cycle_verified_saved_percent: f64,
+    agent_cycle_verified_saved_tokens: i64,
+    agent_cycle_note: String,
     note: String,
 }
 
@@ -1483,6 +1495,12 @@ fn memory_matrix_summary(payload: &Value) -> MemoryMatrixSummary {
 
 fn token_report_summary(payload: &Value) -> TokenReportSummary {
     let headline = &payload["token_budget_report"]["headline"];
+    let report = &payload["token_budget_report"];
+    let agent_cycle_scope = if report["rolling_window"].is_null() {
+        &report["agent_cycle_economics"]["lifetime"]
+    } else {
+        &report["agent_cycle_economics"]["rolling_window"]
+    };
     TokenReportSummary {
         metric_code: headline["metric_code"]
             .as_str()
@@ -1497,6 +1515,24 @@ fn token_report_summary(payload: &Value) -> TokenReportSummary {
         saved_tokens: headline["saved_tokens"].as_i64().unwrap_or_default(),
         events_count: headline["events_count"].as_u64().unwrap_or_default(),
         counted_events: headline["counted_events"].as_u64().unwrap_or_default(),
+        agent_cycle_scope_label: agent_cycle_scope["scope_label"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        agent_cycle_status: report["agent_cycle_economics"]["status"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        agent_cycle_verified_saved_percent: agent_cycle_scope["verified_measured_saved_pct"]
+            .as_f64()
+            .unwrap_or_default(),
+        agent_cycle_verified_saved_tokens: agent_cycle_scope["verified_measured_saved_tokens"]
+            .as_i64()
+            .unwrap_or_default(),
+        agent_cycle_note: report["agent_cycle_economics"]["contract"]["note"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
         note: headline["note"].as_str().unwrap_or("").to_string(),
     }
 }
@@ -3046,6 +3082,20 @@ mod tests {
                     "events_count": 120,
                     "counted_events": 75,
                     "note": "Это главный честный KPI: live-only, quality-gated и с учётом recovery."
+                },
+                "rolling_window": {
+                    "events_total": 120
+                },
+                "agent_cycle_economics": {
+                    "status": "partial_lower_bound",
+                    "contract": {
+                        "note": "Это честная нижняя граница полного агентного цикла."
+                    },
+                    "rolling_window": {
+                        "scope_label": "окно Обычная рабочая машина",
+                        "verified_measured_saved_pct": 96.11,
+                        "verified_measured_saved_tokens": 6812345
+                    }
                 }
             }
         });
@@ -3058,6 +3108,17 @@ mod tests {
         assert_eq!(summary.saved_tokens, 6923645);
         assert_eq!(summary.events_count, 120);
         assert_eq!(summary.counted_events, 75);
+        assert_eq!(
+            summary.agent_cycle_scope_label,
+            "окно Обычная рабочая машина"
+        );
+        assert_eq!(summary.agent_cycle_status, "partial_lower_bound");
+        assert_eq!(summary.agent_cycle_verified_saved_percent, 96.11);
+        assert_eq!(summary.agent_cycle_verified_saved_tokens, 6812345);
+        assert_eq!(
+            summary.agent_cycle_note,
+            "Это честная нижняя граница полного агентного цикла."
+        );
         assert_eq!(
             summary.note,
             "Это главный честный KPI: live-only, quality-gated и с учётом recovery."

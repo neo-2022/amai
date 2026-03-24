@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 09:16 MSK
-Ручная сверка guide/docs: 2026-03-24 09:16 MSK
+modified_at: 2026-03-24 09:56 MSK
+Ручная сверка guide/docs: 2026-03-24 09:56 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -903,9 +903,18 @@ cargo run -- deployment explain --target kubernetes_server
 а не выглядел как безконтекстная цифра.
 
 `amai_token_report` теперь тоже отдаёт наружу готовый `token_report_summary`, где уже
-собраны `scope_label`, `status`, `counted_events / events_count` и `note`.
-Это позволяет внешнему клиенту честно объяснить смысл KPI без ручного разбора
-всего `token_budget_report.headline`.
+собраны не только `scope_label`, `status`, `counted_events / events_count` и `note`,
+но и честный `agent_cycle` lower-bound summary:
+- `agent_cycle_scope_label`
+- `agent_cycle_status`
+- `agent_cycle_verified_saved_percent`
+- `agent_cycle_verified_saved_tokens`
+- `agent_cycle_note`
+
+Это нужно затем, чтобы внешний клиент видел сразу две вещи:
+- главный retrieval-aware KPI;
+- и отдельную подтверждённую нижнюю границу полного агентного цикла,
+  без притворства, будто `Amai` уже измерил весь бюджет клиента целиком.
 
 `amai_context_pack` теперь тоже отдаёт наружу `context_pack_summary` с
 `included_reasons_summary / excluded_reasons_summary`, чтобы внешний клиент видел,
@@ -1006,6 +1015,17 @@ preview, а не только raw count.
 Этот отчёт показывает:
 - главный честный KPI:
   - `Проверенная реальная экономия`;
+- отдельный слой `agent_cycle_economics`
+  - это не “весь бюджет клиента”, а подтверждённая нижняя граница полного
+    агентного цикла;
+  - туда уже входят:
+    - retrieval payload;
+    - доуточнения, которые пришлось сделать после неполного ответа;
+  - туда пока не входят:
+    - токены исходного запроса клиента;
+    - токены генерации итогового ответа;
+    - tool-step и orchestration вне retrieval-контура;
+    - continuity restore, если он прошёл вне token-ledger retrieval-событий;
 - сколько токенов `Amai` сэкономил за текущую рабочую сессию;
 - сколько токенов сэкономлено за текущее окно лимита;
 - сколько токенов сэкономлено за всё время;
@@ -1022,6 +1042,11 @@ preview, а не только raw count.
 - откуда пришли цифры:
   - живые `context pack` вызовы;
   - verification/benchmark события, если вы их явно включили.
+- chart-ready cumulative timelines:
+  - `all_live_timeline`
+  - `verified_live_timeline`
+  - они нужны для будущих live-графиков вида `без Amai / с Amai`,
+    но уже сейчас штампуются как machine-readable data contract.
 
 Главное правило:
 - headline-метрика у `Amai` теперь не raw и не synthetic;

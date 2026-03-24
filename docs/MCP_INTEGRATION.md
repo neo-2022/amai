@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 00:00 MSK
-Ручная сверка guide/docs: 2026-03-24 00:00 MSK
+modified_at: 2026-03-24 09:56 MSK
+Ручная сверка guide/docs: 2026-03-24 09:56 MSK
 
 # MCP Integration
 
@@ -17,6 +17,9 @@ modified_at: 2026-03-24 00:00 MSK
   - за текущую сессию;
   - за окно лимита;
   - за всё время.
+- тот же token report теперь несёт и честный `agent_cycle` lower bound:
+  - не как “полный счёт всей сессии”;
+  - а как подтверждённую нижнюю границу measured части цикла.
 
 ## Это режим "скачал и всё"?
 
@@ -253,6 +256,11 @@ cargo build --release
 а две machine-readable формы:
 - `preflight_report`
 - `preflight_summary`
+
+У `amai_token_report` short summary теперь тоже богаче прежнего headline-only слоя:
+- retrieval KPI summary;
+- и отдельный `agent_cycle` lower-bound summary,
+  чтобы внешний клиент мог строить токенометрию честно, без подмены понятий.
 
 Это нужно для внешних клиентов, которым важно понимать не только текущий health
 stack-а, но и какие deployment promises вообще честно достижимы на этой машине.
