@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 23:20 MSK
-Ручная сверка guide/docs: 2026-03-24 23:20 MSK
+modified_at: 2026-03-24 23:46 MSK
+Ручная сверка guide/docs: 2026-03-24 23:46 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1148,13 +1148,20 @@ preview, а не только raw count.
   - это нужно затем, чтобы dashboard headline и live rollups не принимали за invoice.
 - `reconciliation_contract`
   - публикует, какие внешние truth-sources нужны для будущей сверки с provider;
+  - теперь делает это не только общим списком, а по слоям:
+    - `required_sources_for_usage_truth`
+    - `required_sources_for_cost_truth`
+    - `optional_sources_for_invoice_evidence`
+    - `unready_*`, если source ещё не bound или bound недостаточно честно для этого слоя;
   - честно показывает, что сейчас они ещё не привязаны к runtime.
 - `reconciliation_previews`
   - по каждому scope показывают внутренний measured lower bound;
   - но внешние provider usage / cost / drift остаются `null`, пока нет настоящей external truth binding.
 - `margin_contract`
   - показывает, включена ли вообще money-margin арифметика;
-  - честно фиксирует отсутствие priced rate card и infra cost profile.
+  - честно фиксирует отсутствие priced rate card и infra cost profile;
+  - теперь ещё отдельно публикует `required_sources_for_margin_truth` и
+    `unready_required_sources_for_margin_truth`.
 - `margin_view`
   - по каждому scope показывает token-side lower bound savings клиента;
   - но деньги и маржа остаются `null`, пока это нельзя доказать.

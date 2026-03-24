@@ -108,6 +108,7 @@ from pathlib import Path
 payload = json.loads(Path("/tmp/amai-proof-token-contractual-sources.json").read_text())["token_contractual_sources"]
 
 assert payload["external_truth_sources"]["provider_usage_export"]["status"] == "configured_existing_path", payload
+assert payload["external_truth_sources"]["infra_cost_profile"]["status"] == "configured_existing_path", payload
 assert payload["rate_card"]["status"] == "priced_bound", payload
 assert payload["provider_usage_binding"]["status"] == "usage_and_cost_bound", payload
 assert payload["provider_invoice_binding"]["status"] == "invoice_bound", payload
@@ -122,8 +123,14 @@ assert payload["reconciliation_preview"]["usage_truth_completeness_state"] == "p
 assert payload["reconciliation_preview"]["money_truth_completeness_state"] == "provider_cost_and_invoice_bound", payload
 assert payload["reconciliation_preview"]["reconciliation_readiness_state"] == "usage_cost_and_invoice_truth_ready", payload
 assert payload["statement_export_preview"]["rate_card_status"] == "priced_bound", payload
-assert payload["settlement_report_preview"]["model_version"] == "settlement-report-preview-v1", payload
+assert payload["settlement_report_preview"]["model_version"] == "settlement-report-preview-v2", payload
 assert payload["settlement_report_preview"]["settlement_report_id"], payload
+assert payload["reconciliation_contract"]["source_requirements"]["required_sources_for_usage_truth"] == ["provider_usage_export"], payload
+assert payload["reconciliation_contract"]["source_requirements"]["required_sources_for_cost_truth"] == ["provider_rate_card", "provider_usage_export"], payload
+assert payload["reconciliation_contract"]["source_requirements"]["optional_sources_for_invoice_evidence"] == ["provider_invoice_export"], payload
+assert payload["reconciliation_contract"]["source_requirements"]["unready_required_sources_for_usage_truth"] == [], payload
+assert payload["reconciliation_contract"]["source_requirements"]["unready_required_sources_for_cost_truth"] == [], payload
+assert payload["reconciliation_contract"]["source_requirements"]["unready_optional_sources_for_invoice_evidence"] == [], payload
 assert payload["statement_export_preview"]["rate_card_truth_completeness_state"] == "rate_card_priced_bound", payload
 assert payload["statement_export_preview"]["rate_card_version"] == "proof-rate-card-v1", payload
 assert payload["statement_export_preview"]["rate_card_provider"] == "openai", payload
@@ -135,6 +142,12 @@ assert payload["reconciliation_preview"]["rate_card_provider_alignment_state"] =
 assert payload["reconciliation_preview"]["invoice_provider_alignment_state"] == "provider_identity_aligned", payload
 assert payload["reconciliation_preview"]["provider_identity_state"] == "provider_identity_aligned", payload
 assert payload["reconciliation_preview"]["temporal_truth_state"] == "scope_period_aligned", payload
+assert payload["reconciliation_preview"]["required_sources_for_usage_truth"] == ["provider_usage_export"], payload
+assert payload["reconciliation_preview"]["required_sources_for_cost_truth"] == ["provider_rate_card", "provider_usage_export"], payload
+assert payload["reconciliation_preview"]["optional_sources_for_invoice_evidence"] == ["provider_invoice_export"], payload
+assert payload["reconciliation_preview"]["unready_required_sources_for_usage_truth"] == [], payload
+assert payload["reconciliation_preview"]["unready_required_sources_for_cost_truth"] == [], payload
+assert payload["reconciliation_preview"]["unready_optional_sources_for_invoice_evidence"] == [], payload
 assert payload["margin_scope"]["margin_state"] == "priced_preview_report_only", payload
 assert payload["margin_scope"]["margin_confidence_state"] == "aligned_report_only", payload
 assert payload["margin_scope"]["pricing_truth_completeness_state"] == "pricing_truth_ready", payload
@@ -143,6 +156,8 @@ assert payload["margin_scope"]["rate_card_scope_alignment_state"] == "scope_peri
 assert payload["margin_scope"]["infra_cost_scope_alignment_state"] == "scope_period_aligned", payload
 assert payload["margin_scope"]["provider_identity_state"] == "provider_identity_aligned", payload
 assert payload["margin_scope"]["temporal_truth_state"] == "scope_period_aligned", payload
+assert payload["margin_scope"]["required_sources_for_margin_truth"] == ["infra_cost_profile", "provider_rate_card", "provider_usage_export"], payload
+assert payload["margin_scope"]["unready_required_sources_for_margin_truth"] == [], payload
 assert payload["statement_export_preview"]["scope_code"] == "lifetime", payload
 PY
 

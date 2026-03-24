@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 23:20 MSK
-Ручная сверка guide/docs: 2026-03-24 23:20 MSK
+modified_at: 2026-03-24 23:46 MSK
+Ручная сверка guide/docs: 2026-03-24 23:46 MSK
 
 # Operations
 
@@ -1686,6 +1686,11 @@ cargo run -- context pack \
 - `reconciliation_contract`
   - versioned contract для будущей сверки internal lower bound с provider truth;
   - список обязательных и optional external sources;
+  - теперь отдельно по truth-слоям:
+    - `required_sources_for_usage_truth`
+    - `required_sources_for_cost_truth`
+    - `optional_sources_for_invoice_evidence`
+    - `unready_*`, если source ещё не готов для этого слоя;
   - current truthful status: external truth ещё не bound в runtime;
 - `reconciliation_previews`
   - `current_session / rolling_window / lifetime`;
@@ -1700,6 +1705,9 @@ cargo run -- context pack \
   - versioned truth-layer для product margin;
   - current truthful status зависит от реального bind `rate card + provider usage + infra cost profile`;
   - `rate_card_status` обязан повторять runtime status настоящего rate-card binding;
+  - теперь ещё отдельно публикуются `required_sources_for_margin_truth` и
+    `unready_required_sources_for_margin_truth`, чтобы margin-blocker был виден не только как
+    общий state, но и как нехватка конкретных sources.
 - `margin_view`
   - `current_session / rolling_window / lifetime`;
   - customer lower-bound savings в токенах;

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 19:17 MSK
-Ручная сверка guide/docs: 2026-03-24 19:17 MSK
+modified_at: 2026-03-24 23:46 MSK
+Ручная сверка guide/docs: 2026-03-24 23:46 MSK
 
 # Token Ledger
 
@@ -712,7 +712,7 @@ Operator-safe report-only команды:
 - готовы ли мы вообще к external reconciliation.
 
 Текущий truthful status:
-- `reconciliation_contract_version = provider-reconciliation-v7`
+- `reconciliation_contract_version = provider-reconciliation-v8`
 - `ready_for_external_reconciliation` теперь зависит от реального bind provider usage export,
   а не от одного факта, что где-то прописан путь;
 - contract теперь ещё отдельно публикует:
@@ -721,6 +721,17 @@ Operator-safe report-only команды:
   - `money_truth_completeness_state`
   - `reconciliation_readiness_state`
   - `governance_blocking_reasons`
+  - `source_requirements.required_sources_for_usage_truth`
+  - `source_requirements.required_sources_for_cost_truth`
+  - `source_requirements.optional_sources_for_invoice_evidence`
+  - `source_requirements.unready_*`
+- `external_truth_sources` теперь на верхнем уровне report тоже несёт:
+  - `provider_usage_export`
+  - `provider_invoice_export`
+  - `provider_rate_card`
+  - `infra_cost_profile`
+  вместе с `truth_roles`, чтобы было видно не только где лежит файл, но и для какого слоя правды
+  он вообще нужен;
 - scope-level preview теперь ещё отдельно публикует temporal truth:
   - `provider_usage_scope_alignment_state`
   - `provider_invoice_scope_alignment_state`
@@ -826,7 +837,7 @@ Customer-facing export bundle:
 - включена ли money-margin арифметика.
 
 Текущий truthful status:
-- `margin_model_version = margin-view-v5`
+- `margin_model_version = margin-view-v6`
 - `infra_cost_binding_model_version = infra-cost-binding-v3`
 - `infra_cost_profile_version = unpriced-infra-v1`
 - `money_margin_enabled` включается только после честного bind на
@@ -840,6 +851,8 @@ Customer-facing export bundle:
   - `rate_card_truth_completeness_state`
   - `infra_cost_truth_completeness_state`
   - `pricing_truth_completeness_state`
+  - `required_sources_for_margin_truth`
+  - `unready_required_sources_for_margin_truth`
   - `margin_confidence_state`
   - `margin_readiness_state`
   - `rate_card_scope_alignment_state`
@@ -938,7 +951,7 @@ Customer-facing export bundle:
 - `line_items.excluded`
 
 Честный смысл этого export сейчас такой:
-- это `contractual-evidence-pack-v10`;
+- это `contractual-evidence-pack-v11`;
 - это всё ещё `report_only tokenonomics`;
 - это не invoice;
 - это не final settlement;

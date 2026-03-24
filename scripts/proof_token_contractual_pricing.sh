@@ -133,15 +133,24 @@ root = report["token_budget_report"]
 
 assert root["rate_card"]["status"] == "priced_bound", root["rate_card"]
 assert root["infra_cost_profile"]["status"] == "priced_bound", root["infra_cost_profile"]
-assert root["reconciliation_contract"]["contract_version"] == "provider-reconciliation-v7", root["reconciliation_contract"]
+assert root["external_truth_sources"]["infra_cost_profile"]["status"] == "configured_existing_path", root["external_truth_sources"]
+assert root["reconciliation_contract"]["contract_version"] == "provider-reconciliation-v8", root["reconciliation_contract"]
 assert root["reconciliation_contract"]["provider_identity_state"] == "provider_identity_aligned", root["reconciliation_contract"]
+assert root["reconciliation_contract"]["source_requirements"]["required_sources_for_usage_truth"] == ["provider_usage_export"], root["reconciliation_contract"]
+assert root["reconciliation_contract"]["source_requirements"]["required_sources_for_cost_truth"] == ["provider_rate_card", "provider_usage_export"], root["reconciliation_contract"]
+assert root["reconciliation_contract"]["source_requirements"]["optional_sources_for_invoice_evidence"] == ["provider_invoice_export"], root["reconciliation_contract"]
+assert root["reconciliation_contract"]["source_requirements"]["unready_required_sources_for_usage_truth"] == [], root["reconciliation_contract"]
+assert root["reconciliation_contract"]["source_requirements"]["unready_required_sources_for_cost_truth"] == [], root["reconciliation_contract"]
+assert root["reconciliation_contract"]["source_requirements"]["unready_optional_sources_for_invoice_evidence"] == [], root["reconciliation_contract"]
 assert root["external_truth_manifest"]["manifest_hash"], root["external_truth_manifest"]
 assert root["external_truth_manifest"]["entries"]["provider_rate_card"]["source_sha256"], root["external_truth_manifest"]
 assert root["margin_contract"]["status"] == "priced_preview_report_only", root["margin_contract"]
-assert root["margin_contract"]["model_version"] == "margin-view-v5", root["margin_contract"]
+assert root["margin_contract"]["model_version"] == "margin-view-v6", root["margin_contract"]
 assert root["margin_contract"]["pricing_truth_completeness_state"] == "pricing_truth_ready", root["margin_contract"]
 assert root["margin_contract"]["provider_identity_state"] == "provider_identity_aligned", root["margin_contract"]
 assert root["margin_contract"]["money_margin_enabled"] is True, root["margin_contract"]
+assert root["margin_contract"]["source_requirements"]["required_sources_for_margin_truth"] == ["infra_cost_profile", "provider_rate_card", "provider_usage_export"], root["margin_contract"]
+assert root["margin_contract"]["source_requirements"]["unready_required_sources_for_margin_truth"] == [], root["margin_contract"]
 
 scope = "rolling_window"
 if root["contractual_statement_summaries"][scope] is None:
@@ -152,6 +161,12 @@ margin = root["margin_view"][scope]
 statement_export = root["statement_export_previews"][scope]
 
 assert summary["reconciliation_state"] == "external_usage_and_invoice_aligned_report_only", summary
+assert summary["required_sources_for_usage_truth"] == ["provider_usage_export"], summary
+assert summary["required_sources_for_cost_truth"] == ["provider_rate_card", "provider_usage_export"], summary
+assert summary["optional_sources_for_invoice_evidence"] == ["provider_invoice_export"], summary
+assert summary["unready_required_sources_for_usage_truth"] == [], summary
+assert summary["unready_required_sources_for_cost_truth"] == [], summary
+assert summary["unready_optional_sources_for_invoice_evidence"] == [], summary
 assert summary["provider_usage_scope_alignment_state"] == "scope_period_aligned", summary
 assert summary["provider_invoice_scope_alignment_state"] == "scope_period_aligned", summary
 assert summary["rate_card_scope_alignment_state"] == "scope_period_aligned", summary
@@ -164,6 +179,8 @@ assert summary["invoice_provider_alignment_state"] == "provider_identity_aligned
 assert summary["provider_identity_state"] == "provider_identity_aligned", summary
 assert summary["rate_card_truth_completeness_state"] == "rate_card_priced_bound", summary
 assert summary["pricing_truth_completeness_state"] == "pricing_truth_ready", summary
+assert summary["required_sources_for_margin_truth"] == ["infra_cost_profile", "provider_rate_card", "provider_usage_export"], summary
+assert summary["unready_required_sources_for_margin_truth"] == [], summary
 assert summary["reconciliation_temporal_truth_state"] == "scope_period_aligned", summary
 assert summary["margin_state"] == "priced_preview_report_only", summary
 assert summary["margin_confidence_state"] == "aligned_report_only", summary
@@ -180,9 +197,13 @@ assert margin["infra_cost_scope_alignment_state"] == "scope_period_aligned", mar
 assert margin["provider_identity_state"] == "provider_identity_aligned", margin
 assert margin["temporal_truth_state"] == "scope_period_aligned", margin
 assert statement_export["rate_card_version"] == "demo-priced-v1", statement_export
-assert statement_export["settlement_report_preview"]["model_version"] == "settlement-report-preview-v1", statement_export
+assert statement_export["settlement_report_preview"]["model_version"] == "settlement-report-preview-v2", statement_export
+assert statement_export["required_sources_for_usage_truth"] == ["provider_usage_export"], statement_export
+assert statement_export["required_sources_for_margin_truth"] == ["infra_cost_profile", "provider_rate_card", "provider_usage_export"], statement_export
 assert statement_export["settlement_report_preview"]["settlement_report_id"], statement_export
 assert statement_export["rate_card_provider"] == "demo-provider", statement_export
 assert statement_export["rate_card_currency_profile"] == "USD", statement_export
 assert statement_export["line_item_surfaces"]["margin_scope"]["margin_state"] == "priced_preview_report_only", statement_export
 PY
+
+printf 'proof_token_contractual_pricing: PASS\n'
