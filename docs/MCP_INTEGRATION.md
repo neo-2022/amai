@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 14:07 MSK
-Ручная сверка guide/docs: 2026-03-24 14:07 MSK
+modified_at: 2026-03-24 14:31 MSK
+Ручная сверка guide/docs: 2026-03-24 14:31 MSK
 
 # MCP Integration
 
@@ -273,6 +273,15 @@ cargo build --release
   - `contractual_blockers_summary`
   - `contractual_statement_summary`
   - `statement_export_preview`
+
+Когда runtime честно привяжет `provider usage + rate card + infra cost profile`,
+тот же `statement_export_preview` уже может нести:
+- `line_item_surfaces.reconciliation_preview.drift_amount`
+- `line_item_surfaces.margin_scope.customer_saved_amount_lower_bound`
+- `line_item_surfaces.margin_scope.amai_infra_cost_amount`
+- `line_item_surfaces.margin_scope.margin_amount`
+
+Но это всё равно остаётся `report_only preview`, а не invoice.
 
 Это нужно затем, чтобы клиентский слой мог показать короткий contractual state для review/audit
 без парсинга полного raw `token_budget_report`.

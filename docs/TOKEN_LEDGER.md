@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 14:07 MSK
-Ручная сверка guide/docs: 2026-03-24 14:07 MSK
+modified_at: 2026-03-24 14:31 MSK
+Ручная сверка guide/docs: 2026-03-24 14:31 MSK
 
 # Token Ledger
 
@@ -608,7 +608,7 @@ materialized end-to-end.
 - готовы ли мы вообще к external reconciliation.
 
 Текущий truthful status:
-- `reconciliation_contract_version = provider-reconciliation-v1`
+- `reconciliation_contract_version = provider-reconciliation-v2`
 - `ready_for_external_reconciliation` теперь зависит от реального bind provider usage export,
   а не от одного факта, что где-то прописан путь;
 - внутренний lower bound уже materialized;
@@ -622,10 +622,14 @@ materialized end-to-end.
 - `internal_provider_billed_tokens` отдельно показывает внутренний delivered usage;
 - `drift_tokens` считается только как
   `internal_provider_billed_tokens - external_provider_usage_tokens`;
-- `external_provider_usage_tokens`, `external_provider_cost_amount` и
-  `external_invoice_amount` могут заполняться только после реального bind соответствующих
-  external sources;
-- `drift_amount` остаётся `null`, пока внутренний money-side settlement не materialized.
+  - `external_provider_usage_tokens`, `external_provider_cost_amount` и
+    `external_invoice_amount` могут заполняться только после реального bind соответствующих
+    external sources;
+  - при priced rate card теперь может materialize-иться и
+    `internal_provider_cost_estimate_amount`;
+  - `drift_amount` теперь честно показывает money-side difference между внутренней
+    input-side cost estimate и external provider cost;
+  - `invoice_drift_amount` отдельно показывает drift между provider usage cost и invoice export.
 
 Это не пробел в арифметике, а truth guardrail:
 - пока внешний источник не подключён;
@@ -654,23 +658,32 @@ materialized end-to-end.
 - включена ли money-margin арифметика.
 
 Текущий truthful status:
-- `margin_model_version = margin-view-v1`
+- `margin_model_version = margin-view-v2`
+- `infra_cost_binding_model_version = infra-cost-binding-v1`
 - `infra_cost_profile_version = unpriced-infra-v1`
-- `money_margin_enabled = false`
+- `money_margin_enabled` включается только после честного bind на
+  `priced rate card + provider usage + infra cost profile`;
 - `margin_view` теперь обязан брать priced/unpriced не из static contract label, а из
   настоящего rate-card binding runtime.
 
-Именно поэтому `margin_view` сейчас обязан выглядеть так:
+Именно поэтому truthful `margin_view` теперь обязан выглядеть в одной из двух форм:
+- до bind внешних truth-sources:
 - `customer_saved_tokens_lower_bound` заполнен;
 - `customer_saved_amount_lower_bound = null`
 - `amai_infra_cost_amount = null`
 - `margin_amount = null`
 - `savings_to_cost_ratio = null`
+- после честного bind `provider usage + rate card + infra cost profile`:
+  - `customer_saved_amount_lower_bound` может быть заполнен;
+  - `amai_infra_cost_amount` может быть заполнен;
+  - `margin_amount` может быть заполнен;
+  - `savings_to_cost_ratio` может быть заполнен;
+  - но state всё равно остаётся `report_only preview`, а не invoice.
 
 Это не “недоделанная формула”, а truth guardrail:
 - пока rate card остаётся `unpriced`;
 - пока infra cost profile не materialized;
-- пока provider reconciliation не доведён до денежной сверки;
+- пока provider reconciliation не привязан хотя бы к usage export;
 
 `Amai` не имеет права рисовать даже приблизительную маржу как будто она уже доказана.
 
@@ -747,6 +760,7 @@ Hashes по line items нужны затем, чтобы:
 - preview даёт компактный `statement_preview_id`;
 - публикует `included_events_hash / excluded_events_hash`;
 - отдельно показывает `credit_action_state` и `dispute_action_state`;
+- и хранит рядом уже готовые `statement_preview / reconciliation_preview / margin_scope`;
 - даёт готовую команду `observe token-evidence-pack` для полного export.
 
 Именно так customer-facing export должен масштабироваться:

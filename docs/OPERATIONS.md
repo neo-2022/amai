@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 14:07 MSK
-Ручная сверка guide/docs: 2026-03-24 14:07 MSK
+modified_at: 2026-03-24 14:31 MSK
+Ручная сверка guide/docs: 2026-03-24 14:31 MSK
 
 # Operations
 
@@ -1639,14 +1639,22 @@ cargo run --release -- verify token-benchmark-suite \
   - `current_session / rolling_window / lifetime`;
   - internal measured lower bound по scope;
   - provider usage / provider cost / drift пока остаются `null`, если truth source ещё не подключён;
+  - после честного bind runtime теперь может показать:
+    - `internal_provider_cost_estimate_amount`
+    - `drift_amount`
+    - `invoice_drift_amount`
+    - states `external_usage_aligned_report_only` / `external_usage_drift_report_only`;
 - `margin_contract`
   - versioned truth-layer для product margin;
-  - current truthful status: money-margin ещё не включён;
+  - current truthful status зависит от реального bind `rate card + provider usage + infra cost profile`;
   - `rate_card_status` обязан повторять runtime status настоящего rate-card binding;
 - `margin_view`
   - `current_session / rolling_window / lifetime`;
   - customer lower-bound savings в токенах;
-  - money margin fields пока остаются `null`, если rate card и infra cost profile ещё не materialized;
+  - money fields materialize-ятся только если честно привязаны
+    `provider usage + rate card + infra cost profile`;
+  - при provider drift state обязан стать `priced_preview_with_provider_drift`, а не
+    притворяться нормой;
 - `contractual_evidence_pack`
   - report-only export по `current_session / rolling_window / lifetime`;
   - содержит `statement_preview`, `reconciliation_preview`, `margin_scope`,
@@ -1759,7 +1767,9 @@ cargo run --release -- verify token-benchmark-suite \
     - `external_provider_cost_amount`
     - `external_invoice_amount`
     - `drift_tokens`
-  - `drift_amount` остаётся пустым, пока внутренний money-side settlement ещё не materialized.
+    - `internal_provider_cost_estimate_amount`
+    - `drift_amount`
+    - `invoice_drift_amount`
 - `contractual_statement_summaries` теперь тоже каноничны:
   - `current_session`
   - `rolling_window`
@@ -1776,7 +1786,10 @@ cargo run --release -- verify token-benchmark-suite \
   - в нём видно token-side lower bound savings клиента;
   - при честно привязанном priced rate card он обязан перескочить с `awaiting_rate_card`
     на следующий реальный блокер, а не держаться за старый static contract;
-  - денежные поля остаются пустыми, пока нет priced rate card, provider reconciliation и infra cost profile.
+  - если честно привязаны `provider usage + rate card + infra cost profile`, он уже имеет право
+    materialize-ить `customer_saved_amount_lower_bound`, `amai_infra_cost_amount`,
+    `margin_amount` и `savings_to_cost_ratio`;
+  - если provider usage показывает drift, этот drift должен оставаться видимым и в margin-preview.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе:
@@ -1790,6 +1803,12 @@ cargo run --release -- observe token-report --include-verify-events true
 ```bash
 cargo run --release -- observe token-evidence-pack --scope lifetime
 cargo run --release -- observe token-evidence-pack --scope current_session --output /tmp/amai-token-evidence-pack.json
+```
+
+Если нужен proof именно для contractual money-preview слоя:
+
+```bash
+./scripts/proof_token_contractual_pricing.sh
 ```
 
 Что это даёт:

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 14:07 MSK
-Ручная сверка guide/docs: 2026-03-24 14:07 MSK
+modified_at: 2026-03-24 14:31 MSK
+Ручная сверка guide/docs: 2026-03-24 14:31 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1186,8 +1186,14 @@ preview, а не только raw count.
     - `external_provider_cost_amount`
     - `external_invoice_amount`
     - `drift_tokens`
-  - `drift_amount` всё ещё остаётся `null`, пока внутренний money-side settlement
-    не materialized честно.
+    - `internal_provider_cost_estimate_amount`
+    - `drift_amount`
+    - `invoice_drift_amount`
+  - `reconciliation_state` теперь честно различает:
+    - `external_usage_aligned_report_only`
+    - `external_usage_drift_report_only`
+    - `external_usage_and_invoice_aligned_report_only`
+    - `external_usage_and_invoice_drift_report_only`
 - metering freshness теперь тоже first-class:
   - `metering_freshness.current_session / rolling_window / lifetime`
   - она отдельно показывает:
@@ -1209,12 +1215,14 @@ preview, а не только raw count.
 - margin view теперь тоже first-class:
   - `margin_view.current_session / rolling_window / lifetime`
   - там уже видно `customer_saved_tokens_lower_bound`;
-  - при честно привязанном priced rate card `margin_view` больше не должен
-    притворяться `awaiting_rate_card`: он обязан перейти к следующему реальному
-    блокеру, например `awaiting_infra_cost_profile`;
-  - но `customer_saved_amount_lower_bound`, `amai_infra_cost_amount`, `margin_amount`
-    и `savings_to_cost_ratio` остаются пустыми, пока rate card и infra cost profile
-    ещё не materialized честно.
+  - при честно привязанных `provider usage + rate card + infra cost profile`
+    `margin_view` теперь уже имеет право materialize-ить:
+    - `customer_saved_amount_lower_bound`
+    - `amai_infra_cost_amount`
+    - `margin_amount`
+    - `savings_to_cost_ratio`
+  - если provider usage показывает drift, margin preview не прячется и не
+    “зеленеет”, а прямо уходит в `priced_preview_with_provider_drift`.
 
 По умолчанию proof/benchmark-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе, используйте:
@@ -1235,6 +1243,13 @@ cargo run --release -- observe reverify-token-ledger --apply
 ```bash
 cargo run --release -- observe token-evidence-pack --scope lifetime
 cargo run --release -- observe token-evidence-pack --scope rolling_window --output /tmp/amai-token-evidence-pack.json
+```
+
+Для живого proof, что contractual tokenonomics уже умеет пройти путь до
+денежного preview при честно привязанных external inputs, используйте:
+
+```bash
+./scripts/proof_token_contractual_pricing.sh
 ```
 
 Что важно по правде:

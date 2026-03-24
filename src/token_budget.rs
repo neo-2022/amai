@@ -96,6 +96,8 @@ struct TokenBudgetContractConfig {
     adjustment_registry_version: String,
     #[serde(default = "default_rate_card_binding_model_version")]
     rate_card_binding_model_version: String,
+    #[serde(default = "default_infra_cost_binding_model_version")]
+    infra_cost_binding_model_version: String,
     #[serde(default = "default_telemetry_surface_split_version")]
     telemetry_surface_split_version: String,
     #[serde(default = "default_event_time_policy_version")]
@@ -147,6 +149,7 @@ impl Default for TokenBudgetContractConfig {
             adjustment_request_schema_version: default_adjustment_request_schema_version(),
             adjustment_registry_version: default_adjustment_registry_version(),
             rate_card_binding_model_version: default_rate_card_binding_model_version(),
+            infra_cost_binding_model_version: default_infra_cost_binding_model_version(),
             telemetry_surface_split_version: default_telemetry_surface_split_version(),
             event_time_policy_version: default_event_time_policy_version(),
             billing_policy_version: default_billing_policy_version(),
@@ -257,6 +260,20 @@ struct ProviderInvoiceScopeEntry {
     currency_profile: Option<String>,
     #[serde(default)]
     invoice_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct InfraCostProfileFile {
+    schema_version: String,
+    infra_cost_profile_version: String,
+    currency_profile: String,
+    #[serde(default)]
+    provider: Option<String>,
+    cost_per_1k_internal_billed_tokens: f64,
+    #[serde(default)]
+    cost_per_live_event: f64,
+    #[serde(default)]
+    fixed_scope_cost_amount: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -493,6 +510,10 @@ fn default_rate_card_binding_model_version() -> String {
     "rate-card-binding-v1".to_string()
 }
 
+fn default_infra_cost_binding_model_version() -> String {
+    "infra-cost-binding-v1".to_string()
+}
+
 fn default_telemetry_surface_split_version() -> String {
     "tokenonomics-surface-split-v1".to_string()
 }
@@ -510,11 +531,11 @@ fn default_billing_mode() -> String {
 }
 
 fn default_reconciliation_contract_version() -> String {
-    "provider-reconciliation-v1".to_string()
+    "provider-reconciliation-v2".to_string()
 }
 
 fn default_margin_model_version() -> String {
-    "margin-view-v1".to_string()
+    "margin-view-v2".to_string()
 }
 
 fn default_infra_cost_profile_version() -> String {
@@ -565,6 +586,7 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "adjustment_request_schema_version": contract.adjustment_request_schema_version.clone(),
         "adjustment_registry_version": contract.adjustment_registry_version.clone(),
         "rate_card_binding_model_version": contract.rate_card_binding_model_version.clone(),
+        "infra_cost_binding_model_version": contract.infra_cost_binding_model_version.clone(),
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
@@ -604,6 +626,7 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "adjustment_request_schema_version": contract.adjustment_request_schema_version.clone(),
         "adjustment_registry_version": contract.adjustment_registry_version.clone(),
         "rate_card_binding_model_version": contract.rate_card_binding_model_version.clone(),
+        "infra_cost_binding_model_version": contract.infra_cost_binding_model_version.clone(),
         "telemetry_surface_split_version": contract.telemetry_surface_split_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
@@ -905,6 +928,12 @@ fn parse_provider_invoice_export_file(raw: &str) -> Result<ProviderInvoiceExport
         .context("failed to parse provider invoice export as JSON or TOML")
 }
 
+fn parse_infra_cost_profile_file(raw: &str) -> Result<InfraCostProfileFile> {
+    serde_json::from_str::<InfraCostProfileFile>(raw)
+        .or_else(|_| toml::from_str::<InfraCostProfileFile>(raw).map_err(anyhow::Error::from))
+        .context("failed to parse infra cost profile as JSON or TOML")
+}
+
 fn bind_rate_card_json_from_source(source: &Value, contract: &TokenBudgetContractConfig) -> Value {
     let mut base = json!({
         "binding_model_version": contract.rate_card_binding_model_version.clone(),
@@ -976,6 +1005,87 @@ fn build_rate_card_json(repo_root: &Path, contract: &TokenBudgetContractConfig) 
         true,
     );
     bind_rate_card_json_from_source(&source, contract)
+}
+
+fn bind_infra_cost_profile_json_from_source(
+    source: &Value,
+    contract: &TokenBudgetContractConfig,
+) -> Value {
+    let mut base = json!({
+        "binding_model_version": contract.infra_cost_binding_model_version.clone(),
+        "configured_contract_version": contract.infra_cost_profile_version.clone(),
+        "source": source.clone(),
+        "status": source["status"].clone(),
+        "schema_version": Value::Null,
+        "bound_profile_version": Value::Null,
+        "bound_currency_profile": Value::Null,
+        "provider": Value::Null,
+        "cost_per_1k_internal_billed_tokens": Value::Null,
+        "cost_per_live_event": Value::Null,
+        "fixed_scope_cost_amount": Value::Null,
+        "money_margin_enabled": false,
+        "note": "Infra cost profile начинает влиять на margin preview только после честного bind на versioned machine-readable profile."
+    });
+
+    if source["status"].as_str() != Some("configured_existing_path") {
+        return base;
+    }
+    let Some(path) = source["resolved_path"].as_str() else {
+        return base;
+    };
+
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            base["status"] = Value::String("read_error".to_string());
+            base["source"]["binding_status"] = Value::String("read_error".to_string());
+            base["read_error"] = Value::String(error.to_string());
+            return base;
+        }
+    };
+    let profile = match parse_infra_cost_profile_file(&raw) {
+        Ok(profile) => profile,
+        Err(error) => {
+            base["status"] = Value::String("parse_error".to_string());
+            base["source"]["binding_status"] = Value::String("parse_error".to_string());
+            base["parse_error"] = Value::String(error.to_string());
+            return base;
+        }
+    };
+
+    let money_margin_enabled = profile.cost_per_1k_internal_billed_tokens > 0.0
+        || profile.cost_per_live_event > 0.0
+        || profile.fixed_scope_cost_amount > 0.0;
+    base["status"] = Value::String(if money_margin_enabled {
+        "priced_bound".to_string()
+    } else {
+        "bound_but_unpriced".to_string()
+    });
+    base["source"]["binding_status"] = base["status"].clone();
+    base["schema_version"] = Value::String(profile.schema_version);
+    base["bound_profile_version"] = Value::String(profile.infra_cost_profile_version);
+    base["bound_currency_profile"] = Value::String(profile.currency_profile);
+    base["provider"] = match profile.provider {
+        Some(provider) => Value::String(provider),
+        None => Value::Null,
+    };
+    base["cost_per_1k_internal_billed_tokens"] =
+        Value::from(profile.cost_per_1k_internal_billed_tokens);
+    base["cost_per_live_event"] = Value::from(profile.cost_per_live_event);
+    base["fixed_scope_cost_amount"] = Value::from(profile.fixed_scope_cost_amount);
+    base["money_margin_enabled"] = Value::Bool(money_margin_enabled);
+    base
+}
+
+fn build_infra_cost_profile_json(repo_root: &Path, contract: &TokenBudgetContractConfig) -> Value {
+    let source = configured_external_truth_source(
+        repo_root,
+        "AMAI_INFRA_COST_PROFILE_PATH",
+        "infra_cost_profile",
+        "Профиль собственных infra costs для Amai",
+        false,
+    );
+    bind_infra_cost_profile_json_from_source(&source, contract)
 }
 
 fn build_settlement_contract_json(contract: &TokenBudgetContractConfig) -> Value {
@@ -1342,6 +1452,7 @@ fn build_telemetry_surfaces_json(contract: &TokenBudgetContractConfig) -> Value 
                 "statement_previews",
                 "reconciliation_contract",
                 "reconciliation_previews",
+                "infra_cost_profile",
                 "margin_contract",
                 "margin_view",
                 "adjustment_request_schema",
@@ -1453,6 +1564,40 @@ fn provider_usage_cost_amount(entry: &ProviderUsageScopeEntry, rate_card: &Value
     Some(
         (input_tokens as f64 / 1000.0) * input_rate + (output_tokens as f64 / 1000.0) * output_rate,
     )
+}
+
+fn internal_provider_cost_estimate_amount(
+    internal_provider_billed_tokens: u64,
+    rate_card: &Value,
+) -> Option<f64> {
+    let input_rate = rate_card["default_input_cost_per_1k_tokens"].as_f64()?;
+    Some((internal_provider_billed_tokens as f64 / 1000.0) * input_rate)
+}
+
+fn amount_delta(lhs: Option<f64>, rhs: Option<f64>) -> Value {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => json!(lhs - rhs),
+        _ => Value::Null,
+    }
+}
+
+fn base_reconciliation_blocking_reasons(
+    statement_preview: &Value,
+    rate_card: &Value,
+    include_provider_usage_missing: bool,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if include_provider_usage_missing {
+        reasons.push("provider_usage_source_missing");
+    }
+    if rate_card["money_conversion_enabled"].as_bool() != Some(true) {
+        reasons.push("provider_rate_card_unpriced");
+    }
+    reasons.push("billing_policy_report_only");
+    if statement_preview["billable_lower_bound_tokens"].is_null() {
+        reasons.push("billable_lower_bound_not_materialized");
+    }
+    reasons
 }
 
 fn load_provider_usage_binding_from_source(source: &Value, rate_card: &Value) -> Value {
@@ -1695,50 +1840,135 @@ fn build_reconciliation_preview(
     let provider_invoice_status = provider_invoice_binding["status"]
         .as_str()
         .unwrap_or("not_configured");
-    let reconciliation_state = if matches!(
-        provider_usage_status,
-        "usage_bound" | "usage_and_cost_bound"
-    ) {
-        if provider_invoice_status == "invoice_bound" {
-            "external_usage_and_invoice_bound_report_only"
-        } else if provider_usage_status == "usage_and_cost_bound" {
-            "external_usage_and_cost_bound_report_only"
-        } else {
-            "external_usage_bound_report_only"
-        }
-    } else if provider_usage_status == "not_configured" {
-        "awaiting_provider_usage_source"
+    if provider_usage_status == "not_configured" {
+        let blocking_reasons =
+            base_reconciliation_blocking_reasons(statement_preview, rate_card, true);
+        return json!({
+            "scope_code": scope_code,
+            "scope_label": scope_label,
+            "reconciliation_state": "awaiting_provider_usage_source",
+            "usage_reconciliation_state": "awaiting_provider_usage_source",
+            "invoice_reconciliation_state": if provider_invoice_status == "invoice_bound" {
+                "invoice_bound_without_usage"
+            } else {
+                "invoice_not_bound"
+            },
+            "coverage": statement_preview["coverage"].clone(),
+            "internal_provider_billed_tokens": statement_preview["internal_provider_billed_tokens"].clone(),
+            "internal_provider_cost_estimate_amount": Value::Null,
+            "internal_delivered_tokens": statement_preview["internal_delivered_tokens"].clone(),
+            "internal_recovery_tokens": statement_preview["internal_recovery_tokens"].clone(),
+            "internal_measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
+            "billable_lower_bound_tokens": statement_preview["billable_lower_bound_tokens"].clone(),
+            "external_provider_usage_tokens": Value::Null,
+            "external_provider_cost_amount": Value::Null,
+            "external_invoice_amount": Value::Null,
+            "drift_tokens": Value::Null,
+            "drift_amount": Value::Null,
+            "invoice_drift_amount": Value::Null,
+            "currency_profile": contract.currency_profile.clone(),
+            "external_truth_sources": external_sources.clone(),
+            "external_truth_bindings": {
+                "provider_usage_export": provider_usage_binding.clone(),
+                "provider_invoice_export": provider_invoice_binding.clone(),
+                "provider_rate_card": rate_card.clone(),
+            },
+            "blocking_reasons": blocking_reasons,
+            "note": "Этот preview честно показывает internal delivered tokens и retrieval lower bound по scope. Drift по токенам считается только между internal delivered usage и external provider usage, а не между provider usage и saved tokens."
+        });
     } else if matches!(
         provider_usage_status,
         "configured_path_missing" | "read_error" | "parse_error"
     ) {
-        "provider_usage_source_error"
+        let blocking_reasons =
+            base_reconciliation_blocking_reasons(statement_preview, rate_card, true);
+        return json!({
+            "scope_code": scope_code,
+            "scope_label": scope_label,
+            "reconciliation_state": "provider_usage_source_error",
+            "usage_reconciliation_state": "provider_usage_source_error",
+            "invoice_reconciliation_state": if provider_invoice_status == "invoice_bound" {
+                "invoice_bound_without_usage"
+            } else {
+                "invoice_not_bound"
+            },
+            "coverage": statement_preview["coverage"].clone(),
+            "internal_provider_billed_tokens": statement_preview["internal_provider_billed_tokens"].clone(),
+            "internal_provider_cost_estimate_amount": Value::Null,
+            "internal_delivered_tokens": statement_preview["internal_delivered_tokens"].clone(),
+            "internal_recovery_tokens": statement_preview["internal_recovery_tokens"].clone(),
+            "internal_measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
+            "billable_lower_bound_tokens": statement_preview["billable_lower_bound_tokens"].clone(),
+            "external_provider_usage_tokens": Value::Null,
+            "external_provider_cost_amount": Value::Null,
+            "external_invoice_amount": Value::Null,
+            "drift_tokens": Value::Null,
+            "drift_amount": Value::Null,
+            "invoice_drift_amount": Value::Null,
+            "currency_profile": contract.currency_profile.clone(),
+            "external_truth_sources": external_sources.clone(),
+            "external_truth_bindings": {
+                "provider_usage_export": provider_usage_binding.clone(),
+                "provider_invoice_export": provider_invoice_binding.clone(),
+                "provider_rate_card": rate_card.clone(),
+            },
+            "blocking_reasons": blocking_reasons,
+            "note": "Этот preview честно показывает internal delivered tokens и retrieval lower bound по scope. Drift по токенам считается только между internal delivered usage и external provider usage, а не между provider usage и saved tokens."
+        });
     } else if rate_card_status == "not_configured" {
-        "awaiting_rate_card_source"
-    } else {
-        "configured_sources_not_yet_bound"
+        let mut blocking_reasons =
+            base_reconciliation_blocking_reasons(statement_preview, rate_card, false);
+        blocking_reasons.retain(|reason| *reason != "provider_rate_card_unpriced");
+        blocking_reasons.insert(0, "provider_rate_card_unpriced");
+        return json!({
+            "scope_code": scope_code,
+            "scope_label": scope_label,
+            "reconciliation_state": "awaiting_rate_card_source",
+            "usage_reconciliation_state": "external_usage_bound_report_only",
+            "invoice_reconciliation_state": if provider_invoice_status == "invoice_bound" {
+                "invoice_bound_report_only"
+            } else {
+                "invoice_not_bound"
+            },
+            "coverage": statement_preview["coverage"].clone(),
+            "internal_provider_billed_tokens": statement_preview["internal_provider_billed_tokens"].clone(),
+            "internal_provider_cost_estimate_amount": Value::Null,
+            "internal_delivered_tokens": statement_preview["internal_delivered_tokens"].clone(),
+            "internal_recovery_tokens": statement_preview["internal_recovery_tokens"].clone(),
+            "internal_measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
+            "billable_lower_bound_tokens": statement_preview["billable_lower_bound_tokens"].clone(),
+            "external_provider_usage_tokens": provider_usage_binding["scopes"][scope_code]["total_tokens"].clone(),
+            "external_provider_cost_amount": provider_usage_binding["scopes"][scope_code]["provider_cost_amount"].clone(),
+            "external_invoice_amount": provider_invoice_binding["scopes"][scope_code]["invoice_amount"].clone(),
+            "drift_tokens": Value::Null,
+            "drift_amount": Value::Null,
+            "invoice_drift_amount": Value::Null,
+            "currency_profile": contract.currency_profile.clone(),
+            "external_truth_sources": external_sources.clone(),
+            "external_truth_bindings": {
+                "provider_usage_export": provider_usage_binding.clone(),
+                "provider_invoice_export": provider_invoice_binding.clone(),
+                "provider_rate_card": rate_card.clone(),
+            },
+            "blocking_reasons": blocking_reasons,
+            "note": "Этот preview честно показывает internal delivered tokens и retrieval lower bound по scope. Drift по токенам считается только между internal delivered usage и external provider usage, а не между provider usage и saved tokens."
+        });
     };
     let mut blocking_reasons = Vec::new();
-    if !matches!(
-        provider_usage_status,
-        "usage_bound" | "usage_and_cost_bound"
-    ) {
-        blocking_reasons.push("provider_usage_source_missing");
-    }
-    if rate_card["money_conversion_enabled"].as_bool() != Some(true) {
-        blocking_reasons.push("provider_rate_card_unpriced");
-    }
-    if contract.billing_mode == "report_only" {
-        blocking_reasons.push("billing_policy_report_only");
-    }
+    blocking_reasons.push("billing_policy_report_only");
     if statement_preview["billable_lower_bound_tokens"].is_null() {
         blocking_reasons.push("billable_lower_bound_not_materialized");
+    }
+    if contract.billing_mode == "report_only" {
+        blocking_reasons.push("billing_mode_report_only");
     }
     let usage_scope = &provider_usage_binding["scopes"][scope_code];
     let invoice_scope = &provider_invoice_binding["scopes"][scope_code];
     let internal_provider_billed_tokens = statement_preview["internal_provider_billed_tokens"]
         .as_u64()
         .unwrap_or(0);
+    let internal_provider_cost_estimate =
+        internal_provider_cost_estimate_amount(internal_provider_billed_tokens, rate_card);
     let external_provider_usage_tokens = usage_scope["total_tokens"].clone();
     let drift_tokens = match external_provider_usage_tokens.as_u64() {
         Some(external_tokens) => {
@@ -1748,13 +1978,64 @@ fn build_reconciliation_preview(
     };
     let external_provider_cost_amount = usage_scope["provider_cost_amount"].clone();
     let external_invoice_amount = invoice_scope["invoice_amount"].clone();
+    let drift_amount = amount_delta(
+        internal_provider_cost_estimate,
+        external_provider_cost_amount.as_f64(),
+    );
+    let invoice_drift_amount = amount_delta(
+        external_provider_cost_amount.as_f64(),
+        external_invoice_amount.as_f64(),
+    );
+    let usage_reconciliation_state = match drift_tokens.as_i64() {
+        Some(0) => "external_usage_aligned_report_only",
+        Some(_) => {
+            blocking_reasons.push("provider_usage_drift_detected");
+            "external_usage_drift_report_only"
+        }
+        None => "external_usage_bound_report_only",
+    };
+    let invoice_reconciliation_state = if provider_invoice_status == "invoice_bound" {
+        match invoice_drift_amount.as_f64() {
+            Some(value) if value.abs() < 1e-9 => "invoice_aligned_report_only",
+            Some(_) => {
+                blocking_reasons.push("provider_invoice_drift_detected");
+                "invoice_drift_report_only"
+            }
+            None => "invoice_bound_report_only",
+        }
+    } else {
+        "invoice_not_bound"
+    };
+    let reconciliation_state = if usage_reconciliation_state == "external_usage_aligned_report_only"
+    {
+        if invoice_reconciliation_state == "invoice_aligned_report_only" {
+            "external_usage_and_invoice_aligned_report_only"
+        } else {
+            "external_usage_aligned_report_only"
+        }
+    } else if usage_reconciliation_state == "external_usage_drift_report_only" {
+        if invoice_reconciliation_state == "invoice_drift_report_only" {
+            "external_usage_and_invoice_drift_report_only"
+        } else {
+            "external_usage_drift_report_only"
+        }
+    } else if provider_invoice_status == "invoice_bound" {
+        "external_usage_and_invoice_bound_report_only"
+    } else if provider_usage_status == "usage_and_cost_bound" {
+        "external_usage_and_cost_bound_report_only"
+    } else {
+        "external_usage_bound_report_only"
+    };
 
     json!({
         "scope_code": scope_code,
         "scope_label": scope_label,
         "reconciliation_state": reconciliation_state,
+        "usage_reconciliation_state": usage_reconciliation_state,
+        "invoice_reconciliation_state": invoice_reconciliation_state,
         "coverage": statement_preview["coverage"].clone(),
         "internal_provider_billed_tokens": statement_preview["internal_provider_billed_tokens"].clone(),
+        "internal_provider_cost_estimate_amount": internal_provider_cost_estimate,
         "internal_delivered_tokens": statement_preview["internal_delivered_tokens"].clone(),
         "internal_recovery_tokens": statement_preview["internal_recovery_tokens"].clone(),
         "internal_measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
@@ -1763,7 +2044,8 @@ fn build_reconciliation_preview(
         "external_provider_cost_amount": external_provider_cost_amount,
         "external_invoice_amount": external_invoice_amount,
         "drift_tokens": drift_tokens,
-        "drift_amount": Value::Null,
+        "drift_amount": drift_amount,
+        "invoice_drift_amount": invoice_drift_amount,
         "currency_profile": usage_scope["currency_profile"]
             .as_str()
             .or_else(|| invoice_scope["currency_profile"].as_str())
@@ -1784,33 +2066,41 @@ fn build_reconciliation_preview(
 fn build_margin_contract_json(
     contract: &TokenBudgetContractConfig,
     rate_card: &Value,
-    infra_cost_source: &Value,
+    infra_cost_profile: &Value,
     reconciliation_contract: &Value,
 ) -> Value {
     let rate_card_priced = rate_card["money_conversion_enabled"]
         .as_bool()
         .unwrap_or(false);
-    let infra_cost_status = infra_cost_source["status"]
+    let infra_cost_status = infra_cost_profile["status"]
         .as_str()
         .unwrap_or("not_configured");
+    let provider_status = reconciliation_contract["status"]
+        .as_str()
+        .unwrap_or("awaiting_provider_usage_source");
+    let usage_bound =
+        provider_status.starts_with("usage_") || provider_status.starts_with("external_usage_");
     let status = if !rate_card_priced {
         "awaiting_rate_card"
-    } else if infra_cost_status != "configured_existing_path" {
+    } else if infra_cost_status != "priced_bound" {
         "awaiting_infra_cost_profile"
-    } else if reconciliation_contract["ready_for_external_reconciliation"].as_bool() != Some(true) {
+    } else if !usage_bound
+        && reconciliation_contract["ready_for_external_reconciliation"].as_bool() != Some(true)
+    {
         "awaiting_provider_reconciliation"
     } else {
-        "configured_inputs_not_yet_priced"
+        "priced_preview_report_only"
     };
 
     json!({
         "model_version": contract.margin_model_version.clone(),
         "infra_cost_profile_version": contract.infra_cost_profile_version.clone(),
+        "infra_cost_binding_model_version": contract.infra_cost_binding_model_version.clone(),
         "rate_card_status": rate_card["status"].clone(),
         "status": status,
-        "money_margin_enabled": false,
-        "infra_cost_source": infra_cost_source.clone(),
-        "note": "Margin layer требует одновременно priced rate card, provider reconciliation и infra cost profile. Пока хотя бы один из этих truth-sources отсутствует, деньги и маржа остаются null."
+        "money_margin_enabled": status == "priced_preview_report_only",
+        "infra_cost_profile": infra_cost_profile.clone(),
+        "note": "Margin layer требует одновременно priced rate card, provider usage binding и infra cost profile. Даже после этого он остаётся report-only preview, а не invoice."
     })
 }
 
@@ -1820,55 +2110,114 @@ fn build_margin_scope(
     statement_preview: &Value,
     reconciliation_preview: &Value,
     rate_card: &Value,
-    infra_cost_source: &Value,
+    infra_cost_profile: &Value,
 ) -> Value {
     let rate_card_priced = rate_card["money_conversion_enabled"]
         .as_bool()
         .unwrap_or(false);
-    let infra_cost_status = infra_cost_source["status"]
+    let infra_cost_status = infra_cost_profile["status"]
         .as_str()
         .unwrap_or("not_configured");
     let reconciliation_state = reconciliation_preview["reconciliation_state"]
         .as_str()
         .unwrap_or("awaiting_provider_usage_source");
+    let usage_bound = reconciliation_state.starts_with("external_usage_");
+    let usage_drifted = reconciliation_state.contains("_drift_");
+    let currency_match = rate_card["bound_currency_profile"].as_str()
+        == infra_cost_profile["bound_currency_profile"].as_str();
     let margin_state = if !rate_card_priced {
         "awaiting_rate_card"
-    } else if infra_cost_status != "configured_existing_path" {
+    } else if infra_cost_status != "priced_bound" {
         "awaiting_infra_cost_profile"
-    } else if reconciliation_state != "external_reconciled" {
+    } else if !usage_bound {
         "awaiting_provider_reconciliation"
+    } else if !currency_match {
+        "currency_profile_mismatch"
+    } else if usage_drifted {
+        "priced_preview_with_provider_drift"
     } else {
-        "configured_inputs_not_yet_priced"
+        "priced_preview_report_only"
     };
     let mut blocking_reasons = Vec::new();
     if !rate_card_priced {
         blocking_reasons.push("rate_card_unpriced");
     }
-    if infra_cost_status != "configured_existing_path" {
+    if infra_cost_status != "priced_bound" {
         blocking_reasons.push("infra_cost_profile_missing");
     }
-    if reconciliation_state != "external_reconciled" {
+    if !usage_bound {
         blocking_reasons.push("provider_reconciliation_not_complete");
     }
+    if !currency_match && rate_card_priced && infra_cost_status == "priced_bound" {
+        blocking_reasons.push("currency_profile_mismatch");
+    }
+    if usage_drifted {
+        blocking_reasons.push("provider_usage_drift_detected");
+    }
+    let customer_saved_amount_lower_bound =
+        statement_preview["measured_non_billable_lower_bound_tokens"]
+            .as_i64()
+            .and_then(|tokens| {
+                rate_card["default_input_cost_per_1k_tokens"]
+                    .as_f64()
+                    .map(|rate| (tokens as f64 / 1000.0) * rate)
+            });
+    let amai_infra_cost_amount = if rate_card_priced && infra_cost_status == "priced_bound" {
+        let per_1k = infra_cost_profile["cost_per_1k_internal_billed_tokens"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let per_event = infra_cost_profile["cost_per_live_event"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let fixed_scope = infra_cost_profile["fixed_scope_cost_amount"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let internal_provider_billed_tokens = statement_preview["internal_provider_billed_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+        let included_events = statement_preview["coverage"]["included_events"]
+            .as_u64()
+            .unwrap_or(0);
+        Some(
+            (internal_provider_billed_tokens as f64 / 1000.0) * per_1k
+                + (included_events as f64) * per_event
+                + fixed_scope,
+        )
+    } else {
+        None
+    };
+    let margin_amount = match (customer_saved_amount_lower_bound, amai_infra_cost_amount) {
+        (Some(saved), Some(cost)) if currency_match => Some(saved - cost),
+        _ => None,
+    };
+    let savings_to_cost_ratio = match (customer_saved_amount_lower_bound, amai_infra_cost_amount) {
+        (Some(saved), Some(cost)) if currency_match && cost > 0.0 => Some(saved / cost),
+        _ => None,
+    };
+    let currency_profile = if currency_match {
+        rate_card["bound_currency_profile"]
+            .as_str()
+            .unwrap_or("unpriced")
+            .to_string()
+    } else {
+        "mismatch".to_string()
+    };
 
     json!({
         "scope_code": scope_code,
         "scope_label": scope_label,
         "margin_state": margin_state,
         "customer_saved_tokens_lower_bound": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
-        "customer_saved_amount_lower_bound": Value::Null,
-        "amai_infra_cost_amount": Value::Null,
-        "margin_amount": Value::Null,
-        "savings_to_cost_ratio": Value::Null,
-        "currency_profile": rate_card["bound_currency_profile"]
-            .as_str()
-            .unwrap_or("unpriced")
-            .to_string(),
+        "customer_saved_amount_lower_bound": customer_saved_amount_lower_bound,
+        "amai_infra_cost_amount": amai_infra_cost_amount,
+        "margin_amount": margin_amount,
+        "savings_to_cost_ratio": savings_to_cost_ratio,
+        "currency_profile": currency_profile,
         "coverage": statement_preview["coverage"].clone(),
         "reconciliation_state": reconciliation_preview["reconciliation_state"].clone(),
-        "infra_cost_source": infra_cost_source.clone(),
+        "infra_cost_profile": infra_cost_profile.clone(),
         "blocking_reasons": blocking_reasons,
-        "note": "Пока это token-side lower bound: Amai уже знает, сколько токенов клиент сэкономил минимум, но не делает вид, что денежная маржа уже измерена."
+        "note": "Margin preview опирается на confirmed lower bound, provider input rate и bound infra cost profile. Это всё ещё report-only preview, а не invoice."
     })
 }
 
@@ -1902,10 +2251,13 @@ fn build_contractual_statement_summary(
         "measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
         "billable_lower_bound_tokens": statement_preview["billable_lower_bound_tokens"].clone(),
         "internal_provider_billed_tokens": reconciliation_preview["internal_provider_billed_tokens"].clone(),
+        "internal_provider_cost_estimate_amount": reconciliation_preview["internal_provider_cost_estimate_amount"].clone(),
         "external_provider_usage_tokens": reconciliation_preview["external_provider_usage_tokens"].clone(),
         "external_provider_cost_amount": reconciliation_preview["external_provider_cost_amount"].clone(),
         "external_invoice_amount": reconciliation_preview["external_invoice_amount"].clone(),
         "drift_tokens": reconciliation_preview["drift_tokens"].clone(),
+        "drift_amount": reconciliation_preview["drift_amount"].clone(),
+        "invoice_drift_amount": reconciliation_preview["invoice_drift_amount"].clone(),
         "reconciliation_state": reconciliation_preview["reconciliation_state"].clone(),
         "margin_state": margin_scope["margin_state"].clone(),
         "close_barriers": statement_preview["close_barriers"].clone(),
@@ -2609,13 +2961,7 @@ async fn collect_report(
         &rate_card,
     );
     let adjustment_registry = build_adjustment_registry_json(repo_root, &config.contract);
-    let infra_cost_source = configured_external_truth_source(
-        repo_root,
-        "AMAI_INFRA_COST_PROFILE_PATH",
-        "infra_cost_profile",
-        "Профиль собственных infra costs для Amai",
-        false,
-    );
+    let infra_cost_profile = build_infra_cost_profile_json(repo_root, &config.contract);
     let current_session_statement_preview = build_statement_preview(
         "current_session",
         "текущая сессия",
@@ -2696,7 +3042,7 @@ async fn collect_report(
     let margin_contract = build_margin_contract_json(
         &config.contract,
         &rate_card,
-        &infra_cost_source,
+        &infra_cost_profile,
         &reconciliation_contract,
     );
     let current_session_margin_scope = build_margin_scope(
@@ -2705,7 +3051,7 @@ async fn collect_report(
         &current_session_statement_preview,
         &current_session_reconciliation_preview,
         &rate_card,
-        &infra_cost_source,
+        &infra_cost_profile,
     );
     let rolling_window_margin_scope = if profile.rolling_window_hours.is_some() {
         build_margin_scope(
@@ -2714,7 +3060,7 @@ async fn collect_report(
             &rolling_window_statement_preview,
             &rolling_window_reconciliation_preview,
             &rate_card,
-            &infra_cost_source,
+            &infra_cost_profile,
         )
     } else {
         Value::Null
@@ -2725,7 +3071,7 @@ async fn collect_report(
         &lifetime_statement_preview,
         &lifetime_reconciliation_preview,
         &rate_card,
-        &infra_cost_source,
+        &infra_cost_profile,
     );
     let current_session_contractual_summary = build_contractual_statement_summary(
         "current_session",
@@ -2856,6 +3202,7 @@ async fn collect_report(
             "reconciliation_contract": reconciliation_contract.clone(),
             "provider_usage_binding": provider_usage_binding.clone(),
             "provider_invoice_binding": provider_invoice_binding.clone(),
+            "infra_cost_profile": infra_cost_profile.clone(),
             "margin_contract": margin_contract.clone(),
             "filters": {
                 "include_verify_events": include_verify_events,
@@ -6444,9 +6791,9 @@ mod tests {
     use super::{
         MeasurementConfig, NaiveScope, TokenBudgetContractConfig, TokenBudgetEvent,
         apply_reverification_metadata, baseline_strategy_breakdown,
-        bind_rate_card_json_from_source, build_adjustment_registry_json,
-        build_adjustment_request_schema_json, build_baseline_contract_json,
-        build_billing_policy_json, build_contractual_evidence_pack,
+        bind_infra_cost_profile_json_from_source, bind_rate_card_json_from_source,
+        build_adjustment_registry_json, build_adjustment_request_schema_json,
+        build_baseline_contract_json, build_billing_policy_json, build_contractual_evidence_pack,
         build_contractual_statement_summary, build_event_payload,
         build_external_truth_sources_json, build_margin_contract_json, build_margin_scope,
         build_metering_freshness_contract_json, build_metering_freshness_summary,
@@ -6471,9 +6818,10 @@ mod tests {
         derive_query_type, derive_traffic_class, event_to_json, followup_queries_related,
         include_traffic_class_in_report, latency_slice_breakdown,
         load_adjustment_registry_from_source, load_provider_invoice_binding_from_source,
-        load_provider_usage_binding_from_source, needs_live_reverification, parse_rate_card_file,
-        parse_snapshot_event, reconcile_followup_recovery, repair_legacy_token_event_payload,
-        report_contract_json, summarize_events,
+        load_provider_usage_binding_from_source, needs_live_reverification,
+        parse_infra_cost_profile_file, parse_rate_card_file, parse_snapshot_event,
+        reconcile_followup_recovery, repair_legacy_token_event_payload, report_contract_json,
+        summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -6890,11 +7238,11 @@ mod tests {
         assert_eq!(token_event["contract"]["billing_mode"], "report_only");
         assert_eq!(
             token_event["contract"]["reconciliation_contract_version"],
-            "provider-reconciliation-v1"
+            "provider-reconciliation-v2"
         );
         assert_eq!(
             token_event["contract"]["margin_model_version"],
-            "margin-view-v1"
+            "margin-view-v2"
         );
         assert_eq!(
             token_event["contract"]["infra_cost_profile_version"],
@@ -7107,6 +7455,55 @@ default_output_cost_per_1k_tokens = 0.02
         assert_eq!(rate_card["bound_rate_card_version"], "demo-priced-v1");
         assert_eq!(rate_card["provider"], "demo-provider");
         assert_eq!(rate_card["source"]["binding_status"], "priced_bound");
+    }
+
+    #[test]
+    fn infra_cost_profile_parser_accepts_machine_readable_profile() {
+        let parsed = parse_infra_cost_profile_file(
+            r#"{
+                "schema_version":"infra-cost-profile-v1",
+                "infra_cost_profile_version":"demo-infra-v1",
+                "currency_profile":"USD",
+                "provider":"amai-self-hosted",
+                "cost_per_1k_internal_billed_tokens":0.002,
+                "cost_per_live_event":0.0005,
+                "fixed_scope_cost_amount":0.01
+            }"#,
+        )
+        .expect("infra cost profile");
+        assert_eq!(parsed.infra_cost_profile_version, "demo-infra-v1");
+        assert_eq!(parsed.currency_profile, "USD");
+    }
+
+    #[test]
+    fn infra_cost_profile_binding_uses_resolved_path_and_sets_priced_status() {
+        let contract = contract_fixture();
+        let path = unique_temp_path("amai-infra-cost", "toml");
+        fs::write(
+            &path,
+            r#"
+schema_version = "infra-cost-profile-v1"
+infra_cost_profile_version = "demo-infra-v1"
+currency_profile = "USD"
+provider = "amai-self-hosted"
+cost_per_1k_internal_billed_tokens = 0.002
+cost_per_live_event = 0.0005
+fixed_scope_cost_amount = 0.01
+"#,
+        )
+        .expect("write infra cost profile");
+        let source = json!({
+            "status": "configured_existing_path",
+            "resolved_path": path.display().to_string(),
+            "binding_status": "configured_but_unbound"
+        });
+        let binding = bind_infra_cost_profile_json_from_source(&source, &contract);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(binding["status"], "priced_bound");
+        assert_eq!(binding["money_margin_enabled"], true);
+        assert_eq!(binding["bound_profile_version"], "demo-infra-v1");
+        assert_eq!(binding["source"]["binding_status"], "priced_bound");
     }
 
     #[test]
@@ -7355,7 +7752,7 @@ default_output_cost_per_1k_tokens = 0.02
 
         assert_eq!(
             reconciliation["contract_version"],
-            "provider-reconciliation-v1"
+            "provider-reconciliation-v2"
         );
         assert_eq!(reconciliation["status"], "awaiting_provider_usage_source");
         assert_eq!(
@@ -7470,7 +7867,7 @@ default_output_cost_per_1k_tokens = 0.02
         let margin =
             build_margin_contract_json(&contract, &rate_card, &infra_cost_source, &reconciliation);
 
-        assert_eq!(margin["model_version"], "margin-view-v1");
+        assert_eq!(margin["model_version"], "margin-view-v2");
         assert_eq!(margin["infra_cost_profile_version"], "unpriced-infra-v1");
         assert_eq!(margin["status"], "awaiting_rate_card");
         assert_eq!(margin["money_margin_enabled"], json!(false));
@@ -7554,6 +7951,222 @@ default_output_cost_per_1k_tokens = 0.02
                 "provider_reconciliation_not_complete"
             ])
         );
+    }
+
+    #[test]
+    fn reconciliation_preview_marks_aligned_external_usage_when_tokens_match() {
+        let contract = contract_fixture();
+        let profile = profile_fixture();
+        let adjustment_registry = adjustment_registry_fixture(&contract);
+        let rate_card = json!({
+            "money_conversion_enabled": true,
+            "default_input_cost_per_1k_tokens": 0.01,
+            "default_output_cost_per_1k_tokens": 0.02,
+            "bound_currency_profile": "USD",
+            "status": "priced_bound"
+        });
+        let provider_usage_binding = json!({
+            "status": "usage_and_cost_bound",
+            "scopes": {
+                "current_session": {
+                    "total_tokens": 400,
+                    "provider_cost_amount": 0.004,
+                    "currency_profile": "USD"
+                }
+            }
+        });
+        let provider_invoice_binding = json!({
+            "status": "invoice_bound",
+            "scopes": {
+                "current_session": {
+                    "invoice_amount": 0.004,
+                    "currency_profile": "USD"
+                }
+            }
+        });
+        let summary = json!({
+            "coverage": {
+                "completeness_state": "partially_confirmed"
+            },
+            "delivered_tokens": 400,
+            "recovery_tokens": 0,
+            "verified_effective_saved_tokens": 800
+        });
+        let events = vec![token_event! {
+            occurred_at_epoch_ms: 1_000,
+            naive_tokens: 1200,
+            context_tokens: 400,
+            recovery_tokens: 0,
+            effective_saved_tokens: 800,
+        }];
+        let reconciliation_contract = build_reconciliation_contract_json(
+            &contract,
+            &json!({}),
+            &provider_usage_binding,
+            &provider_invoice_binding,
+            &rate_card,
+        );
+        let freshness =
+            build_metering_freshness_summary(&contract, &measurement_fixture(), 2_000, &events);
+        let preview = build_statement_preview(
+            "current_session",
+            "текущая сессия",
+            2_000,
+            &events,
+            &profile,
+            &summary,
+            &contract,
+            &adjustment_registry,
+            &rate_card,
+            &reconciliation_contract,
+            &freshness,
+        );
+        let reconciliation = build_reconciliation_preview(
+            "current_session",
+            "текущая сессия",
+            &preview,
+            &contract,
+            &json!({}),
+            &provider_usage_binding,
+            &provider_invoice_binding,
+            &rate_card,
+        );
+
+        assert_eq!(
+            reconciliation["reconciliation_state"],
+            "external_usage_and_invoice_aligned_report_only"
+        );
+        assert_eq!(
+            reconciliation["usage_reconciliation_state"],
+            "external_usage_aligned_report_only"
+        );
+        assert_eq!(
+            reconciliation["invoice_reconciliation_state"],
+            "invoice_aligned_report_only"
+        );
+        assert_eq!(reconciliation["drift_tokens"], 0);
+        assert_eq!(reconciliation["drift_amount"], 0.0);
+        assert_eq!(reconciliation["invoice_drift_amount"], 0.0);
+    }
+
+    #[test]
+    fn margin_scope_computes_money_preview_when_inputs_are_bound() {
+        let contract = contract_fixture();
+        let profile = profile_fixture();
+        let adjustment_registry = adjustment_registry_fixture(&contract);
+        let rate_card = json!({
+            "money_conversion_enabled": true,
+            "default_input_cost_per_1k_tokens": 0.01,
+            "default_output_cost_per_1k_tokens": 0.02,
+            "bound_currency_profile": "USD",
+            "status": "priced_bound"
+        });
+        let provider_usage_binding = json!({
+            "status": "usage_and_cost_bound",
+            "scopes": {
+                "current_session": {
+                    "total_tokens": 450,
+                    "provider_cost_amount": 0.0045,
+                    "currency_profile": "USD"
+                }
+            }
+        });
+        let provider_invoice_binding = json!({
+            "status": "invoice_bound",
+            "scopes": {
+                "current_session": {
+                    "invoice_amount": 0.0045,
+                    "currency_profile": "USD"
+                }
+            }
+        });
+        let summary = json!({
+            "coverage": {
+                "completeness_state": "partially_confirmed",
+                "included_events": 2
+            },
+            "delivered_tokens": 400,
+            "recovery_tokens": 50,
+            "verified_effective_saved_tokens": 900
+        });
+        let events = vec![token_event! {
+            occurred_at_epoch_ms: 1_000,
+            naive_tokens: 1350,
+            context_tokens: 400,
+            recovery_tokens: 50,
+            effective_saved_tokens: 900,
+        }];
+        let reconciliation_contract = build_reconciliation_contract_json(
+            &contract,
+            &json!({}),
+            &provider_usage_binding,
+            &provider_invoice_binding,
+            &rate_card,
+        );
+        let freshness =
+            build_metering_freshness_summary(&contract, &measurement_fixture(), 2_000, &events);
+        let preview = build_statement_preview(
+            "current_session",
+            "текущая сессия",
+            2_000,
+            &events,
+            &profile,
+            &summary,
+            &contract,
+            &adjustment_registry,
+            &rate_card,
+            &reconciliation_contract,
+            &freshness,
+        );
+        let reconciliation = build_reconciliation_preview(
+            "current_session",
+            "текущая сессия",
+            &preview,
+            &contract,
+            &json!({}),
+            &provider_usage_binding,
+            &provider_invoice_binding,
+            &rate_card,
+        );
+        let infra_cost_profile = json!({
+            "status": "priced_bound",
+            "bound_currency_profile": "USD",
+            "cost_per_1k_internal_billed_tokens": 0.002,
+            "cost_per_live_event": 0.0005,
+            "fixed_scope_cost_amount": 0.01
+        });
+        let margin = build_margin_scope(
+            "current_session",
+            "текущая сессия",
+            &preview,
+            &reconciliation,
+            &rate_card,
+            &infra_cost_profile,
+        );
+
+        assert_eq!(margin["margin_state"], "priced_preview_report_only");
+        assert!(
+            (margin["customer_saved_amount_lower_bound"]
+                .as_f64()
+                .expect("saved amount")
+                - 0.009)
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            (margin["amai_infra_cost_amount"]
+                .as_f64()
+                .expect("infra cost")
+                - 0.0119)
+                .abs()
+                < 1e-9
+        );
+        assert!((margin["margin_amount"].as_f64().expect("margin amount") + 0.0029).abs() < 1e-9);
+        assert!(
+            (margin["savings_to_cost_ratio"].as_f64().expect("ratio") - 0.7563025210084033).abs()
+                < 1e-9
+        );
+        assert_eq!(margin["currency_profile"], "USD");
     }
 
     #[test]
