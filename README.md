@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 16:19 MSK
-Ручная сверка guide/docs: 2026-03-24 16:19 MSK
+modified_at: 2026-03-24 16:37 MSK
+Ручная сверка guide/docs: 2026-03-24 16:37 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1143,6 +1143,29 @@ preview, а не только raw count.
   - `measured_non_billable`
   - `unmeasured`
   - в текущем runtime это всё ещё `report_only`, а не готовый billing.
+
+## Token Terminal Interaction Contract
+
+Для будущего expanded token terminal утверждён такой desktop interaction contract:
+
+- по двойному клику левой кнопкой по лейблу token-card карточка переворачивается по
+  горизонтали вокруг своей оси и показывает обратную сторону с графиком;
+- повторный двойной клик левой кнопкой возвращает карточку в исходное положение;
+- по двойному клику правой кнопкой по любой карточке, в любом состоянии
+  (`front/back`), карточка разворачивается на весь экран;
+- повторный двойной клик правой кнопкой возвращает карточку из full-screen в исходное
+  положение;
+- это desktop-only contract; на mobile нельзя полагаться на правый клик и двойной клик,
+  там нужен отдельный явный control.
+
+Жёсткие ограничения для этого terminal view:
+
+- expanded side не имеет права показывать больше truth, чем уже materialized backend;
+- default main chart должен показывать только две primary verified lower-bound линии:
+  `Без Amai` и `С Amai`;
+- overlays и analyzers не могут подменять main truth line;
+- карточка не имеет права намекать на `full session economics`, пока backend честно не
+  materialize-ил такой слой.
 
 Главное правило:
 - headline-метрика у `Amai` теперь не raw и не synthetic;

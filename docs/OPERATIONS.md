@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 16:19 MSK
-Ручная сверка guide/docs: 2026-03-24 16:19 MSK
+modified_at: 2026-03-24 16:37 MSK
+Ручная сверка guide/docs: 2026-03-24 16:37 MSK
 
 # Operations
 
@@ -1887,6 +1887,23 @@ cargo run --release -- observe token-statement-export \
   - `statement_export_preview.json` даёт compact review summary;
   - `contractual_evidence_pack.json` даёт line-item evidence;
   - `token_contractual_sources.json` даёт bindings и source-side explainability.
+
+Для будущего token terminal действует утверждённый desktop interaction contract:
+
+- double left click по label/token-card переворачивает карточку по горизонтали вокруг
+  своей оси и показывает reverse side с chart surface;
+- повторный double left click возвращает front side;
+- double right click по любой карточке, независимо от `front/back`, переводит её в
+  full-screen mode;
+- повторный double right click возвращает её обратно;
+- mobile path обязан иметь отдельный explicit control, а не имитировать эти жесты.
+
+Это нужно учитывать заранее:
+
+- terminal renderer ещё не materialized, поэтому gesture contract должен жить в docs
+  раньше UI-кода;
+- flip/full-screen interaction не даёт права показывать неmaterialized semantics;
+- expanded mode остаётся truth-terminal, а не visual bypass текущих tokenonomics guardrails.
 
 Если в базе уже есть старые live `token_budget_event`, записанные до quality-gated формата, канонический путь теперь такой:
 
