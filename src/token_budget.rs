@@ -705,10 +705,9 @@ fn parse_provider_usage_export_file(raw: &str) -> Result<ProviderUsageExportFile
 }
 
 fn parse_provider_invoice_export_file(raw: &str) -> Result<ProviderInvoiceExportFile> {
-    serde_json::from_str::<ProviderInvoiceExportFile>(raw).or_else(|_| {
-        toml::from_str::<ProviderInvoiceExportFile>(raw).map_err(anyhow::Error::from)
-    })
-    .context("failed to parse provider invoice export as JSON or TOML")
+    serde_json::from_str::<ProviderInvoiceExportFile>(raw)
+        .or_else(|_| toml::from_str::<ProviderInvoiceExportFile>(raw).map_err(anyhow::Error::from))
+        .context("failed to parse provider invoice export as JSON or TOML")
 }
 
 fn bind_rate_card_json_from_source(source: &Value, contract: &TokenBudgetContractConfig) -> Value {
@@ -1253,7 +1252,9 @@ fn provider_usage_cost_amount(entry: &ProviderUsageScopeEntry, rate_card: &Value
     let output_rate = rate_card["default_output_cost_per_1k_tokens"].as_f64()?;
     let input_tokens = entry.input_tokens?;
     let output_tokens = entry.output_tokens?;
-    Some((input_tokens as f64 / 1000.0) * input_rate + (output_tokens as f64 / 1000.0) * output_rate)
+    Some(
+        (input_tokens as f64 / 1000.0) * input_rate + (output_tokens as f64 / 1000.0) * output_rate,
+    )
 }
 
 fn load_provider_usage_binding_from_source(source: &Value, rate_card: &Value) -> Value {
@@ -1440,8 +1441,10 @@ fn build_reconciliation_contract_json(
         }
     } else if provider_usage_status == "not_configured" {
         "awaiting_provider_usage_source"
-    } else if matches!(provider_usage_status, "configured_path_missing" | "read_error" | "parse_error")
-    {
+    } else if matches!(
+        provider_usage_status,
+        "configured_path_missing" | "read_error" | "parse_error"
+    ) {
         "provider_usage_source_error"
     } else if rate_card_status == "not_configured" {
         "awaiting_rate_card_source"
@@ -1494,8 +1497,10 @@ fn build_reconciliation_preview(
     let provider_invoice_status = provider_invoice_binding["status"]
         .as_str()
         .unwrap_or("not_configured");
-    let reconciliation_state = if matches!(provider_usage_status, "usage_bound" | "usage_and_cost_bound")
-    {
+    let reconciliation_state = if matches!(
+        provider_usage_status,
+        "usage_bound" | "usage_and_cost_bound"
+    ) {
         if provider_invoice_status == "invoice_bound" {
             "external_usage_and_invoice_bound_report_only"
         } else if provider_usage_status == "usage_and_cost_bound" {
@@ -1505,8 +1510,10 @@ fn build_reconciliation_preview(
         }
     } else if provider_usage_status == "not_configured" {
         "awaiting_provider_usage_source"
-    } else if matches!(provider_usage_status, "configured_path_missing" | "read_error" | "parse_error")
-    {
+    } else if matches!(
+        provider_usage_status,
+        "configured_path_missing" | "read_error" | "parse_error"
+    ) {
         "provider_usage_source_error"
     } else if rate_card_status == "not_configured" {
         "awaiting_rate_card_source"
@@ -1514,7 +1521,10 @@ fn build_reconciliation_preview(
         "configured_sources_not_yet_bound"
     };
     let mut blocking_reasons = Vec::new();
-    if !matches!(provider_usage_status, "usage_bound" | "usage_and_cost_bound") {
+    if !matches!(
+        provider_usage_status,
+        "usage_bound" | "usage_and_cost_bound"
+    ) {
         blocking_reasons.push("provider_usage_source_missing");
     }
     if rate_card["money_conversion_enabled"].as_bool() != Some(true) {
@@ -1614,7 +1624,9 @@ fn build_margin_scope(
     rate_card: &Value,
     infra_cost_source: &Value,
 ) -> Value {
-    let rate_card_priced = rate_card["money_conversion_enabled"].as_bool().unwrap_or(false);
+    let rate_card_priced = rate_card["money_conversion_enabled"]
+        .as_bool()
+        .unwrap_or(false);
     let infra_cost_status = infra_cost_source["status"]
         .as_str()
         .unwrap_or("not_configured");
@@ -1659,6 +1671,39 @@ fn build_margin_scope(
         "infra_cost_source": infra_cost_source.clone(),
         "blocking_reasons": blocking_reasons,
         "note": "Пока это token-side lower bound: Amai уже знает, сколько токенов клиент сэкономил минимум, но не делает вид, что денежная маржа уже измерена."
+    })
+}
+
+fn build_contractual_statement_summary(
+    scope_code: &str,
+    scope_label: &str,
+    statement_preview: &Value,
+    reconciliation_preview: &Value,
+    margin_scope: &Value,
+) -> Value {
+    if statement_preview.is_null() || reconciliation_preview.is_null() || margin_scope.is_null() {
+        return Value::Null;
+    }
+    json!({
+        "scope_code": scope_code,
+        "scope_label": scope_label,
+        "contractual_state": statement_preview["contractual_state"].clone(),
+        "coverage_state": statement_preview["coverage"]["completeness_state"].clone(),
+        "measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
+        "billable_lower_bound_tokens": statement_preview["billable_lower_bound_tokens"].clone(),
+        "internal_provider_billed_tokens": reconciliation_preview["internal_provider_billed_tokens"].clone(),
+        "external_provider_usage_tokens": reconciliation_preview["external_provider_usage_tokens"].clone(),
+        "external_provider_cost_amount": reconciliation_preview["external_provider_cost_amount"].clone(),
+        "external_invoice_amount": reconciliation_preview["external_invoice_amount"].clone(),
+        "drift_tokens": reconciliation_preview["drift_tokens"].clone(),
+        "reconciliation_state": reconciliation_preview["reconciliation_state"].clone(),
+        "margin_state": margin_scope["margin_state"].clone(),
+        "close_barriers": statement_preview["close_barriers"].clone(),
+        "blocking_reasons": reconciliation_preview["blocking_reasons"].clone(),
+        "customer_review_ready": true,
+        "invoice_ready": false,
+        "currency_profile": statement_preview["currency_profile"].clone(),
+        "note": "Это короткий customer-facing summary поверх statement/reconciliation/margin previews. Он пригоден для review и audit, но не для invoice."
     })
 }
 
@@ -2215,8 +2260,9 @@ async fn collect_report(
         &external_truth_sources["provider_usage_export"],
         &rate_card,
     );
-    let provider_invoice_binding =
-        load_provider_invoice_binding_from_source(&external_truth_sources["provider_invoice_export"]);
+    let provider_invoice_binding = load_provider_invoice_binding_from_source(
+        &external_truth_sources["provider_invoice_export"],
+    );
     let reconciliation_contract = build_reconciliation_contract_json(
         &config.contract,
         &external_truth_sources,
@@ -2312,6 +2358,59 @@ async fn collect_report(
         &infra_cost_source,
         &reconciliation_contract,
     );
+    let current_session_margin_scope = build_margin_scope(
+        "current_session",
+        "текущая сессия",
+        &current_session_statement_preview,
+        &current_session_reconciliation_preview,
+        &rate_card,
+        &infra_cost_source,
+    );
+    let rolling_window_margin_scope = if profile.rolling_window_hours.is_some() {
+        build_margin_scope(
+            "rolling_window",
+            &format!("окно {}", profile.display_name),
+            &rolling_window_statement_preview,
+            &rolling_window_reconciliation_preview,
+            &rate_card,
+            &infra_cost_source,
+        )
+    } else {
+        Value::Null
+    };
+    let lifetime_margin_scope = build_margin_scope(
+        "lifetime",
+        "всё время записи",
+        &lifetime_statement_preview,
+        &lifetime_reconciliation_preview,
+        &rate_card,
+        &infra_cost_source,
+    );
+    let current_session_contractual_summary = build_contractual_statement_summary(
+        "current_session",
+        "текущая сессия",
+        &current_session_statement_preview,
+        &current_session_reconciliation_preview,
+        &current_session_margin_scope,
+    );
+    let rolling_window_contractual_summary = if profile.rolling_window_hours.is_some() {
+        build_contractual_statement_summary(
+            "rolling_window",
+            &format!("окно {}", profile.display_name),
+            &rolling_window_statement_preview,
+            &rolling_window_reconciliation_preview,
+            &rolling_window_margin_scope,
+        )
+    } else {
+        Value::Null
+    };
+    let lifetime_contractual_summary = build_contractual_statement_summary(
+        "lifetime",
+        "всё время записи",
+        &lifetime_statement_preview,
+        &lifetime_reconciliation_preview,
+        &lifetime_margin_scope,
+    );
 
     Ok(json!({
         "token_budget_report": {
@@ -2367,34 +2466,14 @@ async fn collect_report(
             "margin_view": {
                 "model_version": config.contract.margin_model_version.clone(),
                 "status": margin_contract["status"].clone(),
-                "current_session": build_margin_scope(
-                    "current_session",
-                    "текущая сессия",
-                    &current_session_statement_preview,
-                    &current_session_reconciliation_preview,
-                    &rate_card,
-                    &infra_cost_source,
-                ),
-                "rolling_window": if profile.rolling_window_hours.is_some() {
-                    build_margin_scope(
-                        "rolling_window",
-                        &format!("окно {}", profile.display_name),
-                        &rolling_window_statement_preview,
-                        &rolling_window_reconciliation_preview,
-                        &rate_card,
-                        &infra_cost_source,
-                    )
-                } else {
-                    Value::Null
-                },
-                "lifetime": build_margin_scope(
-                    "lifetime",
-                    "всё время записи",
-                    &lifetime_statement_preview,
-                    &lifetime_reconciliation_preview,
-                    &rate_card,
-                    &infra_cost_source,
-                ),
+                "current_session": current_session_margin_scope.clone(),
+                "rolling_window": rolling_window_margin_scope.clone(),
+                "lifetime": lifetime_margin_scope.clone(),
+            },
+            "contractual_statement_summaries": {
+                "current_session": current_session_contractual_summary,
+                "rolling_window": rolling_window_contractual_summary,
+                "lifetime": lifetime_contractual_summary,
             },
             "source_breakdown": source_breakdown,
             "query_slices": query_slices,
@@ -5926,7 +6005,8 @@ mod tests {
         apply_reverification_metadata, baseline_strategy_breakdown,
         bind_rate_card_json_from_source, build_adjustment_registry_json,
         build_adjustment_request_schema_json, build_baseline_contract_json,
-        build_billing_policy_json, build_contractual_evidence_pack, build_event_payload,
+        build_billing_policy_json, build_contractual_evidence_pack,
+        build_contractual_statement_summary, build_event_payload,
         build_external_truth_sources_json, build_margin_contract_json, build_margin_scope,
         build_product_headline, build_rate_card_json, build_reconciliation_contract_json,
         build_reconciliation_preview, build_settlement_contract_json, build_statement_preview,
@@ -6678,7 +6758,10 @@ default_output_cost_per_1k_tokens = 0.02
         let _ = fs::remove_file(&path);
 
         assert_eq!(binding["status"], "invoice_bound");
-        assert_eq!(binding["scopes"]["lifetime"]["invoice_amount"], json!(12.34));
+        assert_eq!(
+            binding["scopes"]["lifetime"]["invoice_amount"],
+            json!(12.34)
+        );
         assert_eq!(binding["source"]["binding_status"], "invoice_bound");
     }
 
@@ -7000,6 +7083,47 @@ default_output_cost_per_1k_tokens = 0.02
                 "provider_reconciliation_not_complete"
             ])
         );
+    }
+
+    #[test]
+    fn contractual_statement_summary_compacts_statement_reconciliation_and_margin() {
+        let summary = build_contractual_statement_summary(
+            "current_session",
+            "текущая сессия",
+            &json!({
+                "contractual_state": "report_only_preview_open",
+                "coverage": { "completeness_state": "partially_confirmed" },
+                "measured_non_billable_lower_bound_tokens": 1234,
+                "billable_lower_bound_tokens": json!(null),
+                "currency_profile": "USD",
+                "close_barriers": ["billing_mode_report_only"]
+            }),
+            &json!({
+                "internal_provider_billed_tokens": 456,
+                "external_provider_usage_tokens": 500,
+                "external_provider_cost_amount": 0.12,
+                "external_invoice_amount": 0.13,
+                "drift_tokens": -44,
+                "reconciliation_state": "external_usage_and_invoice_bound_report_only",
+                "blocking_reasons": ["billing_policy_report_only"]
+            }),
+            &json!({
+                "margin_state": "awaiting_infra_cost_profile"
+            }),
+        );
+
+        assert_eq!(summary["scope_code"], "current_session");
+        assert_eq!(summary["coverage_state"], "partially_confirmed");
+        assert_eq!(summary["internal_provider_billed_tokens"], 456);
+        assert_eq!(summary["external_provider_usage_tokens"], 500);
+        assert_eq!(summary["drift_tokens"], -44);
+        assert_eq!(
+            summary["reconciliation_state"],
+            "external_usage_and_invoice_bound_report_only"
+        );
+        assert_eq!(summary["margin_state"], "awaiting_infra_cost_profile");
+        assert_eq!(summary["customer_review_ready"], true);
+        assert_eq!(summary["invoice_ready"], false);
     }
 
     #[test]

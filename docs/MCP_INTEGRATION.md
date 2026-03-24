@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 09:56 MSK
-Ручная сверка guide/docs: 2026-03-24 09:56 MSK
+modified_at: 2026-03-24 13:34 MSK
+Ручная сверка guide/docs: 2026-03-24 13:34 MSK
 
 # MCP Integration
 
@@ -261,6 +261,17 @@ cargo build --release
 - retrieval KPI summary;
 - и отдельный `agent_cycle` lower-bound summary,
   чтобы внешний клиент мог строить токенометрию честно, без подмены понятий.
+- теперь ещё и compact contractual summary:
+  - `contractual_scope_label`
+  - `contractual_state`
+  - `contractual_coverage_state`
+  - `contractual_reconciliation_state`
+  - `contractual_margin_state`
+  - `contractual_blockers_summary`
+  - `contractual_statement_summary`
+
+Это нужно затем, чтобы клиентский слой мог показать короткий contractual state для review/audit
+без парсинга полного raw `token_budget_report`.
 
 Это нужно для внешних клиентов, которым важно понимать не только текущий health
 stack-а, но и какие deployment promises вообще честно достижимы на этой машине.

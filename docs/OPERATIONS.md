@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:26 MSK
-Ручная сверка guide/docs: 2026-03-24 13:26 MSK
+modified_at: 2026-03-24 13:34 MSK
+Ручная сверка guide/docs: 2026-03-24 13:34 MSK
 
 # Operations
 
@@ -657,6 +657,14 @@ cargo run -- mcp serve
   - `agent_cycle_verified_saved_percent`
   - `agent_cycle_verified_saved_tokens`
   - `agent_cycle_note`
+  - теперь ещё и compact contractual summary:
+    - `contractual_scope_label`
+    - `contractual_state`
+    - `contractual_coverage_state`
+    - `contractual_reconciliation_state`
+    - `contractual_margin_state`
+    - `contractual_blockers_summary`
+    - `contractual_statement_summary`
 - `amai_context_pack` теперь тоже отдаёт наружу `context_pack_summary`, где уже
   лежат `included_reasons_summary / excluded_reasons_summary` для последнего
   собранного context pack.
@@ -1730,6 +1738,12 @@ cargo run --release -- verify token-benchmark-suite \
     - `external_invoice_amount`
     - `drift_tokens`
   - `drift_amount` остаётся пустым, пока внутренний money-side settlement ещё не materialized.
+- `contractual_statement_summaries` теперь тоже каноничны:
+  - `current_session`
+  - `rolling_window`
+  - `lifetime`
+  - это короткий customer-facing summary поверх `statement + reconciliation + margin`;
+  - он пригоден для review/audit, но не для invoice.
 - `margin_view` теперь тоже каноничен:
   - `current_session`
   - `rolling_window`

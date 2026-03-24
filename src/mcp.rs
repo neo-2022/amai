@@ -1205,7 +1205,7 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
     .await?;
     let token_summary = token_report_summary(&payload);
     let summary = format!(
-        "token report :: metric={} scope={} status={} value_percent={:.3} saved_tokens={} counted={}/{} agent_cycle_scope={} agent_cycle_verified_percent={:.3} note={}",
+        "token report :: metric={} scope={} status={} value_percent={:.3} saved_tokens={} counted={}/{} agent_cycle_scope={} agent_cycle_verified_percent={:.3} contractual_scope={} contractual_state={} coverage={} reconciliation={} margin={} blockers={} note={}",
         token_summary.metric_code,
         token_summary.scope_label,
         token_summary.status,
@@ -1215,6 +1215,12 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
         token_summary.events_count,
         token_summary.agent_cycle_scope_label,
         token_summary.agent_cycle_verified_saved_percent,
+        token_summary.contractual_scope_label,
+        token_summary.contractual_state,
+        token_summary.contractual_coverage_state,
+        token_summary.contractual_reconciliation_state,
+        token_summary.contractual_margin_state,
+        token_summary.contractual_blockers_summary,
         token_summary.note,
     );
     Ok(tool_result(
@@ -1234,6 +1240,17 @@ async fn tool_token_report(cfg: &AppConfig, args: TokenReportToolArgs) -> Result
                 "agent_cycle_verified_saved_percent": token_summary.agent_cycle_verified_saved_percent,
                 "agent_cycle_verified_saved_tokens": token_summary.agent_cycle_verified_saved_tokens,
                 "agent_cycle_note": token_summary.agent_cycle_note,
+                "contractual_scope_label": token_summary.contractual_scope_label,
+                "contractual_state": token_summary.contractual_state,
+                "contractual_coverage_state": token_summary.contractual_coverage_state,
+                "contractual_reconciliation_state": token_summary.contractual_reconciliation_state,
+                "contractual_margin_state": token_summary.contractual_margin_state,
+                "contractual_blockers_summary": token_summary.contractual_blockers_summary,
+                "contractual_statement_summary": if payload["token_budget_report"]["contractual_statement_summaries"]["rolling_window"].is_null() {
+                    payload["token_budget_report"]["contractual_statement_summaries"]["lifetime"].clone()
+                } else {
+                    payload["token_budget_report"]["contractual_statement_summaries"]["rolling_window"].clone()
+                },
                 "note": token_summary.note,
             }
         }),
@@ -1420,6 +1437,12 @@ struct TokenReportSummary {
     agent_cycle_verified_saved_percent: f64,
     agent_cycle_verified_saved_tokens: i64,
     agent_cycle_note: String,
+    contractual_scope_label: String,
+    contractual_state: String,
+    contractual_coverage_state: String,
+    contractual_reconciliation_state: String,
+    contractual_margin_state: String,
+    contractual_blockers_summary: String,
     note: String,
 }
 
@@ -1501,6 +1524,23 @@ fn token_report_summary(payload: &Value) -> TokenReportSummary {
     } else {
         &report["agent_cycle_economics"]["rolling_window"]
     };
+    let contractual_scope = if report["contractual_statement_summaries"]["rolling_window"].is_null()
+    {
+        &report["contractual_statement_summaries"]["lifetime"]
+    } else {
+        &report["contractual_statement_summaries"]["rolling_window"]
+    };
+    let blockers = contractual_scope["blocking_reasons"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .take(4)
+                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
     TokenReportSummary {
         metric_code: headline["metric_code"]
             .as_str()
@@ -1533,6 +1573,27 @@ fn token_report_summary(payload: &Value) -> TokenReportSummary {
             .as_str()
             .unwrap_or("")
             .to_string(),
+        contractual_scope_label: contractual_scope["scope_label"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        contractual_state: contractual_scope["contractual_state"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        contractual_coverage_state: contractual_scope["coverage_state"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        contractual_reconciliation_state: contractual_scope["reconciliation_state"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        contractual_margin_state: contractual_scope["margin_state"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        contractual_blockers_summary: blockers,
         note: headline["note"].as_str().unwrap_or("").to_string(),
     }
 }
@@ -3096,6 +3157,19 @@ mod tests {
                         "verified_measured_saved_pct": 96.11,
                         "verified_measured_saved_tokens": 6812345
                     }
+                },
+                "contractual_statement_summaries": {
+                    "rolling_window": {
+                        "scope_label": "окно Обычная рабочая машина",
+                        "contractual_state": "report_only_preview_open",
+                        "coverage_state": "partially_confirmed",
+                        "reconciliation_state": "awaiting_provider_usage_source",
+                        "margin_state": "awaiting_rate_card",
+                        "blocking_reasons": [
+                            "provider_usage_source_missing",
+                            "provider_rate_card_unpriced"
+                        ]
+                    }
                 }
             }
         });
@@ -3118,6 +3192,21 @@ mod tests {
         assert_eq!(
             summary.agent_cycle_note,
             "Это честная нижняя граница полного агентного цикла."
+        );
+        assert_eq!(
+            summary.contractual_scope_label,
+            "окно Обычная рабочая машина"
+        );
+        assert_eq!(summary.contractual_state, "report_only_preview_open");
+        assert_eq!(summary.contractual_coverage_state, "partially_confirmed");
+        assert_eq!(
+            summary.contractual_reconciliation_state,
+            "awaiting_provider_usage_source"
+        );
+        assert_eq!(summary.contractual_margin_state, "awaiting_rate_card");
+        assert_eq!(
+            summary.contractual_blockers_summary,
+            "provider_usage_source_missing, provider_rate_card_unpriced"
         );
         assert_eq!(
             summary.note,

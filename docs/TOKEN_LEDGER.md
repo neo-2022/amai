@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:26 MSK
-Ручная сверка guide/docs: 2026-03-24 13:26 MSK
+modified_at: 2026-03-24 13:34 MSK
+Ручная сверка guide/docs: 2026-03-24 13:34 MSK
 
 # Token Ledger
 
@@ -678,6 +678,18 @@ materialized end-to-end.
 
 Следующий честный слой после `statement_preview + reconciliation_preview + margin_view` —
 это не invoice, а отдельный `contractual_evidence_pack`.
+
+Но поверх него теперь уже нужен и короткий `contractual_statement_summary`.
+
+Зачем он нужен:
+- не заставлять клиента и sales читать весь evidence pack ради одного статуса;
+- показывать короткий truthful state по scope:
+  - `contractual_state`
+  - `coverage_state`
+  - `reconciliation_state`
+  - `margin_state`
+  - `blocking_reasons`
+- оставлять evidence pack как следующий слой доказательств, а не как единственный UI-формат.
 
 Зачем он нужен:
 - отдать customer-facing evidence/export одним JSON-пакетом;

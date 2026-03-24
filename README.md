@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:26 MSK
-Ручная сверка guide/docs: 2026-03-24 13:26 MSK
+modified_at: 2026-03-24 13:34 MSK
+Ручная сверка guide/docs: 2026-03-24 13:34 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -915,6 +915,18 @@ cargo run -- deployment explain --target kubernetes_server
 - главный retrieval-aware KPI;
 - и отдельную подтверждённую нижнюю границу полного агентного цикла,
   без притворства, будто `Amai` уже измерил весь бюджет клиента целиком.
+
+Поверх этого у `amai_token_report` теперь есть ещё и compact contractual summary:
+- `contractual_scope_label`
+- `contractual_state`
+- `contractual_coverage_state`
+- `contractual_reconciliation_state`
+- `contractual_margin_state`
+- `contractual_blockers_summary`
+- `contractual_statement_summary`
+
+Это нужно затем, чтобы внешний клиент видел короткий customer-facing contractual слой
+без чтения всего raw token report.
 
 `amai_context_pack` теперь тоже отдаёт наружу `context_pack_summary` с
 `included_reasons_summary / excluded_reasons_summary`, чтобы внешний клиент видел,
