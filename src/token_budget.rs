@@ -559,11 +559,11 @@ fn default_billing_mode() -> String {
 }
 
 fn default_reconciliation_contract_version() -> String {
-    "provider-reconciliation-v4".to_string()
+    "provider-reconciliation-v5".to_string()
 }
 
 fn default_margin_model_version() -> String {
-    "margin-view-v3".to_string()
+    "margin-view-v4".to_string()
 }
 
 fn default_infra_cost_profile_version() -> String {
@@ -571,11 +571,11 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v5".to_string()
+    "contractual-evidence-pack-v6".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v5".to_string()
+    "contractual-statement-export-v6".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -2039,6 +2039,38 @@ fn combined_temporal_truth_state(states: &[&str]) -> &'static str {
     }
 }
 
+fn bound_provider_name<'a>(binding: &'a Value, expected_statuses: &[&str]) -> Option<&'a str> {
+    let status = binding["status"].as_str()?;
+    if !expected_statuses.contains(&status) {
+        return None;
+    }
+    binding["provider"].as_str()
+}
+
+fn provider_alignment_state(
+    lhs_provider: Option<&str>,
+    rhs_provider: Option<&str>,
+) -> &'static str {
+    match (lhs_provider, rhs_provider) {
+        (Some(lhs), Some(rhs)) if lhs == rhs => "provider_identity_aligned",
+        (Some(_), Some(_)) => "provider_identity_mismatch",
+        _ => "provider_identity_unchecked",
+    }
+}
+
+fn combined_provider_identity_state(states: &[&str]) -> &'static str {
+    if states.contains(&"provider_identity_mismatch") {
+        "provider_identity_mismatch"
+    } else if states
+        .iter()
+        .all(|state| *state == "provider_identity_aligned")
+    {
+        "provider_identity_aligned"
+    } else {
+        "provider_identity_unchecked"
+    }
+}
+
 fn base_reconciliation_blocking_reasons(
     statement_preview: &Value,
     rate_card: &Value,
@@ -2442,6 +2474,27 @@ fn build_reconciliation_contract_json(
         rate_card_status,
         provider_invoice_status,
     );
+    let usage_provider = bound_provider_name(
+        provider_usage_binding,
+        &["usage_bound", "usage_and_cost_bound"],
+    );
+    let rate_card_provider =
+        bound_provider_name(rate_card, &["priced_bound", "bound_but_unpriced"]);
+    let invoice_provider = bound_provider_name(provider_invoice_binding, &["invoice_bound"]);
+    let rate_card_provider_alignment_state =
+        provider_alignment_state(usage_provider, rate_card_provider);
+    let invoice_provider_alignment_state =
+        provider_alignment_state(usage_provider, invoice_provider);
+    let provider_identity_state = combined_provider_identity_state(&[
+        rate_card_provider_alignment_state,
+        invoice_provider_alignment_state,
+    ]);
+    let mut governance_blocking_reasons = governance_blocking_reasons;
+    if provider_identity_state == "provider_identity_mismatch"
+        && !governance_blocking_reasons.contains(&"provider_identity_mismatch")
+    {
+        governance_blocking_reasons.push("provider_identity_mismatch");
+    }
     let ready_for_external_reconciliation = matches!(
         provider_usage_status,
         "usage_bound" | "usage_and_cost_bound"
@@ -2475,6 +2528,9 @@ fn build_reconciliation_contract_json(
         "money_truth_completeness_state": money_truth_state,
         "reconciliation_readiness_state": reconciliation_readiness_state,
         "governance_blocking_reasons": governance_blocking_reasons,
+        "rate_card_provider_alignment_state": rate_card_provider_alignment_state,
+        "invoice_provider_alignment_state": invoice_provider_alignment_state,
+        "provider_identity_state": provider_identity_state,
         "internal_truth_layers": [
             "token_budget_event",
             "usage_event_schema",
@@ -2541,6 +2597,21 @@ fn build_reconciliation_preview(
         scope_code,
     );
     let rate_card_alignment_state = rate_card_scope_alignment_state(statement_preview, rate_card);
+    let usage_provider = bound_provider_name(
+        provider_usage_binding,
+        &["usage_bound", "usage_and_cost_bound"],
+    );
+    let rate_card_provider =
+        bound_provider_name(rate_card, &["priced_bound", "bound_but_unpriced"]);
+    let invoice_provider = bound_provider_name(provider_invoice_binding, &["invoice_bound"]);
+    let rate_card_provider_alignment_state =
+        provider_alignment_state(usage_provider, rate_card_provider);
+    let invoice_provider_alignment_state =
+        provider_alignment_state(usage_provider, invoice_provider);
+    let provider_identity_state = combined_provider_identity_state(&[
+        rate_card_provider_alignment_state,
+        invoice_provider_alignment_state,
+    ]);
     let mut temporal_states = vec![provider_usage_alignment_state, rate_card_alignment_state];
     if provider_invoice_status == "invoice_bound" {
         temporal_states.push(provider_invoice_alignment_state);
@@ -2555,6 +2626,9 @@ fn build_reconciliation_preview(
     }
     if rate_card_alignment_state == "scope_period_mismatch" {
         temporal_blocking_reasons.push("provider_rate_card_scope_period_mismatch");
+    }
+    if provider_identity_state == "provider_identity_mismatch" {
+        temporal_blocking_reasons.push("provider_identity_mismatch");
     }
     if provider_usage_missing {
         let blocking_reasons =
@@ -2577,6 +2651,9 @@ fn build_reconciliation_preview(
             "provider_invoice_scope_alignment_state": provider_invoice_alignment_state,
             "rate_card_scope_alignment_state": rate_card_alignment_state,
             "temporal_truth_state": temporal_truth_state,
+            "rate_card_provider_alignment_state": rate_card_provider_alignment_state,
+            "invoice_provider_alignment_state": invoice_provider_alignment_state,
+            "provider_identity_state": provider_identity_state,
             "coverage": statement_preview["coverage"].clone(),
             "internal_provider_billed_tokens": statement_preview["internal_provider_billed_tokens"].clone(),
             "internal_provider_cost_estimate_amount": Value::Null,
@@ -2624,6 +2701,9 @@ fn build_reconciliation_preview(
             "provider_invoice_scope_alignment_state": provider_invoice_alignment_state,
             "rate_card_scope_alignment_state": rate_card_alignment_state,
             "temporal_truth_state": temporal_truth_state,
+            "rate_card_provider_alignment_state": rate_card_provider_alignment_state,
+            "invoice_provider_alignment_state": invoice_provider_alignment_state,
+            "provider_identity_state": provider_identity_state,
             "coverage": statement_preview["coverage"].clone(),
             "internal_provider_billed_tokens": statement_preview["internal_provider_billed_tokens"].clone(),
             "internal_provider_cost_estimate_amount": Value::Null,
@@ -2670,6 +2750,9 @@ fn build_reconciliation_preview(
             "provider_invoice_scope_alignment_state": provider_invoice_alignment_state,
             "rate_card_scope_alignment_state": rate_card_alignment_state,
             "temporal_truth_state": temporal_truth_state,
+            "rate_card_provider_alignment_state": rate_card_provider_alignment_state,
+            "invoice_provider_alignment_state": invoice_provider_alignment_state,
+            "provider_identity_state": provider_identity_state,
             "coverage": statement_preview["coverage"].clone(),
             "internal_provider_billed_tokens": statement_preview["internal_provider_billed_tokens"].clone(),
             "internal_provider_cost_estimate_amount": Value::Null,
@@ -2786,6 +2869,9 @@ fn build_reconciliation_preview(
         "provider_invoice_scope_alignment_state": provider_invoice_alignment_state,
         "rate_card_scope_alignment_state": rate_card_alignment_state,
         "temporal_truth_state": temporal_truth_state,
+        "rate_card_provider_alignment_state": rate_card_provider_alignment_state,
+        "invoice_provider_alignment_state": invoice_provider_alignment_state,
+        "provider_identity_state": provider_identity_state,
         "coverage": statement_preview["coverage"].clone(),
         "internal_provider_billed_tokens": statement_preview["internal_provider_billed_tokens"].clone(),
         "internal_provider_cost_estimate_amount": internal_provider_cost_estimate,
@@ -2833,6 +2919,9 @@ fn build_margin_contract_json(
         .unwrap_or("awaiting_provider_usage_source");
     let usage_bound =
         provider_status.starts_with("usage_") || provider_status.starts_with("external_usage_");
+    let provider_identity_state = reconciliation_contract["provider_identity_state"]
+        .as_str()
+        .unwrap_or("provider_identity_unchecked");
     let status = if !rate_card_priced {
         "awaiting_rate_card"
     } else if infra_cost_status != "priced_bound" {
@@ -2841,6 +2930,8 @@ fn build_margin_contract_json(
         && reconciliation_contract["ready_for_external_reconciliation"].as_bool() != Some(true)
     {
         "awaiting_provider_reconciliation"
+    } else if provider_identity_state == "provider_identity_mismatch" {
+        "provider_identity_mismatch"
     } else {
         "priced_preview_report_only"
     };
@@ -2852,6 +2943,7 @@ fn build_margin_contract_json(
         "rate_card_status": rate_card["status"].clone(),
         "rate_card_temporal_scope_state": rate_card["temporal_scope_state"].clone(),
         "infra_cost_temporal_scope_state": infra_cost_profile["temporal_scope_state"].clone(),
+        "provider_identity_state": provider_identity_state,
         "status": status,
         "money_margin_enabled": status == "priced_preview_report_only",
         "infra_cost_profile": infra_cost_profile.clone(),
@@ -2887,6 +2979,9 @@ fn build_margin_scope(
     let rate_card_alignment_state = reconciliation_preview["rate_card_scope_alignment_state"]
         .as_str()
         .unwrap_or("rate_card_not_bound");
+    let provider_identity_state = reconciliation_preview["provider_identity_state"]
+        .as_str()
+        .unwrap_or("provider_identity_unchecked");
     let infra_cost_alignment_state =
         infra_cost_scope_alignment_state(statement_preview, infra_cost_profile);
     let temporal_truth_state = combined_temporal_truth_state(&[
@@ -2900,6 +2995,8 @@ fn build_margin_scope(
         "awaiting_infra_cost_profile"
     } else if !usage_bound {
         "awaiting_provider_reconciliation"
+    } else if provider_identity_state == "provider_identity_mismatch" {
+        "provider_identity_mismatch"
     } else if temporal_truth_state == "scope_period_mismatch" {
         "pricing_period_mismatch"
     } else if !currency_match {
@@ -2922,6 +3019,7 @@ fn build_margin_scope(
         "currency_profile_mismatch" => "currency_profile_mismatch",
         "awaiting_provider_reconciliation" => "awaiting_provider_reconciliation",
         "awaiting_infra_cost_profile" => "awaiting_infra_cost_profile",
+        "provider_identity_mismatch" => "provider_identity_mismatch",
         _ => "awaiting_rate_card",
     };
     let mut blocking_reasons = Vec::new();
@@ -2933,6 +3031,9 @@ fn build_margin_scope(
     }
     if !usage_bound {
         blocking_reasons.push("provider_reconciliation_not_complete");
+    }
+    if provider_identity_state == "provider_identity_mismatch" {
+        blocking_reasons.push("provider_identity_mismatch");
     }
     if provider_usage_alignment_state == "scope_period_mismatch" {
         blocking_reasons.push("provider_usage_scope_period_mismatch");
@@ -3006,6 +3107,7 @@ fn build_margin_scope(
         "provider_usage_scope_alignment_state": provider_usage_alignment_state,
         "rate_card_scope_alignment_state": rate_card_alignment_state,
         "infra_cost_scope_alignment_state": infra_cost_alignment_state,
+        "provider_identity_state": provider_identity_state,
         "temporal_truth_state": temporal_truth_state,
         "customer_saved_tokens_lower_bound": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
         "customer_saved_amount_lower_bound": customer_saved_amount_lower_bound,
@@ -3601,6 +3703,9 @@ fn build_contractual_statement_summary(
         "provider_usage_scope_alignment_state": reconciliation_preview["provider_usage_scope_alignment_state"].clone(),
         "provider_invoice_scope_alignment_state": reconciliation_preview["provider_invoice_scope_alignment_state"].clone(),
         "rate_card_scope_alignment_state": reconciliation_preview["rate_card_scope_alignment_state"].clone(),
+        "rate_card_provider_alignment_state": reconciliation_preview["rate_card_provider_alignment_state"].clone(),
+        "invoice_provider_alignment_state": reconciliation_preview["invoice_provider_alignment_state"].clone(),
+        "provider_identity_state": reconciliation_preview["provider_identity_state"].clone(),
         "reconciliation_temporal_truth_state": reconciliation_preview["temporal_truth_state"].clone(),
         "metering_ingest_state": metering_freshness["metering_ingest_state"].clone(),
         "contractual_lag_state": metering_freshness["contractual_lag_state"].clone(),
@@ -3625,6 +3730,7 @@ fn build_contractual_statement_summary(
         "reconciliation_state": reconciliation_preview["reconciliation_state"].clone(),
         "margin_state": margin_scope["margin_state"].clone(),
         "margin_confidence_state": margin_scope["margin_confidence_state"].clone(),
+        "margin_provider_identity_state": margin_scope["provider_identity_state"].clone(),
         "margin_temporal_truth_state": margin_scope["temporal_truth_state"].clone(),
         "infra_cost_scope_alignment_state": margin_scope["infra_cost_scope_alignment_state"].clone(),
         "adjustment_state": statement_preview["adjustment_preview"]["correction_action_state"].clone(),
@@ -3927,11 +4033,15 @@ fn build_statement_export_preview(
         "provider_usage_scope_alignment_state": contractual_summary["provider_usage_scope_alignment_state"].clone(),
         "provider_invoice_scope_alignment_state": contractual_summary["provider_invoice_scope_alignment_state"].clone(),
         "rate_card_scope_alignment_state": contractual_summary["rate_card_scope_alignment_state"].clone(),
+        "rate_card_provider_alignment_state": contractual_summary["rate_card_provider_alignment_state"].clone(),
+        "invoice_provider_alignment_state": contractual_summary["invoice_provider_alignment_state"].clone(),
+        "provider_identity_state": contractual_summary["provider_identity_state"].clone(),
         "reconciliation_temporal_truth_state": contractual_summary["reconciliation_temporal_truth_state"].clone(),
         "contractual_freshness_state": contractual_summary["contractual_freshness_state"].clone(),
         "reconciliation_state": contractual_summary["reconciliation_state"].clone(),
         "margin_state": contractual_summary["margin_state"].clone(),
         "margin_confidence_state": contractual_summary["margin_confidence_state"].clone(),
+        "margin_provider_identity_state": contractual_summary["margin_provider_identity_state"].clone(),
         "margin_temporal_truth_state": contractual_summary["margin_temporal_truth_state"].clone(),
         "infra_cost_scope_alignment_state": contractual_summary["infra_cost_scope_alignment_state"].clone(),
         "export_status": "review_ready_report_only",
@@ -9163,11 +9273,11 @@ mod tests {
         assert_eq!(token_event["contract"]["billing_mode"], "report_only");
         assert_eq!(
             token_event["contract"]["reconciliation_contract_version"],
-            "provider-reconciliation-v4"
+            "provider-reconciliation-v5"
         );
         assert_eq!(
             token_event["contract"]["margin_model_version"],
-            "margin-view-v3"
+            "margin-view-v4"
         );
         assert_eq!(
             token_event["contract"]["infra_cost_profile_version"],
@@ -9175,7 +9285,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v5"
+            "contractual-evidence-pack-v6"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -9862,7 +9972,7 @@ effective_to_epoch_ms = 2000
 
         assert_eq!(
             reconciliation["contract_version"],
-            "provider-reconciliation-v4"
+            "provider-reconciliation-v5"
         );
         assert_eq!(reconciliation["status"], "awaiting_provider_usage_source");
         assert_eq!(
@@ -10001,7 +10111,7 @@ effective_to_epoch_ms = 2000
         let margin =
             build_margin_contract_json(&contract, &rate_card, &infra_cost_source, &reconciliation);
 
-        assert_eq!(margin["model_version"], "margin-view-v3");
+        assert_eq!(margin["model_version"], "margin-view-v4");
         assert_eq!(margin["infra_cost_profile_version"], "unpriced-infra-v1");
         assert_eq!(margin["status"], "awaiting_rate_card");
         assert_eq!(margin["money_margin_enabled"], json!(false));
@@ -10097,12 +10207,14 @@ effective_to_epoch_ms = 2000
             "default_input_cost_per_1k_tokens": 0.01,
             "default_output_cost_per_1k_tokens": 0.02,
             "bound_currency_profile": "USD",
+            "provider": "demo-provider",
             "effective_from_epoch_ms": 1_000,
             "effective_to_epoch_ms": 2_000,
             "status": "priced_bound"
         });
         let provider_usage_binding = json!({
             "status": "usage_and_cost_bound",
+            "provider": "demo-provider",
             "scopes": {
                 "current_session": {
                     "total_tokens": 400,
@@ -10115,6 +10227,7 @@ effective_to_epoch_ms = 2000
         });
         let provider_invoice_binding = json!({
             "status": "invoice_bound",
+            "provider": "demo-provider",
             "scopes": {
                 "current_session": {
                     "invoice_amount": 0.004,
@@ -10212,6 +10325,18 @@ effective_to_epoch_ms = 2000
             reconciliation["temporal_truth_state"],
             "scope_period_aligned"
         );
+        assert_eq!(
+            reconciliation["rate_card_provider_alignment_state"],
+            "provider_identity_aligned"
+        );
+        assert_eq!(
+            reconciliation["invoice_provider_alignment_state"],
+            "provider_identity_aligned"
+        );
+        assert_eq!(
+            reconciliation["provider_identity_state"],
+            "provider_identity_aligned"
+        );
         assert_eq!(reconciliation["drift_tokens"], 0);
         assert_eq!(reconciliation["drift_amount"], 0.0);
         assert_eq!(reconciliation["invoice_drift_amount"], 0.0);
@@ -10227,12 +10352,14 @@ effective_to_epoch_ms = 2000
             "default_input_cost_per_1k_tokens": 0.01,
             "default_output_cost_per_1k_tokens": 0.02,
             "bound_currency_profile": "USD",
+            "provider": "demo-provider",
             "effective_from_epoch_ms": 1_000,
             "effective_to_epoch_ms": 2_000,
             "status": "priced_bound"
         });
         let provider_usage_binding = json!({
             "status": "usage_and_cost_bound",
+            "provider": "demo-provider",
             "scopes": {
                 "current_session": {
                     "total_tokens": 450,
@@ -10245,6 +10372,7 @@ effective_to_epoch_ms = 2000
         });
         let provider_invoice_binding = json!({
             "status": "invoice_bound",
+            "provider": "demo-provider",
             "scopes": {
                 "current_session": {
                     "invoice_amount": 0.0045,
@@ -10334,6 +10462,10 @@ effective_to_epoch_ms = 2000
             margin["infra_cost_scope_alignment_state"],
             "scope_period_aligned"
         );
+        assert_eq!(
+            margin["provider_identity_state"],
+            "provider_identity_aligned"
+        );
         assert_eq!(margin["temporal_truth_state"], "scope_period_aligned");
         assert!(
             (margin["customer_saved_amount_lower_bound"]
@@ -10370,12 +10502,14 @@ effective_to_epoch_ms = 2000
             "default_input_cost_per_1k_tokens": 0.01,
             "default_output_cost_per_1k_tokens": 0.02,
             "bound_currency_profile": "USD",
+            "provider": "demo-provider",
             "effective_from_epoch_ms": 1_500,
             "effective_to_epoch_ms": 1_800,
             "status": "priced_bound"
         });
         let provider_usage_binding = json!({
             "status": "usage_and_cost_bound",
+            "provider": "demo-provider",
             "scopes": {
                 "current_session": {
                     "total_tokens": 400,
@@ -10388,6 +10522,7 @@ effective_to_epoch_ms = 2000
         });
         let provider_invoice_binding = json!({
             "status": "invoice_bound",
+            "provider": "demo-provider",
             "scopes": {
                 "current_session": {
                     "invoice_amount": 0.004,
@@ -10471,6 +10606,171 @@ effective_to_epoch_ms = 2000
     }
 
     #[test]
+    fn reconciliation_and_margin_block_on_provider_identity_mismatch() {
+        let contract = contract_fixture();
+        let profile = profile_fixture();
+        let adjustment_registry = adjustment_registry_fixture(&contract);
+        let rate_card = json!({
+            "money_conversion_enabled": true,
+            "default_input_cost_per_1k_tokens": 0.01,
+            "default_output_cost_per_1k_tokens": 0.02,
+            "bound_currency_profile": "USD",
+            "provider": "demo-provider-b",
+            "effective_from_epoch_ms": 1_000,
+            "effective_to_epoch_ms": 2_000,
+            "status": "priced_bound"
+        });
+        let provider_usage_binding = json!({
+            "status": "usage_and_cost_bound",
+            "provider": "demo-provider-a",
+            "scopes": {
+                "current_session": {
+                    "total_tokens": 450,
+                    "provider_cost_amount": 0.0045,
+                    "currency_profile": "USD",
+                    "period_start_epoch_ms": 1_000,
+                    "period_end_epoch_ms": 2_000
+                }
+            }
+        });
+        let provider_invoice_binding = json!({
+            "status": "invoice_bound",
+            "provider": "demo-provider-a",
+            "scopes": {
+                "current_session": {
+                    "invoice_amount": 0.0045,
+                    "currency_profile": "USD",
+                    "period_start_epoch_ms": 1_000,
+                    "period_end_epoch_ms": 2_000
+                }
+            }
+        });
+        let summary = json!({
+            "coverage": {
+                "completeness_state": "partially_confirmed",
+                "included_events": 2
+            },
+            "delivered_tokens": 400,
+            "recovery_tokens": 50,
+            "verified_effective_saved_tokens": 900
+        });
+        let events = vec![token_event! {
+            occurred_at_epoch_ms: 1_000,
+            naive_tokens: 1350,
+            context_tokens: 400,
+            recovery_tokens: 50,
+            effective_saved_tokens: 900,
+        }];
+        let reconciliation_contract = build_reconciliation_contract_json(
+            &contract,
+            &json!({}),
+            &provider_usage_binding,
+            &provider_invoice_binding,
+            &rate_card,
+        );
+        let freshness =
+            build_metering_freshness_summary(&contract, &measurement_fixture(), 2_000, &events);
+        let preview = build_statement_preview(
+            "current_session",
+            "текущая сессия",
+            2_000,
+            &events,
+            &profile,
+            &summary,
+            &contract,
+            &adjustment_registry,
+            &rate_card,
+            &reconciliation_contract,
+            &freshness,
+        );
+        let reconciliation = build_reconciliation_preview(
+            "current_session",
+            "текущая сессия",
+            &preview,
+            &contract,
+            &json!({}),
+            &provider_usage_binding,
+            &provider_invoice_binding,
+            &rate_card,
+        );
+        let infra_cost_profile = json!({
+            "status": "priced_bound",
+            "bound_currency_profile": "USD",
+            "cost_per_1k_internal_billed_tokens": 0.002,
+            "cost_per_live_event": 0.0005,
+            "fixed_scope_cost_amount": 0.01,
+            "effective_from_epoch_ms": 1_000,
+            "effective_to_epoch_ms": 2_000
+        });
+        let margin_contract = build_margin_contract_json(
+            &contract,
+            &rate_card,
+            &infra_cost_profile,
+            &reconciliation_contract,
+        );
+        let margin = build_margin_scope(
+            "current_session",
+            "текущая сессия",
+            &preview,
+            &reconciliation,
+            &rate_card,
+            &infra_cost_profile,
+        );
+
+        assert_eq!(
+            reconciliation_contract["provider_identity_state"],
+            "provider_identity_mismatch"
+        );
+        assert!(
+            reconciliation_contract["governance_blocking_reasons"]
+                .as_array()
+                .expect("governance blocking reasons")
+                .iter()
+                .any(|reason| reason == "provider_identity_mismatch")
+        );
+        assert_eq!(
+            reconciliation["rate_card_provider_alignment_state"],
+            "provider_identity_mismatch"
+        );
+        assert_eq!(
+            reconciliation["invoice_provider_alignment_state"],
+            "provider_identity_aligned"
+        );
+        assert_eq!(
+            reconciliation["provider_identity_state"],
+            "provider_identity_mismatch"
+        );
+        assert!(
+            reconciliation["blocking_reasons"]
+                .as_array()
+                .expect("blocking reasons")
+                .iter()
+                .any(|reason| reason == "provider_identity_mismatch")
+        );
+        assert_eq!(margin_contract["status"], "provider_identity_mismatch");
+        assert_eq!(
+            margin_contract["provider_identity_state"],
+            "provider_identity_mismatch"
+        );
+        assert_eq!(margin["margin_state"], "provider_identity_mismatch");
+        assert_eq!(
+            margin["margin_confidence_state"],
+            "provider_identity_mismatch"
+        );
+        assert_eq!(
+            margin["provider_identity_state"],
+            "provider_identity_mismatch"
+        );
+        assert!(
+            margin["blocking_reasons"]
+                .as_array()
+                .expect("margin blocking reasons")
+                .iter()
+                .any(|reason| reason == "provider_identity_mismatch")
+        );
+    }
+
+    #[test]
     fn contractual_statement_summary_compacts_statement_reconciliation_and_margin() {
         let contract = contract_fixture();
         let summary = build_contractual_statement_summary(
@@ -10531,11 +10831,19 @@ effective_to_epoch_ms = 2000
                 "money_truth_completeness_state": "provider_cost_and_invoice_bound",
                 "reconciliation_readiness_state": "usage_cost_and_invoice_truth_ready",
                 "governance_blocking_reasons": [],
+                "rate_card_provider_alignment_state": "provider_identity_aligned",
+                "invoice_provider_alignment_state": "provider_identity_aligned",
+                "provider_identity_state": "provider_identity_aligned",
                 "reconciliation_state": "external_usage_and_invoice_bound_report_only",
                 "blocking_reasons": ["billing_policy_report_only"]
             }),
             &json!({
-                "margin_state": "awaiting_infra_cost_profile"
+                "margin_state": "awaiting_infra_cost_profile",
+                "margin_confidence_state": "awaiting_infra_cost_profile",
+                "provider_identity_state": "provider_identity_aligned",
+                "temporal_truth_state": "scope_period_aligned",
+                "infra_cost_scope_alignment_state": "scope_period_aligned",
+                "blocking_reasons": []
             }),
             &json!({
                 "metering_ingest_state": "within_slo",
@@ -10584,6 +10892,18 @@ effective_to_epoch_ms = 2000
             summary["reconciliation_readiness_state"],
             "usage_cost_and_invoice_truth_ready"
         );
+        assert_eq!(
+            summary["rate_card_provider_alignment_state"],
+            "provider_identity_aligned"
+        );
+        assert_eq!(
+            summary["invoice_provider_alignment_state"],
+            "provider_identity_aligned"
+        );
+        assert_eq!(
+            summary["provider_identity_state"],
+            "provider_identity_aligned"
+        );
         assert_eq!(summary["metering_ingest_state"], "within_slo");
         assert_eq!(summary["contractual_lag_state"], "lag_window_elapsed");
         assert_eq!(summary["contractual_freshness_state"], "stable");
@@ -10595,6 +10915,10 @@ effective_to_epoch_ms = 2000
             "external_usage_and_invoice_bound_report_only"
         );
         assert_eq!(summary["margin_state"], "awaiting_infra_cost_profile");
+        assert_eq!(
+            summary["margin_provider_identity_state"],
+            "provider_identity_aligned"
+        );
         assert_eq!(summary["can_treat_scope_as_stable"], true);
         assert_eq!(summary["customer_review_ready"], true);
         assert_eq!(summary["invoice_ready"], false);
@@ -10694,9 +11018,20 @@ effective_to_epoch_ms = 2000
                             }
                         },
                         "coverage_state": "partially_confirmed",
+                        "provider_usage_scope_alignment_state": "scope_period_aligned",
+                        "provider_invoice_scope_alignment_state": "scope_period_aligned",
+                        "rate_card_scope_alignment_state": "scope_period_aligned",
+                        "rate_card_provider_alignment_state": "provider_identity_aligned",
+                        "invoice_provider_alignment_state": "provider_identity_aligned",
+                        "provider_identity_state": "provider_identity_aligned",
+                        "reconciliation_temporal_truth_state": "scope_period_aligned",
                         "contractual_freshness_state": "provisional_open_window",
                         "reconciliation_state": "awaiting_provider_usage_source",
                         "margin_state": "awaiting_rate_card",
+                        "margin_confidence_state": "awaiting_rate_card",
+                        "margin_provider_identity_state": "provider_identity_aligned",
+                        "margin_temporal_truth_state": "scope_period_aligned",
+                        "infra_cost_scope_alignment_state": "infra_cost_profile_not_bound",
                         "blocking_reasons": ["late_arrival_window_open"],
                         "suitability": {
                             "surfaces": {
@@ -10745,7 +11080,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v5");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v6");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -10756,6 +11091,14 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             preview["next_settlement_stage_blockers"],
             json!(["coverage_not_final"])
+        );
+        assert_eq!(
+            preview["provider_identity_state"],
+            "provider_identity_aligned"
+        );
+        assert_eq!(
+            preview["margin_provider_identity_state"],
+            "provider_identity_aligned"
         );
         assert_eq!(
             preview["transactional_statuses"]["review"]["status"],
@@ -10900,7 +11243,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v5");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v6");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"

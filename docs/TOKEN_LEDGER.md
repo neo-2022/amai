@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 19:11 MSK
-Ручная сверка guide/docs: 2026-03-24 19:11 MSK
+modified_at: 2026-03-24 20:40 MSK
+Ручная сверка guide/docs: 2026-03-24 20:40 MSK
 
 # Token Ledger
 
@@ -712,7 +712,7 @@ Operator-safe report-only команды:
 - готовы ли мы вообще к external reconciliation.
 
 Текущий truthful status:
-- `reconciliation_contract_version = provider-reconciliation-v4`
+- `reconciliation_contract_version = provider-reconciliation-v5`
 - `ready_for_external_reconciliation` теперь зависит от реального bind provider usage export,
   а не от одного факта, что где-то прописан путь;
 - contract теперь ещё отдельно публикует:
@@ -725,6 +725,10 @@ Operator-safe report-only команды:
   - `provider_invoice_scope_alignment_state`
   - `rate_card_scope_alignment_state`
   - `temporal_truth_state`
+- scope-level preview теперь ещё отдельно публикует provider-identity truth:
+  - `rate_card_provider_alignment_state`
+  - `invoice_provider_alignment_state`
+  - `provider_identity_state`
 - эти поля нужны затем, чтобы external truth не считалась честно применимой к scope только
   потому, что файл уже привязан и арифметика сошлась;
   - теперь ещё отдельно видно, покрывают ли provider usage, invoice export и rate card
@@ -820,7 +824,7 @@ Customer-facing export bundle:
 - включена ли money-margin арифметика.
 
 Текущий truthful status:
-- `margin_model_version = margin-view-v3`
+- `margin_model_version = margin-view-v4`
 - `infra_cost_binding_model_version = infra-cost-binding-v2`
 - `infra_cost_profile_version = unpriced-infra-v1`
 - `money_margin_enabled` включается только после честного bind на
@@ -835,6 +839,7 @@ Customer-facing export bundle:
   - `rate_card_scope_alignment_state`
   - `infra_cost_scope_alignment_state`
   - `temporal_truth_state`
+  - `provider_identity_state`
 
 Именно поэтому truthful `margin_view` теперь обязан выглядеть в одной из двух форм:
 - до bind внешних truth-sources:
@@ -853,6 +858,9 @@ Customer-facing export bundle:
     - `priced_preview_temporal_unscoped_report_only`
     - или `pricing_period_mismatch`
     а не делать вид, что pricing уже финально пригоден к scope.
+  - если provider usage и priced rate card смотрят на разные provider identities, state обязан стать:
+    - `provider_identity_mismatch`
+    а не продолжать money preview как будто provider truth уже согласован.
 
 Это не “недоделанная формула”, а truth guardrail:
 - пока rate card остаётся `unpriced`;
@@ -906,7 +914,7 @@ Customer-facing export bundle:
 - `line_items.excluded`
 
 Честный смысл этого export сейчас такой:
-- это `contractual-evidence-pack-v5`;
+- это `contractual-evidence-pack-v6`;
 - это всё ещё `report_only tokenonomics`;
 - это не invoice;
 - это не final settlement;

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 19:11 MSK
-Ручная сверка guide/docs: 2026-03-24 19:11 MSK
+modified_at: 2026-03-24 20:40 MSK
+Ручная сверка guide/docs: 2026-03-24 20:40 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1277,8 +1277,14 @@ preview, а не только raw count.
     - `provider_invoice_scope_alignment_state`
     - `rate_card_scope_alignment_state`
     - `reconciliation_temporal_truth_state`
+  - отдельно materialized provider-identity truth layer:
+    - `rate_card_provider_alignment_state`
+    - `invoice_provider_alignment_state`
+    - `provider_identity_state`
   - это нужно затем, чтобы provider usage и priced rate card не выглядели честно
     применимыми к текущему statement period без отдельной проверки по времени;
+  - это нужно затем, чтобы rate card и invoice export не выглядели честно применимыми
+    к тому же provider truth, если они вообще смотрят на другого provider;
   - это нужно затем, чтобы не смешивать в одну строку:
     - отсутствие usage truth
     - отсутствие money truth
@@ -1328,9 +1334,12 @@ preview, а не только raw count.
     - `rate_card_scope_alignment_state`
     - `infra_cost_scope_alignment_state`
     - `margin_temporal_truth_state`
+    - `provider_identity_state`
   - если priced inputs есть, но их период не покрывает statement scope, margin preview
     теперь честно уходит в `pricing_period_mismatch`, а не делает вид, что money truth уже
     готова;
+  - если provider usage и priced rate card смотрят на разные provider identities, margin preview
+    обязан уходить в `provider_identity_mismatch`, а не притворяться честным money-preview;
   - если provider usage показывает drift, margin preview не прячется и не
     “зеленеет”, а прямо уходит в `priced_preview_with_provider_drift`.
 

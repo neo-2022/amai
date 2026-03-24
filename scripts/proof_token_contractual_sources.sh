@@ -119,11 +119,15 @@ assert payload["reconciliation_preview"]["reconciliation_readiness_state"] == "u
 assert payload["reconciliation_preview"]["provider_usage_scope_alignment_state"] == "scope_period_aligned", payload
 assert payload["reconciliation_preview"]["provider_invoice_scope_alignment_state"] == "scope_period_aligned", payload
 assert payload["reconciliation_preview"]["rate_card_scope_alignment_state"] == "scope_period_aligned", payload
+assert payload["reconciliation_preview"]["rate_card_provider_alignment_state"] == "provider_identity_aligned", payload
+assert payload["reconciliation_preview"]["invoice_provider_alignment_state"] == "provider_identity_aligned", payload
+assert payload["reconciliation_preview"]["provider_identity_state"] == "provider_identity_aligned", payload
 assert payload["reconciliation_preview"]["temporal_truth_state"] == "scope_period_aligned", payload
 assert payload["margin_scope"]["margin_state"] == "priced_preview_report_only", payload
 assert payload["margin_scope"]["margin_confidence_state"] == "aligned_report_only", payload
 assert payload["margin_scope"]["rate_card_scope_alignment_state"] == "scope_period_aligned", payload
 assert payload["margin_scope"]["infra_cost_scope_alignment_state"] == "scope_period_aligned", payload
+assert payload["margin_scope"]["provider_identity_state"] == "provider_identity_aligned", payload
 assert payload["margin_scope"]["temporal_truth_state"] == "scope_period_aligned", payload
 assert payload["statement_export_preview"]["scope_code"] == "lifetime", payload
 PY

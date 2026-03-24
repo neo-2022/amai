@@ -133,7 +133,11 @@ root = report["token_budget_report"]
 
 assert root["rate_card"]["status"] == "priced_bound", root["rate_card"]
 assert root["infra_cost_profile"]["status"] == "priced_bound", root["infra_cost_profile"]
+assert root["reconciliation_contract"]["contract_version"] == "provider-reconciliation-v5", root["reconciliation_contract"]
+assert root["reconciliation_contract"]["provider_identity_state"] == "provider_identity_aligned", root["reconciliation_contract"]
 assert root["margin_contract"]["status"] == "priced_preview_report_only", root["margin_contract"]
+assert root["margin_contract"]["model_version"] == "margin-view-v4", root["margin_contract"]
+assert root["margin_contract"]["provider_identity_state"] == "provider_identity_aligned", root["margin_contract"]
 assert root["margin_contract"]["money_margin_enabled"] is True, root["margin_contract"]
 
 scope = "rolling_window"
@@ -148,9 +152,13 @@ assert summary["reconciliation_state"] == "external_usage_and_invoice_aligned_re
 assert summary["provider_usage_scope_alignment_state"] == "scope_period_aligned", summary
 assert summary["provider_invoice_scope_alignment_state"] == "scope_period_aligned", summary
 assert summary["rate_card_scope_alignment_state"] == "scope_period_aligned", summary
+assert summary["rate_card_provider_alignment_state"] == "provider_identity_aligned", summary
+assert summary["invoice_provider_alignment_state"] == "provider_identity_aligned", summary
+assert summary["provider_identity_state"] == "provider_identity_aligned", summary
 assert summary["reconciliation_temporal_truth_state"] == "scope_period_aligned", summary
 assert summary["margin_state"] == "priced_preview_report_only", summary
 assert summary["margin_confidence_state"] == "aligned_report_only", summary
+assert summary["margin_provider_identity_state"] == "provider_identity_aligned", summary
 assert summary["margin_temporal_truth_state"] == "scope_period_aligned", summary
 assert summary["external_provider_cost_amount"] is not None, summary
 assert margin["customer_saved_amount_lower_bound"] is not None, margin
@@ -158,6 +166,7 @@ assert margin["amai_infra_cost_amount"] is not None, margin
 assert margin["margin_amount"] is not None, margin
 assert margin["rate_card_scope_alignment_state"] == "scope_period_aligned", margin
 assert margin["infra_cost_scope_alignment_state"] == "scope_period_aligned", margin
+assert margin["provider_identity_state"] == "provider_identity_aligned", margin
 assert margin["temporal_truth_state"] == "scope_period_aligned", margin
 assert statement_export["line_item_surfaces"]["margin_scope"]["margin_state"] == "priced_preview_report_only", statement_export
 PY

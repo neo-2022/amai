@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 19:11 MSK
-Ручная сверка guide/docs: 2026-03-24 19:11 MSK
+modified_at: 2026-03-24 20:40 MSK
+Ручная сверка guide/docs: 2026-03-24 20:40 MSK
 
 # Operations
 
@@ -1867,11 +1867,14 @@ cargo run -- context pack \
     - `rate_card_scope_alignment_state`
     - `infra_cost_scope_alignment_state`
     - `temporal_truth_state`
+    - `provider_identity_state`
   - если честно привязаны `provider usage + rate card + infra cost profile`, он уже имеет право
     materialize-ить `customer_saved_amount_lower_bound`, `amai_infra_cost_amount`,
     `margin_amount` и `savings_to_cost_ratio`;
   - если priced inputs есть, но их период не покрывает statement scope, state обязан стать
     `pricing_period_mismatch`, а не притворяться aligned money preview;
+  - если provider usage и priced rate card смотрят на разные provider identities, state обязан
+    стать `provider_identity_mismatch`, а не продолжать money preview как будто источник истины един;
   - если provider usage показывает drift, этот drift должен оставаться видимым и в margin-preview.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
