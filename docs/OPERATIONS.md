@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:04 MSK
-Ручная сверка guide/docs: 2026-03-24 13:04 MSK
+modified_at: 2026-03-24 13:26 MSK
+Ручная сверка guide/docs: 2026-03-24 13:26 MSK
 
 # Operations
 
@@ -1718,12 +1718,26 @@ cargo run --release -- verify token-benchmark-suite \
   - `current_session`
   - `rolling_window`
   - `lifetime`
-  - в них видно внутренний lower bound по каждому scope, но внешняя provider сверка и drift остаются пустыми, пока нет real source binding.
+  - в них теперь видно не только lower bound, но и внутренний delivered usage:
+    - `internal_delivered_tokens`
+    - `internal_recovery_tokens`
+    - `internal_provider_billed_tokens`
+  - drift по токенам считается только между `internal_provider_billed_tokens` и
+    `external_provider_usage_tokens`;
+  - при реальном source binding там уже могут появляться:
+    - `external_provider_usage_tokens`
+    - `external_provider_cost_amount`
+    - `external_invoice_amount`
+    - `drift_tokens`
+  - `drift_amount` остаётся пустым, пока внутренний money-side settlement ещё не materialized.
 - `margin_view` теперь тоже каноничен:
   - `current_session`
   - `rolling_window`
   - `lifetime`
-  - в нём видно token-side lower bound savings клиента, но денежные поля остаются пустыми, пока нет priced rate card, provider reconciliation и infra cost profile.
+  - в нём видно token-side lower bound savings клиента;
+  - при честно привязанном priced rate card он обязан перескочить с `awaiting_rate_card`
+    на следующий реальный блокер, а не держаться за старый static contract;
+  - денежные поля остаются пустыми, пока нет priced rate card, provider reconciliation и infra cost profile.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе:

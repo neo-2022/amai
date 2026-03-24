@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:04 MSK
-Ручная сверка guide/docs: 2026-03-24 13:04 MSK
+modified_at: 2026-03-24 13:26 MSK
+Ручная сверка guide/docs: 2026-03-24 13:26 MSK
 
 # Token Ledger
 
@@ -609,23 +609,30 @@ materialized end-to-end.
 
 Текущий truthful status:
 - `reconciliation_contract_version = provider-reconciliation-v1`
-- `ready_for_external_reconciliation = false`
+- `ready_for_external_reconciliation` теперь зависит от реального bind provider usage export,
+  а не от одного факта, что где-то прописан путь;
 - внутренний lower bound уже materialized;
-- provider usage export, invoice export и rate card пока ещё не привязаны к runtime автоматически.
+- при честном runtime bind report теперь отдельно показывает:
+  - `provider_usage_binding`
+  - `provider_invoice_binding`
+  - и те же bindings внутри `reconciliation_contract.external_truth_bindings`.
 
-Именно поэтому `reconciliation_previews` сейчас обязаны оставаться такими:
-- `internal_measured_non_billable_lower_bound_tokens` заполнен;
-- `external_provider_usage_tokens = null`
-- `external_provider_cost_amount = null`
-- `drift_tokens = null`
-- `drift_amount = null`
+Именно поэтому truthful `reconciliation_previews` теперь обязаны выглядеть так:
+- `internal_measured_non_billable_lower_bound_tokens` остаётся про lower bound savings;
+- `internal_provider_billed_tokens` отдельно показывает внутренний delivered usage;
+- `drift_tokens` считается только как
+  `internal_provider_billed_tokens - external_provider_usage_tokens`;
+- `external_provider_usage_tokens`, `external_provider_cost_amount` и
+  `external_invoice_amount` могут заполняться только после реального bind соответствующих
+  external sources;
+- `drift_amount` остаётся `null`, пока внутренний money-side settlement не materialized.
 
 Это не пробел в арифметике, а truth guardrail:
 - пока внешний источник не подключён;
 - пока rate card не materialized;
 - пока reconciliation parser не привязан к canonical ledger;
 
-`Amai` не имеет права подменять внутренний lower bound внешней сверкой “по ощущениям”.
+`Amai` не имеет права сравнивать provider usage с savings и выдавать это за честный drift.
 
 ## Margin view и собственная экономика Amai
 
@@ -650,6 +657,8 @@ materialized end-to-end.
 - `margin_model_version = margin-view-v1`
 - `infra_cost_profile_version = unpriced-infra-v1`
 - `money_margin_enabled = false`
+- `margin_view` теперь обязан брать priced/unpriced не из static contract label, а из
+  настоящего rate-card binding runtime.
 
 Именно поэтому `margin_view` сейчас обязан выглядеть так:
 - `customer_saved_tokens_lower_bound` заполнен;

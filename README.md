@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 13:04 MSK
-Ручная сверка guide/docs: 2026-03-24 13:04 MSK
+modified_at: 2026-03-24 13:26 MSK
+Ручная сверка guide/docs: 2026-03-24 13:26 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1146,12 +1146,27 @@ preview, а не только raw count.
   - пока registry не подключён, этот слой честно остаётся `not_configured`.
 - provider reconciliation теперь тоже first-class:
   - `reconciliation_previews.current_session / rolling_window / lifetime`
-  - там уже видно, что внутренний lower bound по scope есть;
-  - но `external_provider_usage_tokens`, `external_provider_cost_amount` и `drift_*`
-    остаются пустыми, пока provider export и rate-card ещё не подключены честно.
+  - там теперь отдельно видны:
+    - `internal_delivered_tokens`
+    - `internal_recovery_tokens`
+    - `internal_provider_billed_tokens`
+  - drift по токенам теперь считается только как
+    `internal_provider_billed_tokens - external_provider_usage_tokens`;
+  - это сделано специально, чтобы не сравнивать provider usage с saved tokens;
+  - если provider usage/invoice export и rate-card честно подключены, там уже могут
+    появляться:
+    - `external_provider_usage_tokens`
+    - `external_provider_cost_amount`
+    - `external_invoice_amount`
+    - `drift_tokens`
+  - `drift_amount` всё ещё остаётся `null`, пока внутренний money-side settlement
+    не materialized честно.
 - margin view теперь тоже first-class:
   - `margin_view.current_session / rolling_window / lifetime`
   - там уже видно `customer_saved_tokens_lower_bound`;
+  - при честно привязанном priced rate card `margin_view` больше не должен
+    притворяться `awaiting_rate_card`: он обязан перейти к следующему реальному
+    блокеру, например `awaiting_infra_cost_profile`;
   - но `customer_saved_amount_lower_bound`, `amai_infra_cost_amount`, `margin_amount`
     и `savings_to_cost_ratio` остаются пустыми, пока rate card и infra cost profile
     ещё не materialized честно.
