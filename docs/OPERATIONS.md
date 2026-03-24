@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 09:56 MSK
-Ручная сверка guide/docs: 2026-03-24 09:56 MSK
+modified_at: 2026-03-24 11:02 MSK
+Ручная сверка guide/docs: 2026-03-24 11:02 MSK
 
 # Operations
 
@@ -1545,6 +1545,11 @@ cargo run --release -- verify token-benchmark-suite \
     - `all_live_timeline`
     - `verified_live_timeline`
     - cumulative lines `without_amai_measured_tokens / with_amai_measured_tokens / measured_saved_tokens`;
+  - reporting layers:
+    - `billable`
+    - `measured_non_billable`
+    - `unmeasured`
+    - текущий runtime честно держит это в `report_only`, а не в money-facing режиме;
 - `current_session`
   - токены, сэкономленные в текущей рабочей сессии;
 - `rolling_window`
@@ -1578,6 +1583,26 @@ cargo run --release -- verify token-benchmark-suite \
 - `median_recovery_tokens`
   - медианный штраф на follow-up/retry/correction токены;
   - нужен затем, чтобы видеть не только красивую экономию, но и цену ошибок retrieval.
+- `contract`
+  - versioned contract на meter schema / baseline / quality / coverage /
+    excluded taxonomy / billing policy;
+- `coverage`
+  - отдельный truth-layer поверх каждого rollup:
+    - `measured_events`
+    - `included_events`
+    - `excluded_events`
+    - `event_coverage_pct`
+    - `baseline_token_coverage_pct`
+    - `completeness_state`
+- `excluded_breakdown`
+  - taxonomy измеренных, но не включённых событий:
+    - `quality_gate_failed`
+    - `awaiting_followup_reconciliation`
+    - `legacy_unverified`
+    - `synthetic_verify`
+    - `synthetic_proof`
+    - `synthetic_benchmark`
+    - `non_live_other`
 
 Главная честная поправка теперь такая:
 - headline считается не просто по raw savings;
@@ -1601,6 +1626,9 @@ cargo run --release -- verify token-benchmark-suite \
     - `hybrid_answer_proxy` означает, что контекст уже выглядит достаточным для полезного ответа без follow-up;
   - успешный recovery-follow-up может получить `quality_method = hybrid_answer_success`;
   - и его `recovery_tokens` уже включают стоимость предыдущего промаха.
+- любая большая savings-цифра теперь должна читаться вместе с `coverage`, иначе
+  её слишком легко принять за полный охват всей сессии.
+- `agent_cycle_economics` остаётся `partial lower bound`, а не полной session economics.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе:

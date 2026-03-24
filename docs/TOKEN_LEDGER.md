@@ -1,5 +1,5 @@
-modified_at: 2026-03-21 05:47 MSK
-Ручная сверка guide/docs: 2026-03-21 05:47 MSK
+modified_at: 2026-03-24 11:02 MSK
+Ручная сверка guide/docs: 2026-03-24 11:02 MSK
 
 # Token Ledger
 
@@ -76,10 +76,14 @@ Ledger не имеет права смешивать:
 
 Каждый retrieval event должен иметь хотя бы:
 - `event_id`
+- `correlation_id`
 - `timestamp_utc`
+- `occurred_at_epoch_ms`
+- `ingested_at_epoch_ms`
 - `session_id` или эквивалент session grouping
 - `rolling_window_profile`
 - `traffic_class`
+- `measurement_scope`
 - `project_code`
 - `namespace_code`
 - `query_hash`
@@ -101,6 +105,21 @@ Ledger не имеет права смешивать:
 - `latency_ms`
 - `sources_count`
 - `chunks_count`
+
+Для billing-grade эволюции событие теперь должно нести и contract-версии, даже если
+денежный режим ещё работает только как `report_only`:
+- `metering_event_schema_version`
+- `baseline_method_version`
+- `quality_method_version`
+- `coverage_model_version`
+- `excluded_taxonomy_version`
+- `dedup_contract_version`
+- `event_time_policy_version`
+- `billing_policy_version`
+- `billing_mode`
+- `rate_card_version`
+- `currency_profile`
+- `settlement_status`
 
 В текущем runtime `Amai` старается писать эти канонические поля прямо в событие, а не держать их только как внутренние alias:
 - `project_code`
@@ -264,6 +283,81 @@ Ledger не имеет права смешивать:
 - `effective_savings_pct`
 - `quality_ok_rate`
 - `fallback_rate`
+
+## Coverage и excluded taxonomy
+
+Накопительная savings-цифра без coverage считается неполной.
+
+Каждый rollup теперь обязан публиковать отдельный `coverage` слой:
+- `model_version`
+- `completeness_state`
+- `measured_events`
+- `included_events`
+- `excluded_events`
+- `event_coverage_pct`
+- `measured_baseline_tokens`
+- `included_baseline_tokens`
+- `excluded_baseline_tokens`
+- `baseline_token_coverage_pct`
+
+Смысл по-человечески:
+- `measured_events`
+  - всё, что ledger уже увидел в этом scope;
+- `included_events`
+  - что реально вошло в главный verified итог;
+- `excluded_events`
+  - что измерено, но не может честно попасть в headline;
+- `completeness_state`
+  - не “зелёный/красный статус”, а степень завершённости измерения.
+
+Разрешённые состояния сейчас:
+- `empty`
+- `no_confirmed_usage`
+- `partially_confirmed`
+- `fully_confirmed`
+
+Рядом с coverage обязан жить и `excluded_breakdown`.
+Это не мусорный хвост, а честная причина, почему часть измеренного потока не попала в
+главный итог.
+
+Текущая каноническая taxonomy:
+- `quality_gate_failed`
+- `awaiting_followup_reconciliation`
+- `legacy_unverified`
+- `synthetic_verify`
+- `synthetic_proof`
+- `synthetic_benchmark`
+- `non_live_other`
+
+Для каждого excluded-класса нужно видеть:
+- `events_count`
+- `baseline_tokens`
+- `delivered_tokens`
+- `recovery_tokens`
+- `effective_saved_tokens`
+
+## Whole-agent-cycle lower bound и reporting layers
+
+`agent_cycle_economics` нельзя подавать как “весь бюджет всей сессии”.
+
+Канонический truth guardrail теперь такой:
+- `retrieval savings floor` реален;
+- `partial whole-agent-cycle lower bound` реален;
+- `full session economics` пока ещё не полностью измерен.
+
+Поэтому `agent_cycle_economics` обязан публиковать не только timeline и lower bound, но и
+reporting layers:
+- `billable`
+- `measured_non_billable`
+- `unmeasured`
+
+В текущем runtime это честно materialized как:
+- `billable.status = disabled_report_only`
+- `measured_non_billable.status = active`
+- `unmeasured.status = active`
+
+То есть денежный режим ещё не включён. Пока это report-only lower bound со строгим
+разделением уже измеренной и ещё не измеренной части цикла.
 
 ## Preliminary vs stable
 

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 09:56 MSK
-Ручная сверка guide/docs: 2026-03-24 09:56 MSK
+modified_at: 2026-03-24 11:02 MSK
+Ручная сверка guide/docs: 2026-03-24 11:02 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1047,6 +1047,22 @@ preview, а не только raw count.
   - `verified_live_timeline`
   - они нужны для будущих live-графиков вида `без Amai / с Amai`,
     но уже сейчас штампуются как machine-readable data contract.
+- отдельный `contract` слой
+  - он явно публикует версии meter schema / baseline / quality / coverage /
+    excluded taxonomy / billing policy;
+  - это нужно затем, чтобы tokenonomics не “плыла” незаметно после смены
+    формулы или semantics.
+- first-class `coverage`
+  - у каждого rollup теперь есть не только savings, но и честный охват:
+    `measured / included / excluded`;
+  - без него savings нельзя подавать как полный охват сессии.
+- `excluded_breakdown`
+  - видно, какие измеренные события не попали в главный verified итог и почему.
+- reporting layers у `agent_cycle_economics`
+  - `billable`
+  - `measured_non_billable`
+  - `unmeasured`
+  - в текущем runtime это всё ещё `report_only`, а не готовый billing.
 
 Главное правило:
 - headline-метрика у `Amai` теперь не raw и не synthetic;
@@ -1054,6 +1070,9 @@ preview, а не только raw count.
 - каноническое имя этой метрики:
   - `Verified Effective Savings %`
   - по-русски: `Проверенная реальная экономия`.
+- рядом с любой крупной savings-цифрой теперь нужно смотреть и `coverage`;
+- `agent_cycle_economics` по-прежнему нельзя трактовать как полностью измеренную
+  экономику всей сессии.
 
 По умолчанию proof/benchmark-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе, используйте:

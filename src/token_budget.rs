@@ -17,13 +17,14 @@ use tokio_postgres::Client;
 use uuid::Uuid;
 
 const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
-const AGENT_CYCLE_MODEL_VERSION: &str = "agent-cycle-lower-bound-v1";
 const AGENT_CYCLE_TIMELINE_MAX_POINTS: usize = 256;
 
 #[derive(Debug, Clone, Deserialize)]
 struct TokenBudgetConfigFile {
     default_profile: String,
     measurement: MeasurementConfig,
+    #[serde(default)]
+    contract: TokenBudgetContractConfig,
     #[serde(default)]
     profiles: BTreeMap<String, TokenBudgetProfile>,
     #[serde(default)]
@@ -41,6 +42,56 @@ struct MeasurementConfig {
     preliminary_min_events: u64,
     #[serde(default = "default_preliminary_min_baseline_tokens")]
     preliminary_min_baseline_tokens: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TokenBudgetContractConfig {
+    #[serde(default = "default_metering_event_schema_version")]
+    metering_event_schema_version: String,
+    #[serde(default = "default_baseline_method_version")]
+    baseline_method_version: String,
+    #[serde(default = "default_quality_method_version")]
+    quality_method_version: String,
+    #[serde(default = "default_coverage_model_version")]
+    coverage_model_version: String,
+    #[serde(default = "default_agent_cycle_model_version")]
+    agent_cycle_model_version: String,
+    #[serde(default = "default_excluded_taxonomy_version")]
+    excluded_taxonomy_version: String,
+    #[serde(default = "default_dedup_contract_version")]
+    dedup_contract_version: String,
+    #[serde(default = "default_event_time_policy_version")]
+    event_time_policy_version: String,
+    #[serde(default = "default_billing_policy_version")]
+    billing_policy_version: String,
+    #[serde(default = "default_billing_mode")]
+    billing_mode: String,
+    #[serde(default = "default_rate_card_version")]
+    rate_card_version: String,
+    #[serde(default = "default_currency_profile")]
+    currency_profile: String,
+    #[serde(default = "default_settlement_status")]
+    settlement_status: String,
+}
+
+impl Default for TokenBudgetContractConfig {
+    fn default() -> Self {
+        Self {
+            metering_event_schema_version: default_metering_event_schema_version(),
+            baseline_method_version: default_baseline_method_version(),
+            quality_method_version: default_quality_method_version(),
+            coverage_model_version: default_coverage_model_version(),
+            agent_cycle_model_version: default_agent_cycle_model_version(),
+            excluded_taxonomy_version: default_excluded_taxonomy_version(),
+            dedup_contract_version: default_dedup_contract_version(),
+            event_time_policy_version: default_event_time_policy_version(),
+            billing_policy_version: default_billing_policy_version(),
+            billing_mode: default_billing_mode(),
+            rate_card_version: default_rate_card_version(),
+            currency_profile: default_currency_profile(),
+            settlement_status: default_settlement_status(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,12 +115,28 @@ struct ResolvedProfile {
 struct TokenBudgetEvent {
     created_at_epoch_ms: i64,
     event_id: String,
+    correlation_id: String,
     session_id: String,
     rolling_window_profile: String,
     timestamp_utc: i64,
+    occurred_at_epoch_ms: i64,
+    ingested_at_epoch_ms: i64,
     snapshot_kind: String,
     source_kind: String,
     traffic_class: String,
+    measurement_scope: String,
+    metering_event_schema_version: String,
+    baseline_method_version: String,
+    quality_method_version: String,
+    coverage_model_version: String,
+    excluded_taxonomy_version: String,
+    dedup_contract_version: String,
+    event_time_policy_version: String,
+    billing_policy_version: String,
+    billing_mode: String,
+    rate_card_version: String,
+    currency_profile: String,
+    settlement_status: String,
     project: String,
     namespace: String,
     query: String,
@@ -157,6 +224,94 @@ fn default_preliminary_min_baseline_tokens() -> u64 {
     100_000
 }
 
+fn default_metering_event_schema_version() -> String {
+    "token-budget-event-v2".to_string()
+}
+
+fn default_baseline_method_version() -> String {
+    "retrieval-baseline-v1".to_string()
+}
+
+fn default_quality_method_version() -> String {
+    "quality-gate-v1".to_string()
+}
+
+fn default_coverage_model_version() -> String {
+    "token-coverage-v1".to_string()
+}
+
+fn default_agent_cycle_model_version() -> String {
+    "agent-cycle-lower-bound-v1".to_string()
+}
+
+fn default_excluded_taxonomy_version() -> String {
+    "token-excluded-usage-v1".to_string()
+}
+
+fn default_dedup_contract_version() -> String {
+    "event-id-source-kind-v1".to_string()
+}
+
+fn default_event_time_policy_version() -> String {
+    "client-visible-ingest-v1".to_string()
+}
+
+fn default_billing_policy_version() -> String {
+    "report-only-v1".to_string()
+}
+
+fn default_billing_mode() -> String {
+    "report_only".to_string()
+}
+
+fn default_rate_card_version() -> String {
+    "unpriced-v1".to_string()
+}
+
+fn default_currency_profile() -> String {
+    "unpriced".to_string()
+}
+
+fn default_settlement_status() -> String {
+    "unsettled_report_only".to_string()
+}
+
+fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
+    json!({
+        "metering_event_schema_version": contract.metering_event_schema_version.clone(),
+        "baseline_method_version": contract.baseline_method_version.clone(),
+        "quality_method_version": contract.quality_method_version.clone(),
+        "coverage_model_version": contract.coverage_model_version.clone(),
+        "agent_cycle_model_version": contract.agent_cycle_model_version.clone(),
+        "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
+        "dedup_contract_version": contract.dedup_contract_version.clone(),
+        "event_time_policy_version": contract.event_time_policy_version.clone(),
+        "billing_policy_version": contract.billing_policy_version.clone(),
+        "billing_mode": contract.billing_mode.clone(),
+        "rate_card_version": contract.rate_card_version.clone(),
+        "currency_profile": contract.currency_profile.clone(),
+        "settlement_status": contract.settlement_status.clone(),
+        "note": "Сейчас tokenonomics работает в report-only режиме: metering и lower-bound semantics уже materialized, но money-facing billable settlement ещё не включён."
+    })
+}
+
+fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
+    json!({
+        "metering_event_schema_version": contract.metering_event_schema_version.clone(),
+        "baseline_method_version": contract.baseline_method_version.clone(),
+        "quality_method_version": contract.quality_method_version.clone(),
+        "coverage_model_version": contract.coverage_model_version.clone(),
+        "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
+        "dedup_contract_version": contract.dedup_contract_version.clone(),
+        "event_time_policy_version": contract.event_time_policy_version.clone(),
+        "billing_policy_version": contract.billing_policy_version.clone(),
+        "billing_mode": contract.billing_mode.clone(),
+        "rate_card_version": contract.rate_card_version.clone(),
+        "currency_profile": contract.currency_profile.clone(),
+        "settlement_status": contract.settlement_status.clone(),
+    })
+}
+
 pub async fn print_report(db: &Client, args: &ObserveTokenReportArgs) -> Result<()> {
     let repo_root = config::discover_repo_root(None)?;
     let config = load_config(&repo_root)?;
@@ -214,7 +369,9 @@ pub async fn reverify_legacy_live_events(
     let rows =
         postgres::list_observability_snapshots_by_kinds(db, &["token_budget_event"], limit).await?;
     let repo_root = config::discover_repo_root(None)?;
-    let measurement = load_config(&repo_root)?.measurement;
+    let config = load_config(&repo_root)?;
+    let measurement = config.measurement.clone();
+    let contract = config.contract.clone();
     let mut scanned = 0_u64;
     let mut eligible = 0_u64;
     let mut reverified = 0_u64;
@@ -230,7 +387,7 @@ pub async fn reverify_legacy_live_events(
         }
         eligible += 1;
 
-        match reverify_live_event_payload(cfg, db, &measurement, &row).await {
+        match reverify_live_event_payload(cfg, db, &measurement, &contract, &row).await {
             Ok(Some(payload)) => {
                 let node = &payload["token_budget_event"];
                 if node["quality"]["quality_ok"].as_bool().unwrap_or(false) {
@@ -305,6 +462,7 @@ pub async fn record_live_context_pack_event(db: &Client, payload: &Value) -> Res
     let mut event = build_event_payload(
         payload,
         &config.measurement,
+        &config.contract,
         "live_context_pack",
         "context_pack_token_budget",
     )?;
@@ -319,6 +477,7 @@ pub async fn record_verify_context_pack_event(db: &Client, payload: &Value) -> R
     let event = build_event_payload(
         payload,
         &config.measurement,
+        &config.contract,
         "verify_context_pack",
         "verify_context_pack",
     )?;
@@ -331,13 +490,21 @@ pub async fn record_verify_benchmark_event(db: &Client, benchmark_payload: &Valu
         .get("token_benchmark")
         .cloned()
         .ok_or_else(|| anyhow!("token benchmark payload missing token_benchmark root"))?;
+    let repo_root = config::discover_repo_root(None)?;
+    let contract = load_config(&repo_root)?.contract;
+    let timestamp_utc = current_epoch_ms()?;
     let event = json!({
         "token_budget_event": {
             "event_id": Uuid::new_v4(),
-            "timestamp_utc": current_epoch_ms()?,
+            "correlation_id": benchmark["context_pack_id"].clone(),
+            "timestamp_utc": timestamp_utc,
+            "occurred_at_epoch_ms": timestamp_utc,
+            "ingested_at_epoch_ms": timestamp_utc,
             "source_kind": "verify_token_benchmark",
             "traffic_class": "verify",
+            "measurement_scope": "retrieval_lower_bound",
             "payload_origin": "verify_token_benchmark",
+            "contract": token_contract_metadata_json(&contract),
             "project": benchmark["project"].clone(),
             "namespace": benchmark["namespace"].clone(),
             "query": benchmark["query"].clone(),
@@ -410,17 +577,28 @@ async fn collect_report(
         .last()
         .map(event_to_json)
         .unwrap_or_else(|| json!(null));
-    let source_breakdown = source_breakdown(&events, &config.measurement);
-    let query_slices = query_slice_breakdown(&events, &config.measurement);
-    let temperature_slices = temperature_slice_breakdown(&events, &config.measurement);
-    let current_session_summary =
-        summarize_events(&session_events, now_epoch_ms, &config.measurement);
+    let source_breakdown = source_breakdown(&events, &config.measurement, &config.contract);
+    let query_slices = query_slice_breakdown(&events, &config.measurement, &config.contract);
+    let temperature_slices =
+        temperature_slice_breakdown(&events, &config.measurement, &config.contract);
+    let current_session_summary = summarize_events(
+        &session_events,
+        now_epoch_ms,
+        &config.measurement,
+        &config.contract,
+    );
     let rolling_window_summary = if profile.rolling_window_hours.is_some() {
-        summarize_events(&rolling_window_events, now_epoch_ms, &config.measurement)
+        summarize_events(
+            &rolling_window_events,
+            now_epoch_ms,
+            &config.measurement,
+            &config.contract,
+        )
     } else {
         json!(null)
     };
-    let lifetime_summary = summarize_events(&events, now_epoch_ms, &config.measurement);
+    let lifetime_summary =
+        summarize_events(&events, now_epoch_ms, &config.measurement, &config.contract);
     let headline_summary = if profile.rolling_window_hours.is_some() {
         build_product_headline(
             &rolling_window_summary,
@@ -431,6 +609,7 @@ async fn collect_report(
     };
     let agent_cycle_economics = build_agent_cycle_economics(
         &config.measurement,
+        &config.contract,
         now_epoch_ms,
         &session_events,
         profile
@@ -451,6 +630,7 @@ async fn collect_report(
                 "preliminary_min_events": config.measurement.preliminary_min_events,
                 "preliminary_min_baseline_tokens": config.measurement.preliminary_min_baseline_tokens,
             },
+            "contract": report_contract_json(&config.contract),
             "filters": {
                 "include_verify_events": include_verify_events,
             },
@@ -784,6 +964,11 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("{}-{}", row.snapshot_kind, row.created_at_epoch_ms));
+    let correlation_id = node["correlation_id"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .or_else(|| node["context_pack_id"].as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| event_id.clone());
     let session_id = node["session_id"]
         .as_str()
         .map(ToOwned::to_owned)
@@ -795,6 +980,64 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
     let timestamp_utc = node["timestamp_utc"]
         .as_i64()
         .unwrap_or(row.created_at_epoch_ms);
+    let occurred_at_epoch_ms = node["occurred_at_epoch_ms"]
+        .as_i64()
+        .unwrap_or(timestamp_utc);
+    let ingested_at_epoch_ms = node["ingested_at_epoch_ms"]
+        .as_i64()
+        .unwrap_or(row.created_at_epoch_ms);
+    let measurement_scope = node["measurement_scope"]
+        .as_str()
+        .unwrap_or("retrieval_lower_bound")
+        .to_string();
+    let metering_event_schema_version = node["contract"]["metering_event_schema_version"]
+        .as_str()
+        .unwrap_or("token-budget-event-v1")
+        .to_string();
+    let baseline_method_version = node["contract"]["baseline_method_version"]
+        .as_str()
+        .unwrap_or("retrieval-baseline-v0")
+        .to_string();
+    let quality_method_version = node["contract"]["quality_method_version"]
+        .as_str()
+        .unwrap_or("quality-gate-v0")
+        .to_string();
+    let coverage_model_version = node["contract"]["coverage_model_version"]
+        .as_str()
+        .unwrap_or("token-coverage-v0")
+        .to_string();
+    let excluded_taxonomy_version = node["contract"]["excluded_taxonomy_version"]
+        .as_str()
+        .unwrap_or("token-excluded-usage-v0")
+        .to_string();
+    let dedup_contract_version = node["contract"]["dedup_contract_version"]
+        .as_str()
+        .unwrap_or("event-id-source-kind-v0")
+        .to_string();
+    let event_time_policy_version = node["contract"]["event_time_policy_version"]
+        .as_str()
+        .unwrap_or("client-visible-ingest-v0")
+        .to_string();
+    let billing_policy_version = node["contract"]["billing_policy_version"]
+        .as_str()
+        .unwrap_or("report-only-v0")
+        .to_string();
+    let billing_mode = node["contract"]["billing_mode"]
+        .as_str()
+        .unwrap_or("report_only")
+        .to_string();
+    let rate_card_version = node["contract"]["rate_card_version"]
+        .as_str()
+        .unwrap_or("unpriced-v0")
+        .to_string();
+    let currency_profile = node["contract"]["currency_profile"]
+        .as_str()
+        .unwrap_or("unpriced")
+        .to_string();
+    let settlement_status = node["contract"]["settlement_status"]
+        .as_str()
+        .unwrap_or("unsettled_report_only")
+        .to_string();
     let saved_tokens = node["savings"]["saved_tokens"].as_u64().unwrap_or(0);
     let naive_tokens = node["naive_scope"]["tokens"]
         .as_u64()
@@ -864,12 +1107,28 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
     Ok(Some(TokenBudgetEvent {
         created_at_epoch_ms: row.created_at_epoch_ms,
         event_id,
+        correlation_id,
         session_id,
         rolling_window_profile,
         timestamp_utc,
+        occurred_at_epoch_ms,
+        ingested_at_epoch_ms,
         snapshot_kind: row.snapshot_kind.clone(),
         source_kind,
         traffic_class,
+        measurement_scope,
+        metering_event_schema_version,
+        baseline_method_version,
+        quality_method_version,
+        coverage_model_version,
+        excluded_taxonomy_version,
+        dedup_contract_version,
+        event_time_policy_version,
+        billing_policy_version,
+        billing_mode,
+        rate_card_version,
+        currency_profile,
+        settlement_status,
         project,
         namespace,
         query,
@@ -949,6 +1208,7 @@ async fn reverify_live_event_payload(
     cfg: &AppConfig,
     db: &mut Client,
     measurement: &MeasurementConfig,
+    contract: &TokenBudgetContractConfig,
     row: &ObservabilitySnapshotRecord,
 ) -> Result<Option<Value>> {
     let node = &row.payload["token_budget_event"];
@@ -990,6 +1250,7 @@ async fn reverify_live_event_payload(
     let mut rebuilt = build_event_payload(
         &result.payload,
         measurement,
+        contract,
         source_kind,
         "reverified_live_context_pack",
     )?;
@@ -1423,6 +1684,7 @@ fn summarize_events(
     events: &[TokenBudgetEvent],
     now_epoch_ms: i64,
     measurement: &MeasurementConfig,
+    contract: &TokenBudgetContractConfig,
 ) -> Value {
     if events.is_empty() {
         return json!({
@@ -1462,6 +1724,8 @@ fn summarize_events(
             "started_at_epoch_ms": Value::Null,
             "ended_at_epoch_ms": Value::Null,
             "age_ms_since_latest": Value::Null,
+            "coverage": build_coverage_summary(contract, 0, 0, 0, 0, 0),
+            "excluded_breakdown": build_excluded_breakdown(contract, &[]),
         });
     }
 
@@ -1638,6 +1902,15 @@ fn summarize_events(
 
     let preliminary = events.len() < measurement.preliminary_min_events as usize
         && total_naive_tokens < measurement.preliminary_min_baseline_tokens;
+    let coverage = build_coverage_summary(
+        contract,
+        events.len() as u64,
+        verified_events.len() as u64,
+        excluded_events.len() as u64,
+        total_naive_tokens,
+        verified_baseline_tokens,
+    );
+    let excluded_breakdown = build_excluded_breakdown(contract, &excluded_events);
 
     json!({
         "events_total": events.len(),
@@ -1690,7 +1963,120 @@ fn summarize_events(
         "started_at_epoch_ms": started_at_epoch_ms,
         "ended_at_epoch_ms": ended_at_epoch_ms,
         "age_ms_since_latest": now_epoch_ms.saturating_sub(ended_at_epoch_ms),
+        "coverage": coverage,
+        "excluded_breakdown": excluded_breakdown,
     })
+}
+
+fn build_coverage_summary(
+    contract: &TokenBudgetContractConfig,
+    measured_events: u64,
+    included_events: u64,
+    excluded_events: u64,
+    measured_baseline_tokens: u64,
+    included_baseline_tokens: u64,
+) -> Value {
+    let excluded_baseline_tokens =
+        measured_baseline_tokens.saturating_sub(included_baseline_tokens);
+    let event_coverage_pct = percent_share(included_events, measured_events);
+    let baseline_token_coverage_pct =
+        percent_share(included_baseline_tokens, measured_baseline_tokens);
+    let completeness_state = if measured_events == 0 {
+        "empty"
+    } else if included_events == 0 {
+        "no_confirmed_usage"
+    } else if included_events == measured_events {
+        "fully_confirmed"
+    } else {
+        "partially_confirmed"
+    };
+    json!({
+        "model_version": contract.coverage_model_version.clone(),
+        "completeness_state": completeness_state,
+        "measured_events": measured_events,
+        "included_events": included_events,
+        "excluded_events": excluded_events,
+        "event_coverage_pct": event_coverage_pct,
+        "measured_baseline_tokens": measured_baseline_tokens,
+        "included_baseline_tokens": included_baseline_tokens,
+        "excluded_baseline_tokens": excluded_baseline_tokens,
+        "baseline_token_coverage_pct": baseline_token_coverage_pct,
+    })
+}
+
+fn build_excluded_breakdown(
+    contract: &TokenBudgetContractConfig,
+    excluded_events: &[&TokenBudgetEvent],
+) -> Value {
+    let mut grouped = BTreeMap::<String, (u64, u64, u64, u64, i64)>::new();
+    for event in excluded_events {
+        let code = excluded_event_code(event).to_string();
+        let entry = grouped.entry(code).or_insert((0, 0, 0, 0, 0));
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 = entry.1.saturating_add(event.naive_tokens);
+        entry.2 = entry.2.saturating_add(event.context_tokens);
+        entry.3 = entry.3.saturating_add(event.recovery_tokens);
+        entry.4 = entry.4.saturating_add(event.effective_saved_tokens);
+    }
+    let items = grouped
+        .into_iter()
+        .map(
+            |(
+                code,
+                (
+                    events_count,
+                    baseline_tokens,
+                    delivered_tokens,
+                    recovery_tokens,
+                    effective_saved_tokens,
+                ),
+            )| {
+                json!({
+                    "code": code,
+                    "label": excluded_event_label(&code),
+                    "events_count": events_count,
+                    "baseline_tokens": baseline_tokens,
+                    "delivered_tokens": delivered_tokens,
+                    "recovery_tokens": recovery_tokens,
+                    "effective_saved_tokens": effective_saved_tokens,
+                })
+            },
+        )
+        .collect::<Vec<_>>();
+    json!({
+        "model_version": contract.excluded_taxonomy_version.clone(),
+        "items": items,
+    })
+}
+
+fn excluded_event_code(event: &TokenBudgetEvent) -> &'static str {
+    match event.traffic_class.as_str() {
+        "verify" => "synthetic_verify",
+        "proof" => "synthetic_proof",
+        "benchmark" => "synthetic_benchmark",
+        "live" => {
+            if event.quality_method == "legacy_unverified" {
+                "legacy_unverified"
+            } else if event.needed_followup && event.resolved_by_event_id.is_none() {
+                "awaiting_followup_reconciliation"
+            } else {
+                "quality_gate_failed"
+            }
+        }
+        _ => "non_live_other",
+    }
+}
+
+fn excluded_event_label(code: &str) -> &'static str {
+    match code {
+        "synthetic_verify" => "engineering verify-событие",
+        "synthetic_proof" => "engineering proof-событие",
+        "synthetic_benchmark" => "benchmark-событие",
+        "legacy_unverified" => "старое live-событие без quality-блока",
+        "awaiting_followup_reconciliation" => "ожидает полезного follow-up или подтверждения",
+        "quality_gate_failed" => "не прошло quality gate",
+        _ => "другое исключённое событие",
+    }
 }
 
 fn build_product_headline(summary: &Value, scope_label: &str) -> Value {
@@ -1769,6 +2155,7 @@ fn build_product_headline(summary: &Value, scope_label: &str) -> Value {
 
 fn build_agent_cycle_economics(
     measurement: &MeasurementConfig,
+    contract: &TokenBudgetContractConfig,
     now_epoch_ms: i64,
     current_session_events: &[TokenBudgetEvent],
     rolling_window_events: Option<&[TokenBudgetEvent]>,
@@ -1776,11 +2163,16 @@ fn build_agent_cycle_economics(
     rolling_window_label: &str,
 ) -> Value {
     json!({
-        "model_version": AGENT_CYCLE_MODEL_VERSION,
+        "model_version": contract.agent_cycle_model_version.clone(),
         "status": "partial_lower_bound",
         "contract": {
             "scope": "lower_bound_whole_agent_cycle",
             "status": "partial_lower_bound",
+            "billing_mode": contract.billing_mode.clone(),
+            "billing_policy_version": contract.billing_policy_version.clone(),
+            "rate_card_version": contract.rate_card_version.clone(),
+            "currency_profile": contract.currency_profile.clone(),
+            "settlement_status": contract.settlement_status.clone(),
             "summary": "Это не весь токеновый бюджет клиента, а подтверждённая нижняя граница полного агентного цикла.",
             "measured_components": [
                 {
@@ -1810,6 +2202,20 @@ fn build_agent_cycle_economics(
                     "label": "Восстановление continuity, если оно прошло вне token-ledger retrieval-событий"
                 }
             ],
+            "reporting_layers": {
+                "billable": {
+                    "status": "disabled_report_only",
+                    "note": "Пока billing policy работает только в report-only режиме, подтверждённая нижняя граница не используется как money-facing начисление."
+                },
+                "measured_non_billable": {
+                    "status": "active",
+                    "note": "Подтверждённые live lower-bound измерения уже видны и пригодны для анализа, но ещё не являются contractual billing amount."
+                },
+                "unmeasured": {
+                    "status": "active",
+                    "note": "Полный agent-cycle ещё не покрыт: missing components перечислены отдельно и не маскируются под измеренную экономию."
+                }
+            },
             "note": "Линия 'без Amai' здесь пока означает измеренный baseline retrieval-части цикла, а линия 'с Amai' — retrieval плюс уже зафиксированные доуточнения. Это честная нижняя граница, а не полная стоимость всей агентной сессии."
         },
         "chart_contract": {
@@ -1828,6 +2234,7 @@ fn build_agent_cycle_economics(
         },
         "current_session": build_agent_cycle_scope(
             measurement,
+            contract,
             now_epoch_ms,
             "current_session",
             "текущая сессия",
@@ -1838,6 +2245,7 @@ fn build_agent_cycle_economics(
             .map(|events| {
                 build_agent_cycle_scope(
                     measurement,
+                    contract,
                     now_epoch_ms,
                     "rolling_window",
                     &format!("окно {}", rolling_window_label),
@@ -1848,6 +2256,7 @@ fn build_agent_cycle_economics(
             .unwrap_or(Value::Null),
         "lifetime": build_agent_cycle_scope(
             measurement,
+            contract,
             now_epoch_ms,
             "lifetime",
             "всё время записи",
@@ -1859,6 +2268,7 @@ fn build_agent_cycle_economics(
 
 fn build_agent_cycle_scope(
     measurement: &MeasurementConfig,
+    contract: &TokenBudgetContractConfig,
     now_epoch_ms: i64,
     scope_code: &str,
     scope_label: &str,
@@ -1870,7 +2280,7 @@ fn build_agent_cycle_scope(
         .filter(|event| event.traffic_class == "live")
         .cloned()
         .collect::<Vec<_>>();
-    let summary = summarize_events(&live_events, now_epoch_ms, measurement);
+    let summary = summarize_events(&live_events, now_epoch_ms, measurement, contract);
     let with_amai_measured_tokens = summary["total_context_tokens"]
         .as_u64()
         .unwrap_or(0)
@@ -1890,6 +2300,8 @@ fn build_agent_cycle_scope(
         "events_total": summary["events_total"].as_u64().unwrap_or(0),
         "counted_events": summary["counted_events"].as_u64().unwrap_or(0),
         "excluded_events_count": summary["excluded_events_count"].as_u64().unwrap_or(0),
+        "coverage": summary["coverage"].clone(),
+        "excluded_breakdown": summary["excluded_breakdown"].clone(),
         "verified_share_pct": verified_share_pct,
         "without_amai_measured_tokens": summary["total_naive_tokens"].as_u64().unwrap_or(0),
         "with_amai_measured_tokens": with_amai_measured_tokens,
@@ -1982,7 +2394,11 @@ fn percent_share(part: u64, total: u64) -> f64 {
     }
 }
 
-fn source_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementConfig) -> Value {
+fn source_breakdown(
+    events: &[TokenBudgetEvent],
+    measurement: &MeasurementConfig,
+    contract: &TokenBudgetContractConfig,
+) -> Value {
     let mut grouped = BTreeMap::<String, Vec<TokenBudgetEvent>>::new();
     for event in events {
         grouped
@@ -2002,6 +2418,7 @@ fn source_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementConfig
                             .map(|item| item.created_at_epoch_ms)
                             .unwrap_or_default(),
                         measurement,
+                        contract,
                     ),
                 })
             })
@@ -2009,7 +2426,11 @@ fn source_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementConfig
     )
 }
 
-fn query_slice_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementConfig) -> Value {
+fn query_slice_breakdown(
+    events: &[TokenBudgetEvent],
+    measurement: &MeasurementConfig,
+    contract: &TokenBudgetContractConfig,
+) -> Value {
     let mut grouped = BTreeMap::<String, Vec<TokenBudgetEvent>>::new();
     for event in events {
         grouped
@@ -2028,6 +2449,7 @@ fn query_slice_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementC
                         .map(|item| item.created_at_epoch_ms)
                         .unwrap_or_default(),
                     measurement,
+                    contract,
                 );
                 json!({
                     "query_type": query_type,
@@ -2057,6 +2479,7 @@ fn query_slice_breakdown(events: &[TokenBudgetEvent], measurement: &MeasurementC
 fn temperature_slice_breakdown(
     events: &[TokenBudgetEvent],
     measurement: &MeasurementConfig,
+    contract: &TokenBudgetContractConfig,
 ) -> Value {
     let mut grouped = BTreeMap::<String, Vec<TokenBudgetEvent>>::new();
     for event in events {
@@ -2076,6 +2499,7 @@ fn temperature_slice_breakdown(
                         .map(|item| item.created_at_epoch_ms)
                         .unwrap_or_default(),
                     measurement,
+                    contract,
                 );
                 json!({
                     "state": state,
@@ -2197,6 +2621,10 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
         Value::String(event.event_id.clone()),
     );
     object.insert(
+        "correlation_id".to_string(),
+        Value::String(event.correlation_id.clone()),
+    );
+    object.insert(
         "session_id".to_string(),
         Value::String(event.session_id.clone()),
     );
@@ -2209,6 +2637,14 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
         Value::from(event.timestamp_utc),
     );
     object.insert(
+        "occurred_at_epoch_ms".to_string(),
+        Value::from(event.occurred_at_epoch_ms),
+    );
+    object.insert(
+        "ingested_at_epoch_ms".to_string(),
+        Value::from(event.ingested_at_epoch_ms),
+    );
+    object.insert(
         "snapshot_kind".to_string(),
         Value::String(event.snapshot_kind.clone()),
     );
@@ -2219,6 +2655,27 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
     object.insert(
         "traffic_class".to_string(),
         Value::String(event.traffic_class.clone()),
+    );
+    object.insert(
+        "measurement_scope".to_string(),
+        Value::String(event.measurement_scope.clone()),
+    );
+    object.insert(
+        "contract".to_string(),
+        json!({
+            "metering_event_schema_version": event.metering_event_schema_version.clone(),
+            "baseline_method_version": event.baseline_method_version.clone(),
+            "quality_method_version": event.quality_method_version.clone(),
+            "coverage_model_version": event.coverage_model_version.clone(),
+            "excluded_taxonomy_version": event.excluded_taxonomy_version.clone(),
+            "dedup_contract_version": event.dedup_contract_version.clone(),
+            "event_time_policy_version": event.event_time_policy_version.clone(),
+            "billing_policy_version": event.billing_policy_version.clone(),
+            "billing_mode": event.billing_mode.clone(),
+            "rate_card_version": event.rate_card_version.clone(),
+            "currency_profile": event.currency_profile.clone(),
+            "settlement_status": event.settlement_status.clone(),
+        }),
     );
     object.insert("project".to_string(), Value::String(event.project.clone()));
     object.insert(
@@ -2394,6 +2851,7 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
 fn build_event_payload(
     payload: &Value,
     measurement: &MeasurementConfig,
+    contract: &TokenBudgetContractConfig,
     source_kind: &str,
     payload_origin: &str,
 ) -> Result<Value> {
@@ -2444,16 +2902,22 @@ fn build_event_payload(
     let context_pack_id = payload["context_pack_id"].as_str().map(ToOwned::to_owned);
     let event_id = Uuid::new_v4().to_string();
     let timestamp_utc = current_epoch_ms()?;
+    let correlation_id = context_pack_id.clone().unwrap_or_else(|| event_id.clone());
     let latency_ms = total_latency_ms(payload);
 
     Ok(json!({
         "token_budget_event": {
             "event_id": event_id,
+            "correlation_id": correlation_id,
             "context_pack_id": context_pack_id,
             "timestamp_utc": timestamp_utc,
+            "occurred_at_epoch_ms": timestamp_utc,
+            "ingested_at_epoch_ms": timestamp_utc,
             "source_kind": source_kind,
             "traffic_class": traffic_class,
+            "measurement_scope": "retrieval_lower_bound",
             "payload_origin": payload_origin,
+            "contract": token_contract_metadata_json(contract),
             "project": payload["project"]["code"].clone(),
             "project_code": payload["project"]["code"].clone(),
             "namespace": payload["namespace"]["code"].clone(),
@@ -3469,16 +3933,109 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MeasurementConfig, NaiveScope, TokenBudgetEvent, apply_reverification_metadata,
-        build_event_payload, build_product_headline, derive_baseline_strategy,
-        derive_quality_verdict, derive_query_type, derive_traffic_class, event_to_json,
-        followup_queries_related, include_traffic_class_in_report, latency_slice_breakdown,
-        needs_live_reverification, parse_snapshot_event, reconcile_followup_recovery,
-        repair_legacy_token_event_payload, summarize_events,
+        MeasurementConfig, NaiveScope, TokenBudgetContractConfig, TokenBudgetEvent,
+        apply_reverification_metadata, build_event_payload, build_product_headline,
+        default_baseline_method_version, default_billing_mode, default_billing_policy_version,
+        default_coverage_model_version, default_currency_profile, default_dedup_contract_version,
+        default_event_time_policy_version, default_excluded_taxonomy_version,
+        default_quality_method_version, default_rate_card_version, default_settlement_status,
+        derive_baseline_strategy, derive_quality_verdict, derive_query_type, derive_traffic_class,
+        event_to_json, followup_queries_related, include_traffic_class_in_report,
+        latency_slice_breakdown, needs_live_reverification, parse_snapshot_event,
+        reconcile_followup_recovery, repair_legacy_token_event_payload, summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
     use uuid::Uuid;
+
+    fn contract_fixture() -> TokenBudgetContractConfig {
+        TokenBudgetContractConfig::default()
+    }
+
+    fn measurement_fixture() -> MeasurementConfig {
+        MeasurementConfig {
+            tokenizer: "o200k_base".to_string(),
+            naive_limit_files: 5,
+            naive_max_bytes_per_file: 16384,
+            include_verify_events_by_default: false,
+            preliminary_min_events: 50,
+            preliminary_min_baseline_tokens: 100_000,
+        }
+    }
+
+    macro_rules! token_event {
+        ($($field:ident : $value:expr,)+) => {
+            {
+                let mut event = TokenBudgetEvent {
+                    created_at_epoch_ms: 0,
+                    event_id: "event-default".to_string(),
+                    correlation_id: "event-default".to_string(),
+                    session_id: "session-default".to_string(),
+                    rolling_window_profile: "codex_5h".to_string(),
+                    timestamp_utc: 0,
+                    occurred_at_epoch_ms: 0,
+                    ingested_at_epoch_ms: 0,
+                    snapshot_kind: "token_budget_event".to_string(),
+                    source_kind: "live_context_pack".to_string(),
+                    traffic_class: "live".to_string(),
+                    measurement_scope: "retrieval_lower_bound".to_string(),
+                    metering_event_schema_version: "token-budget-event-v2".to_string(),
+                    baseline_method_version: default_baseline_method_version(),
+                    quality_method_version: default_quality_method_version(),
+                    coverage_model_version: default_coverage_model_version(),
+                    excluded_taxonomy_version: default_excluded_taxonomy_version(),
+                    dedup_contract_version: default_dedup_contract_version(),
+                    event_time_policy_version: default_event_time_policy_version(),
+                    billing_policy_version: default_billing_policy_version(),
+                    billing_mode: default_billing_mode(),
+                    rate_card_version: default_rate_card_version(),
+                    currency_profile: default_currency_profile(),
+                    settlement_status: default_settlement_status(),
+                    project: "art".to_string(),
+                    namespace: "continuity".to_string(),
+                    query: "token report".to_string(),
+                    query_hash: "hash".to_string(),
+                    query_type: "code_lookup".to_string(),
+                    target_kind: "file".to_string(),
+                    baseline_hit_target: true,
+                    amai_hit_target: true,
+                    cold_warm_state: "warm".to_string(),
+                    baseline_strategy: "naive_top_files".to_string(),
+                    retrieval_mode: Some("local_strict".to_string()),
+                    tokenizer: "o200k_base".to_string(),
+                    latency_ms: 0.0,
+                    saved_tokens: 0,
+                    naive_tokens: 0,
+                    context_tokens: 0,
+                    recovery_tokens: 0,
+                    effective_saved_tokens: 0,
+                    savings_factor: 0.0,
+                    savings_percent: 0.0,
+                    effective_savings_percent: 0.0,
+                    quality_ok: true,
+                    quality_score: 1.0,
+                    quality_method: "retrieval_parity".to_string(),
+                    quality_tier: "retrieval".to_string(),
+                    head_hit_target: true,
+                    needed_followup: false,
+                    followup_count: 0,
+                    followup_of_event_id: None,
+                    resolved_by_event_id: None,
+                    fallback_triggered: false,
+                    fallback_count: 0,
+                    document_hits: 1,
+                    symbol_hits_count: 0,
+                    file_hits: 1,
+                    sources_count: 1,
+                    chunks_count: 1,
+                    pack_token_count: 0,
+                    deduped_token_count: 0,
+                };
+                $(event.$field = $value;)+
+                event
+            }
+        };
+    }
 
     #[test]
     fn traffic_class_comes_from_source_kind_prefix() {
@@ -3634,9 +4191,11 @@ mod tests {
             }
         });
 
+        let contract = contract_fixture();
         let first = build_event_payload(
             &payload,
             &measurement,
+            &contract,
             "live_context_pack",
             "context_pack_token_budget",
         )
@@ -3644,6 +4203,7 @@ mod tests {
         let second = build_event_payload(
             &payload,
             &measurement,
+            &contract,
             "live_context_pack",
             "context_pack_token_budget",
         )
@@ -3661,18 +4221,82 @@ mod tests {
     }
 
     #[test]
+    fn build_event_payload_stamps_contract_metadata_and_correlation_id() {
+        let measurement = measurement_fixture();
+        let payload = json!({
+            "context_pack_id": "ctx-pack-1",
+            "timestamp_utc": 12345,
+            "query": "token report",
+            "query_hash": "hash-1",
+            "query_type": "code_lookup",
+            "target_kind": "file",
+            "baseline_strategy": "naive_top_files",
+            "baseline_tokens": 1000,
+            "delivered_tokens": 120,
+            "saved_tokens": 880,
+            "gross_savings_pct": 88.0,
+            "recovery_tokens": 20,
+            "effective_saved_tokens": 860,
+            "effective_savings_pct": 86.0,
+            "quality_ok": true,
+            "quality_score": 1.0,
+            "quality_method": "retrieval_parity",
+            "quality_tier": "retrieval",
+            "head_hit_target": true,
+            "fallback_triggered": false,
+            "fallback_count": 0,
+            "latency_ms": 4.0,
+            "sources_count": 1,
+            "chunks_count": 1,
+            "file_hits": 1,
+            "document_hits": 1,
+            "symbol_hits": 0,
+            "pack_token_count": 120,
+            "deduped_token_count": 120,
+            "scope_snapshot": {
+                "project_code": "art",
+                "namespace_code": "continuity"
+            }
+        });
+
+        let event = build_event_payload(
+            &payload,
+            &measurement,
+            &contract_fixture(),
+            "live_context_pack",
+            "context_pack_token_budget",
+        )
+        .expect("event payload");
+
+        let token_event = &event["token_budget_event"];
+        assert_eq!(token_event["correlation_id"], "ctx-pack-1");
+        assert_eq!(token_event["measurement_scope"], "retrieval_lower_bound");
+        assert_eq!(
+            token_event["contract"]["metering_event_schema_version"],
+            "token-budget-event-v2"
+        );
+        assert_eq!(
+            token_event["contract"]["billing_policy_version"],
+            "report-only-v1"
+        );
+        assert_eq!(token_event["contract"]["billing_mode"], "report_only");
+        assert_eq!(
+            token_event["contract"]["settlement_status"],
+            "unsettled_report_only"
+        );
+    }
+
+    #[test]
     fn event_json_exposes_canonical_token_ledger_aliases() {
-        let event = TokenBudgetEvent {
+        let event = token_event! {
             created_at_epoch_ms: 10,
             event_id: "event-1".to_string(),
+            correlation_id: "ctx-pack-1".to_string(),
             session_id: "session-1".to_string(),
             rolling_window_profile: "codex_5h".to_string(),
             timestamp_utc: 10,
-            snapshot_kind: "token_budget_event".to_string(),
-            source_kind: "live_context_pack".to_string(),
-            traffic_class: "live".to_string(),
-            project: "art".to_string(),
-            namespace: "continuity".to_string(),
+            occurred_at_epoch_ms: 10,
+            ingested_at_epoch_ms: 10,
             query: "token report".to_string(),
             query_hash: "hash".to_string(),
             query_type: "architecture_question".to_string(),
@@ -3855,17 +4479,15 @@ mod tests {
             preliminary_min_baseline_tokens: 100_000,
         };
         let events = vec![
-            TokenBudgetEvent {
+            token_event! {
                 created_at_epoch_ms: 10,
                 event_id: "event-1".to_string(),
+                correlation_id: "event-1".to_string(),
                 session_id: "session-1".to_string(),
                 rolling_window_profile: "codex_5h".to_string(),
                 timestamp_utc: 10,
-                snapshot_kind: "token_budget_event".to_string(),
-                source_kind: "live_context_pack".to_string(),
-                traffic_class: "live".to_string(),
-                project: "art".to_string(),
-                namespace: "continuity".to_string(),
+                occurred_at_epoch_ms: 10,
+                ingested_at_epoch_ms: 10,
                 query: "first".to_string(),
                 query_hash: "hash-1".to_string(),
                 query_type: "code_lookup".to_string(),
@@ -3904,17 +4526,15 @@ mod tests {
                 pack_token_count: 40,
                 deduped_token_count: 40,
             },
-            TokenBudgetEvent {
+            token_event! {
                 created_at_epoch_ms: 20,
                 event_id: "event-2".to_string(),
+                correlation_id: "event-2".to_string(),
                 session_id: "session-1".to_string(),
                 rolling_window_profile: "codex_5h".to_string(),
                 timestamp_utc: 20,
-                snapshot_kind: "token_budget_event".to_string(),
-                source_kind: "live_context_pack".to_string(),
-                traffic_class: "live".to_string(),
-                project: "art".to_string(),
-                namespace: "continuity".to_string(),
+                occurred_at_epoch_ms: 20,
+                ingested_at_epoch_ms: 20,
                 query: "second".to_string(),
                 query_hash: "hash-2".to_string(),
                 query_type: "code_lookup".to_string(),
@@ -3957,6 +4577,7 @@ mod tests {
 
         let economics = super::build_agent_cycle_economics(
             &measurement,
+            &contract_fixture(),
             25,
             &events,
             Some(&events),
@@ -3964,7 +4585,7 @@ mod tests {
             "Обычная рабочая машина",
         );
 
-        assert_eq!(economics["model_version"], super::AGENT_CYCLE_MODEL_VERSION);
+        assert_eq!(economics["model_version"], "agent-cycle-lower-bound-v1");
         assert_eq!(economics["status"], "partial_lower_bound");
         assert_eq!(
             economics["current_session"]["without_amai_measured_tokens"],
@@ -3994,6 +4615,14 @@ mod tests {
                 .as_array()
                 .map(Vec::len),
             Some(1)
+        );
+        assert_eq!(
+            economics["contract"]["reporting_layers"]["billable"]["status"],
+            "disabled_report_only"
+        );
+        assert_eq!(
+            economics["current_session"]["coverage"]["completeness_state"],
+            "partially_confirmed"
         );
     }
 
@@ -4142,17 +4771,15 @@ mod tests {
             preliminary_min_baseline_tokens: 100_000,
         };
         let summary = summarize_events(
-            &[TokenBudgetEvent {
+            &[token_event! {
                 created_at_epoch_ms: 10,
                 event_id: "event-1".to_string(),
+                correlation_id: "event-1".to_string(),
                 session_id: "session-1".to_string(),
                 rolling_window_profile: "codex_5h".to_string(),
                 timestamp_utc: 10,
-                snapshot_kind: "token_budget_event".to_string(),
-                source_kind: "live_context_pack".to_string(),
-                traffic_class: "live".to_string(),
-                project: "art".to_string(),
-                namespace: "continuity".to_string(),
+                occurred_at_epoch_ms: 10,
+                ingested_at_epoch_ms: 10,
                 query: "explain token savings".to_string(),
                 query_hash: "hash".to_string(),
                 query_type: "architecture_question".to_string(),
@@ -4193,6 +4820,7 @@ mod tests {
             }],
             20,
             &measurement,
+            &contract_fixture(),
         );
 
         assert_eq!(summary["preliminary"], false);
@@ -4213,17 +4841,15 @@ mod tests {
             preliminary_min_baseline_tokens: 100_000,
         };
         let events = vec![
-            TokenBudgetEvent {
+            token_event! {
                 created_at_epoch_ms: 10,
                 event_id: "event-1".to_string(),
+                correlation_id: "event-1".to_string(),
                 session_id: "session-1".to_string(),
                 rolling_window_profile: "codex_5h".to_string(),
                 timestamp_utc: 10,
-                snapshot_kind: "token_budget_event".to_string(),
-                source_kind: "live_context_pack".to_string(),
-                traffic_class: "live".to_string(),
-                project: "art".to_string(),
-                namespace: "continuity".to_string(),
+                occurred_at_epoch_ms: 10,
+                ingested_at_epoch_ms: 10,
                 query: "first".to_string(),
                 query_hash: "hash-1".to_string(),
                 query_type: "code_lookup".to_string(),
@@ -4262,17 +4888,15 @@ mod tests {
                 pack_token_count: 10,
                 deduped_token_count: 10,
             },
-            TokenBudgetEvent {
+            token_event! {
                 created_at_epoch_ms: 20,
                 event_id: "event-2".to_string(),
+                correlation_id: "event-2".to_string(),
                 session_id: "session-1".to_string(),
                 rolling_window_profile: "codex_5h".to_string(),
                 timestamp_utc: 20,
-                snapshot_kind: "token_budget_event".to_string(),
-                source_kind: "live_context_pack".to_string(),
-                traffic_class: "live".to_string(),
-                project: "art".to_string(),
-                namespace: "continuity".to_string(),
+                occurred_at_epoch_ms: 20,
+                ingested_at_epoch_ms: 20,
                 query: "second".to_string(),
                 query_hash: "hash-2".to_string(),
                 query_type: "code_lookup".to_string(),
@@ -4313,7 +4937,7 @@ mod tests {
             },
         ];
 
-        let summary = summarize_events(&events, 20, &measurement);
+        let summary = summarize_events(&events, 20, &measurement, &contract_fixture());
         assert_eq!(summary["sample_count"], 2);
         assert_eq!(summary["current_latency_ms"], 5.0);
         assert_eq!(summary["p50_latency_ms"], 11.0);
@@ -4323,19 +4947,96 @@ mod tests {
     }
 
     #[test]
-    fn latency_slice_breakdown_normalizes_hot_cold_and_mixed() {
+    fn summarize_events_exposes_coverage_and_excluded_taxonomy() {
+        let measurement = measurement_fixture();
         let events = vec![
-            TokenBudgetEvent {
+            token_event! {
                 created_at_epoch_ms: 10,
                 event_id: "event-1".to_string(),
+                correlation_id: "event-1".to_string(),
                 session_id: "session-1".to_string(),
                 rolling_window_profile: "codex_5h".to_string(),
                 timestamp_utc: 10,
-                snapshot_kind: "token_budget_event".to_string(),
-                source_kind: "live_context_pack".to_string(),
-                traffic_class: "live".to_string(),
-                project: "art".to_string(),
-                namespace: "continuity".to_string(),
+                occurred_at_epoch_ms: 10,
+                ingested_at_epoch_ms: 10,
+                query: "verified".to_string(),
+                query_hash: "hash-1".to_string(),
+                query_type: "code_lookup".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                naive_tokens: 1000,
+                context_tokens: 100,
+                saved_tokens: 900,
+                effective_saved_tokens: 900,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_method: "retrieval_parity".to_string(),
+            },
+            token_event! {
+                created_at_epoch_ms: 20,
+                event_id: "event-2".to_string(),
+                correlation_id: "event-2".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 20,
+                occurred_at_epoch_ms: 20,
+                ingested_at_epoch_ms: 20,
+                query: "excluded".to_string(),
+                query_hash: "hash-2".to_string(),
+                query_type: "architecture_question".to_string(),
+                baseline_strategy: "semantic_top_k".to_string(),
+                naive_tokens: 500,
+                context_tokens: 200,
+                saved_tokens: 300,
+                effective_saved_tokens: 300,
+                savings_percent: 60.0,
+                effective_savings_percent: 60.0,
+                quality_ok: false,
+                quality_method: "retrieval_parity".to_string(),
+            },
+        ];
+
+        let summary = summarize_events(&events, 20, &measurement, &contract_fixture());
+        assert_eq!(summary["coverage"]["model_version"], "token-coverage-v1");
+        assert_eq!(summary["coverage"]["measured_events"], 2);
+        assert_eq!(summary["coverage"]["included_events"], 1);
+        assert_eq!(summary["coverage"]["excluded_events"], 1);
+        assert_eq!(
+            summary["coverage"]["completeness_state"],
+            "partially_confirmed"
+        );
+        assert_eq!(summary["coverage"]["event_coverage_pct"], 50.0);
+        let baseline_token_coverage_pct = summary["coverage"]["baseline_token_coverage_pct"]
+            .as_f64()
+            .expect("baseline token coverage pct");
+        assert!((baseline_token_coverage_pct - (1000.0 / 1500.0 * 100.0)).abs() < 1e-9);
+
+        let excluded_items = summary["excluded_breakdown"]["items"]
+            .as_array()
+            .expect("excluded items");
+        assert_eq!(
+            summary["excluded_breakdown"]["model_version"],
+            "token-excluded-usage-v1"
+        );
+        assert_eq!(excluded_items.len(), 1);
+        assert_eq!(excluded_items[0]["code"], "quality_gate_failed");
+        assert_eq!(excluded_items[0]["events_count"], 1);
+        assert_eq!(excluded_items[0]["baseline_tokens"], 500);
+        assert_eq!(excluded_items[0]["delivered_tokens"], 200);
+    }
+
+    #[test]
+    fn latency_slice_breakdown_normalizes_hot_cold_and_mixed() {
+        let events = vec![
+            token_event! {
+                created_at_epoch_ms: 10,
+                event_id: "event-1".to_string(),
+                correlation_id: "event-1".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 10,
+                occurred_at_epoch_ms: 10,
+                ingested_at_epoch_ms: 10,
                 query: "cold".to_string(),
                 query_hash: "hash-1".to_string(),
                 query_type: "code_lookup".to_string(),
@@ -4374,17 +5075,15 @@ mod tests {
                 pack_token_count: 10,
                 deduped_token_count: 10,
             },
-            TokenBudgetEvent {
+            token_event! {
                 created_at_epoch_ms: 20,
                 event_id: "event-2".to_string(),
+                correlation_id: "event-2".to_string(),
                 session_id: "session-1".to_string(),
                 rolling_window_profile: "codex_5h".to_string(),
                 timestamp_utc: 20,
-                snapshot_kind: "token_budget_event".to_string(),
-                source_kind: "live_context_pack".to_string(),
-                traffic_class: "live".to_string(),
-                project: "art".to_string(),
-                namespace: "continuity".to_string(),
+                occurred_at_epoch_ms: 20,
+                ingested_at_epoch_ms: 20,
                 query: "hot".to_string(),
                 query_hash: "hash-2".to_string(),
                 query_type: "code_lookup".to_string(),
@@ -4451,17 +5150,15 @@ mod tests {
     fn followup_recovery_is_attributed_to_successful_followup_event() {
         let reconciled = reconcile_followup_recovery(
             &[
-                TokenBudgetEvent {
+                token_event! {
                     created_at_epoch_ms: 1000,
                     event_id: "event-1".to_string(),
+                    correlation_id: "event-1".to_string(),
                     session_id: "session-1".to_string(),
                     rolling_window_profile: "codex_5h".to_string(),
                     timestamp_utc: 1000,
-                    snapshot_kind: "token_budget_event".to_string(),
-                    source_kind: "live_context_pack".to_string(),
-                    traffic_class: "live".to_string(),
-                    project: "art".to_string(),
-                    namespace: "continuity".to_string(),
+                    occurred_at_epoch_ms: 1000,
+                    ingested_at_epoch_ms: 1000,
                     query: "find dashboard token bug".to_string(),
                     query_hash: "hash-1".to_string(),
                     query_type: "code_lookup".to_string(),
@@ -4500,17 +5197,15 @@ mod tests {
                     pack_token_count: 100,
                     deduped_token_count: 100,
                 },
-                TokenBudgetEvent {
+                token_event! {
                     created_at_epoch_ms: 2000,
                     event_id: "event-2".to_string(),
+                    correlation_id: "event-2".to_string(),
                     session_id: "session-1".to_string(),
                     rolling_window_profile: "codex_5h".to_string(),
                     timestamp_utc: 2000,
-                    snapshot_kind: "token_budget_event".to_string(),
-                    source_kind: "live_context_pack".to_string(),
-                    traffic_class: "live".to_string(),
-                    project: "art".to_string(),
-                    namespace: "continuity".to_string(),
+                    occurred_at_epoch_ms: 2000,
+                    ingested_at_epoch_ms: 2000,
                     query: "dashboard token bug file".to_string(),
                     query_hash: "hash-2".to_string(),
                     query_type: "code_lookup".to_string(),
