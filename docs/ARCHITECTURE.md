@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 02:45 MSK
-Ручная сверка guide/docs: 2026-03-24 02:45 MSK
+modified_at: 2026-03-24 03:25 MSK
+Ручная сверка guide/docs: 2026-03-24 03:25 MSK
 
 # Architecture
 
@@ -337,6 +337,11 @@ Machine-readable профиль:
 - `hot` нужен для реальной скорости повторной сессии агента;
 - `cold` нужен для оценки настоящего retrieval path без result-cache shortcut;
 - быстрый hot-path измеряется в микросекундах и сохраняется как дробные миллисекунды, чтобы убрать ложный `0ms` эффект после агрессивной локальной оптимизации;
+- exact document path в cold contour теперь не должен сканировать весь namespace через regex:
+  SQL layer materialize-ит и индексирует `relative_path`, `relative_basename` и `relative_basename_stem`;
+- single exact-document pack и single symbol-only pack теперь разрешены как minimal provenance contour:
+  если retrieval возвращает ровно один document или ровно один symbol и больше ничего, `workspace_graph`
+  собирается без полного `structure/symbol/call/import` обхода файла;
 - SLA нельзя честно считать выполненным, если известен только один из этих режимов;
 - scrape path Prometheus exporter обязан быть read-only;
 - exporter не должен писать `system_snapshot` в PostgreSQL на каждый scrape, иначе monitoring сам начнёт искажать state и latency baseline.

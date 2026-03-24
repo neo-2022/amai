@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 02:45 MSK
-Ручная сверка guide/docs: 2026-03-24 02:45 MSK
+modified_at: 2026-03-24 03:25 MSK
+Ручная сверка guide/docs: 2026-03-24 03:25 MSK
 
 # Operations
 
@@ -363,6 +363,7 @@ cd /home/art/agent-memory-index
   - `workspace_graph` хранит versioned structural runtime/workspace graph:
     `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref / call_ref`,
     а в `workspace-graph-v10` ещё и resolved relations `imports_file / re_exports_file / imports_symbol / re_exports_symbol / resolves_file / resolves_symbol / calls_file / calls_symbol / resolves_call_file / resolves_call_symbol`, включая owner-aware Rust symbol lookup для provable path-cases вроде `Type::new`, `Self::helper()`, `self.helper()`, trait-qualified forms вида `<Type as Trait>::make`, trait-qualified forms через доказанный imported alias, module-alias forms вроде `trait_mod::Factory`, owner-side module alias paths вроде `type_mod::Beta::new` и combined forms вроде `<type_mod::Beta as trait_mod::Factory>::make` и `<type_mod::Beta as FactoryAlias>::make`; если impl-owner или impl-trait в symbol metadata видны только как alias, импортированный terminal selector или module alias, graph пишет дополнительные поля `owner_path_canonical` и `trait_name_canonical` только при единственном доказуемом import-target;
+  - для single exact-document pack и single symbol-only pack provenance теперь может честно materialize-ить минимальный graph без полного file-обхода; это режет cold latency, но не теряет source-of-truth по самому retrieved file/symbol;
   - `workspace_graph_summary` в `chat_start_restore` и startup-output нужен как короткий human-readable слой поверх этого graph;
   - при битом `session_id` restore-path теперь fail-closed и не смешивает несколько пустых сессий в один bundle.
 
@@ -899,6 +900,13 @@ cargo run --release -- verify benchmark \
 Если для repo в proof включён `skip_embeddings = true`, runner не должен искусственно платить за semantic path на scope без vector points:
 - в таком случае retrieval честно short-circuit-ится;
 - cold contour меряет реальный end-to-end lexical/doc path, а не пустой embed хвост.
+
+Exact document lookup в этом контуре теперь идёт через индексируемые SQL поля:
+- `relative_path`
+- `relative_basename`
+- `relative_basename_stem`
+
+То есть cold exact-path contour больше не обязан regex-фильтровать весь namespace, если нужен один точный file/path hit.
 
 Этот runner считает:
 - отдельно `cold` и `hot shadow`;

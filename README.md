@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 02:45 MSK
-Ручная сверка guide/docs: 2026-03-24 02:45 MSK
+modified_at: 2026-03-24 03:25 MSK
+Ручная сверка guide/docs: 2026-03-24 03:25 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -610,6 +610,10 @@ http://127.0.0.1:9464/
   - сколько repo и query slices вошло в последний run;
 - compact proof-run теперь не должен искусственно раздувать cold хвост на scope без vector points:
   - если для репозитория embeddings не строились, semantic path честно short-circuit-ится;
+  - exact document lookup больше не должен regex-фильтровать весь namespace:
+    `relative_path`, `relative_basename` и `relative_basename_stem` теперь живут как индексируемый SQL contour;
+  - single exact-document pack и single symbol-only pack теперь не обязаны строить полный file graph:
+    для них честно materialize-ится минимальный `context_pack -> file` или `context_pack -> symbol` graph без лишнего provenance-хвоста;
   - это позволяет смотреть на реальный cold-path retrieval, а не на пустую оплату embed/search без единого hit;
 - что происходит внутри `PostgreSQL`, `Qdrant`, `NATS` и слоёв точности;
 - на каком железе сейчас всё работает и к какому клиенту уже привязана установка.
@@ -1576,6 +1580,8 @@ cargo run --release -- verify degradation
 - для локальных репозиториев использует канонические `project code`, чтобы один и тот же repo не жил в benchmark-пуле под alias и под обычным именем одновременно;
 - перед live indexing canonicalize-ит `repo_root` ещё раз, чтобы внешний repo из manifest не оставлял
   в индексе path-хвосты с `..` и не ломал честный exact-path score;
+- exact document lookup теперь идёт через адресные SQL ветки:
+  `relative_path`, `relative_basename`, `relative_basename_stem`, а не через regex-фильтр по всему namespace;
 - если case-set для локального repo не требует semantic path и держит `limit_semantic_chunks = 0`, manifest может и должен честно ставить `skip_embeddings = true`, чтобы cold contour не платил лишнюю цену за vector layer там, где этот конкретный набор проверок его всё равно не использует;
 - сам индексирует указанные repo из manifest;
 - считает отдельно `cold` и `hot shadow`;

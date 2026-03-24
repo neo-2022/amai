@@ -677,7 +677,8 @@ pub async fn search_documents_exact_for_namespace(
     limit: i64,
 ) -> Result<Vec<DocumentHit>> {
     let basename_query = exact_match_basename(query);
-    let allow_extensionless_basename_match = !basename_query.contains('.');
+    let basename_stem_query = exact_match_basename_stem(&basename_query);
+    let allow_extensionless_basename_match = basename_query == basename_stem_query;
     let rows = client
         .query(
             r#"
@@ -685,54 +686,92 @@ pub async fn search_documents_exact_for_namespace(
                 SELECT
                     $3::text AS full_query,
                     $4::text AS basename_query,
-                    $5::boolean AS allow_extensionless_basename_match
+                    $5::text AS basename_stem_query,
+                    $6::boolean AS allow_extensionless_basename_match
+            ),
+            matches AS (
+                SELECT
+                    p.code AS project_code,
+                    n.code AS namespace_code,
+                    d.repo_root,
+                    d.relative_path,
+                    d.language,
+                    d.source_kind,
+                    d.git_commit_sha,
+                    2000.0::real AS score,
+                    LEFT(d.content, 1600) AS snippet
+                FROM ami.code_documents d
+                JOIN ami.projects p ON p.project_id = d.project_id
+                JOIN ami.namespaces n ON n.namespace_id = d.namespace_id
+                CROSS JOIN normalized
+                WHERE d.project_id = $1
+                  AND d.namespace_id = $2
+                  AND d.relative_path = normalized.full_query
+
+                UNION ALL
+
+                SELECT
+                    p.code AS project_code,
+                    n.code AS namespace_code,
+                    d.repo_root,
+                    d.relative_path,
+                    d.language,
+                    d.source_kind,
+                    d.git_commit_sha,
+                    1500.0::real AS score,
+                    LEFT(d.content, 1600) AS snippet
+                FROM ami.code_documents d
+                JOIN ami.projects p ON p.project_id = d.project_id
+                JOIN ami.namespaces n ON n.namespace_id = d.namespace_id
+                CROSS JOIN normalized
+                WHERE d.project_id = $1
+                  AND d.namespace_id = $2
+                  AND d.relative_basename = normalized.basename_query
+                  AND d.relative_path <> normalized.full_query
+
+                UNION ALL
+
+                SELECT
+                    p.code AS project_code,
+                    n.code AS namespace_code,
+                    d.repo_root,
+                    d.relative_path,
+                    d.language,
+                    d.source_kind,
+                    d.git_commit_sha,
+                    1400.0::real AS score,
+                    LEFT(d.content, 1600) AS snippet
+                FROM ami.code_documents d
+                JOIN ami.projects p ON p.project_id = d.project_id
+                JOIN ami.namespaces n ON n.namespace_id = d.namespace_id
+                CROSS JOIN normalized
+                WHERE d.project_id = $1
+                  AND d.namespace_id = $2
+                  AND normalized.allow_extensionless_basename_match
+                  AND d.relative_basename_stem = normalized.basename_stem_query
+                  AND d.relative_path <> normalized.full_query
+                  AND d.relative_basename <> normalized.basename_query
             )
             SELECT
-                p.code,
-                n.code,
-                d.repo_root,
-                d.relative_path,
-                d.language,
-                d.source_kind,
-                d.git_commit_sha,
-                CASE
-                    WHEN d.relative_path = normalized.full_query THEN 2000.0
-                    WHEN regexp_replace(d.relative_path, '^.*/', '') = normalized.basename_query THEN 1500.0
-                    WHEN normalized.allow_extensionless_basename_match
-                         AND regexp_replace(
-                            regexp_replace(d.relative_path, '^.*/', ''),
-                            '\.[^.]+$',
-                            ''
-                         ) = normalized.basename_query THEN 1400.0
-                    ELSE 0.0
-                END::real AS score,
-                LEFT(d.content, 1600)
-            FROM ami.code_documents d
-            JOIN ami.projects p ON p.project_id = d.project_id
-            JOIN ami.namespaces n ON n.namespace_id = d.namespace_id
-            CROSS JOIN normalized
-            WHERE d.project_id = $1
-              AND d.namespace_id = $2
-              AND (
-                d.relative_path = normalized.full_query
-                OR regexp_replace(d.relative_path, '^.*/', '') = normalized.basename_query
-                OR (
-                    normalized.allow_extensionless_basename_match
-                    AND regexp_replace(
-                        regexp_replace(d.relative_path, '^.*/', ''),
-                        '\.[^.]+$',
-                        ''
-                    ) = normalized.basename_query
-                )
-              )
-            ORDER BY score DESC, length(d.relative_path), d.relative_path
-            LIMIT $6
+                project_code,
+                namespace_code,
+                repo_root,
+                relative_path,
+                language,
+                source_kind,
+                git_commit_sha,
+                score,
+                snippet
+            FROM matches
+            ORDER BY score DESC, length(relative_path), relative_path
+            LIMIT $7
             "#,
             &[
                 &project_id,
                 &namespace_id,
                 &query,
                 &basename_query,
+                &basename_stem_query,
                 &allow_extensionless_basename_match,
                 &limit,
             ],
@@ -756,6 +795,13 @@ pub async fn search_documents_exact_for_namespace(
 
 fn exact_match_basename(query: &str) -> String {
     query.rsplit('/').next().unwrap_or(query).to_string()
+}
+
+fn exact_match_basename_stem(basename: &str) -> String {
+    basename
+        .rsplit_once('.')
+        .map(|(stem, _)| stem.to_string())
+        .unwrap_or_else(|| basename.to_string())
 }
 
 pub async fn search_symbols_for_namespace(
@@ -2009,8 +2055,8 @@ fn hex_sha256(bytes: &[u8]) -> String {
 mod tests {
     use super::{
         ObservabilityInsertMeta, canonical_repo_root_string, exact_match_basename,
-        observability_conflict_error, observability_source_class, prepare_observability_payload,
-        validate_observability_update,
+        exact_match_basename_stem, observability_conflict_error, observability_source_class,
+        prepare_observability_payload, validate_observability_update,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -2295,6 +2341,18 @@ mod tests {
         assert_eq!(
             exact_match_basename("scripts/tools/amai_art_continuity_startup.sh"),
             "amai_art_continuity_startup.sh"
+        );
+    }
+
+    #[test]
+    fn exact_match_basename_stem_strips_single_extension() {
+        assert_eq!(
+            exact_match_basename_stem("amai_art_continuity_startup.sh"),
+            "amai_art_continuity_startup"
+        );
+        assert_eq!(
+            exact_match_basename_stem("CHECKLIST_00_MASTER_ART_REGART"),
+            "CHECKLIST_00_MASTER_ART_REGART"
         );
     }
 }

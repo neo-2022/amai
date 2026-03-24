@@ -84,6 +84,16 @@ CREATE TABLE IF NOT EXISTS ami.code_documents (
     repo_root TEXT NOT NULL,
     absolute_path TEXT NOT NULL,
     relative_path TEXT NOT NULL,
+    relative_basename TEXT GENERATED ALWAYS AS (
+        regexp_replace(relative_path, '^.*/', '')
+    ) STORED,
+    relative_basename_stem TEXT GENERATED ALWAYS AS (
+        regexp_replace(
+            regexp_replace(relative_path, '^.*/', ''),
+            '\.[^.]+$',
+            ''
+        )
+    ) STORED,
     language TEXT,
     source_kind TEXT NOT NULL,
     git_commit_sha TEXT,
@@ -109,6 +119,20 @@ CREATE TABLE IF NOT EXISTS ami.code_documents (
     ) STORED,
     UNIQUE (namespace_id, relative_path)
 );
+
+ALTER TABLE ami.code_documents
+    ADD COLUMN IF NOT EXISTS relative_basename TEXT GENERATED ALWAYS AS (
+        regexp_replace(relative_path, '^.*/', '')
+    ) STORED;
+
+ALTER TABLE ami.code_documents
+    ADD COLUMN IF NOT EXISTS relative_basename_stem TEXT GENERATED ALWAYS AS (
+        regexp_replace(
+            regexp_replace(relative_path, '^.*/', ''),
+            '\.[^.]+$',
+            ''
+        )
+    ) STORED;
 
 CREATE TABLE IF NOT EXISTS ami.code_symbols (
     symbol_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -485,6 +509,10 @@ CREATE INDEX IF NOT EXISTS idx_ami_namespaces_project ON ami.namespaces(project_
 CREATE INDEX IF NOT EXISTS idx_ami_relations_source_target ON ami.project_relations(source_project_id, target_project_id);
 CREATE INDEX IF NOT EXISTS idx_ami_documents_project_namespace ON ami.code_documents(project_id, namespace_id);
 CREATE INDEX IF NOT EXISTS idx_ami_documents_relative_path ON ami.code_documents(relative_path);
+CREATE INDEX IF NOT EXISTS idx_ami_documents_namespace_relative_basename
+    ON ami.code_documents(namespace_id, relative_basename);
+CREATE INDEX IF NOT EXISTS idx_ami_documents_namespace_relative_basename_stem
+    ON ami.code_documents(namespace_id, relative_basename_stem);
 CREATE INDEX IF NOT EXISTS idx_ami_documents_search ON ami.code_documents USING GIN (search_vector);
 CREATE INDEX IF NOT EXISTS idx_ami_symbols_document ON ami.code_symbols(document_id);
 CREATE INDEX IF NOT EXISTS idx_ami_symbols_name ON ami.code_symbols(name);

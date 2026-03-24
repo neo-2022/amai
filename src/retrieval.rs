@@ -497,9 +497,17 @@ async fn prepare_context_pack(
         &chunks,
         &semantic_chunks,
     );
+    let minimal_document_context = should_use_minimal_document_workspace_graph(
+        &documents,
+        &symbols,
+        &chunks,
+        &semantic_chunks,
+    );
     let minimal_symbol_context =
         should_use_minimal_symbol_workspace_graph(&documents, &symbols, &chunks, &semantic_chunks);
-    let (workspace_documents, workspace_symbols) = if minimal_symbol_context {
+    let (workspace_documents, workspace_symbols) = if minimal_document_context
+        || minimal_symbol_context
+    {
         (Vec::new(), Vec::new())
     } else {
         (
@@ -2031,6 +2039,15 @@ fn push_workspace_request(
     }
 }
 
+fn should_use_minimal_document_workspace_graph(
+    documents: &[DocumentHit],
+    symbols: &[SymbolHit],
+    chunks: &[ChunkHit],
+    semantic_chunks: &[Value],
+) -> bool {
+    documents.len() == 1 && symbols.is_empty() && chunks.is_empty() && semantic_chunks.is_empty()
+}
+
 fn should_use_minimal_symbol_workspace_graph(
     documents: &[DocumentHit],
     symbols: &[SymbolHit],
@@ -2181,7 +2198,8 @@ mod tests {
         SemanticTimings, apply_semantic_relevance_guard, build_context_pack_decision_trace,
         degradation_probe_stale_fast_cache, degradation_proof_scenarios, query_terms,
         semantic_fallback_result, semantic_hit_has_query_overlap,
-        should_use_minimal_symbol_workspace_graph, synthetic_chunk_hit,
+        should_use_minimal_document_workspace_graph, should_use_minimal_symbol_workspace_graph,
+        synthetic_chunk_hit,
     };
     use crate::postgres::{DocumentHit, SymbolHit};
     use serde_json::json;
@@ -2300,6 +2318,48 @@ mod tests {
             snippet: "readme".to_string(),
         }];
         assert!(!should_use_minimal_symbol_workspace_graph(
+            &docs,
+            &symbols,
+            &[],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn minimal_document_workspace_graph_only_applies_to_single_document_only_shape() {
+        let docs = vec![DocumentHit {
+            project_code: "amai".to_string(),
+            namespace_code: "cold_benchmark".to_string(),
+            repo_root: "/home/art/agent-memory-index".to_string(),
+            relative_path: "src/config.rs".to_string(),
+            language: Some("rust".to_string()),
+            source_kind: "code".to_string(),
+            git_commit_sha: None,
+            score: 2000.0,
+            snippet: "config".to_string(),
+        }];
+        assert!(should_use_minimal_document_workspace_graph(
+            &docs,
+            &[],
+            &[],
+            &[]
+        ));
+
+        let symbols = vec![SymbolHit {
+            project_code: "amai".to_string(),
+            namespace_code: "cold_benchmark".to_string(),
+            repo_root: "/home/art/agent-memory-index".to_string(),
+            relative_path: "src/config.rs".to_string(),
+            name: "from_env".to_string(),
+            kind: "function_item".to_string(),
+            start_line: 45,
+            end_line: 94,
+            start_byte: 0,
+            end_byte: 0,
+            score: 2000.0,
+            metadata: json!({"language":"rust"}),
+        }];
+        assert!(!should_use_minimal_document_workspace_graph(
             &docs,
             &symbols,
             &[],
