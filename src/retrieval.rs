@@ -497,10 +497,16 @@ async fn prepare_context_pack(
         &chunks,
         &semantic_chunks,
     );
-    let workspace_documents =
-        postgres::list_document_structures_for_namespace_paths(db, &workspace_requests).await?;
-    let workspace_symbols =
-        postgres::list_document_symbols_for_namespace_paths(db, &workspace_requests).await?;
+    let minimal_symbol_context =
+        should_use_minimal_symbol_workspace_graph(&documents, &symbols, &chunks, &semantic_chunks);
+    let (workspace_documents, workspace_symbols) = if minimal_symbol_context {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            postgres::list_document_structures_for_namespace_paths(db, &workspace_requests).await?,
+            postgres::list_document_symbols_for_namespace_paths(db, &workspace_requests).await?,
+        )
+    };
     let workspace_graph = workspace_graph::build_context_pack_workspace_graph(
         &context_pack_id,
         &args.query,
@@ -2025,6 +2031,15 @@ fn push_workspace_request(
     }
 }
 
+fn should_use_minimal_symbol_workspace_graph(
+    documents: &[DocumentHit],
+    symbols: &[SymbolHit],
+    chunks: &[ChunkHit],
+    semantic_chunks: &[Value],
+) -> bool {
+    documents.is_empty() && chunks.is_empty() && semantic_chunks.is_empty() && symbols.len() == 1
+}
+
 pub fn degradation_proof_scenarios(local_fast_cache_ttl_ms: u128) -> Result<Vec<Value>> {
     let lexical_chunk = synthetic_chunk_hit(
         "src/degradation.rs",
@@ -2165,8 +2180,10 @@ mod tests {
     use super::{
         SemanticTimings, apply_semantic_relevance_guard, build_context_pack_decision_trace,
         degradation_probe_stale_fast_cache, degradation_proof_scenarios, query_terms,
-        semantic_fallback_result, semantic_hit_has_query_overlap, synthetic_chunk_hit,
+        semantic_fallback_result, semantic_hit_has_query_overlap,
+        should_use_minimal_symbol_workspace_graph, synthetic_chunk_hit,
     };
+    use crate::postgres::{DocumentHit, SymbolHit};
     use serde_json::json;
 
     #[test]
@@ -2246,6 +2263,48 @@ mod tests {
             trace["scope"]["effective_retrieval_mode"].as_str(),
             Some("local_strict")
         );
+    }
+
+    #[test]
+    fn minimal_symbol_workspace_graph_only_applies_to_single_symbol_only_shape() {
+        let symbols = vec![SymbolHit {
+            project_code: "amai".to_string(),
+            namespace_code: "cold_benchmark".to_string(),
+            repo_root: "/home/art/agent-memory-index".to_string(),
+            relative_path: "src/verify.rs".to_string(),
+            name: "run_text_compare".to_string(),
+            kind: "function_item".to_string(),
+            start_line: 1212,
+            end_line: 1425,
+            start_byte: 0,
+            end_byte: 0,
+            score: 2000.0,
+            metadata: json!({"language":"rust"}),
+        }];
+        assert!(should_use_minimal_symbol_workspace_graph(
+            &[],
+            &symbols,
+            &[],
+            &[]
+        ));
+
+        let docs = vec![DocumentHit {
+            project_code: "amai".to_string(),
+            namespace_code: "cold_benchmark".to_string(),
+            repo_root: "/home/art/agent-memory-index".to_string(),
+            relative_path: "README.md".to_string(),
+            language: Some("markdown".to_string()),
+            source_kind: "docs".to_string(),
+            git_commit_sha: None,
+            score: 1500.0,
+            snippet: "readme".to_string(),
+        }];
+        assert!(!should_use_minimal_symbol_workspace_graph(
+            &docs,
+            &symbols,
+            &[],
+            &[]
+        ));
     }
 
     #[test]
