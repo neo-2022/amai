@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:02 MSK
-Ручная сверка guide/docs: 2026-03-24 11:02 MSK
+modified_at: 2026-03-24 11:17 MSK
+Ручная сверка guide/docs: 2026-03-24 11:17 MSK
 
 # Operations
 
@@ -1586,6 +1586,13 @@ cargo run --release -- verify token-benchmark-suite \
 - `contract`
   - versioned contract на meter schema / baseline / quality / coverage /
     excluded taxonomy / billing policy;
+- `usage_event_schema`
+  - machine-readable usage contract:
+    - required identity fields;
+    - dedup key format;
+    - canonical event-time field;
+    - lifecycle status codes;
+    - backfill/correction policy;
 - `coverage`
   - отдельный truth-layer поверх каждого rollup:
     - `measured_events`
@@ -1629,6 +1636,13 @@ cargo run --release -- verify token-benchmark-suite \
 - любая большая savings-цифра теперь должна читаться вместе с `coverage`, иначе
   её слишком легко принять за полный охват всей сессии.
 - `agent_cycle_economics` остаётся `partial lower bound`, а не полной session economics.
+- event-level `usage_state` теперь тоже каноничен:
+  - `verified_included`
+  - `excluded_quality_gate_failed`
+  - `excluded_awaiting_followup_reconciliation`
+  - `excluded_legacy_unverified`
+  - `excluded_non_live`
+  - `backfill_status` тоже виден отдельно и не маскируется под обычный live ingest.
 
 По умолчанию verification-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе:

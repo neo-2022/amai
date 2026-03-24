@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:02 MSK
-Ручная сверка guide/docs: 2026-03-24 11:02 MSK
+modified_at: 2026-03-24 11:17 MSK
+Ручная сверка guide/docs: 2026-03-24 11:17 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1052,6 +1052,10 @@ preview, а не только raw count.
     excluded taxonomy / billing policy;
   - это нужно затем, чтобы tokenonomics не “плыла” незаметно после смены
     формулы или semantics.
+- отдельный `usage_event_schema`
+  - там уже machine-readable видны dedup key, canonical event-time field,
+    lifecycle status codes, backfill/correction policy;
+  - это первый мост от measuring engine к будущему billing-grade contract.
 - first-class `coverage`
   - у каждого rollup теперь есть не только savings, но и честный охват:
     `measured / included / excluded`;
@@ -1073,6 +1077,11 @@ preview, а не только raw count.
 - рядом с любой крупной savings-цифрой теперь нужно смотреть и `coverage`;
 - `agent_cycle_economics` по-прежнему нельзя трактовать как полностью измеренную
   экономику всей сессии.
+- event-level `usage_state` тоже теперь важен:
+  - `verified_included`
+  - `excluded_*`
+  - `legacy_ingest / reverified_backfill / live_ingest`
+  Он нужен затем, чтобы savings не теряла связь с event lifecycle.
 
 По умолчанию proof/benchmark-трафик не смешивается с обычной рабочей активностью.
 Если нужно показать всё вместе, используйте:

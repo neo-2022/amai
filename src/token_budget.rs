@@ -46,8 +46,12 @@ struct MeasurementConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 struct TokenBudgetContractConfig {
+    #[serde(default = "default_usage_event_schema_version")]
+    usage_event_schema_version: String,
     #[serde(default = "default_metering_event_schema_version")]
     metering_event_schema_version: String,
+    #[serde(default = "default_usage_lifecycle_model_version")]
+    usage_lifecycle_model_version: String,
     #[serde(default = "default_baseline_method_version")]
     baseline_method_version: String,
     #[serde(default = "default_quality_method_version")]
@@ -60,6 +64,10 @@ struct TokenBudgetContractConfig {
     excluded_taxonomy_version: String,
     #[serde(default = "default_dedup_contract_version")]
     dedup_contract_version: String,
+    #[serde(default = "default_backfill_policy_version")]
+    backfill_policy_version: String,
+    #[serde(default = "default_correction_policy_version")]
+    correction_policy_version: String,
     #[serde(default = "default_event_time_policy_version")]
     event_time_policy_version: String,
     #[serde(default = "default_billing_policy_version")]
@@ -77,13 +85,17 @@ struct TokenBudgetContractConfig {
 impl Default for TokenBudgetContractConfig {
     fn default() -> Self {
         Self {
+            usage_event_schema_version: default_usage_event_schema_version(),
             metering_event_schema_version: default_metering_event_schema_version(),
+            usage_lifecycle_model_version: default_usage_lifecycle_model_version(),
             baseline_method_version: default_baseline_method_version(),
             quality_method_version: default_quality_method_version(),
             coverage_model_version: default_coverage_model_version(),
             agent_cycle_model_version: default_agent_cycle_model_version(),
             excluded_taxonomy_version: default_excluded_taxonomy_version(),
             dedup_contract_version: default_dedup_contract_version(),
+            backfill_policy_version: default_backfill_policy_version(),
+            correction_policy_version: default_correction_policy_version(),
             event_time_policy_version: default_event_time_policy_version(),
             billing_policy_version: default_billing_policy_version(),
             billing_mode: default_billing_mode(),
@@ -116,6 +128,7 @@ struct TokenBudgetEvent {
     created_at_epoch_ms: i64,
     event_id: String,
     correlation_id: String,
+    payload_origin: String,
     session_id: String,
     rolling_window_profile: String,
     timestamp_utc: i64,
@@ -125,12 +138,16 @@ struct TokenBudgetEvent {
     source_kind: String,
     traffic_class: String,
     measurement_scope: String,
+    usage_event_schema_version: String,
     metering_event_schema_version: String,
+    usage_lifecycle_model_version: String,
     baseline_method_version: String,
     quality_method_version: String,
     coverage_model_version: String,
     excluded_taxonomy_version: String,
     dedup_contract_version: String,
+    backfill_policy_version: String,
+    correction_policy_version: String,
     event_time_policy_version: String,
     billing_policy_version: String,
     billing_mode: String,
@@ -224,8 +241,16 @@ fn default_preliminary_min_baseline_tokens() -> u64 {
     100_000
 }
 
+fn default_usage_event_schema_version() -> String {
+    "billing-usage-event-v1".to_string()
+}
+
 fn default_metering_event_schema_version() -> String {
     "token-budget-event-v2".to_string()
+}
+
+fn default_usage_lifecycle_model_version() -> String {
+    "usage-lifecycle-v1".to_string()
 }
 
 fn default_baseline_method_version() -> String {
@@ -250,6 +275,14 @@ fn default_excluded_taxonomy_version() -> String {
 
 fn default_dedup_contract_version() -> String {
     "event-id-source-kind-v1".to_string()
+}
+
+fn default_backfill_policy_version() -> String {
+    "report-only-backfill-v1".to_string()
+}
+
+fn default_correction_policy_version() -> String {
+    "report-only-correction-v1".to_string()
 }
 
 fn default_event_time_policy_version() -> String {
@@ -278,13 +311,17 @@ fn default_settlement_status() -> String {
 
 fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
     json!({
+        "usage_event_schema_version": contract.usage_event_schema_version.clone(),
         "metering_event_schema_version": contract.metering_event_schema_version.clone(),
+        "usage_lifecycle_model_version": contract.usage_lifecycle_model_version.clone(),
         "baseline_method_version": contract.baseline_method_version.clone(),
         "quality_method_version": contract.quality_method_version.clone(),
         "coverage_model_version": contract.coverage_model_version.clone(),
         "agent_cycle_model_version": contract.agent_cycle_model_version.clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
+        "backfill_policy_version": contract.backfill_policy_version.clone(),
+        "correction_policy_version": contract.correction_policy_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
@@ -297,18 +334,78 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
 
 fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
     json!({
+        "usage_event_schema_version": contract.usage_event_schema_version.clone(),
         "metering_event_schema_version": contract.metering_event_schema_version.clone(),
+        "usage_lifecycle_model_version": contract.usage_lifecycle_model_version.clone(),
         "baseline_method_version": contract.baseline_method_version.clone(),
         "quality_method_version": contract.quality_method_version.clone(),
         "coverage_model_version": contract.coverage_model_version.clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
+        "backfill_policy_version": contract.backfill_policy_version.clone(),
+        "correction_policy_version": contract.correction_policy_version.clone(),
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
         "rate_card_version": contract.rate_card_version.clone(),
         "currency_profile": contract.currency_profile.clone(),
         "settlement_status": contract.settlement_status.clone(),
+    })
+}
+
+fn build_usage_event_schema_json(contract: &TokenBudgetContractConfig) -> Value {
+    json!({
+        "schema_version": contract.usage_event_schema_version.clone(),
+        "identity": {
+            "required_fields": [
+                "event_id",
+                "correlation_id",
+                "source_kind",
+                "traffic_class",
+                "project_code",
+                "namespace_code",
+                "measurement_scope",
+                "occurred_at_epoch_ms",
+                "ingested_at_epoch_ms"
+            ],
+            "dedup_key_format": "source_kind:event_id",
+            "event_identity_note": "Исторические события сохраняют записанные contract versions; новые report semantics не переписывают прошлую truth-схему."
+        },
+        "lifecycle": {
+            "model_version": contract.usage_lifecycle_model_version.clone(),
+            "statuses": [
+                "verified_included",
+                "excluded_quality_gate_failed",
+                "excluded_awaiting_followup_reconciliation",
+                "excluded_legacy_unverified",
+                "excluded_non_live"
+            ],
+            "reporting_layers": [
+                "measured_non_billable",
+                "excluded"
+            ]
+        },
+        "dedup": {
+            "policy_version": contract.dedup_contract_version.clone(),
+            "idempotency_scope": "source_kind + event_id",
+            "retry_behavior": "same dedup key must resolve to the same usage event identity"
+        },
+        "time_policy": {
+            "policy_version": contract.event_time_policy_version.clone(),
+            "canonical_window_field": "occurred_at_epoch_ms",
+            "ingest_field": "ingested_at_epoch_ms",
+            "ordering_note": "Rollup-окна считаются по occurred_at_epoch_ms; ingest time хранится отдельно и не подменяет event time."
+        },
+        "backfill": {
+            "policy_version": contract.backfill_policy_version.clone(),
+            "status": "report_only_manual_repair_or_reverify",
+            "note": "Backfill пока разрешён только через явные repair/reverify paths и не должен тихо переписывать старую event truth."
+        },
+        "corrections": {
+            "policy_version": contract.correction_policy_version.clone(),
+            "status": "mutable_snapshot_report_only",
+            "note": "До settlement layer corrections остаются report-only snapshot updates, а не invoice-grade credit workflow."
+        }
     })
 }
 
@@ -631,6 +728,7 @@ async fn collect_report(
                 "preliminary_min_baseline_tokens": config.measurement.preliminary_min_baseline_tokens,
             },
             "contract": report_contract_json(&config.contract),
+            "usage_event_schema": build_usage_event_schema_json(&config.contract),
             "filters": {
                 "include_verify_events": include_verify_events,
             },
@@ -969,6 +1067,10 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .map(ToOwned::to_owned)
         .or_else(|| node["context_pack_id"].as_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| event_id.clone());
+    let payload_origin = node["payload_origin"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
     let session_id = node["session_id"]
         .as_str()
         .map(ToOwned::to_owned)
@@ -990,9 +1092,17 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .unwrap_or("retrieval_lower_bound")
         .to_string();
+    let usage_event_schema_version = node["contract"]["usage_event_schema_version"]
+        .as_str()
+        .unwrap_or("billing-usage-event-v0")
+        .to_string();
     let metering_event_schema_version = node["contract"]["metering_event_schema_version"]
         .as_str()
         .unwrap_or("token-budget-event-v1")
+        .to_string();
+    let usage_lifecycle_model_version = node["contract"]["usage_lifecycle_model_version"]
+        .as_str()
+        .unwrap_or("usage-lifecycle-v0")
         .to_string();
     let baseline_method_version = node["contract"]["baseline_method_version"]
         .as_str()
@@ -1013,6 +1123,14 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
     let dedup_contract_version = node["contract"]["dedup_contract_version"]
         .as_str()
         .unwrap_or("event-id-source-kind-v0")
+        .to_string();
+    let backfill_policy_version = node["contract"]["backfill_policy_version"]
+        .as_str()
+        .unwrap_or("report-only-backfill-v0")
+        .to_string();
+    let correction_policy_version = node["contract"]["correction_policy_version"]
+        .as_str()
+        .unwrap_or("report-only-correction-v0")
         .to_string();
     let event_time_policy_version = node["contract"]["event_time_policy_version"]
         .as_str()
@@ -1108,6 +1226,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         created_at_epoch_ms: row.created_at_epoch_ms,
         event_id,
         correlation_id,
+        payload_origin,
         session_id,
         rolling_window_profile,
         timestamp_utc,
@@ -1117,12 +1236,16 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         source_kind,
         traffic_class,
         measurement_scope,
+        usage_event_schema_version,
         metering_event_schema_version,
+        usage_lifecycle_model_version,
         baseline_method_version,
         quality_method_version,
         coverage_model_version,
         excluded_taxonomy_version,
         dedup_contract_version,
+        backfill_policy_version,
+        correction_policy_version,
         event_time_policy_version,
         billing_policy_version,
         billing_mode,
@@ -1202,6 +1325,50 @@ fn needs_live_reverification(payload: &Value) -> bool {
     quality_method == "legacy_unverified"
         || (quality_method.is_empty() && !quality_ok)
         || needs_shape_upgrade
+}
+
+fn usage_dedup_key(source_kind: &str, event_id: &str) -> String {
+    format!("{source_kind}:{event_id}")
+}
+
+fn usage_excluded_reason_code(event: &TokenBudgetEvent) -> Option<&'static str> {
+    if event.traffic_class != "live" {
+        return Some("non_live_other");
+    }
+    if event.quality_ok {
+        return None;
+    }
+    Some(excluded_event_code(event))
+}
+
+fn usage_lifecycle_status(event: &TokenBudgetEvent) -> &'static str {
+    match usage_excluded_reason_code(event) {
+        None => "verified_included",
+        Some("quality_gate_failed") => "excluded_quality_gate_failed",
+        Some("awaiting_followup_reconciliation") => "excluded_awaiting_followup_reconciliation",
+        Some("legacy_unverified") => "excluded_legacy_unverified",
+        Some(_) => "excluded_non_live",
+    }
+}
+
+fn usage_reporting_layer(event: &TokenBudgetEvent) -> &'static str {
+    if usage_excluded_reason_code(event).is_none() {
+        "measured_non_billable"
+    } else {
+        "excluded"
+    }
+}
+
+fn usage_backfill_status(event: &TokenBudgetEvent) -> &'static str {
+    if event.traffic_class != "live" {
+        "synthetic_ingest"
+    } else if event.payload_origin == "reverified_live_context_pack" {
+        "reverified_backfill"
+    } else if event.metering_event_schema_version != default_metering_event_schema_version() {
+        "legacy_ingest"
+    } else {
+        "live_ingest"
+    }
 }
 
 async fn reverify_live_event_payload(
@@ -2611,6 +2778,7 @@ fn percentile_from_sorted(values: &[f64], percentile: f64) -> f64 {
 }
 
 fn event_to_json(event: &TokenBudgetEvent) -> Value {
+    let excluded_reason_code = usage_excluded_reason_code(event);
     let mut object = serde_json::Map::new();
     object.insert(
         "created_at_epoch_ms".to_string(),
@@ -2623,6 +2791,10 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
     object.insert(
         "correlation_id".to_string(),
         Value::String(event.correlation_id.clone()),
+    );
+    object.insert(
+        "payload_origin".to_string(),
+        Value::String(event.payload_origin.clone()),
     );
     object.insert(
         "session_id".to_string(),
@@ -2663,17 +2835,42 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
     object.insert(
         "contract".to_string(),
         json!({
+            "usage_event_schema_version": event.usage_event_schema_version.clone(),
             "metering_event_schema_version": event.metering_event_schema_version.clone(),
+            "usage_lifecycle_model_version": event.usage_lifecycle_model_version.clone(),
             "baseline_method_version": event.baseline_method_version.clone(),
             "quality_method_version": event.quality_method_version.clone(),
             "coverage_model_version": event.coverage_model_version.clone(),
             "excluded_taxonomy_version": event.excluded_taxonomy_version.clone(),
             "dedup_contract_version": event.dedup_contract_version.clone(),
+            "backfill_policy_version": event.backfill_policy_version.clone(),
+            "correction_policy_version": event.correction_policy_version.clone(),
             "event_time_policy_version": event.event_time_policy_version.clone(),
             "billing_policy_version": event.billing_policy_version.clone(),
             "billing_mode": event.billing_mode.clone(),
             "rate_card_version": event.rate_card_version.clone(),
             "currency_profile": event.currency_profile.clone(),
+            "settlement_status": event.settlement_status.clone(),
+        }),
+    );
+    object.insert(
+        "usage_identity".to_string(),
+        json!({
+            "dedup_key": usage_dedup_key(&event.source_kind, &event.event_id),
+            "idempotency_scope": "source_kind + event_id",
+            "canonical_window_time_field": "occurred_at_epoch_ms",
+            "event_id": event.event_id.clone(),
+            "correlation_id": event.correlation_id.clone(),
+        }),
+    );
+    object.insert(
+        "usage_state".to_string(),
+        json!({
+            "lifecycle_status": usage_lifecycle_status(event),
+            "reporting_layer": usage_reporting_layer(event),
+            "included_in_verified_rollup": excluded_reason_code.is_none(),
+            "excluded_reason_code": excluded_reason_code,
+            "backfill_status": usage_backfill_status(event),
             "settlement_status": event.settlement_status.clone(),
         }),
     );
@@ -3935,8 +4132,10 @@ mod tests {
     use super::{
         MeasurementConfig, NaiveScope, TokenBudgetContractConfig, TokenBudgetEvent,
         apply_reverification_metadata, build_event_payload, build_product_headline,
+        build_usage_event_schema_json, default_backfill_policy_version,
         default_baseline_method_version, default_billing_mode, default_billing_policy_version,
-        default_coverage_model_version, default_currency_profile, default_dedup_contract_version,
+        default_correction_policy_version, default_coverage_model_version,
+        default_currency_profile, default_dedup_contract_version,
         default_event_time_policy_version, default_excluded_taxonomy_version,
         default_quality_method_version, default_rate_card_version, default_settlement_status,
         derive_baseline_strategy, derive_quality_verdict, derive_query_type, derive_traffic_class,
@@ -3970,6 +4169,7 @@ mod tests {
                     created_at_epoch_ms: 0,
                     event_id: "event-default".to_string(),
                     correlation_id: "event-default".to_string(),
+                    payload_origin: "context_pack_token_budget".to_string(),
                     session_id: "session-default".to_string(),
                     rolling_window_profile: "codex_5h".to_string(),
                     timestamp_utc: 0,
@@ -3979,12 +4179,16 @@ mod tests {
                     source_kind: "live_context_pack".to_string(),
                     traffic_class: "live".to_string(),
                     measurement_scope: "retrieval_lower_bound".to_string(),
+                    usage_event_schema_version: "billing-usage-event-v1".to_string(),
                     metering_event_schema_version: "token-budget-event-v2".to_string(),
+                    usage_lifecycle_model_version: "usage-lifecycle-v1".to_string(),
                     baseline_method_version: default_baseline_method_version(),
                     quality_method_version: default_quality_method_version(),
                     coverage_model_version: default_coverage_model_version(),
                     excluded_taxonomy_version: default_excluded_taxonomy_version(),
                     dedup_contract_version: default_dedup_contract_version(),
+                    backfill_policy_version: default_backfill_policy_version(),
+                    correction_policy_version: default_correction_policy_version(),
                     event_time_policy_version: default_event_time_policy_version(),
                     billing_policy_version: default_billing_policy_version(),
                     billing_mode: default_billing_mode(),
@@ -4272,6 +4476,10 @@ mod tests {
         assert_eq!(token_event["correlation_id"], "ctx-pack-1");
         assert_eq!(token_event["measurement_scope"], "retrieval_lower_bound");
         assert_eq!(
+            token_event["contract"]["usage_event_schema_version"],
+            "billing-usage-event-v1"
+        );
+        assert_eq!(
             token_event["contract"]["metering_event_schema_version"],
             "token-budget-event-v2"
         );
@@ -4342,6 +4550,38 @@ mod tests {
         assert_eq!(payload["baseline_tokens"], 1000);
         assert_eq!(payload["delivered_tokens"], 300);
         assert_eq!(payload["gross_savings_pct"], 70.0);
+        assert_eq!(
+            payload["usage_identity"]["dedup_key"],
+            "live_context_pack:event-1"
+        );
+        assert_eq!(
+            payload["usage_state"]["lifecycle_status"],
+            "verified_included"
+        );
+        assert_eq!(
+            payload["usage_state"]["reporting_layer"],
+            "measured_non_billable"
+        );
+        assert_eq!(payload["usage_state"]["backfill_status"], "live_ingest");
+    }
+
+    #[test]
+    fn usage_event_schema_contract_is_machine_readable() {
+        let schema = build_usage_event_schema_json(&contract_fixture());
+        assert_eq!(schema["schema_version"], "billing-usage-event-v1");
+        assert_eq!(
+            schema["identity"]["dedup_key_format"],
+            "source_kind:event_id"
+        );
+        assert_eq!(schema["dedup"]["policy_version"], "event-id-source-kind-v1");
+        assert_eq!(
+            schema["backfill"]["policy_version"],
+            "report-only-backfill-v1"
+        );
+        assert_eq!(
+            schema["corrections"]["policy_version"],
+            "report-only-correction-v1"
+        );
     }
 
     #[test]

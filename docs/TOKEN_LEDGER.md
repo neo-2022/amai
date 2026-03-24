@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 11:02 MSK
-Ручная сверка guide/docs: 2026-03-24 11:02 MSK
+modified_at: 2026-03-24 11:17 MSK
+Ручная сверка guide/docs: 2026-03-24 11:17 MSK
 
 # Token Ledger
 
@@ -108,18 +108,71 @@ Ledger не имеет права смешивать:
 
 Для billing-grade эволюции событие теперь должно нести и contract-версии, даже если
 денежный режим ещё работает только как `report_only`:
+- `usage_event_schema_version`
 - `metering_event_schema_version`
+- `usage_lifecycle_model_version`
 - `baseline_method_version`
 - `quality_method_version`
 - `coverage_model_version`
 - `excluded_taxonomy_version`
 - `dedup_contract_version`
+- `backfill_policy_version`
+- `correction_policy_version`
 - `event_time_policy_version`
 - `billing_policy_version`
 - `billing_mode`
 - `rate_card_version`
 - `currency_profile`
 - `settlement_status`
+
+## Usage event schema и lifecycle
+
+Сейчас у ledger уже должен быть не просто набор token-полей, а канонический usage-event
+contract.
+
+Что это значит practically:
+- у события есть `usage_identity`;
+- у события есть `usage_state`;
+- report отдельно публикует `usage_event_schema`.
+
+`usage_identity` обязан отвечать на вопрос:
+- что является канонической единицей usage;
+- по какому ключу она дедупится;
+- какое время используется для расчётных окон.
+
+Минимальный contract:
+- `event_id`
+- `correlation_id`
+- `source_kind`
+- `traffic_class`
+- `project_code`
+- `namespace_code`
+- `measurement_scope`
+- `occurred_at_epoch_ms`
+- `ingested_at_epoch_ms`
+- `dedup_key = source_kind:event_id`
+
+`usage_state` обязан отвечать на вопрос:
+- вошло ли событие в verified rollup;
+- если нет, то почему;
+- какой у него lifecycle status;
+- это live ingest, legacy ingest или reverified backfill.
+
+Текущие канонические lifecycle statuses:
+- `verified_included`
+- `excluded_quality_gate_failed`
+- `excluded_awaiting_followup_reconciliation`
+- `excluded_legacy_unverified`
+- `excluded_non_live`
+
+Текущие reporting layers на event level:
+- `measured_non_billable`
+- `excluded`
+
+Это честно соответствует текущему режиму продукта:
+- metering уже сильный;
+- billing semantics ещё не включены;
+- money-facing settlement пока не materialized.
 
 В текущем runtime `Amai` старается писать эти канонические поля прямо в событие, а не держать их только как внутренние alias:
 - `project_code`
@@ -336,6 +389,11 @@ Ledger не имеет права смешивать:
 - `recovery_tokens`
 - `effective_saved_tokens`
 
+Эти коды нельзя silently переписывать задним числом.
+Если старое событие было записано по старой schema/version, оно должно сохранять свою
+историческую правду, даже если новый report уже считает поверх него более сильные
+aggregate semantics.
+
 ## Whole-agent-cycle lower bound и reporting layers
 
 `agent_cycle_economics` нельзя подавать как “весь бюджет всей сессии”.
@@ -358,6 +416,26 @@ reporting layers:
 
 То есть денежный режим ещё не включён. Пока это report-only lower bound со строгим
 разделением уже измеренной и ещё не измеренной части цикла.
+
+## Idempotency, backfill и corrections
+
+Текущий billing-grade truth guardrail требует явно публиковать не только savings, но и
+правила обращения с usage event.
+
+Сейчас machine-readable contract уже должен показывать:
+- `dedup_contract_version`
+- `backfill_policy_version`
+- `correction_policy_version`
+- `event_time_policy_version`
+
+Честный смысл этих правил сейчас такой:
+- dedup key считается как `source_kind:event_id`;
+- rollup-окна считаются по `occurred_at_epoch_ms`, а ingest time хранится отдельно;
+- backfill пока разрешён только через явные `repair/reverify` paths;
+- corrections пока остаются `report-only mutable snapshot`, а не invoice-grade credit flow.
+
+То есть billing-grade governance ещё не завершён, но truth-contract уже не скрыт внутри
+кода.
 
 ## Preliminary vs stable
 
