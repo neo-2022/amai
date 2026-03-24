@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 23:46 MSK
-Ручная сверка guide/docs: 2026-03-24 23:46 MSK
+modified_at: 2026-03-25 00:05 MSK
+Ручная сверка guide/docs: 2026-03-25 00:05 MSK
 
 # Token Ledger
 
@@ -712,12 +712,14 @@ Operator-safe report-only команды:
 - готовы ли мы вообще к external reconciliation.
 
 Текущий truthful status:
-- `reconciliation_contract_version = provider-reconciliation-v8`
+- `reconciliation_contract_version = provider-reconciliation-v9`
 - `ready_for_external_reconciliation` теперь зависит от реального bind provider usage export,
   а не от одного факта, что где-то прописан путь;
 - contract теперь ещё отдельно публикует:
   - `usage_truth_completeness_state`
   - `rate_card_truth_completeness_state`
+  - `provider_cost_truth_completeness_state`
+  - `invoice_evidence_completeness_state`
   - `money_truth_completeness_state`
   - `reconciliation_readiness_state`
   - `governance_blocking_reasons`
@@ -837,7 +839,7 @@ Customer-facing export bundle:
 - включена ли money-margin арифметика.
 
 Текущий truthful status:
-- `margin_model_version = margin-view-v6`
+- `margin_model_version = margin-view-v7`
 - `infra_cost_binding_model_version = infra-cost-binding-v3`
 - `infra_cost_profile_version = unpriced-infra-v1`
 - `money_margin_enabled` включается только после честного bind на
@@ -951,7 +953,7 @@ Customer-facing export bundle:
 - `line_items.excluded`
 
 Честный смысл этого export сейчас такой:
-- это `contractual-evidence-pack-v11`;
+- это `contractual-evidence-pack-v12`;
 - это всё ещё `report_only tokenonomics`;
 - это не invoice;
 - это не final settlement;

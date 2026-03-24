@@ -120,10 +120,14 @@ assert payload["external_truth_manifest"]["entries"]["provider_rate_card"]["sour
 assert payload["external_truth_manifest"]["entries"]["infra_cost_profile"]["source_sha256"], payload
 assert payload["reconciliation_preview"]["reconciliation_state"] == "external_usage_and_invoice_aligned_report_only", payload
 assert payload["reconciliation_preview"]["usage_truth_completeness_state"] == "provider_usage_bound", payload
+assert payload["reconciliation_preview"]["provider_cost_truth_completeness_state"] == "provider_cost_bound", payload
+assert payload["reconciliation_preview"]["invoice_evidence_completeness_state"] == "provider_invoice_bound", payload
 assert payload["reconciliation_preview"]["money_truth_completeness_state"] == "provider_cost_and_invoice_bound", payload
 assert payload["reconciliation_preview"]["reconciliation_readiness_state"] == "usage_cost_and_invoice_truth_ready", payload
 assert payload["statement_export_preview"]["rate_card_status"] == "priced_bound", payload
-assert payload["settlement_report_preview"]["model_version"] == "settlement-report-preview-v2", payload
+assert payload["statement_export_preview"]["provider_cost_truth_completeness_state"] == "provider_cost_bound", payload
+assert payload["statement_export_preview"]["invoice_evidence_completeness_state"] == "provider_invoice_bound", payload
+assert payload["settlement_report_preview"]["model_version"] == "settlement-report-preview-v3", payload
 assert payload["settlement_report_preview"]["settlement_report_id"], payload
 assert payload["reconciliation_contract"]["source_requirements"]["required_sources_for_usage_truth"] == ["provider_usage_export"], payload
 assert payload["reconciliation_contract"]["source_requirements"]["required_sources_for_cost_truth"] == ["provider_rate_card", "provider_usage_export"], payload

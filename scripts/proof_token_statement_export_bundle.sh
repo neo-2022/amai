@@ -32,20 +32,24 @@ assert settlement_report["scope_code"] == "lifetime", settlement_report
 assert statement_export["scope_code"] == "lifetime", statement_export
 assert evidence_pack["scope_code"] == "lifetime", evidence_pack
 assert contractual_sources["scope_code"] == "lifetime", contractual_sources
-assert statement_export["model_version"] == "contractual-statement-export-v11", statement_export
-assert settlement_report["model_version"] == "settlement-report-preview-v2", settlement_report
-assert evidence_pack["pack_version"] == "contractual-evidence-pack-v11", evidence_pack
+assert statement_export["model_version"] == "contractual-statement-export-v12", statement_export
+assert settlement_report["model_version"] == "settlement-report-preview-v3", settlement_report
+assert evidence_pack["pack_version"] == "contractual-evidence-pack-v12", evidence_pack
 assert statement_export["external_truth_manifest"]["manifest_hash"], statement_export
 assert settlement_report["external_truth_manifest_hash"], settlement_report
 assert evidence_pack["external_truth_manifest"]["manifest_hash"], evidence_pack
 assert contractual_sources["external_truth_manifest"]["manifest_hash"], contractual_sources
 assert settlement_report["settlement_report_id"], settlement_report
 assert statement_export["rate_card_truth_completeness_state"] is not None, statement_export
+assert statement_export["provider_cost_truth_completeness_state"] is not None, statement_export
+assert statement_export["invoice_evidence_completeness_state"] is not None, statement_export
 assert statement_export["pricing_truth_completeness_state"] is not None, statement_export
 assert statement_export["margin_readiness_state"] is not None, statement_export
 assert statement_export["required_sources_for_usage_truth"] is not None, statement_export
 assert statement_export["required_sources_for_margin_truth"] is not None, statement_export
 assert evidence_pack["rate_card_truth_completeness_state"] is not None, evidence_pack
+assert evidence_pack["provider_cost_truth_completeness_state"] is not None, evidence_pack
+assert evidence_pack["invoice_evidence_completeness_state"] is not None, evidence_pack
 assert evidence_pack["pricing_truth_completeness_state"] is not None, evidence_pack
 assert evidence_pack["margin_readiness_state"] is not None, evidence_pack
 assert evidence_pack["required_sources_for_usage_truth"] is not None, evidence_pack

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 23:46 MSK
-Ручная сверка guide/docs: 2026-03-24 23:46 MSK
+modified_at: 2026-03-25 00:05 MSK
+Ручная сверка guide/docs: 2026-03-25 00:05 MSK
 
 # Operations
 
@@ -1856,9 +1856,14 @@ cargo run -- context pack \
   - если файла ещё нет, источник остаётся `default_path_missing`;
   - governance-layer теперь отдельно показывает:
     - `usage_truth_completeness_state`
+    - `provider_cost_truth_completeness_state`
+    - `invoice_evidence_completeness_state`
     - `money_truth_completeness_state`
     - `reconciliation_readiness_state`
     - `governance_blocking_reasons`
+  - `money_truth_completeness_state` остаётся верхним агрегатом,
+    но runtime теперь сначала показывает, дошли ли мы до `provider cost truth`
+    и отдельно дошли ли до `invoice evidence`;
   - в них теперь видно не только lower bound, но и внутренний delivered usage:
     - `internal_delivered_tokens`
     - `internal_recovery_tokens`

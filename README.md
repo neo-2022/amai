@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 23:46 MSK
-Ручная сверка guide/docs: 2026-03-24 23:46 MSK
+modified_at: 2026-03-25 00:05 MSK
+Ручная сверка guide/docs: 2026-03-25 00:05 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1320,9 +1320,15 @@ preview, а не только raw count.
     - `external_usage_and_invoice_drift_report_only`
   - отдельно materialized governance-layer:
     - `usage_truth_completeness_state`
+    - `provider_cost_truth_completeness_state`
+    - `invoice_evidence_completeness_state`
     - `money_truth_completeness_state`
     - `reconciliation_readiness_state`
     - `governance_blocking_reasons`
+  - `money_truth_completeness_state` теперь остаётся как агрегированный итог,
+    а не как единственная широкая ось:
+    сначала отдельно видны `provider cost truth` и `invoice evidence`,
+    а уже потом их общий `money truth`;
   - отдельно materialized temporal truth layer:
     - `provider_usage_scope_alignment_state`
     - `provider_invoice_scope_alignment_state`
