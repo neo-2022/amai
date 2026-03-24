@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:03 MSK
-Ручная сверка guide/docs: 2026-03-24 12:03 MSK
+modified_at: 2026-03-24 12:17 MSK
+Ручная сверка guide/docs: 2026-03-24 12:17 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1081,6 +1081,12 @@ preview, а не только raw count.
 - `margin_view`
   - по каждому scope показывает token-side lower bound savings клиента;
   - но деньги и маржа остаются `null`, пока это нельзя доказать.
+- `contractual_evidence_pack`
+  - по каждому scope можно выгрузить report-only evidence pack;
+  - туда входят `statement_preview`, `reconciliation_preview`, `margin_scope`,
+    hashes включённых/исключённых line items и сами line items без сырого текста запроса;
+  - это нужно затем, чтобы customer-facing audit/export не подменялся dashboard-экраном;
+  - но это по-прежнему не invoice и не готовый settlement.
 - first-class `coverage`
   - у каждого rollup теперь есть не только savings, но и честный охват:
     `measured / included / excluded`;
@@ -1140,6 +1146,18 @@ preview, а не только raw count.
 cargo run --release -- observe repair-token-ledger --apply
 cargo run --release -- observe reverify-token-ledger --apply
 ```
+
+Если нужен report-only contractual export по одному scope, используйте:
+
+```bash
+cargo run --release -- observe token-evidence-pack --scope lifetime
+cargo run --release -- observe token-evidence-pack --scope rolling_window --output /tmp/amai-token-evidence-pack.json
+```
+
+Что важно по правде:
+- pack redacts raw `query` и оставляет только `query_hash`, scope, usage-state и token arithmetic;
+- `included_events_hash` и `excluded_events_hash` дают audit-friendly proof состава;
+- это contractual evidence pack для review/export, а не invoice и не денежный settlement.
 
 Что делают эти команды:
 - `repair-token-ledger`

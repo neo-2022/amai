@@ -165,6 +165,7 @@ pub enum ObserveCommand {
     SlaCheck,
     Guardrails,
     TokenReport(ObserveTokenReportArgs),
+    TokenEvidencePack(ObserveTokenEvidencePackArgs),
     CleanupSnapshots(ObserveCleanupSnapshotsArgs),
     CleanupArtifacts(ObserveCleanupArtifactsArgs),
     RepairTokenLedger(ObserveRepairTokenLedgerArgs),
@@ -679,6 +680,18 @@ pub struct ObserveTokenReportArgs {
     pub budget_profile: Option<String>,
     #[arg(long)]
     pub include_verify_events: Option<bool>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveTokenEvidencePackArgs {
+    #[arg(long, default_value = "lifetime")]
+    pub scope: String,
+    #[arg(long)]
+    pub budget_profile: Option<String>,
+    #[arg(long)]
+    pub include_verify_events: Option<bool>,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]

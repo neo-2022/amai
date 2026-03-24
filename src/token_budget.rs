@@ -1,4 +1,4 @@
-use crate::cli::{ContextPackArgs, ObserveTokenReportArgs};
+use crate::cli::{ContextPackArgs, ObserveTokenEvidencePackArgs, ObserveTokenReportArgs};
 use crate::config::{self, AppConfig};
 use crate::language;
 use crate::postgres::{self, ObservabilitySnapshotRecord};
@@ -88,6 +88,8 @@ struct TokenBudgetContractConfig {
     margin_model_version: String,
     #[serde(default = "default_infra_cost_profile_version")]
     infra_cost_profile_version: String,
+    #[serde(default = "default_contractual_evidence_pack_version")]
+    contractual_evidence_pack_version: String,
     #[serde(default = "default_rate_card_version")]
     rate_card_version: String,
     #[serde(default = "default_currency_profile")]
@@ -120,6 +122,7 @@ impl Default for TokenBudgetContractConfig {
             reconciliation_contract_version: default_reconciliation_contract_version(),
             margin_model_version: default_margin_model_version(),
             infra_cost_profile_version: default_infra_cost_profile_version(),
+            contractual_evidence_pack_version: default_contractual_evidence_pack_version(),
             rate_card_version: default_rate_card_version(),
             currency_profile: default_currency_profile(),
             settlement_status: default_settlement_status(),
@@ -179,6 +182,7 @@ struct TokenBudgetEvent {
     reconciliation_contract_version: String,
     margin_model_version: String,
     infra_cost_profile_version: String,
+    contractual_evidence_pack_version: String,
     rate_card_version: String,
     currency_profile: String,
     settlement_status: String,
@@ -353,6 +357,10 @@ fn default_infra_cost_profile_version() -> String {
     "unpriced-infra-v1".to_string()
 }
 
+fn default_contractual_evidence_pack_version() -> String {
+    "contractual-evidence-pack-v1".to_string()
+}
+
 fn default_rate_card_version() -> String {
     "unpriced-v1".to_string()
 }
@@ -388,6 +396,7 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "margin_model_version": contract.margin_model_version.clone(),
         "infra_cost_profile_version": contract.infra_cost_profile_version.clone(),
+        "contractual_evidence_pack_version": contract.contractual_evidence_pack_version.clone(),
         "rate_card_version": contract.rate_card_version.clone(),
         "currency_profile": contract.currency_profile.clone(),
         "settlement_status": contract.settlement_status.clone(),
@@ -417,6 +426,7 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "margin_model_version": contract.margin_model_version.clone(),
         "infra_cost_profile_version": contract.infra_cost_profile_version.clone(),
+        "contractual_evidence_pack_version": contract.contractual_evidence_pack_version.clone(),
         "rate_card_version": contract.rate_card_version.clone(),
         "currency_profile": contract.currency_profile.clone(),
         "settlement_status": contract.settlement_status.clone(),
@@ -839,6 +849,102 @@ fn build_statement_preview(
     })
 }
 
+fn contractual_line_item_json(event: &TokenBudgetEvent) -> Value {
+    json!({
+        "event_id": event.event_id.clone(),
+        "correlation_id": event.correlation_id.clone(),
+        "occurred_at_epoch_ms": event.occurred_at_epoch_ms,
+        "ingested_at_epoch_ms": event.ingested_at_epoch_ms,
+        "project_code": event.project.clone(),
+        "namespace_code": event.namespace.clone(),
+        "source_kind": event.source_kind.clone(),
+        "traffic_class": event.traffic_class.clone(),
+        "measurement_scope": event.measurement_scope.clone(),
+        "query_hash": event.query_hash.clone(),
+        "query_type": event.query_type.clone(),
+        "target_kind": event.target_kind.clone(),
+        "baseline_strategy": event.baseline_strategy.clone(),
+        "retrieval_mode": event.retrieval_mode.clone(),
+        "baseline_tokens": event.naive_tokens,
+        "delivered_tokens": event.context_tokens,
+        "recovery_tokens": event.recovery_tokens,
+        "effective_saved_tokens": event.effective_saved_tokens,
+        "quality_ok": event.quality_ok,
+        "quality_method": event.quality_method.clone(),
+        "quality_tier": event.quality_tier.clone(),
+        "usage_state": {
+            "lifecycle_status": usage_lifecycle_status(event),
+            "reporting_layer": usage_reporting_layer(event),
+            "excluded_reason_code": usage_excluded_reason_code(event),
+        },
+        "settlement_status": event.settlement_status.clone(),
+    })
+}
+
+fn hash_line_items(items: &[Value]) -> Result<String> {
+    let bytes = serde_json::to_vec(items).context("failed to encode contractual line items")?;
+    Ok(hex_sha256(&bytes))
+}
+
+fn build_contractual_evidence_pack(
+    report: &Value,
+    scope_code: &str,
+    scope_label: &str,
+    scope_events: &[TokenBudgetEvent],
+    contract: &TokenBudgetContractConfig,
+    profile: &ResolvedProfile,
+    include_verify_events: bool,
+    generated_at_epoch_ms: i64,
+) -> Result<Value> {
+    let included_items = scope_events
+        .iter()
+        .filter(|event| usage_excluded_reason_code(event).is_none())
+        .map(contractual_line_item_json)
+        .collect::<Vec<_>>();
+    let excluded_items = scope_events
+        .iter()
+        .filter(|event| usage_excluded_reason_code(event).is_some())
+        .map(contractual_line_item_json)
+        .collect::<Vec<_>>();
+
+    let statement_preview = report["token_budget_report"]["statement_previews"][scope_code].clone();
+    let reconciliation_preview =
+        report["token_budget_report"]["reconciliation_previews"][scope_code].clone();
+    let margin_scope = report["token_budget_report"]["margin_view"][scope_code].clone();
+
+    Ok(json!({
+        "contractual_evidence_pack": {
+            "pack_version": contract.contractual_evidence_pack_version.clone(),
+            "generated_at_epoch_ms": generated_at_epoch_ms,
+            "scope_code": scope_code,
+            "scope_label": scope_label,
+            "budget_profile": {
+                "code": profile.code.clone(),
+                "display_name": profile.display_name.clone(),
+            },
+            "include_verify_events": include_verify_events,
+            "truth_guardrail": {
+                "retrieval_savings_floor": "real",
+                "partial_whole_agent_cycle_lower_bound": "real",
+                "full_session_economics": "not_fully_measured"
+            },
+            "contract_versions": report["token_budget_report"]["contract"].clone(),
+            "statement_preview": statement_preview,
+            "reconciliation_preview": reconciliation_preview,
+            "margin_scope": margin_scope,
+            "included_events_count": included_items.len(),
+            "excluded_events_count": excluded_items.len(),
+            "included_events_hash": hash_line_items(&included_items)?,
+            "excluded_events_hash": hash_line_items(&excluded_items)?,
+            "line_items": {
+                "included": included_items,
+                "excluded": excluded_items,
+            },
+            "note": "Это contractual evidence pack для report-only tokenonomics: он доказывает состав измеренного scope, но не превращает lower bound в invoice."
+        }
+    }))
+}
+
 pub async fn print_report(db: &Client, args: &ObserveTokenReportArgs) -> Result<()> {
     let repo_root = config::discover_repo_root(None)?;
     let config = load_config(&repo_root)?;
@@ -854,6 +960,76 @@ pub async fn print_report(db: &Client, args: &ObserveTokenReportArgs) -> Result<
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+pub async fn print_evidence_pack(db: &Client, args: &ObserveTokenEvidencePackArgs) -> Result<()> {
+    let repo_root = config::discover_repo_root(None)?;
+    let config = load_config(&repo_root)?;
+    let include_verify = args
+        .include_verify_events
+        .unwrap_or(config.measurement.include_verify_events_by_default);
+    let profile = resolve_profile(&config, args.budget_profile.as_deref(), &repo_root)?;
+    let report = collect_report(
+        &repo_root,
+        db,
+        args.budget_profile.as_deref(),
+        include_verify,
+        None,
+    )
+    .await?;
+    let mut events = load_events(db, include_verify, None).await?;
+    events.sort_by_key(|event| event.created_at_epoch_ms);
+    let events = reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
+    let now_epoch_ms = current_epoch_ms()?;
+    let scope_code = args.scope.as_str();
+    let (scope_label, scoped_events) = match scope_code {
+        "current_session" => (
+            "текущая сессия".to_string(),
+            current_session_events(
+                &events,
+                profile.session_gap_minutes.saturating_mul(60_000) as i64,
+            ),
+        ),
+        "rolling_window" => {
+            let hours = profile
+                .rolling_window_hours
+                .ok_or_else(|| anyhow!("selected budget profile has no rolling window"))?;
+            let lower_bound = now_epoch_ms.saturating_sub((hours as i64).saturating_mul(3_600_000));
+            (
+                format!("окно {}", profile.display_name),
+                events
+                    .iter()
+                    .filter(|event| event.created_at_epoch_ms >= lower_bound)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        }
+        "lifetime" => ("всё время записи".to_string(), events.clone()),
+        _ => bail!("unknown scope for token evidence pack: {scope_code}"),
+    };
+
+    let pack = build_contractual_evidence_pack(
+        &report,
+        scope_code,
+        &scope_label,
+        &scoped_events,
+        &config.contract,
+        &profile,
+        include_verify,
+        now_epoch_ms,
+    )?;
+    let rendered = serde_json::to_string_pretty(&pack)?;
+    if let Some(path) = &args.output {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(path, rendered).with_context(|| format!("failed to write {}", path.display()))?;
+        println!("{}", path.display());
+    } else {
+        println!("{}", rendered);
+    }
     Ok(())
 }
 
@@ -1723,6 +1899,10 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .as_str()
         .unwrap_or("unpriced-infra-v0")
         .to_string();
+    let contractual_evidence_pack_version = node["contract"]["contractual_evidence_pack_version"]
+        .as_str()
+        .unwrap_or("contractual-evidence-pack-v0")
+        .to_string();
     let rate_card_version = node["contract"]["rate_card_version"]
         .as_str()
         .unwrap_or("unpriced-v0")
@@ -1835,6 +2015,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         reconciliation_contract_version,
         margin_model_version,
         infra_cost_profile_version,
+        contractual_evidence_pack_version,
         rate_card_version,
         currency_profile,
         settlement_status,
@@ -3483,6 +3664,7 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
             "reconciliation_contract_version": event.reconciliation_contract_version.clone(),
             "margin_model_version": event.margin_model_version.clone(),
             "infra_cost_profile_version": event.infra_cost_profile_version.clone(),
+            "contractual_evidence_pack_version": event.contractual_evidence_pack_version.clone(),
             "rate_card_version": event.rate_card_version.clone(),
             "currency_profile": event.currency_profile.clone(),
             "settlement_status": event.settlement_status.clone(),
@@ -4767,12 +4949,13 @@ mod tests {
     use super::{
         MeasurementConfig, NaiveScope, TokenBudgetContractConfig, TokenBudgetEvent,
         apply_reverification_metadata, baseline_strategy_breakdown, build_baseline_contract_json,
-        build_billing_policy_json, build_event_payload, build_external_truth_sources_json,
-        build_margin_contract_json, build_margin_scope, build_product_headline,
-        build_rate_card_json, build_reconciliation_contract_json, build_reconciliation_preview,
-        build_settlement_contract_json, build_statement_preview, build_usage_event_schema_json,
-        default_backfill_policy_version, default_baseline_method_version, default_billing_mode,
-        default_billing_policy_version, default_correction_policy_version,
+        build_billing_policy_json, build_contractual_evidence_pack, build_event_payload,
+        build_external_truth_sources_json, build_margin_contract_json, build_margin_scope,
+        build_product_headline, build_rate_card_json, build_reconciliation_contract_json,
+        build_reconciliation_preview, build_settlement_contract_json, build_statement_preview,
+        build_usage_event_schema_json, contractual_line_item_json, default_backfill_policy_version,
+        default_baseline_method_version, default_billing_mode, default_billing_policy_version,
+        default_contractual_evidence_pack_version, default_correction_policy_version,
         default_coverage_model_version, default_currency_profile, default_dedup_contract_version,
         default_dispute_policy_version, default_event_time_policy_version,
         default_excluded_taxonomy_version, default_freeze_close_policy_version,
@@ -4783,7 +4966,7 @@ mod tests {
         derive_query_type, derive_traffic_class, event_to_json, followup_queries_related,
         include_traffic_class_in_report, latency_slice_breakdown, needs_live_reverification,
         parse_snapshot_event, reconcile_followup_recovery, repair_legacy_token_event_payload,
-        summarize_events,
+        report_contract_json, summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -4842,6 +5025,7 @@ mod tests {
                     reconciliation_contract_version: default_reconciliation_contract_version(),
                     margin_model_version: default_margin_model_version(),
                     infra_cost_profile_version: default_infra_cost_profile_version(),
+                    contractual_evidence_pack_version: default_contractual_evidence_pack_version(),
                     rate_card_version: default_rate_card_version(),
                     currency_profile: default_currency_profile(),
                     settlement_status: default_settlement_status(),
@@ -5151,6 +5335,10 @@ mod tests {
             "unpriced-infra-v1"
         );
         assert_eq!(
+            token_event["contract"]["contractual_evidence_pack_version"],
+            "contractual-evidence-pack-v1"
+        );
+        assert_eq!(
             token_event["contract"]["settlement_status"],
             "unsettled_report_only"
         );
@@ -5425,6 +5613,133 @@ mod tests {
                 "infra_cost_profile_missing",
                 "provider_reconciliation_not_complete"
             ])
+        );
+    }
+
+    #[test]
+    fn contractual_line_item_redacts_raw_query_but_keeps_token_and_state_proof() {
+        let event = token_event! {
+            event_id: "event-7".to_string(),
+            correlation_id: "ctx-7".to_string(),
+            query: "very private raw query".to_string(),
+            query_hash: "hash-7".to_string(),
+            query_type: "bugfix_context".to_string(),
+            baseline_strategy: "semantic_top_k".to_string(),
+            naive_tokens: 900,
+            context_tokens: 120,
+            recovery_tokens: 0,
+            effective_saved_tokens: 780,
+            quality_ok: true,
+            quality_method: "hybrid_answer_success".to_string(),
+            quality_tier: "answer_success_recovered".to_string(),
+        };
+
+        let line_item = contractual_line_item_json(&event);
+        assert_eq!(line_item["query_hash"], "hash-7");
+        assert_eq!(line_item["query_type"], "bugfix_context");
+        assert_eq!(line_item["baseline_tokens"], 900);
+        assert_eq!(line_item["effective_saved_tokens"], 780);
+        assert_eq!(
+            line_item["usage_state"]["lifecycle_status"],
+            "verified_included"
+        );
+        assert_eq!(line_item.get("query"), None);
+    }
+
+    #[test]
+    fn contractual_evidence_pack_carries_hashes_and_scope_previews() {
+        let contract = contract_fixture();
+        let report = json!({
+            "token_budget_report": {
+                "contract": report_contract_json(&contract),
+                "statement_previews": {
+                    "lifetime": {
+                        "coverage": { "completeness_state": "partially_confirmed" },
+                        "measured_non_billable_lower_bound_tokens": 780,
+                        "billable_lower_bound_tokens": json!(null)
+                    }
+                },
+                "reconciliation_previews": {
+                    "lifetime": {
+                        "reconciliation_state": "awaiting_provider_usage_source"
+                    }
+                },
+                "margin_view": {
+                    "lifetime": {
+                        "margin_state": "awaiting_rate_card"
+                    }
+                }
+            }
+        });
+        let profile = super::ResolvedProfile {
+            code: "local_default".to_string(),
+            display_name: "Обычная рабочая машина".to_string(),
+            description: "test".to_string(),
+            session_gap_minutes: 30,
+            rolling_window_hours: Some(24),
+        };
+        let events = vec![
+            token_event! {
+                event_id: "event-included".to_string(),
+                correlation_id: "ctx-1".to_string(),
+                query_hash: "hash-a".to_string(),
+                naive_tokens: 1000,
+                context_tokens: 100,
+                effective_saved_tokens: 900,
+            },
+            token_event! {
+                event_id: "event-excluded".to_string(),
+                correlation_id: "ctx-2".to_string(),
+                query_hash: "hash-b".to_string(),
+                quality_ok: false,
+                needed_followup: true,
+                naive_tokens: 800,
+                context_tokens: 200,
+                effective_saved_tokens: 600,
+            },
+        ];
+
+        let pack = build_contractual_evidence_pack(
+            &report,
+            "lifetime",
+            "всё время записи",
+            &events,
+            &contract,
+            &profile,
+            false,
+            777,
+        )
+        .expect("evidence pack");
+
+        let payload = &pack["contractual_evidence_pack"];
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v1");
+        assert_eq!(payload["included_events_count"], 1);
+        assert_eq!(payload["excluded_events_count"], 1);
+        assert!(
+            payload["included_events_hash"]
+                .as_str()
+                .unwrap_or_default()
+                .len()
+                > 10
+        );
+        assert!(
+            payload["excluded_events_hash"]
+                .as_str()
+                .unwrap_or_default()
+                .len()
+                > 10
+        );
+        assert_eq!(
+            payload["truth_guardrail"]["full_session_economics"],
+            "not_fully_measured"
+        );
+        assert_eq!(
+            payload["line_items"]["included"][0]["event_id"],
+            "event-included"
+        );
+        assert_eq!(
+            payload["line_items"]["excluded"][0]["usage_state"]["excluded_reason_code"],
+            "awaiting_followup_reconciliation"
         );
     }
 

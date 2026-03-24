@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:03 MSK
-Ручная сверка guide/docs: 2026-03-24 12:03 MSK
+modified_at: 2026-03-24 12:17 MSK
+Ручная сверка guide/docs: 2026-03-24 12:17 MSK
 
 # Operations
 
@@ -1625,6 +1625,12 @@ cargo run --release -- verify token-benchmark-suite \
   - `current_session / rolling_window / lifetime`;
   - customer lower-bound savings в токенах;
   - money margin fields пока остаются `null`, если rate card и infra cost profile ещё не materialized;
+- `contractual_evidence_pack`
+  - report-only export по `current_session / rolling_window / lifetime`;
+  - содержит `statement_preview`, `reconciliation_preview`, `margin_scope`,
+    hashes включённых и исключённых line items;
+  - raw `query` туда не попадает, только `query_hash` и usage-state поля;
+  - это contractual evidence для review/export, но не invoice.
 - `coverage`
   - отдельный truth-layer поверх каждого rollup:
     - `measured_events`
@@ -1700,6 +1706,19 @@ cargo run --release -- verify token-benchmark-suite \
 ```bash
 cargo run --release -- observe token-report --include-verify-events true
 ```
+
+Если нужен customer-facing evidence/export pack по одному scope:
+
+```bash
+cargo run --release -- observe token-evidence-pack --scope lifetime
+cargo run --release -- observe token-evidence-pack --scope current_session --output /tmp/amai-token-evidence-pack.json
+```
+
+Что это даёт:
+- на выходе один JSON-пакет для review/export;
+- в нём уже есть hashes по included/excluded line items;
+- `statement_preview`, `reconciliation_preview` и `margin_scope` лежат рядом;
+- pack остаётся `report_only`, пока billing/settlement не materialized честно.
 
 Если в базе уже есть старые live `token_budget_event`, записанные до quality-gated формата, канонический путь теперь такой:
 

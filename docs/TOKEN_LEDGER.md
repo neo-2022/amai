@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 12:03 MSK
-Ручная сверка guide/docs: 2026-03-24 12:03 MSK
+modified_at: 2026-03-24 12:17 MSK
+Ручная сверка guide/docs: 2026-03-24 12:17 MSK
 
 # Token Ledger
 
@@ -581,6 +581,60 @@ materialized end-to-end.
 - пока provider reconciliation не доведён до денежной сверки;
 
 `Amai` не имеет права рисовать даже приблизительную маржу как будто она уже доказана.
+
+## Contractual evidence pack
+
+Следующий честный слой после `statement_preview + reconciliation_preview + margin_view` —
+это не invoice, а отдельный `contractual_evidence_pack`.
+
+Зачем он нужен:
+- отдать customer-facing evidence/export одним JSON-пакетом;
+- зафиксировать состав included/excluded usage line items;
+- не заставлять клиента читать dashboard вместо audit-friendly пакета;
+- не подмешивать сырой текст запроса туда, где нужен только contract-level след.
+
+Теперь этот export должен собираться отдельной командой:
+- `observe token-evidence-pack --scope current_session`
+- `observe token-evidence-pack --scope rolling_window`
+- `observe token-evidence-pack --scope lifetime`
+
+Внутри pack обязаны быть:
+- `pack_version`
+- `scope_code`
+- `scope_label`
+- `truth_guardrail`
+- `contract_versions`
+- `statement_preview`
+- `reconciliation_preview`
+- `margin_scope`
+- `included_events_count`
+- `excluded_events_count`
+- `included_events_hash`
+- `excluded_events_hash`
+- `line_items.included`
+- `line_items.excluded`
+
+Честный смысл этого export сейчас такой:
+- это `contractual-evidence-pack-v1`;
+- это всё ещё `report_only tokenonomics`;
+- это не invoice;
+- это не final settlement;
+- это не разрешение quietly подменять прошлый period.
+
+Отдельный truth guardrail внутри pack обязателен:
+- `retrieval_savings_floor = real`
+- `partial_whole_agent_cycle_lower_bound = real`
+- `full_session_economics = not_fully_measured`
+
+Отдельное правило redaction:
+- raw `query` в pack не попадает;
+- остаются только `query_hash`, scope, usage-state и token arithmetic;
+- это нужно затем, чтобы audit/export слой не тащил лишний customer content.
+
+Hashes по line items нужны затем, чтобы:
+- доказать состав export без ручного перебора;
+- не подменять included/excluded состав незаметно;
+- иметь audit-friendly anchor для будущих settlement/dispute flows.
 
 ## Preliminary vs stable
 

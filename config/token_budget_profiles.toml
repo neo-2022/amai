@@ -1,5 +1,5 @@
-modified_at = "2026-03-24 12:03 MSK"
-"Ручная сверка guide/docs" = "2026-03-24 12:03 MSK"
+modified_at = "2026-03-24 12:17 MSK"
+"Ручная сверка guide/docs" = "2026-03-24 12:17 MSK"
 
 default_profile = "local_default"
 
@@ -34,6 +34,7 @@ infra_cost_profile_version = "unpriced-infra-v1"
 rate_card_version = "unpriced-v1"
 currency_profile = "unpriced"
 settlement_status = "unsettled_report_only"
+contractual_evidence_pack_version = "contractual-evidence-pack-v1"
 
 [profiles.local_default]
 display_name = "Обычная рабочая машина"
