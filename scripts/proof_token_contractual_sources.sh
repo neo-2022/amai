@@ -122,6 +122,7 @@ assert payload["reconciliation_preview"]["usage_truth_completeness_state"] == "p
 assert payload["reconciliation_preview"]["money_truth_completeness_state"] == "provider_cost_and_invoice_bound", payload
 assert payload["reconciliation_preview"]["reconciliation_readiness_state"] == "usage_cost_and_invoice_truth_ready", payload
 assert payload["statement_export_preview"]["rate_card_status"] == "priced_bound", payload
+assert payload["statement_export_preview"]["rate_card_truth_completeness_state"] == "rate_card_priced_bound", payload
 assert payload["statement_export_preview"]["rate_card_version"] == "proof-rate-card-v1", payload
 assert payload["statement_export_preview"]["rate_card_provider"] == "openai", payload
 assert payload["statement_export_preview"]["rate_card_currency_profile"] == "USD", payload
@@ -134,6 +135,8 @@ assert payload["reconciliation_preview"]["provider_identity_state"] == "provider
 assert payload["reconciliation_preview"]["temporal_truth_state"] == "scope_period_aligned", payload
 assert payload["margin_scope"]["margin_state"] == "priced_preview_report_only", payload
 assert payload["margin_scope"]["margin_confidence_state"] == "aligned_report_only", payload
+assert payload["margin_scope"]["pricing_truth_completeness_state"] == "pricing_truth_ready", payload
+assert payload["margin_scope"]["margin_readiness_state"] == "preview_ready_report_only", payload
 assert payload["margin_scope"]["rate_card_scope_alignment_state"] == "scope_period_aligned", payload
 assert payload["margin_scope"]["infra_cost_scope_alignment_state"] == "scope_period_aligned", payload
 assert payload["margin_scope"]["provider_identity_state"] == "provider_identity_aligned", payload

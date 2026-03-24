@@ -30,11 +30,17 @@ assert manifest["scope_code"] == "lifetime", manifest
 assert statement_export["scope_code"] == "lifetime", statement_export
 assert evidence_pack["scope_code"] == "lifetime", evidence_pack
 assert contractual_sources["scope_code"] == "lifetime", contractual_sources
-assert statement_export["model_version"] == "contractual-statement-export-v8", statement_export
-assert evidence_pack["pack_version"] == "contractual-evidence-pack-v8", evidence_pack
+assert statement_export["model_version"] == "contractual-statement-export-v9", statement_export
+assert evidence_pack["pack_version"] == "contractual-evidence-pack-v9", evidence_pack
 assert statement_export["external_truth_manifest"]["manifest_hash"], statement_export
 assert evidence_pack["external_truth_manifest"]["manifest_hash"], evidence_pack
 assert contractual_sources["external_truth_manifest"]["manifest_hash"], contractual_sources
+assert statement_export["rate_card_truth_completeness_state"] is not None, statement_export
+assert statement_export["pricing_truth_completeness_state"] is not None, statement_export
+assert statement_export["margin_readiness_state"] is not None, statement_export
+assert evidence_pack["rate_card_truth_completeness_state"] is not None, evidence_pack
+assert evidence_pack["pricing_truth_completeness_state"] is not None, evidence_pack
+assert evidence_pack["margin_readiness_state"] is not None, evidence_pack
 assert statement_export["provider_identity_state"] in {"provider_identity_aligned", "provider_identity_unchecked"}, statement_export
 assert statement_export["rate_card_status"] is not None, statement_export
 assert statement_export["transactional_statuses"]["billable"]["boundary"] == "reserved_future", statement_export

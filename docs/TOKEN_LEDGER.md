@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 22:10 MSK
-Ручная сверка guide/docs: 2026-03-24 22:10 MSK
+modified_at: 2026-03-24 22:22 MSK
+Ручная сверка guide/docs: 2026-03-24 22:22 MSK
 
 # Token Ledger
 
@@ -712,11 +712,12 @@ Operator-safe report-only команды:
 - готовы ли мы вообще к external reconciliation.
 
 Текущий truthful status:
-- `reconciliation_contract_version = provider-reconciliation-v6`
+- `reconciliation_contract_version = provider-reconciliation-v7`
 - `ready_for_external_reconciliation` теперь зависит от реального bind provider usage export,
   а не от одного факта, что где-то прописан путь;
 - contract теперь ещё отдельно публикует:
   - `usage_truth_completeness_state`
+  - `rate_card_truth_completeness_state`
   - `money_truth_completeness_state`
   - `reconciliation_readiness_state`
   - `governance_blocking_reasons`
@@ -824,7 +825,7 @@ Customer-facing export bundle:
 - включена ли money-margin арифметика.
 
 Текущий truthful status:
-- `margin_model_version = margin-view-v4`
+- `margin_model_version = margin-view-v5`
 - `infra_cost_binding_model_version = infra-cost-binding-v3`
 - `infra_cost_profile_version = unpriced-infra-v1`
 - `money_margin_enabled` включается только после честного bind на
@@ -835,11 +836,33 @@ Customer-facing export bundle:
 - `margin_view` теперь обязан брать priced/unpriced не из static contract label, а из
   настоящего rate-card binding runtime.
 - `margin_view` теперь ещё отдельно публикует:
+  - `rate_card_truth_completeness_state`
+  - `infra_cost_truth_completeness_state`
+  - `pricing_truth_completeness_state`
   - `margin_confidence_state`
+  - `margin_readiness_state`
   - `rate_card_scope_alignment_state`
   - `infra_cost_scope_alignment_state`
   - `temporal_truth_state`
   - `provider_identity_state`
+
+Новый смысл этих полей:
+- `rate_card_truth_completeness_state`
+  - показывает, дошли ли мы хотя бы до честно привязанного pricing source;
+- `infra_cost_truth_completeness_state`
+  - показывает, есть ли уже отдельный truthful источник собственных infra costs;
+- `pricing_truth_completeness_state`
+  - показывает итог по pricing-layer целиком, не смешивая его с usage truth;
+- `margin_readiness_state`
+  - нормализует, какой именно следующий реальный блокер сейчас мешает money-preview:
+    - `awaiting_pricing_truth`
+    - `awaiting_usage_truth`
+    - `provider_identity_mismatch`
+    - `pricing_period_mismatch`
+    - `currency_profile_mismatch`
+    - `provider_drift_detected`
+    - `temporal_truth_unscoped_report_only`
+    - `preview_ready_report_only`
 
 Именно поэтому truthful `margin_view` теперь обязан выглядеть в одной из двух форм:
 - до bind внешних truth-sources:
@@ -914,7 +937,7 @@ Customer-facing export bundle:
 - `line_items.excluded`
 
 Честный смысл этого export сейчас такой:
-- это `contractual-evidence-pack-v8`;
+- это `contractual-evidence-pack-v9`;
 - это всё ещё `report_only tokenonomics`;
 - это не invoice;
 - это не final settlement;

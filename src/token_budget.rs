@@ -559,11 +559,11 @@ fn default_billing_mode() -> String {
 }
 
 fn default_reconciliation_contract_version() -> String {
-    "provider-reconciliation-v6".to_string()
+    "provider-reconciliation-v7".to_string()
 }
 
 fn default_margin_model_version() -> String {
-    "margin-view-v4".to_string()
+    "margin-view-v5".to_string()
 }
 
 fn default_infra_cost_profile_version() -> String {
@@ -571,11 +571,11 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v8".to_string()
+    "contractual-evidence-pack-v9".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v8".to_string()
+    "contractual-statement-export-v9".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -2233,6 +2233,79 @@ fn money_truth_completeness_state(
     }
 }
 
+fn rate_card_truth_completeness_state(rate_card_status: &str) -> &'static str {
+    if matches!(rate_card_status, "not_configured" | "default_path_missing") {
+        "awaiting_rate_card_source"
+    } else if matches!(
+        rate_card_status,
+        "configured_path_missing" | "read_error" | "parse_error"
+    ) {
+        "provider_rate_card_error"
+    } else if rate_card_status == "priced_bound" {
+        "rate_card_priced_bound"
+    } else if rate_card_status == "bound_but_unpriced" {
+        "rate_card_bound_unpriced"
+    } else {
+        "rate_card_not_yet_bound"
+    }
+}
+
+fn infra_cost_truth_completeness_state(infra_cost_status: &str) -> &'static str {
+    if matches!(infra_cost_status, "not_configured" | "default_path_missing") {
+        "awaiting_infra_cost_profile"
+    } else if matches!(
+        infra_cost_status,
+        "configured_path_missing" | "read_error" | "parse_error"
+    ) {
+        "infra_cost_profile_error"
+    } else if infra_cost_status == "priced_bound" {
+        "infra_cost_profile_priced_bound"
+    } else if infra_cost_status == "bound_but_unpriced" {
+        "infra_cost_profile_bound_unpriced"
+    } else {
+        "infra_cost_profile_not_yet_bound"
+    }
+}
+
+fn pricing_truth_completeness_state(
+    rate_card_truth_state: &str,
+    infra_cost_truth_state: &str,
+) -> &'static str {
+    if matches!(rate_card_truth_state, "provider_rate_card_error")
+        || matches!(infra_cost_truth_state, "infra_cost_profile_error")
+    {
+        "pricing_truth_source_error"
+    } else if rate_card_truth_state == "rate_card_priced_bound"
+        && infra_cost_truth_state == "infra_cost_profile_priced_bound"
+    {
+        "pricing_truth_ready"
+    } else if matches!(
+        rate_card_truth_state,
+        "awaiting_rate_card_source" | "rate_card_not_yet_bound"
+    ) && matches!(
+        infra_cost_truth_state,
+        "awaiting_infra_cost_profile" | "infra_cost_profile_not_yet_bound"
+    ) {
+        "awaiting_rate_card_and_infra_cost_profile"
+    } else if matches!(
+        rate_card_truth_state,
+        "awaiting_rate_card_source" | "rate_card_not_yet_bound"
+    ) {
+        "awaiting_rate_card_source"
+    } else if matches!(
+        infra_cost_truth_state,
+        "awaiting_infra_cost_profile" | "infra_cost_profile_not_yet_bound"
+    ) {
+        "awaiting_infra_cost_profile"
+    } else if matches!(rate_card_truth_state, "rate_card_bound_unpriced")
+        || matches!(infra_cost_truth_state, "infra_cost_profile_bound_unpriced")
+    {
+        "pricing_truth_bound_unpriced"
+    } else {
+        "pricing_truth_partially_bound"
+    }
+}
+
 fn reconciliation_readiness_state(
     usage_truth_completeness_state: &str,
     money_truth_completeness_state: &str,
@@ -2561,6 +2634,7 @@ fn build_reconciliation_contract_json(
     );
     let rate_card_missing = matches!(rate_card_status, "not_configured" | "default_path_missing");
     let usage_truth_state = usage_truth_completeness_state(provider_usage_status);
+    let rate_card_truth_state = rate_card_truth_completeness_state(rate_card_status);
     let money_truth_state = money_truth_completeness_state(
         provider_usage_status,
         rate_card_status,
@@ -2624,6 +2698,7 @@ fn build_reconciliation_contract_json(
         "status": status,
         "ready_for_external_reconciliation": ready_for_external_reconciliation,
         "usage_truth_completeness_state": usage_truth_state,
+        "rate_card_truth_completeness_state": rate_card_truth_state,
         "money_truth_completeness_state": money_truth_state,
         "reconciliation_readiness_state": reconciliation_readiness_state,
         "governance_blocking_reasons": governance_blocking_reasons,
@@ -2677,6 +2752,7 @@ fn build_reconciliation_preview(
     );
     let rate_card_missing = matches!(rate_card_status, "not_configured" | "default_path_missing");
     let usage_truth_state = usage_truth_completeness_state(provider_usage_status);
+    let rate_card_truth_state = rate_card_truth_completeness_state(rate_card_status);
     let money_truth_state = money_truth_completeness_state(
         provider_usage_status,
         rate_card_status,
@@ -2737,6 +2813,7 @@ fn build_reconciliation_preview(
             "scope_label": scope_label,
             "reconciliation_state": "awaiting_provider_usage_source",
             "usage_truth_completeness_state": usage_truth_state,
+            "rate_card_truth_completeness_state": rate_card_truth_state,
             "money_truth_completeness_state": money_truth_state,
             "reconciliation_readiness_state": readiness_state,
             "governance_blocking_reasons": governance_blocking_reasons,
@@ -2787,6 +2864,7 @@ fn build_reconciliation_preview(
             "scope_label": scope_label,
             "reconciliation_state": "provider_usage_source_error",
             "usage_truth_completeness_state": usage_truth_state,
+            "rate_card_truth_completeness_state": rate_card_truth_state,
             "money_truth_completeness_state": money_truth_state,
             "reconciliation_readiness_state": readiness_state,
             "governance_blocking_reasons": governance_blocking_reasons,
@@ -2836,6 +2914,7 @@ fn build_reconciliation_preview(
             "scope_label": scope_label,
             "reconciliation_state": "awaiting_rate_card_source",
             "usage_truth_completeness_state": usage_truth_state,
+            "rate_card_truth_completeness_state": rate_card_truth_state,
             "money_truth_completeness_state": money_truth_state,
             "reconciliation_readiness_state": readiness_state,
             "governance_blocking_reasons": governance_blocking_reasons,
@@ -2959,6 +3038,7 @@ fn build_reconciliation_preview(
         "scope_label": scope_label,
         "reconciliation_state": reconciliation_state,
         "usage_truth_completeness_state": usage_truth_state,
+        "rate_card_truth_completeness_state": rate_card_truth_state,
         "money_truth_completeness_state": money_truth_state,
         "reconciliation_readiness_state": readiness_state,
         "governance_blocking_reasons": governance_blocking_reasons,
@@ -3013,6 +3093,12 @@ fn build_margin_contract_json(
     let infra_cost_status = infra_cost_profile["status"]
         .as_str()
         .unwrap_or("not_configured");
+    let rate_card_truth_state = rate_card_truth_completeness_state(
+        rate_card["status"].as_str().unwrap_or("not_configured"),
+    );
+    let infra_cost_truth_state = infra_cost_truth_completeness_state(infra_cost_status);
+    let pricing_truth_state =
+        pricing_truth_completeness_state(rate_card_truth_state, infra_cost_truth_state);
     let provider_status = reconciliation_contract["status"]
         .as_str()
         .unwrap_or("awaiting_provider_usage_source");
@@ -3039,6 +3125,10 @@ fn build_margin_contract_json(
         "model_version": contract.margin_model_version.clone(),
         "infra_cost_profile_version": contract.infra_cost_profile_version.clone(),
         "infra_cost_binding_model_version": contract.infra_cost_binding_model_version.clone(),
+        "rate_card_truth_completeness_state": rate_card_truth_state,
+        "infra_cost_truth_completeness_state": infra_cost_truth_state,
+        "pricing_truth_completeness_state": pricing_truth_state,
+        "margin_readiness_state": status,
         "rate_card_status": rate_card["status"].clone(),
         "rate_card_temporal_scope_state": rate_card["temporal_scope_state"].clone(),
         "infra_cost_temporal_scope_state": infra_cost_profile["temporal_scope_state"].clone(),
@@ -3064,6 +3154,12 @@ fn build_margin_scope(
     let infra_cost_status = infra_cost_profile["status"]
         .as_str()
         .unwrap_or("not_configured");
+    let rate_card_truth_state = rate_card_truth_completeness_state(
+        rate_card["status"].as_str().unwrap_or("not_configured"),
+    );
+    let infra_cost_truth_state = infra_cost_truth_completeness_state(infra_cost_status);
+    let pricing_truth_state =
+        pricing_truth_completeness_state(rate_card_truth_state, infra_cost_truth_state);
     let reconciliation_state = reconciliation_preview["reconciliation_state"]
         .as_str()
         .unwrap_or("awaiting_provider_usage_source");
@@ -3120,6 +3216,17 @@ fn build_margin_scope(
         "awaiting_infra_cost_profile" => "awaiting_infra_cost_profile",
         "provider_identity_mismatch" => "provider_identity_mismatch",
         _ => "awaiting_rate_card",
+    };
+    let margin_readiness_state = match margin_state {
+        "awaiting_rate_card" | "awaiting_infra_cost_profile" => "awaiting_pricing_truth",
+        "awaiting_provider_reconciliation" => "awaiting_usage_truth",
+        "provider_identity_mismatch" => "provider_identity_mismatch",
+        "pricing_period_mismatch" => "pricing_period_mismatch",
+        "currency_profile_mismatch" => "currency_profile_mismatch",
+        "priced_preview_with_provider_drift" => "provider_drift_detected",
+        "priced_preview_temporal_unscoped_report_only" => "temporal_truth_unscoped_report_only",
+        "priced_preview_report_only" => "preview_ready_report_only",
+        _ => "awaiting_pricing_truth",
     };
     let mut blocking_reasons = Vec::new();
     if !rate_card_priced {
@@ -3203,6 +3310,10 @@ fn build_margin_scope(
         "scope_label": scope_label,
         "margin_state": margin_state,
         "margin_confidence_state": margin_confidence_state,
+        "margin_readiness_state": margin_readiness_state,
+        "rate_card_truth_completeness_state": rate_card_truth_state,
+        "infra_cost_truth_completeness_state": infra_cost_truth_state,
+        "pricing_truth_completeness_state": pricing_truth_state,
         "provider_usage_scope_alignment_state": provider_usage_alignment_state,
         "rate_card_scope_alignment_state": rate_card_alignment_state,
         "infra_cost_scope_alignment_state": infra_cost_alignment_state,
@@ -3802,6 +3913,7 @@ fn build_contractual_statement_summary(
         "provisional_close_barriers": statement_preview["provisional_close_barriers"].clone(),
         "billing_close_barriers": statement_preview["billing_close_barriers"].clone(),
         "usage_truth_completeness_state": reconciliation_preview["usage_truth_completeness_state"].clone(),
+        "rate_card_truth_completeness_state": reconciliation_preview["rate_card_truth_completeness_state"].clone(),
         "money_truth_completeness_state": reconciliation_preview["money_truth_completeness_state"].clone(),
         "reconciliation_readiness_state": reconciliation_preview["reconciliation_readiness_state"].clone(),
         "reconciliation_governance_blocking_reasons": reconciliation_preview["governance_blocking_reasons"].clone(),
@@ -3841,6 +3953,9 @@ fn build_contractual_statement_summary(
         "reconciliation_state": reconciliation_preview["reconciliation_state"].clone(),
         "margin_state": margin_scope["margin_state"].clone(),
         "margin_confidence_state": margin_scope["margin_confidence_state"].clone(),
+        "margin_readiness_state": margin_scope["margin_readiness_state"].clone(),
+        "infra_cost_truth_completeness_state": margin_scope["infra_cost_truth_completeness_state"].clone(),
+        "pricing_truth_completeness_state": margin_scope["pricing_truth_completeness_state"].clone(),
         "margin_provider_identity_state": margin_scope["provider_identity_state"].clone(),
         "margin_temporal_truth_state": margin_scope["temporal_truth_state"].clone(),
         "infra_cost_scope_alignment_state": margin_scope["infra_cost_scope_alignment_state"].clone(),
@@ -4140,6 +4255,7 @@ fn build_statement_export_preview(
         "provisional_close_candidate": contractual_summary["provisional_close_candidate"].clone(),
         "provisional_close_earliest_at_epoch_ms": contractual_summary["provisional_close_earliest_at_epoch_ms"].clone(),
         "usage_truth_completeness_state": contractual_summary["usage_truth_completeness_state"].clone(),
+        "rate_card_truth_completeness_state": contractual_summary["rate_card_truth_completeness_state"].clone(),
         "money_truth_completeness_state": contractual_summary["money_truth_completeness_state"].clone(),
         "reconciliation_readiness_state": contractual_summary["reconciliation_readiness_state"].clone(),
         "rate_card_status": contractual_summary["rate_card_status"].clone(),
@@ -4159,6 +4275,9 @@ fn build_statement_export_preview(
         "reconciliation_state": contractual_summary["reconciliation_state"].clone(),
         "margin_state": contractual_summary["margin_state"].clone(),
         "margin_confidence_state": contractual_summary["margin_confidence_state"].clone(),
+        "margin_readiness_state": contractual_summary["margin_readiness_state"].clone(),
+        "infra_cost_truth_completeness_state": contractual_summary["infra_cost_truth_completeness_state"].clone(),
+        "pricing_truth_completeness_state": contractual_summary["pricing_truth_completeness_state"].clone(),
         "margin_provider_identity_state": contractual_summary["margin_provider_identity_state"].clone(),
         "margin_temporal_truth_state": contractual_summary["margin_temporal_truth_state"].clone(),
         "infra_cost_scope_alignment_state": contractual_summary["infra_cost_scope_alignment_state"].clone(),
@@ -4254,12 +4373,16 @@ fn build_contractual_evidence_pack(
         "next_settlement_stage_blockers": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["next_settlement_stage_blockers"].clone(),
         "transactional_statuses": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["transactional_statuses"].clone(),
         "rate_card_status": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["rate_card_status"].clone(),
+        "rate_card_truth_completeness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["rate_card_truth_completeness_state"].clone(),
         "rate_card_version": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["rate_card_version"].clone(),
         "rate_card_provider": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["rate_card_provider"].clone(),
         "rate_card_currency_profile": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["rate_card_currency_profile"].clone(),
         "provider_usage_provider": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["provider_usage_provider"].clone(),
         "provider_invoice_provider": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["provider_invoice_provider"].clone(),
         "provider_identity_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["provider_identity_state"].clone(),
+        "infra_cost_truth_completeness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["infra_cost_truth_completeness_state"].clone(),
+        "pricing_truth_completeness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["pricing_truth_completeness_state"].clone(),
+        "margin_readiness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["margin_readiness_state"].clone(),
         "external_truth_manifest": report["token_budget_report"]["external_truth_manifest"].clone(),
         "export_semantics": {
             "surface_kind": "customer_evidence_pack_report_only",
@@ -9416,11 +9539,11 @@ mod tests {
         assert_eq!(token_event["contract"]["billing_mode"], "report_only");
         assert_eq!(
             token_event["contract"]["reconciliation_contract_version"],
-            "provider-reconciliation-v6"
+            "provider-reconciliation-v7"
         );
         assert_eq!(
             token_event["contract"]["margin_model_version"],
-            "margin-view-v4"
+            "margin-view-v5"
         );
         assert_eq!(
             token_event["contract"]["infra_cost_profile_version"],
@@ -9428,7 +9551,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v8"
+            "contractual-evidence-pack-v9"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -10136,12 +10259,16 @@ effective_to_epoch_ms = 2000
 
         assert_eq!(
             reconciliation["contract_version"],
-            "provider-reconciliation-v6"
+            "provider-reconciliation-v7"
         );
         assert_eq!(reconciliation["status"], "awaiting_provider_usage_source");
         assert_eq!(
             reconciliation["usage_truth_completeness_state"],
             "awaiting_provider_usage_source"
+        );
+        assert_eq!(
+            reconciliation["rate_card_truth_completeness_state"],
+            "awaiting_rate_card_source"
         );
         assert_eq!(
             reconciliation["money_truth_completeness_state"],
@@ -10228,6 +10355,10 @@ effective_to_epoch_ms = 2000
             "awaiting_provider_usage_source"
         );
         assert_eq!(
+            reconciliation["rate_card_truth_completeness_state"],
+            "awaiting_rate_card_source"
+        );
+        assert_eq!(
             reconciliation["money_truth_completeness_state"],
             "no_external_money_truth"
         );
@@ -10275,9 +10406,22 @@ effective_to_epoch_ms = 2000
         let margin =
             build_margin_contract_json(&contract, &rate_card, &infra_cost_source, &reconciliation);
 
-        assert_eq!(margin["model_version"], "margin-view-v4");
+        assert_eq!(margin["model_version"], "margin-view-v5");
         assert_eq!(margin["infra_cost_profile_version"], "unpriced-infra-v1");
         assert_eq!(margin["status"], "awaiting_rate_card");
+        assert_eq!(
+            margin["rate_card_truth_completeness_state"],
+            "awaiting_rate_card_source"
+        );
+        assert_eq!(
+            margin["infra_cost_truth_completeness_state"],
+            "awaiting_infra_cost_profile"
+        );
+        assert_eq!(
+            margin["pricing_truth_completeness_state"],
+            "awaiting_rate_card_and_infra_cost_profile"
+        );
+        assert_eq!(margin["margin_readiness_state"], "awaiting_rate_card");
         assert_eq!(margin["money_margin_enabled"], json!(false));
     }
 
@@ -10347,6 +10491,11 @@ effective_to_epoch_ms = 2000
         );
 
         assert_eq!(margin["margin_state"], "awaiting_rate_card");
+        assert_eq!(margin["margin_readiness_state"], "awaiting_pricing_truth");
+        assert_eq!(
+            margin["pricing_truth_completeness_state"],
+            "awaiting_rate_card_and_infra_cost_profile"
+        );
         assert_eq!(margin["customer_saved_tokens_lower_bound"], 9876);
         assert_eq!(margin["customer_saved_amount_lower_bound"], json!(null));
         assert_eq!(margin["amai_infra_cost_amount"], json!(null));
@@ -10456,6 +10605,10 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             reconciliation["usage_truth_completeness_state"],
             "provider_usage_bound"
+        );
+        assert_eq!(
+            reconciliation["rate_card_truth_completeness_state"],
+            "rate_card_priced_bound"
         );
         assert_eq!(
             reconciliation["money_truth_completeness_state"],
@@ -10614,6 +10767,14 @@ effective_to_epoch_ms = 2000
 
         assert_eq!(margin["margin_state"], "priced_preview_report_only");
         assert_eq!(margin["margin_confidence_state"], "aligned_report_only");
+        assert_eq!(
+            margin["margin_readiness_state"],
+            "preview_ready_report_only"
+        );
+        assert_eq!(
+            margin["pricing_truth_completeness_state"],
+            "pricing_truth_ready"
+        );
         assert_eq!(
             margin["provider_usage_scope_alignment_state"],
             "scope_period_aligned"
@@ -10922,6 +11083,10 @@ effective_to_epoch_ms = 2000
             "provider_identity_mismatch"
         );
         assert_eq!(
+            margin["margin_readiness_state"],
+            "provider_identity_mismatch"
+        );
+        assert_eq!(
             margin["provider_identity_state"],
             "provider_identity_mismatch"
         );
@@ -11006,6 +11171,7 @@ effective_to_epoch_ms = 2000
                     }
                 },
                 "usage_truth_completeness_state": "provider_usage_bound",
+                "rate_card_truth_completeness_state": "rate_card_priced_bound",
                 "money_truth_completeness_state": "provider_cost_and_invoice_bound",
                 "reconciliation_readiness_state": "usage_cost_and_invoice_truth_ready",
                 "governance_blocking_reasons": [],
@@ -11018,6 +11184,9 @@ effective_to_epoch_ms = 2000
             &json!({
                 "margin_state": "awaiting_infra_cost_profile",
                 "margin_confidence_state": "awaiting_infra_cost_profile",
+                "margin_readiness_state": "awaiting_pricing_truth",
+                "infra_cost_truth_completeness_state": "awaiting_infra_cost_profile",
+                "pricing_truth_completeness_state": "awaiting_infra_cost_profile",
                 "provider_identity_state": "provider_identity_aligned",
                 "temporal_truth_state": "scope_period_aligned",
                 "infra_cost_scope_alignment_state": "scope_period_aligned",
@@ -11063,6 +11232,10 @@ effective_to_epoch_ms = 2000
             "provider_usage_bound"
         );
         assert_eq!(
+            summary["rate_card_truth_completeness_state"],
+            "rate_card_priced_bound"
+        );
+        assert_eq!(
             summary["money_truth_completeness_state"],
             "provider_cost_and_invoice_bound"
         );
@@ -11099,6 +11272,15 @@ effective_to_epoch_ms = 2000
             "external_usage_and_invoice_bound_report_only"
         );
         assert_eq!(summary["margin_state"], "awaiting_infra_cost_profile");
+        assert_eq!(summary["margin_readiness_state"], "awaiting_pricing_truth");
+        assert_eq!(
+            summary["infra_cost_truth_completeness_state"],
+            "awaiting_infra_cost_profile"
+        );
+        assert_eq!(
+            summary["pricing_truth_completeness_state"],
+            "awaiting_infra_cost_profile"
+        );
         assert_eq!(
             summary["margin_provider_identity_state"],
             "provider_identity_aligned"
@@ -11204,6 +11386,7 @@ effective_to_epoch_ms = 2000
                         },
                         "coverage_state": "partially_confirmed",
                         "rate_card_status": "priced_bound",
+                        "rate_card_truth_completeness_state": "rate_card_priced_bound",
                         "rate_card_version": "demo-priced-v1",
                         "rate_card_provider": "demo-provider",
                         "rate_card_currency_profile": "USD",
@@ -11220,6 +11403,9 @@ effective_to_epoch_ms = 2000
                         "reconciliation_state": "awaiting_provider_usage_source",
                         "margin_state": "awaiting_rate_card",
                         "margin_confidence_state": "awaiting_rate_card",
+                        "margin_readiness_state": "awaiting_pricing_truth",
+                        "infra_cost_truth_completeness_state": "awaiting_infra_cost_profile",
+                        "pricing_truth_completeness_state": "awaiting_infra_cost_profile",
                         "margin_provider_identity_state": "provider_identity_aligned",
                         "margin_temporal_truth_state": "scope_period_aligned",
                         "infra_cost_scope_alignment_state": "infra_cost_profile_not_bound",
@@ -11275,7 +11461,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v8");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v9");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -11292,6 +11478,10 @@ effective_to_epoch_ms = 2000
             "provider_identity_aligned"
         );
         assert_eq!(preview["rate_card_version"], "demo-priced-v1");
+        assert_eq!(
+            preview["rate_card_truth_completeness_state"],
+            "rate_card_priced_bound"
+        );
         assert_eq!(preview["rate_card_provider"], "demo-provider");
         assert_eq!(preview["rate_card_currency_profile"], "USD");
         assert_eq!(preview["provider_usage_provider"], "demo-provider");
@@ -11299,6 +11489,11 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             preview["margin_provider_identity_state"],
             "provider_identity_aligned"
+        );
+        assert_eq!(preview["margin_readiness_state"], "awaiting_pricing_truth");
+        assert_eq!(
+            preview["pricing_truth_completeness_state"],
+            "awaiting_infra_cost_profile"
         );
         assert_eq!(
             preview["margin_blocking_reasons"],
@@ -11398,6 +11593,10 @@ effective_to_epoch_ms = 2000
                                 "status": "billable_blocked_reserved"
                             }
                         },
+                        "rate_card_truth_completeness_state": "rate_card_priced_bound",
+                        "infra_cost_truth_completeness_state": "awaiting_infra_cost_profile",
+                        "pricing_truth_completeness_state": "awaiting_infra_cost_profile",
+                        "margin_readiness_state": "awaiting_pricing_truth",
                         "suitability": {
                             "surfaces": {
                                 "contractual_export": {
@@ -11454,7 +11653,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v8");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v9");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -11472,6 +11671,19 @@ effective_to_epoch_ms = 2000
             payload["transactional_statuses"]["billable"]["status"],
             "billable_blocked_reserved"
         );
+        assert_eq!(
+            payload["rate_card_truth_completeness_state"],
+            "rate_card_priced_bound"
+        );
+        assert_eq!(
+            payload["infra_cost_truth_completeness_state"],
+            "awaiting_infra_cost_profile"
+        );
+        assert_eq!(
+            payload["pricing_truth_completeness_state"],
+            "awaiting_infra_cost_profile"
+        );
+        assert_eq!(payload["margin_readiness_state"], "awaiting_pricing_truth");
         assert_eq!(
             payload["export_semantics"]["surface_kind"],
             "customer_evidence_pack_report_only"

@@ -1,5 +1,5 @@
-modified_at: 2026-03-24 21:05 MSK
-Ручная сверка guide/docs: 2026-03-24 21:05 MSK
+modified_at: 2026-03-24 22:22 MSK
+Ручная сверка guide/docs: 2026-03-24 22:22 MSK
 
 # Operations
 
@@ -1860,8 +1860,13 @@ cargo run -- context pack \
   - `rolling_window`
   - `lifetime`
   - в нём видно token-side lower bound savings клиента;
-  - при честно привязанном priced rate card он обязан перескочить с `awaiting_rate_card`
-    на следующий реальный блокер, а не держаться за старый static contract;
+  - при честно привязанном priced rate card он обязан перескочить с общего
+    `awaiting_rate_card` на следующий реальный блокер;
+  - для этого теперь отдельно публикуются:
+    - `rate_card_truth_completeness_state`
+    - `infra_cost_truth_completeness_state`
+    - `pricing_truth_completeness_state`
+    - `margin_readiness_state`
   - temporal truth теперь тоже first-class:
     - `margin_confidence_state`
     - `rate_card_scope_alignment_state`
