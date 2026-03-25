@@ -5345,6 +5345,32 @@ fn build_statement_preview(
     })
 }
 
+fn build_dashboard_statement_preview(
+    scope_code: &str,
+    scope_label: &str,
+    summary: &Value,
+    events: &[TokenBudgetEvent],
+    contract: &TokenBudgetContractConfig,
+    rollout_observations: &[codex_threads::RolloutAssistantGenerationObservation],
+    assistant_scope: Option<&AssistantGenerationScopeObservation>,
+) -> Value {
+    json!({
+        "scope_code": scope_code,
+        "scope_label": scope_label,
+        "statement_status": "dashboard_read_only_preview",
+        "coverage": summary["coverage"].clone(),
+        "client_limit_meter_alignment": build_client_limit_meter_alignment(
+            contract,
+            "dashboard_statement_preview",
+            summary,
+            Some(events),
+            Some(rollout_observations),
+            assistant_scope,
+        ),
+        "note": "Dashboard preview intentionally stays read-only and lightweight: it is for fast operator cards, not for contractual export, settlement, or billing semantics."
+    })
+}
+
 fn observed_whole_cycle_with_assistant_scope_tokens(
     summary: &Value,
     assistant_scope: Option<&AssistantGenerationScopeObservation>,
@@ -6731,11 +6757,130 @@ pub async fn collect_default_report(db: &Client) -> Result<Value> {
     .await
 }
 
+pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
+    let repo_root = config::discover_repo_root(None)?;
+    let config = load_config(&repo_root)?;
+    let profile = resolve_profile(&config, None, &repo_root)?;
+    let include_verify_events = config.measurement.include_verify_events_by_default;
+    let rollout_observations = rollout_assistant_generation_observations_for_repo(&repo_root)?;
+    let mut events = load_events(db, include_verify_events, None).await?;
+    events.sort_by_key(|event| event.created_at_epoch_ms);
+    let events =
+        reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
+    let now_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as i64;
+    let session_gap_ms = profile.session_gap_minutes.saturating_mul(60_000) as i64;
+    let session_events = current_session_events(&events, session_gap_ms);
+    let rolling_window_events = profile
+        .rolling_window_hours
+        .map(|hours| {
+            let lower_bound = now_epoch_ms.saturating_sub((hours as i64).saturating_mul(3_600_000));
+            events
+                .iter()
+                .filter(|event| event.created_at_epoch_ms >= lower_bound)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let current_session_assistant_scope =
+        derive_rollout_assistant_generation_scope(db, &session_events).await?;
+    let rolling_window_assistant_scope = if profile.rolling_window_hours.is_some() {
+        Some(derive_rollout_assistant_generation_scope(db, &rolling_window_events).await?)
+    } else {
+        None
+    };
+    let lifetime_assistant_scope = derive_rollout_assistant_generation_scope(db, &events).await?;
+    let current_session_summary = summarize_events(
+        &session_events,
+        now_epoch_ms,
+        &config.measurement,
+        &config.contract,
+    );
+    let rolling_window_summary = if profile.rolling_window_hours.is_some() {
+        summarize_events(
+            &rolling_window_events,
+            now_epoch_ms,
+            &config.measurement,
+            &config.contract,
+        )
+    } else {
+        Value::Null
+    };
+    let lifetime_summary =
+        summarize_events(&events, now_epoch_ms, &config.measurement, &config.contract);
+    let headline_summary = if profile.rolling_window_hours.is_some() {
+        build_product_headline(
+            &rolling_window_summary,
+            &format!("окно {}", profile.display_name),
+        )
+    } else {
+        build_product_headline(&lifetime_summary, "всё время записи")
+    };
+    Ok(json!({
+        "token_budget_report": {
+            "surface": "dashboard_read_only",
+            "profile": {
+                "code": profile.code,
+                "display_name": profile.display_name,
+                "description": profile.description,
+                "session_gap_minutes": profile.session_gap_minutes,
+                "rolling_window_hours": profile.rolling_window_hours,
+            },
+            "filters": {
+                "include_verify_events": include_verify_events,
+            },
+            "headline": headline_summary,
+            "current_session": current_session_summary,
+            "rolling_window": rolling_window_summary,
+            "lifetime": lifetime_summary,
+            "statement_previews": {
+                "current_session": build_dashboard_statement_preview(
+                    "current_session",
+                    "текущая сессия",
+                    &current_session_summary,
+                    &session_events,
+                    &config.contract,
+                    &rollout_observations,
+                    Some(&current_session_assistant_scope),
+                ),
+                "rolling_window": if profile.rolling_window_hours.is_some() {
+                    build_dashboard_statement_preview(
+                        "rolling_window",
+                        &format!("окно {}", profile.display_name),
+                        &rolling_window_summary,
+                        &rolling_window_events,
+                        &config.contract,
+                        &rollout_observations,
+                        rolling_window_assistant_scope.as_ref(),
+                    )
+                } else {
+                    Value::Null
+                },
+                "lifetime": build_dashboard_statement_preview(
+                    "lifetime",
+                    "всё время записи",
+                    &lifetime_summary,
+                    &events,
+                    &config.contract,
+                    &rollout_observations,
+                    Some(&lifetime_assistant_scope),
+                ),
+            },
+            "note": "Это облегчённый dashboard read-only report: он сохраняет честные current_session / rolling_window / lifetime rollups и client-limit alignment, но не разворачивает полный contractual/export contour и не делает quiet sync/write-back во время refresh карточек.",
+        }
+    }))
+}
+
 pub async fn collect_default_report_with_overrides(
     db: &Client,
     requested_profile: Option<&str>,
     include_verify_events: Option<bool>,
 ) -> Result<Value> {
+    if requested_profile.is_none() && include_verify_events.is_none() {
+        return collect_default_report(db).await;
+    }
     let repo_root = config::discover_repo_root(None)?;
     let config = load_config(&repo_root)?;
     collect_report(

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 01:01 MSK
-Ручная сверка guide/docs: 2026-03-26 01:01 MSK
+modified_at: 2026-03-26 01:18 MSK
+Ручная сверка guide/docs: 2026-03-26 01:18 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -633,6 +633,7 @@ scripts\human_dashboard_down.cmd
 - `/api/dashboard`, `/api/snapshot`, `/metrics` и `/healthz` читают уже готовый последний снимок;
 - в summary панели теперь прямо видны `refresh`, `возраст` и состояние кэша, чтобы было ясно, страница ждёт браузер или сам snapshot-builder;
 - там же теперь выводится и самый дорогой stage последнего snapshot-refresh, чтобы operator сразу видел узкое место без отдельного raw JSON разбора.
+- сами карточки при этом больше не тянут полный contractual `observe token-report`: для `observe serve` они используют отдельный `dashboard_read_only` token report без quiet sync/write-back и без разворачивания export/settlement contours на каждый refresh.
 
 После запуска откройте в браузере:
 

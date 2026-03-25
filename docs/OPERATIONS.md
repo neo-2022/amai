@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 01:01 MSK
-Ручная сверка guide/docs: 2026-03-26 01:01 MSK
+modified_at: 2026-03-26 01:18 MSK
+Ручная сверка guide/docs: 2026-03-26 01:18 MSK
 
 # Operations
 
@@ -2639,6 +2639,7 @@ Grafana login берётся из `.env`:
   - из-за этого даже если очередной snapshot дорогой, страница должна отдавать последний готовый слой быстро, а не висеть на полном probe-contour;
   - summary панели теперь обязана поднимать `refresh`, `возраст` и stale-state этого process-local cache;
   - туда же теперь выводится самый дорогой stage последнего snapshot-refresh, чтобы operator видел реальное узкое место (`token_budget_report`, `collect_nats_live` и т.п.) без отдельного forensic-разбора raw snapshot;
+  - hero-карты и token-rows внутри `observe serve` теперь строятся через отдельный `dashboard_read_only` token report; он сохраняет live/current/rolling/lifetime rollups и `client_limit_meter_alignment`, но не имеет права тащить full contractual/export path и quiet sync/write-back в browser refresh contour;
 - верхние hero-карты human dashboard теперь intentionally живут только на real live ledger:
   - текущая сессия;
   - текущее рабочее окно профиля;

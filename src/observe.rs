@@ -771,8 +771,8 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
     .await?;
     let token_budget_report = timed_future(
         &mut observe_refresh_stage_ms,
-        "token_budget_report",
-        token_budget::collect_default_report(&db),
+        "token_budget_dashboard_report",
+        token_budget::collect_dashboard_report(&db),
     )
     .await?;
     let artifact_cleanup_summary = timed_future(
