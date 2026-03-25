@@ -27,6 +27,27 @@ cargo run --release --quiet -- namespace ensure \
   --display-name Review \
   --retrieval-mode local_plus_related
 
+bootstrap_file="$(mktemp)"
+handoff_file="$(mktemp)"
+trap 'rm -f "$bootstrap_file" "$handoff_file"' EXIT
+
+printf '# Synthetic continuity bootstrap\nMCP proof continuity contour for project_alpha.\n' >"$bootstrap_file"
+cargo run --release --quiet -- continuity import \
+  --project project_alpha \
+  --display-name "Project Alpha" \
+  --repo-root "$PWD/fixtures/project_alpha" \
+  --namespace continuity \
+  --bootstrap-file "$bootstrap_file" \
+  --transcript-limit 0
+
+printf '%s\n' '- MCP proof continuity seed.' >"$handoff_file"
+cargo run --release --quiet -- continuity handoff \
+  --project project_alpha \
+  --namespace continuity \
+  --headline "MCP continuity startup proof seed" \
+  --next-step "Use amai_continuity_startup before substantive MCP work." \
+  --details-file "$handoff_file"
+
 cargo run --release --quiet -- relation add \
   --source project_alpha \
   --target project_beta \

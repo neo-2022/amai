@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 19:22 MSK
-Ручная сверка guide/docs: 2026-03-25 19:22 MSK
+modified_at: 2026-03-25 19:52 MSK
+Ручная сверка guide/docs: 2026-03-25 19:52 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -110,6 +110,13 @@ modified_at: 2026-03-25 19:22 MSK
 - после этого открываете проект и пишете первое нормальное сообщение;
 - специальная команда вроде `подними continuity` не должна быть обязательной;
 - агент до первого содержательного ответа сам вызывает normal continuity startup/restore для этого проекта.
+
+Для MCP-клиентов это теперь опирается не на устную договорённость, а на явный runtime entrypoint:
+- tool `amai_continuity_startup`;
+- prompt `amai-continuity-startup`.
+
+То есть новый клиент теперь должен стартовать не “по ощущению”, а через тот же machine-readable
+startup contract, который уже materialized в `continuity startup --json`.
 
 То есть:
 - открыть папку проекта недостаточно, если клиент вообще не подключён к `Amai`;

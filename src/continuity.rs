@@ -478,6 +478,11 @@ async fn import_thread_index_snapshots(
 pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<()> {
     let db = postgres::connect_admin(cfg).await?;
     let context = load_startup_context(&db, args).await?;
+    if args.json {
+        let payload = startup_payload_with_context(&db, &context, args).await?;
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
     let chat_start_restore = build_chat_start_restore(
         &context.project,
         &context.namespace,
@@ -495,11 +500,6 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
         &args.token_source_kind,
     )
     .await?;
-    if args.json {
-        let payload = build_continuity_startup_payload(&context, &chat_start_restore)?;
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-        return Ok(());
-    }
     println!("Amai continuity startup");
     println!();
     println!(
@@ -596,6 +596,37 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
     );
     println!("- Для обновления continuity после новых изменений: {import_command}");
     Ok(())
+}
+
+pub async fn startup_payload(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<Value> {
+    let db = postgres::connect_admin(cfg).await?;
+    let context = load_startup_context(&db, args).await?;
+    startup_payload_with_context(&db, &context, args).await
+}
+
+async fn startup_payload_with_context(
+    db: &Client,
+    context: &ContinuityStartupContext,
+    args: &ContinuityStartupArgs,
+) -> Result<Value> {
+    let chat_start_restore = build_chat_start_restore(
+        &context.project,
+        &context.namespace,
+        &context.continuity,
+        &context.handoff_summary,
+        context.restore.as_ref(),
+    );
+    token_budget::record_continuity_restore_observed_event(
+        db,
+        &context.project.code,
+        &context.namespace.code,
+        chat_start_restore["chat_start_restore"]["prompt_text"]
+            .as_str()
+            .unwrap_or_default(),
+        &args.token_source_kind,
+    )
+    .await?;
+    build_continuity_startup_payload(context, &chat_start_restore)
 }
 
 pub async fn print_restore(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<()> {

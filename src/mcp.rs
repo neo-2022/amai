@@ -1,9 +1,10 @@
 use crate::cli::{
-    ContextPackArgs, McpConfigArgs, VerifyMcpArgs, VerifyMemoryMatrixArgs, VerifyTokenBenchmarkArgs,
+    ContextPackArgs, ContinuityStartupArgs, McpConfigArgs, VerifyMcpArgs, VerifyMemoryMatrixArgs,
+    VerifyTokenBenchmarkArgs,
 };
 use crate::{
-    benchmark_matrix, compatibility, config, memory_task_matrix, observe, postgres, profiles,
-    retrieval, token_budget, verify,
+    benchmark_matrix, compatibility, config, continuity, memory_task_matrix, observe, postgres,
+    profiles, retrieval, token_budget, verify,
 };
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
@@ -16,6 +17,7 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand};
 use tokio::time::{Duration, timeout};
+use uuid::Uuid;
 
 use crate::config::AppConfig;
 
@@ -358,6 +360,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         .collect::<BTreeSet<_>>();
     let expected_tools = BTreeSet::from([
         "amai_benchmark_coverage".to_string(),
+        "amai_continuity_startup".to_string(),
         "amai_list_projects".to_string(),
         "amai_list_namespaces".to_string(),
         "amai_observe_whole_cycle".to_string(),
@@ -386,6 +389,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         .filter_map(|prompt| prompt["name"].as_str().map(ToOwned::to_owned))
         .collect::<BTreeSet<_>>();
     let expected_prompts = BTreeSet::from([
+        "amai-continuity-startup".to_string(),
         "amai-onboarding".to_string(),
         "amai-context-pack".to_string(),
     ]);
@@ -408,6 +412,11 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     if !onboarding_text.contains("local_strict") {
         return Err(anyhow!(
             "onboarding prompt does not teach project isolation clearly"
+        ));
+    }
+    if !onboarding_text.contains("amai_continuity_startup") {
+        return Err(anyhow!(
+            "onboarding prompt does not teach canonical continuity startup tool clearly"
         ));
     }
 
@@ -445,6 +454,55 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         return Err(anyhow!(
             "MCP list_namespaces did not return {}",
             args.context.namespace
+        ));
+    }
+
+    let continuity_prompt = session
+        .request(
+            "prompts/get",
+            json!({
+                "name": "amai-continuity-startup",
+                "arguments": {
+                    "project": args.context.project,
+                    "namespace": "continuity"
+                }
+            }),
+        )
+        .await?;
+    let continuity_prompt_text = continuity_prompt["messages"]
+        .as_array()
+        .and_then(|messages| messages.first())
+        .and_then(|message| message["content"]["text"].as_str())
+        .unwrap_or_default();
+    if !continuity_prompt_text.contains("amai_continuity_startup") {
+        return Err(anyhow!(
+            "continuity-startup prompt does not point to amai_continuity_startup"
+        ));
+    }
+
+    let continuity_startup = session
+        .tool_call(
+            "amai_continuity_startup",
+            json!({
+                "project": args.context.project,
+                "namespace": "continuity",
+            }),
+        )
+        .await
+        .context("MCP amai_continuity_startup failed")?;
+    if continuity_startup["continuity_startup_summary"]["project_code"].as_str()
+        != Some(args.context.project.as_str())
+    {
+        return Err(anyhow!(
+            "MCP continuity startup lost primary project {}",
+            args.context.project
+        ));
+    }
+    if continuity_startup["continuity_startup_summary"]["prompt_text_present"].as_bool()
+        != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP continuity startup did not materialize chat_start_restore.prompt_text"
         ));
     }
 
@@ -506,11 +564,12 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     let context_pack_id = context_pack["stats"]["context_pack_id"]
         .as_str()
         .ok_or_else(|| anyhow!("MCP context pack returned invalid stats.context_pack_id"))?;
+    let proof_turn_id = format!("proof-mcp-turn-attach-{}", Uuid::new_v4().simple());
     let turn_attach = session
         .tool_call(
             "amai_observe_whole_cycle_turn",
             json!({
-                "turn_id": "proof-mcp-turn-attach",
+                "turn_id": proof_turn_id,
                 "context_pack_ids": [context_pack_id],
                 "assistant_generation_tokens": 41,
             }),
@@ -929,6 +988,12 @@ async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> McpToolR
         "amai_benchmark_coverage" => tool_benchmark_coverage()
             .await
             .map_err(McpError::tool_runtime),
+        "amai_continuity_startup" => {
+            let args: ContinuityStartupToolArgs = parse_arguments(request.arguments)?;
+            tool_continuity_startup(cfg, args)
+                .await
+                .map_err(McpError::tool_runtime)
+        }
         "amai_context_pack" => {
             let args: ContextPackToolArgs = parse_arguments(request.arguments)?;
             tool_context_pack(cfg, args)
@@ -1122,6 +1187,45 @@ async fn tool_benchmark_coverage() -> Result<Value> {
     ))
 }
 
+async fn tool_continuity_startup(
+    cfg: &AppConfig,
+    args: ContinuityStartupToolArgs,
+) -> Result<Value> {
+    let payload = continuity::startup_payload(cfg, &args.to_cli_args()).await?;
+    let summary = continuity_startup_summary(&payload);
+    Ok(tool_result(
+        format!(
+            "continuity startup :: {}::{} headline={} next_step={} execctl={} pending_return={}",
+            summary.project_code,
+            summary.namespace_code,
+            summary.headline,
+            summary.next_step,
+            summary.execctl_resume_state,
+            summary.pending_return_summary.as_deref().unwrap_or("none"),
+        ),
+        json!({
+            "continuity_startup": payload["continuity_startup"].clone(),
+            "chat_start_restore": payload["chat_start_restore"].clone(),
+            "working_state_restore": payload["working_state_restore"].clone(),
+            "retrieval_science": payload["retrieval_science"].clone(),
+            "degradation_policy": payload["degradation_policy"].clone(),
+            "continuity_startup_summary": {
+                "project_code": summary.project_code,
+                "namespace_code": summary.namespace_code,
+                "headline": summary.headline,
+                "next_step": summary.next_step,
+                "restore_confidence": summary.restore_confidence,
+                "thread_count": summary.thread_count,
+                "prompt_text_present": summary.prompt_text_present,
+                "execctl_resume_state": summary.execctl_resume_state,
+                "pending_return_summary": summary.pending_return_summary,
+                "included_reasons_summary": summary.included_reasons_summary,
+                "excluded_reasons_summary": summary.excluded_reasons_summary,
+            }
+        }),
+    ))
+}
+
 fn summarize_codes(codes: &[&str]) -> String {
     summarize_with_limit(
         &codes
@@ -1261,7 +1365,8 @@ async fn tool_observe_whole_cycle(
     let updated = attach["updated_fields"]
         .as_array()
         .map(|items| {
-            items.iter()
+            items
+                .iter()
                 .filter_map(Value::as_str)
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -1271,7 +1376,8 @@ async fn tool_observe_whole_cycle(
     let retained = attach["retained_fields"]
         .as_array()
         .map(|items| {
-            items.iter()
+            items
+                .iter()
                 .filter_map(Value::as_str)
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -1313,7 +1419,9 @@ async fn tool_observe_whole_cycle_turn(
         format!(
             "turn-scoped assistant generation attached for {} :: context_packs={} inferred_thread={}",
             attach["turn_id"].as_str().unwrap_or("unknown"),
-            attach["context_pack_ids"].as_array().map_or(0, |items| items.len()),
+            attach["context_pack_ids"]
+                .as_array()
+                .map_or(0, |items| items.len()),
             attach["thread_id_inferred"].as_bool().unwrap_or(false)
         ),
         structured,
@@ -1662,6 +1770,68 @@ fn benchmark_coverage_summary(payload: &Value) -> BenchmarkCoverageSummary {
         next_priority: counts["next_priority"].as_u64().unwrap_or_default(),
         future: counts["future"].as_u64().unwrap_or_default(),
         next_priorities_summary: summarize_with_limit(&next_priorities),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContinuityStartupSummary {
+    project_code: String,
+    namespace_code: String,
+    headline: String,
+    next_step: String,
+    restore_confidence: String,
+    thread_count: u64,
+    prompt_text_present: bool,
+    execctl_resume_state: String,
+    pending_return_summary: Option<String>,
+    included_reasons_summary: Option<String>,
+    excluded_reasons_summary: Option<String>,
+}
+
+fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
+    ContinuityStartupSummary {
+        project_code: payload["continuity_startup"]["project"]["code"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        namespace_code: payload["continuity_startup"]["namespace"]["code"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        headline: payload["chat_start_restore"]["headline"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        next_step: payload["chat_start_restore"]["next_step"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        restore_confidence: payload["chat_start_restore"]["restore_confidence"]
+            .as_str()
+            .unwrap_or("preliminary")
+            .to_string(),
+        thread_count: payload["chat_start_restore"]["thread_count"]
+            .as_u64()
+            .unwrap_or_default(),
+        prompt_text_present: payload["chat_start_restore"]["prompt_text"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty()),
+        execctl_resume_state: payload["chat_start_restore"]["execctl_resume_state"]
+            .as_str()
+            .unwrap_or("clear")
+            .to_string(),
+        pending_return_summary: payload["chat_start_restore"]["pending_return_summary"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        included_reasons_summary: payload["chat_start_restore"]["included_reasons_summary"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        excluded_reasons_summary: payload["chat_start_restore"]["excluded_reasons_summary"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
     }
 }
 
@@ -2015,6 +2185,7 @@ fn server_instructions() -> String {
         "Default law: keep projects isolated and prefer local_strict unless a related-project policy is explicitly required.",
         "Use amai_list_projects first when you do not know what is registered.",
         "Use amai_list_namespaces before querying an unfamiliar project.",
+        "Use amai_continuity_startup at the beginning of a new chat or when resuming a project, before substantive work.",
         "Use amai_stack_preflight when you need to know what this machine can honestly support.",
         "Use amai_context_pack for retrieval instead of asking for whole repositories.",
         "Use amai_observe_whole_cycle when the client only learns assistant output tokens after the context-pack tool call and needs to attach real whole-cycle evidence back to the same event.",
@@ -2049,6 +2220,10 @@ fn protocol_manifest() -> Value {
             "amai_benchmark_coverage": {
                 "summary_field": "benchmark_coverage_summary",
                 "short_summary_contract": "external benchmark coverage totals plus the next benchmark priorities for Amai",
+            },
+            "amai_continuity_startup": {
+                "summary_field": "continuity_startup_summary",
+                "short_summary_contract": "project-scoped startup restore summary with headline, next step, prompt availability and execctl return obligations",
             },
             "amai_context_pack": {
                 "summary_field": "context_pack_summary",
@@ -2086,6 +2261,9 @@ fn protocol_manifest() -> Value {
         "prompt_contracts": {
             "amai-onboarding": {
                 "purpose": "safe onboarding without mixing projects",
+            },
+            "amai-continuity-startup": {
+                "purpose": "project-scoped startup guidance for continuity restore before substantive work",
             },
             "amai-context-pack": {
                 "purpose": "project-scoped retrieval guidance for context-pack requests",
@@ -2199,6 +2377,18 @@ fn tool_definitions() -> Vec<Value> {
             },
             "annotations": {
                 "title": "Benchmark Coverage",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }),
+        json!({
+            "name": "amai_continuity_startup",
+            "description": "Build a project-scoped continuity startup/restore pack for a new chat or resumed workline.",
+            "inputSchema": continuity_startup_input_schema(),
+            "annotations": {
+                "title": "Continuity Startup",
                 "readOnlyHint": true,
                 "destructiveHint": false,
                 "idempotentHint": true,
@@ -2359,6 +2549,22 @@ fn prompt_definitions() -> Vec<Value> {
             "arguments": []
         }),
         json!({
+            "name": "amai-continuity-startup",
+            "description": "Guide the model to request a project-scoped continuity startup pack before substantive work.",
+            "arguments": [
+                {
+                    "name": "project",
+                    "description": "Registered project code to resume.",
+                    "required": true
+                },
+                {
+                    "name": "namespace",
+                    "description": "Optional continuity namespace code. Defaults to continuity.",
+                    "required": false
+                }
+            ]
+        }),
+        json!({
             "name": "amai-context-pack",
             "description": "Guide the model to request a project-scoped context pack from Amai.",
             "arguments": [
@@ -2403,6 +2609,25 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
                 }
             }]
         }),
+        "amai-continuity-startup" => {
+            let project = required_prompt_arg(&arguments, "project")?;
+            let namespace = arguments
+                .get("namespace")
+                .and_then(Value::as_str)
+                .unwrap_or("continuity");
+            json!({
+                "description": "Prompt for calling Amai continuity-startup correctly.",
+                "messages": [{
+                    "role": "assistant",
+                    "content": {
+                        "type": "text",
+                        "text": format!(
+                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, and any pending_return_queue obligations before asking for retrieval or proposing new work."
+                        )
+                    }
+                }]
+            })
+        }
         "amai-context-pack" => {
             let project = required_prompt_arg(&arguments, "project")?;
             let query = required_prompt_arg(&arguments, "query")?;
@@ -2557,6 +2782,33 @@ fn context_pack_input_schema(include_persist: bool) -> Value {
         ("required".to_string(), json!(["project", "query"])),
         ("additionalProperties".to_string(), Value::Bool(false)),
     ]))
+}
+
+fn continuity_startup_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "project": {
+                "type": ["string", "null"],
+                "description": "Registered project code to resume."
+            },
+            "repo_root": {
+                "type": ["string", "null"],
+                "description": "Optional repo root path used to resolve the registered project binding."
+            },
+            "namespace": {
+                "type": "string",
+                "default": "continuity",
+                "description": "Continuity namespace code."
+            },
+            "token_source_kind": {
+                "type": "string",
+                "default": "live_continuity_startup",
+                "description": "Token ledger source kind for continuity-startup observed whole-cycle events. Use proof_/verify_ prefixes for engineering calls."
+            }
+        },
+        "additionalProperties": false
+    })
 }
 
 fn token_benchmark_input_schema() -> Value {
@@ -3157,6 +3409,18 @@ struct ContextPackToolArgs {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+struct ContinuityStartupToolArgs {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    repo_root: Option<String>,
+    #[serde(default = "default_continuity_namespace")]
+    namespace: String,
+    #[serde(default = "default_continuity_startup_token_source_kind")]
+    token_source_kind: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 struct ObserveWholeCycleToolArgs {
     #[serde(default)]
     context_pack_id: String,
@@ -3199,6 +3463,18 @@ impl ContextPackToolArgs {
             assistant_generation_tokens: self.assistant_generation_tokens,
             tool_overhead_tokens: self.tool_overhead_tokens,
             continuity_restore_tokens: self.continuity_restore_tokens,
+        }
+    }
+}
+
+impl ContinuityStartupToolArgs {
+    fn to_cli_args(&self) -> ContinuityStartupArgs {
+        ContinuityStartupArgs {
+            project: self.project.clone(),
+            repo_root: self.repo_root.as_ref().map(PathBuf::from),
+            namespace: self.namespace.clone(),
+            json: true,
+            token_source_kind: self.token_source_kind.clone(),
         }
     }
 }
@@ -3286,6 +3562,10 @@ fn default_namespace() -> String {
     "default".to_string()
 }
 
+fn default_continuity_namespace() -> String {
+    "continuity".to_string()
+}
+
 fn default_limit_documents() -> usize {
     5
 }
@@ -3304,6 +3584,10 @@ fn default_limit_semantic_chunks() -> usize {
 
 fn default_context_pack_token_source_kind() -> String {
     "live_context_pack".to_string()
+}
+
+fn default_continuity_startup_token_source_kind() -> String {
+    "live_continuity_startup".to_string()
 }
 
 fn default_true() -> bool {
@@ -3345,11 +3629,12 @@ fn default_warm_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextPackToolArgs, McpConfigArgs, McpError, benchmark_coverage_summary,
-        context_pack_input_schema, context_pack_summary, mcp_tool_error_result,
+        ContextPackToolArgs, ContinuityStartupToolArgs, McpConfigArgs, McpError,
+        benchmark_coverage_summary, context_pack_input_schema, context_pack_summary,
+        continuity_startup_input_schema, continuity_startup_summary, mcp_tool_error_result,
         memory_matrix_summary, observe_snapshot_summary, observe_whole_cycle_input_schema,
-        observe_whole_cycle_turn_input_schema, protocol_manifest, render_client_config,
-        stack_preflight_summary, summarize_codes, summarize_namespace_modes,
+        observe_whole_cycle_turn_input_schema, prompt_result, protocol_manifest,
+        render_client_config, stack_preflight_summary, summarize_codes, summarize_namespace_modes,
         token_benchmark_summary, token_report_summary, warm_cache_summary,
     };
     use serde_json::json;
@@ -3484,6 +3769,39 @@ mod tests {
         assert_eq!(context.assistant_generation_tokens, Some(24));
         assert_eq!(context.tool_overhead_tokens, Some(7));
         assert_eq!(context.continuity_restore_tokens, Some(3));
+    }
+
+    #[test]
+    fn continuity_startup_schema_exposes_project_or_repo_binding_fields() {
+        let schema = continuity_startup_input_schema();
+        let properties = schema["properties"]
+            .as_object()
+            .expect("properties must be object");
+        assert!(properties.contains_key("project"));
+        assert!(properties.contains_key("repo_root"));
+        assert!(properties.contains_key("namespace"));
+        assert!(properties.contains_key("token_source_kind"));
+    }
+
+    #[test]
+    fn continuity_startup_tool_args_forward_cli_contract() {
+        let args = ContinuityStartupToolArgs {
+            project: Some("art".to_string()),
+            repo_root: Some("/tmp/art".to_string()),
+            namespace: "continuity".to_string(),
+            token_source_kind: "proof_mcp_continuity_startup".to_string(),
+        };
+        let cli = args.to_cli_args();
+        assert_eq!(cli.project.as_deref(), Some("art"));
+        assert_eq!(
+            cli.repo_root
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            Some("/tmp/art".to_string())
+        );
+        assert_eq!(cli.namespace, "continuity");
+        assert!(cli.json);
+        assert_eq!(cli.token_source_kind, "proof_mcp_continuity_startup");
     }
 
     #[test]
@@ -3870,6 +4188,10 @@ mod tests {
         let manifest = protocol_manifest();
         assert_eq!(manifest["version"].as_str(), Some("mcp-contract-v1"));
         assert_eq!(
+            manifest["tool_contracts"]["amai_continuity_startup"]["summary_field"].as_str(),
+            Some("continuity_startup_summary")
+        );
+        assert_eq!(
             manifest["tool_contracts"]["amai_context_pack"]["summary_field"].as_str(),
             Some("context_pack_summary")
         );
@@ -3902,6 +4224,10 @@ mod tests {
             Some("safe onboarding without mixing projects")
         );
         assert_eq!(
+            manifest["prompt_contracts"]["amai-continuity-startup"]["purpose"].as_str(),
+            Some("project-scoped startup guidance for continuity restore before substantive work")
+        );
+        assert_eq!(
             manifest["error_contracts"]["tool_execution_failed"]["error_class"].as_str(),
             Some("tool_runtime")
         );
@@ -3913,6 +4239,56 @@ mod tests {
             .as_array()
             .expect("safety laws array");
         assert!(!safety_laws.is_empty());
+    }
+
+    #[test]
+    fn continuity_startup_prompt_points_to_canonical_tool() {
+        let result = prompt_result(json!({
+            "name": "amai-continuity-startup",
+            "arguments": {
+                "project": "art",
+                "namespace": "continuity"
+            }
+        }))
+        .expect("prompt result");
+        let text = result["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("amai_continuity_startup"));
+        assert!(text.contains("pending_return_queue"));
+    }
+
+    #[test]
+    fn continuity_startup_summary_surfaces_execctl_and_prompt_state() {
+        let payload = json!({
+            "continuity_startup": {
+                "project": { "code": "art" },
+                "namespace": { "code": "continuity" }
+            },
+            "chat_start_restore": {
+                "headline": "ExecCtl pending return contour materialized in Amai",
+                "next_step": "Continue runtime auto-start guarantees.",
+                "restore_confidence": "high",
+                "thread_count": 8,
+                "prompt_text": "CHAT_START_RESTORE\nProject: Art",
+                "execctl_resume_state": "pending_return_queue_present",
+                "pending_return_summary": "Same-meter spend control -> Materialize live assistant generation source.",
+                "included_reasons_summary": "exact_documents (1) — Exact layer matched.",
+                "excluded_reasons_summary": "semantic_chunks — Semantic layer abstained."
+            }
+        });
+        let summary = continuity_startup_summary(&payload);
+        assert_eq!(summary.project_code, "art");
+        assert_eq!(summary.namespace_code, "continuity");
+        assert_eq!(summary.execctl_resume_state, "pending_return_queue_present");
+        assert!(summary.prompt_text_present);
+        assert_eq!(summary.thread_count, 8);
+        assert!(
+            summary
+                .pending_return_summary
+                .as_deref()
+                .is_some_and(|value| value.contains("Same-meter spend control"))
+        );
     }
 
     #[test]
