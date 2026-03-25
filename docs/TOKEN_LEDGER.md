@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 00:18 MSK
-Ручная сверка guide/docs: 2026-03-25 00:18 MSK
+modified_at: 2026-03-25 11:08 MSK
+Ручная сверка guide/docs: 2026-03-25 11:08 MSK
 
 # Token Ledger
 
@@ -1024,6 +1024,14 @@ Hashes по line items нужны затем, чтобы:
 - preview теперь ещё несёт готовый `settlement_report_preview`, чтобы review/export не
   собирал period anchors, hashes и policy snapshot вручную;
 - preview теперь ещё несёт `settlement_stage`, `settlement_stage_family` и `next_settlement_stage_candidate`;
+- preview теперь ещё отдельно несёт readiness-axis:
+  - `internal_money_arithmetic_readiness_state`
+  - `internal_money_arithmetic_blocking_reasons`
+  - `contractual_settlement_readiness_state`
+  - `contractual_settlement_blocking_reasons`
+  Это нужно затем, чтобы export не смешивал:
+  - внутреннюю готовность money-arithmetic preview;
+  - и более строгую contractual/settlement readiness;
 - preview теперь ещё несёт `transactional_statuses`, чтобы export не путал уже materialized
   measured/report-only стадии с будущими reserved billing стадиями;
 - preview и evidence pack теперь ещё несут `export_semantics`, чтобы customer review surface
@@ -1037,6 +1045,11 @@ Hashes по line items нужны затем, чтобы:
 - сначала compact preview;
 - затем on-demand full evidence pack;
 - и только потом, в будущем, settlement/dispute workflow.
+
+Текущие surface versions для этого слоя:
+- `contractual-statement-export-v14`
+- `settlement-report-preview-v5`
+- `contractual-evidence-pack-v14`
 
 ## Preliminary vs stable
 

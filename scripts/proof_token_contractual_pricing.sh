@@ -198,6 +198,12 @@ assert summary["margin_readiness_state"] == "preview_ready_report_only", summary
 assert summary["margin_provider_identity_state"] == "provider_identity_aligned", summary
 assert summary["margin_blocking_reasons"] == [], summary
 assert summary["margin_temporal_truth_state"] == "scope_period_aligned", summary
+assert summary["contractual_readiness_model_version"] == "contractual-readiness-v1", summary
+assert summary["internal_money_arithmetic_readiness_state"] == "money_arithmetic_preview_ready_report_only", summary
+assert summary["internal_money_arithmetic_blocking_reasons"] == [], summary
+assert summary["contractual_settlement_readiness_state"] == "review_not_yet_ready_report_only", summary
+assert "billing_mode_report_only" in summary["contractual_settlement_blocking_reasons"], summary
+assert "money_arithmetic_not_ready" not in summary["contractual_settlement_blocking_reasons"], summary
 assert summary["external_provider_cost_amount"] is not None, summary
 assert margin["customer_saved_amount_lower_bound"] is not None, margin
 assert margin["amai_infra_cost_amount"] is not None, margin
@@ -215,7 +221,13 @@ assert statement_export["invoice_evidence_completeness_state"] == "provider_invo
 assert statement_export["customer_savings_money_truth_completeness_state"] == "customer_savings_lower_bound_ready_report_only", statement_export
 assert statement_export["amai_cost_truth_completeness_state"] == "amai_cost_preview_ready_report_only", statement_export
 assert statement_export["margin_truth_completeness_state"] == "margin_preview_amounts_ready_report_only", statement_export
-assert statement_export["settlement_report_preview"]["model_version"] == "settlement-report-preview-v4", statement_export
+assert statement_export["contractual_readiness_model_version"] == "contractual-readiness-v1", statement_export
+assert statement_export["internal_money_arithmetic_readiness_state"] == "money_arithmetic_preview_ready_report_only", statement_export
+assert statement_export["internal_money_arithmetic_blocking_reasons"] == [], statement_export
+assert statement_export["contractual_settlement_readiness_state"] == "review_not_yet_ready_report_only", statement_export
+assert "billing_mode_report_only" in statement_export["contractual_settlement_blocking_reasons"], statement_export
+assert "money_arithmetic_not_ready" not in statement_export["contractual_settlement_blocking_reasons"], statement_export
+assert statement_export["settlement_report_preview"]["model_version"] == "settlement-report-preview-v5", statement_export
 assert statement_export["required_sources_for_usage_truth"] == ["provider_usage_export"], statement_export
 assert statement_export["required_sources_for_margin_truth"] == ["infra_cost_profile", "provider_rate_card", "provider_usage_export"], statement_export
 assert statement_export["settlement_report_preview"]["settlement_report_id"], statement_export

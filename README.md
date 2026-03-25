@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 00:18 MSK
-Ручная сверка guide/docs: 2026-03-25 00:18 MSK
+modified_at: 2026-03-25 11:08 MSK
+Ручная сверка guide/docs: 2026-03-25 11:08 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1380,6 +1380,14 @@ preview, а не только raw count.
     - `bound_version`
   - это уже customer-facing review surface с hashes и contract states, но всё ещё строго
     `report_only`, а не invoice.
+  - export/evidence surface versions теперь подняты до:
+    - `contractual-statement-export-v14`
+    - `settlement-report-preview-v5`
+    - `contractual-evidence-pack-v14`
+    потому что customer-facing payload теперь уже явно различает:
+    - `customer review ready`
+    - `internal money arithmetic ready`
+    - `contractual settlement ready`
 - metering freshness теперь тоже first-class:
   - `metering_freshness.current_session / rolling_window / lifetime`
   - она отдельно показывает:
@@ -1396,6 +1404,14 @@ preview, а не только raw count.
   - `contractual_statement_summaries.*`
   - там теперь видны `metering_ingest_state`, `contractual_lag_state` и
     `contractual_freshness_state`;
+  - там теперь ещё отдельно materialized readiness-axis:
+    - `internal_money_arithmetic_readiness_state`
+    - `internal_money_arithmetic_blocking_reasons`
+    - `contractual_settlement_readiness_state`
+    - `contractual_settlement_blocking_reasons`
+  - это нужно затем, чтобы customer-facing export честно различал:
+    - можно ли уже посчитать внутреннюю money-arithmetic preview;
+    - и можно ли вообще говорить о более строгой settlement readiness;
   - там теперь ещё отдельно видны pricing source поля:
     - `rate_card_status`
     - `rate_card_truth_completeness_state`

@@ -110,6 +110,8 @@ struct TokenBudgetContractConfig {
     billing_policy_version: String,
     #[serde(default = "default_suitability_model_version")]
     suitability_model_version: String,
+    #[serde(default = "default_contractual_readiness_model_version")]
+    contractual_readiness_model_version: String,
     #[serde(default = "default_billing_mode")]
     billing_mode: String,
     #[serde(default = "default_reconciliation_contract_version")]
@@ -162,6 +164,7 @@ impl Default for TokenBudgetContractConfig {
             event_time_policy_version: default_event_time_policy_version(),
             billing_policy_version: default_billing_policy_version(),
             suitability_model_version: default_suitability_model_version(),
+            contractual_readiness_model_version: default_contractual_readiness_model_version(),
             billing_mode: default_billing_mode(),
             reconciliation_contract_version: default_reconciliation_contract_version(),
             margin_model_version: default_margin_model_version(),
@@ -557,6 +560,10 @@ fn default_suitability_model_version() -> String {
     "token-suitability-v1".to_string()
 }
 
+fn default_contractual_readiness_model_version() -> String {
+    "contractual-readiness-v1".to_string()
+}
+
 fn default_billing_mode() -> String {
     "report_only".to_string()
 }
@@ -574,15 +581,15 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v13".to_string()
+    "contractual-evidence-pack-v14".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v13".to_string()
+    "contractual-statement-export-v14".to_string()
 }
 
 fn default_settlement_report_preview_version() -> String {
-    "settlement-report-preview-v4".to_string()
+    "settlement-report-preview-v5".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -626,6 +633,7 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
         "suitability_model_version": contract.suitability_model_version.clone(),
+        "contractual_readiness_model_version": contract.contractual_readiness_model_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "margin_model_version": contract.margin_model_version.clone(),
@@ -668,6 +676,7 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "event_time_policy_version": contract.event_time_policy_version.clone(),
         "billing_policy_version": contract.billing_policy_version.clone(),
         "suitability_model_version": contract.suitability_model_version.clone(),
+        "contractual_readiness_model_version": contract.contractual_readiness_model_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "margin_model_version": contract.margin_model_version.clone(),
@@ -4045,6 +4054,157 @@ fn merged_reason_strings(values: &[&Value]) -> Vec<String> {
     merged
 }
 
+fn push_unique_reason(reasons: &mut Vec<String>, reason: &str) {
+    if !reasons.iter().any(|existing| existing == reason) {
+        reasons.push(reason.to_string());
+    }
+}
+
+fn internal_money_arithmetic_readiness(
+    reconciliation_preview: &Value,
+    margin_scope: &Value,
+) -> (&'static str, Vec<String>) {
+    let mut blockers = merged_reason_strings(&[
+        &reconciliation_preview["governance_blocking_reasons"],
+        &margin_scope["blocking_reasons"],
+    ]);
+    blockers.retain(|reason| reason != "provider_invoice_source_error");
+
+    if reconciliation_preview["provider_identity_state"]
+        .as_str()
+        .unwrap_or("provider_identity_aligned")
+        == "provider_identity_mismatch"
+        || margin_scope["provider_identity_state"]
+            .as_str()
+            .unwrap_or("provider_identity_aligned")
+            == "provider_identity_mismatch"
+    {
+        push_unique_reason(&mut blockers, "provider_identity_mismatch");
+        return ("provider_identity_mismatch", blockers);
+    }
+
+    if reconciliation_preview["temporal_truth_state"]
+        .as_str()
+        .unwrap_or("scope_period_aligned")
+        != "scope_period_aligned"
+    {
+        push_unique_reason(&mut blockers, "reconciliation_scope_period_not_aligned");
+        return ("reconciliation_scope_period_misaligned", blockers);
+    }
+
+    if margin_scope["temporal_truth_state"]
+        .as_str()
+        .unwrap_or("scope_period_aligned")
+        != "scope_period_aligned"
+    {
+        push_unique_reason(&mut blockers, "margin_scope_period_not_aligned");
+        return ("margin_scope_period_misaligned", blockers);
+    }
+
+    match reconciliation_preview["usage_truth_completeness_state"].as_str() {
+        Some("provider_usage_bound") => {}
+        Some("provider_usage_source_error") => {
+            push_unique_reason(&mut blockers, "usage_truth_source_error");
+            return ("usage_truth_source_error", blockers);
+        }
+        Some("provider_usage_not_yet_bound") => {
+            push_unique_reason(&mut blockers, "usage_truth_not_yet_bound");
+            return ("usage_truth_not_yet_bound", blockers);
+        }
+        _ => {
+            push_unique_reason(&mut blockers, "usage_truth_not_ready");
+            return ("awaiting_usage_truth", blockers);
+        }
+    }
+
+    match reconciliation_preview["provider_cost_truth_completeness_state"].as_str() {
+        Some("provider_cost_bound") => {}
+        Some("provider_rate_card_error") => {
+            push_unique_reason(&mut blockers, "provider_cost_truth_source_error");
+            return ("provider_cost_truth_source_error", blockers);
+        }
+        Some("rate_card_bound_unpriced") => {
+            push_unique_reason(&mut blockers, "provider_cost_truth_unpriced");
+            return ("provider_cost_truth_unpriced", blockers);
+        }
+        Some("rate_card_bound_internal_estimate_only") => {
+            push_unique_reason(&mut blockers, "provider_cost_truth_internal_estimate_only");
+            return ("provider_cost_truth_internal_estimate_only", blockers);
+        }
+        _ => {
+            push_unique_reason(&mut blockers, "provider_cost_truth_not_ready");
+            return ("awaiting_provider_cost_truth", blockers);
+        }
+    }
+
+    if margin_scope["pricing_truth_completeness_state"].as_str() != Some("pricing_truth_ready") {
+        push_unique_reason(&mut blockers, "pricing_truth_not_ready");
+        return ("awaiting_pricing_truth", blockers);
+    }
+
+    match margin_scope["margin_truth_completeness_state"].as_str() {
+        Some("margin_preview_amounts_ready_report_only") => {
+            ("money_arithmetic_preview_ready_report_only", blockers)
+        }
+        Some("margin_truth_source_error") => {
+            push_unique_reason(&mut blockers, "margin_truth_source_error");
+            ("margin_truth_source_error", blockers)
+        }
+        Some("margin_truth_bound_unpriced") => {
+            push_unique_reason(&mut blockers, "margin_truth_unpriced");
+            ("margin_truth_unpriced", blockers)
+        }
+        _ => {
+            push_unique_reason(&mut blockers, "margin_truth_not_ready");
+            ("awaiting_margin_truth", blockers)
+        }
+    }
+}
+
+fn contractual_settlement_readiness(
+    statement_preview: &Value,
+    metering_freshness: &Value,
+    internal_money_arithmetic_state: &str,
+) -> (&'static str, Vec<String>) {
+    let measured_events = statement_preview["coverage"]["measured_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let mut blockers = merged_reason_strings(&[
+        &statement_preview["close_barriers"],
+        &statement_preview["next_settlement_stage_blockers"],
+        &metering_freshness["blocking_reasons"],
+    ]);
+
+    if internal_money_arithmetic_state != "money_arithmetic_preview_ready_report_only" {
+        push_unique_reason(&mut blockers, "money_arithmetic_not_ready");
+    }
+
+    if measured_events == 0 {
+        push_unique_reason(&mut blockers, "no_measured_usage_events");
+        return ("empty", blockers);
+    }
+
+    let settlement_stage = statement_preview["settlement_stage"]
+        .as_str()
+        .unwrap_or("unknown");
+    let next_stage_candidate = statement_preview["next_settlement_stage_candidate"]
+        .as_str()
+        .unwrap_or("unknown");
+
+    if settlement_stage == "measured_review_ready_report_only" {
+        if blockers.is_empty() && next_stage_candidate == "billable_ready" {
+            ("settlement_ready_reserved", blockers)
+        } else {
+            (
+                "customer_review_ready_settlement_activation_blocked_report_only",
+                blockers,
+            )
+        }
+    } else {
+        ("review_not_yet_ready_report_only", blockers)
+    }
+}
+
 fn build_scope_suitability(
     contract: &TokenBudgetContractConfig,
     statement_preview: &Value,
@@ -4263,6 +4423,14 @@ fn build_contractual_statement_summary(
         margin_scope,
         metering_freshness,
     );
+    let (internal_money_arithmetic_state, internal_money_arithmetic_blockers) =
+        internal_money_arithmetic_readiness(reconciliation_preview, margin_scope);
+    let (contractual_settlement_state, contractual_settlement_blockers) =
+        contractual_settlement_readiness(
+            statement_preview,
+            metering_freshness,
+            internal_money_arithmetic_state,
+        );
     let mut summary = serde_json::Map::new();
     let mut insert = |key: &str, value: Value| {
         summary.insert(key.to_string(), value);
@@ -4293,6 +4461,10 @@ fn build_contractual_statement_summary(
     insert(
         "future_reserved_settlement_stages",
         statement_preview["future_reserved_settlement_stages"].clone(),
+    );
+    insert(
+        "contractual_readiness_model_version",
+        json!(contract.contractual_readiness_model_version.clone()),
     );
     insert(
         "transactional_statuses",
@@ -4556,6 +4728,22 @@ fn build_contractual_statement_summary(
     insert(
         "margin_blocking_reasons",
         margin_scope["blocking_reasons"].clone(),
+    );
+    insert(
+        "internal_money_arithmetic_readiness_state",
+        json!(internal_money_arithmetic_state),
+    );
+    insert(
+        "internal_money_arithmetic_blocking_reasons",
+        json!(internal_money_arithmetic_blockers),
+    );
+    insert(
+        "contractual_settlement_readiness_state",
+        json!(contractual_settlement_state),
+    );
+    insert(
+        "contractual_settlement_blocking_reasons",
+        json!(contractual_settlement_blockers),
     );
     insert(
         "adjustment_state",
@@ -4861,6 +5049,11 @@ fn build_settlement_report_preview(
         "settlement_stage_family": statement_export_preview["settlement_stage_family"].clone(),
         "next_settlement_stage_candidate": statement_export_preview["next_settlement_stage_candidate"].clone(),
         "next_settlement_stage_blockers": statement_export_preview["next_settlement_stage_blockers"].clone(),
+        "contractual_readiness_model_version": statement_export_preview["contractual_readiness_model_version"].clone(),
+        "internal_money_arithmetic_readiness_state": statement_export_preview["internal_money_arithmetic_readiness_state"].clone(),
+        "internal_money_arithmetic_blocking_reasons": statement_export_preview["internal_money_arithmetic_blocking_reasons"].clone(),
+        "contractual_settlement_readiness_state": statement_export_preview["contractual_settlement_readiness_state"].clone(),
+        "contractual_settlement_blocking_reasons": statement_export_preview["contractual_settlement_blocking_reasons"].clone(),
         "coverage_state": statement_export_preview["coverage_state"].clone(),
         "contractual_freshness_state": statement_export_preview["contractual_freshness_state"].clone(),
         "usage_truth_completeness_state": statement_export_preview["usage_truth_completeness_state"].clone(),
@@ -4919,6 +5112,7 @@ fn build_settlement_report_preview(
             "margin_model_version": contract.margin_model_version.clone(),
             "rate_card_binding_model_version": contract.rate_card_binding_model_version.clone(),
             "infra_cost_binding_model_version": contract.infra_cost_binding_model_version.clone(),
+            "contractual_readiness_model_version": contract.contractual_readiness_model_version.clone(),
         },
         "review_grade_state": review_grade_state,
         "report_only": true,
@@ -4981,76 +5175,264 @@ fn build_statement_export_preview(
         "no_open_disputes"
     };
 
-    let mut preview = json!({
-        "model_version": contract.contractual_statement_export_version.clone(),
-        "scope_code": scope_code,
-        "scope_label": scope_label,
-        "statement_preview_id": hex_sha256(export_identity.as_bytes()),
-        "contractual_state": contractual_summary["contractual_state"].clone(),
-        "settlement_stage": contractual_summary["settlement_stage"].clone(),
-        "settlement_stage_family": contractual_summary["settlement_stage_family"].clone(),
-        "next_settlement_stage_candidate": contractual_summary["next_settlement_stage_candidate"].clone(),
-        "next_settlement_stage_blockers": contractual_summary["next_settlement_stage_blockers"].clone(),
-        "future_reserved_settlement_stages": contractual_summary["future_reserved_settlement_stages"].clone(),
-        "transactional_statuses": contractual_summary["transactional_statuses"].clone(),
-        "coverage_state": contractual_summary["coverage_state"].clone(),
-        "provisional_close_state": contractual_summary["provisional_close_state"].clone(),
-        "provisional_close_candidate": contractual_summary["provisional_close_candidate"].clone(),
-        "provisional_close_earliest_at_epoch_ms": contractual_summary["provisional_close_earliest_at_epoch_ms"].clone(),
-        "usage_truth_completeness_state": contractual_summary["usage_truth_completeness_state"].clone(),
-        "rate_card_truth_completeness_state": contractual_summary["rate_card_truth_completeness_state"].clone(),
-        "provider_cost_truth_completeness_state": contractual_summary["provider_cost_truth_completeness_state"].clone(),
-        "invoice_evidence_completeness_state": contractual_summary["invoice_evidence_completeness_state"].clone(),
-        "money_truth_completeness_state": contractual_summary["money_truth_completeness_state"].clone(),
-        "reconciliation_readiness_state": contractual_summary["reconciliation_readiness_state"].clone(),
-        "required_sources_for_usage_truth": contractual_summary["required_sources_for_usage_truth"].clone(),
-        "required_sources_for_cost_truth": contractual_summary["required_sources_for_cost_truth"].clone(),
-        "optional_sources_for_invoice_evidence": contractual_summary["optional_sources_for_invoice_evidence"].clone(),
-        "unready_required_sources_for_usage_truth": contractual_summary["unready_required_sources_for_usage_truth"].clone(),
-        "unready_required_sources_for_cost_truth": contractual_summary["unready_required_sources_for_cost_truth"].clone(),
-        "unready_optional_sources_for_invoice_evidence": contractual_summary["unready_optional_sources_for_invoice_evidence"].clone(),
-        "rate_card_status": contractual_summary["rate_card_status"].clone(),
-        "rate_card_version": contractual_summary["rate_card_version"].clone(),
-        "rate_card_provider": contractual_summary["rate_card_provider"].clone(),
-        "rate_card_currency_profile": contractual_summary["rate_card_currency_profile"].clone(),
-        "provider_usage_provider": contractual_summary["provider_usage_provider"].clone(),
-        "provider_invoice_provider": contractual_summary["provider_invoice_provider"].clone(),
-        "provider_usage_scope_alignment_state": contractual_summary["provider_usage_scope_alignment_state"].clone(),
-        "provider_invoice_scope_alignment_state": contractual_summary["provider_invoice_scope_alignment_state"].clone(),
-        "rate_card_scope_alignment_state": contractual_summary["rate_card_scope_alignment_state"].clone(),
-        "rate_card_provider_alignment_state": contractual_summary["rate_card_provider_alignment_state"].clone(),
-        "invoice_provider_alignment_state": contractual_summary["invoice_provider_alignment_state"].clone(),
-        "provider_identity_state": contractual_summary["provider_identity_state"].clone(),
-        "reconciliation_temporal_truth_state": contractual_summary["reconciliation_temporal_truth_state"].clone(),
-        "contractual_freshness_state": contractual_summary["contractual_freshness_state"].clone(),
-        "reconciliation_state": contractual_summary["reconciliation_state"].clone(),
-        "margin_state": contractual_summary["margin_state"].clone(),
-        "margin_confidence_state": contractual_summary["margin_confidence_state"].clone(),
-        "margin_readiness_state": contractual_summary["margin_readiness_state"].clone(),
-        "infra_cost_truth_completeness_state": contractual_summary["infra_cost_truth_completeness_state"].clone(),
-        "pricing_truth_completeness_state": contractual_summary["pricing_truth_completeness_state"].clone(),
-        "customer_savings_money_truth_completeness_state": contractual_summary["customer_savings_money_truth_completeness_state"].clone(),
-        "amai_cost_truth_completeness_state": contractual_summary["amai_cost_truth_completeness_state"].clone(),
-        "margin_truth_completeness_state": contractual_summary["margin_truth_completeness_state"].clone(),
-        "required_sources_for_margin_truth": contractual_summary["required_sources_for_margin_truth"].clone(),
-        "optional_sources_for_margin_invoice_evidence": contractual_summary["optional_sources_for_margin_invoice_evidence"].clone(),
-        "unready_required_sources_for_margin_truth": contractual_summary["unready_required_sources_for_margin_truth"].clone(),
-        "margin_provider_identity_state": contractual_summary["margin_provider_identity_state"].clone(),
-        "margin_temporal_truth_state": contractual_summary["margin_temporal_truth_state"].clone(),
-        "infra_cost_scope_alignment_state": contractual_summary["infra_cost_scope_alignment_state"].clone(),
-        "margin_blocking_reasons": contractual_summary["margin_blocking_reasons"].clone(),
-        "export_status": "review_ready_report_only",
-        "included_events_count": included_items.len(),
-        "excluded_events_count": excluded_items.len(),
-        "included_events_hash": included_hash,
-        "excluded_events_hash": excluded_hash,
-        "customer_review_ready": true,
-        "invoice_ready": false,
-        "credit_action_state": credit_action_state,
-        "dispute_action_state": dispute_action_state,
-        "pending_adjustment_entries_count": pending_entries,
-        "disputed_entries_count": disputed_entries,
-        "export_semantics": {
+    let mut preview = serde_json::Map::new();
+    let mut insert = |key: &str, value: Value| {
+        preview.insert(key.to_string(), value);
+    };
+
+    insert(
+        "model_version",
+        json!(contract.contractual_statement_export_version.clone()),
+    );
+    insert("scope_code", json!(scope_code));
+    insert("scope_label", json!(scope_label));
+    insert(
+        "statement_preview_id",
+        json!(hex_sha256(export_identity.as_bytes())),
+    );
+    insert(
+        "contractual_state",
+        contractual_summary["contractual_state"].clone(),
+    );
+    insert(
+        "settlement_stage",
+        contractual_summary["settlement_stage"].clone(),
+    );
+    insert(
+        "settlement_stage_family",
+        contractual_summary["settlement_stage_family"].clone(),
+    );
+    insert(
+        "next_settlement_stage_candidate",
+        contractual_summary["next_settlement_stage_candidate"].clone(),
+    );
+    insert(
+        "next_settlement_stage_blockers",
+        contractual_summary["next_settlement_stage_blockers"].clone(),
+    );
+    insert(
+        "future_reserved_settlement_stages",
+        contractual_summary["future_reserved_settlement_stages"].clone(),
+    );
+    insert(
+        "contractual_readiness_model_version",
+        contractual_summary["contractual_readiness_model_version"].clone(),
+    );
+    insert(
+        "transactional_statuses",
+        contractual_summary["transactional_statuses"].clone(),
+    );
+    insert(
+        "coverage_state",
+        contractual_summary["coverage_state"].clone(),
+    );
+    insert(
+        "provisional_close_state",
+        contractual_summary["provisional_close_state"].clone(),
+    );
+    insert(
+        "provisional_close_candidate",
+        contractual_summary["provisional_close_candidate"].clone(),
+    );
+    insert(
+        "provisional_close_earliest_at_epoch_ms",
+        contractual_summary["provisional_close_earliest_at_epoch_ms"].clone(),
+    );
+    insert(
+        "usage_truth_completeness_state",
+        contractual_summary["usage_truth_completeness_state"].clone(),
+    );
+    insert(
+        "rate_card_truth_completeness_state",
+        contractual_summary["rate_card_truth_completeness_state"].clone(),
+    );
+    insert(
+        "provider_cost_truth_completeness_state",
+        contractual_summary["provider_cost_truth_completeness_state"].clone(),
+    );
+    insert(
+        "invoice_evidence_completeness_state",
+        contractual_summary["invoice_evidence_completeness_state"].clone(),
+    );
+    insert(
+        "money_truth_completeness_state",
+        contractual_summary["money_truth_completeness_state"].clone(),
+    );
+    insert(
+        "reconciliation_readiness_state",
+        contractual_summary["reconciliation_readiness_state"].clone(),
+    );
+    insert(
+        "required_sources_for_usage_truth",
+        contractual_summary["required_sources_for_usage_truth"].clone(),
+    );
+    insert(
+        "required_sources_for_cost_truth",
+        contractual_summary["required_sources_for_cost_truth"].clone(),
+    );
+    insert(
+        "optional_sources_for_invoice_evidence",
+        contractual_summary["optional_sources_for_invoice_evidence"].clone(),
+    );
+    insert(
+        "unready_required_sources_for_usage_truth",
+        contractual_summary["unready_required_sources_for_usage_truth"].clone(),
+    );
+    insert(
+        "unready_required_sources_for_cost_truth",
+        contractual_summary["unready_required_sources_for_cost_truth"].clone(),
+    );
+    insert(
+        "unready_optional_sources_for_invoice_evidence",
+        contractual_summary["unready_optional_sources_for_invoice_evidence"].clone(),
+    );
+    insert(
+        "rate_card_status",
+        contractual_summary["rate_card_status"].clone(),
+    );
+    insert(
+        "rate_card_version",
+        contractual_summary["rate_card_version"].clone(),
+    );
+    insert(
+        "rate_card_provider",
+        contractual_summary["rate_card_provider"].clone(),
+    );
+    insert(
+        "rate_card_currency_profile",
+        contractual_summary["rate_card_currency_profile"].clone(),
+    );
+    insert(
+        "provider_usage_provider",
+        contractual_summary["provider_usage_provider"].clone(),
+    );
+    insert(
+        "provider_invoice_provider",
+        contractual_summary["provider_invoice_provider"].clone(),
+    );
+    insert(
+        "provider_usage_scope_alignment_state",
+        contractual_summary["provider_usage_scope_alignment_state"].clone(),
+    );
+    insert(
+        "provider_invoice_scope_alignment_state",
+        contractual_summary["provider_invoice_scope_alignment_state"].clone(),
+    );
+    insert(
+        "rate_card_scope_alignment_state",
+        contractual_summary["rate_card_scope_alignment_state"].clone(),
+    );
+    insert(
+        "rate_card_provider_alignment_state",
+        contractual_summary["rate_card_provider_alignment_state"].clone(),
+    );
+    insert(
+        "invoice_provider_alignment_state",
+        contractual_summary["invoice_provider_alignment_state"].clone(),
+    );
+    insert(
+        "provider_identity_state",
+        contractual_summary["provider_identity_state"].clone(),
+    );
+    insert(
+        "reconciliation_temporal_truth_state",
+        contractual_summary["reconciliation_temporal_truth_state"].clone(),
+    );
+    insert(
+        "contractual_freshness_state",
+        contractual_summary["contractual_freshness_state"].clone(),
+    );
+    insert(
+        "reconciliation_state",
+        contractual_summary["reconciliation_state"].clone(),
+    );
+    insert("margin_state", contractual_summary["margin_state"].clone());
+    insert(
+        "margin_confidence_state",
+        contractual_summary["margin_confidence_state"].clone(),
+    );
+    insert(
+        "margin_readiness_state",
+        contractual_summary["margin_readiness_state"].clone(),
+    );
+    insert(
+        "infra_cost_truth_completeness_state",
+        contractual_summary["infra_cost_truth_completeness_state"].clone(),
+    );
+    insert(
+        "pricing_truth_completeness_state",
+        contractual_summary["pricing_truth_completeness_state"].clone(),
+    );
+    insert(
+        "customer_savings_money_truth_completeness_state",
+        contractual_summary["customer_savings_money_truth_completeness_state"].clone(),
+    );
+    insert(
+        "amai_cost_truth_completeness_state",
+        contractual_summary["amai_cost_truth_completeness_state"].clone(),
+    );
+    insert(
+        "margin_truth_completeness_state",
+        contractual_summary["margin_truth_completeness_state"].clone(),
+    );
+    insert(
+        "required_sources_for_margin_truth",
+        contractual_summary["required_sources_for_margin_truth"].clone(),
+    );
+    insert(
+        "optional_sources_for_margin_invoice_evidence",
+        contractual_summary["optional_sources_for_margin_invoice_evidence"].clone(),
+    );
+    insert(
+        "unready_required_sources_for_margin_truth",
+        contractual_summary["unready_required_sources_for_margin_truth"].clone(),
+    );
+    insert(
+        "margin_provider_identity_state",
+        contractual_summary["margin_provider_identity_state"].clone(),
+    );
+    insert(
+        "margin_temporal_truth_state",
+        contractual_summary["margin_temporal_truth_state"].clone(),
+    );
+    insert(
+        "infra_cost_scope_alignment_state",
+        contractual_summary["infra_cost_scope_alignment_state"].clone(),
+    );
+    insert(
+        "margin_blocking_reasons",
+        contractual_summary["margin_blocking_reasons"].clone(),
+    );
+    insert(
+        "internal_money_arithmetic_readiness_state",
+        contractual_summary["internal_money_arithmetic_readiness_state"].clone(),
+    );
+    insert(
+        "internal_money_arithmetic_blocking_reasons",
+        contractual_summary["internal_money_arithmetic_blocking_reasons"].clone(),
+    );
+    insert(
+        "contractual_settlement_readiness_state",
+        contractual_summary["contractual_settlement_readiness_state"].clone(),
+    );
+    insert(
+        "contractual_settlement_blocking_reasons",
+        contractual_summary["contractual_settlement_blocking_reasons"].clone(),
+    );
+    insert("export_status", json!("review_ready_report_only"));
+    insert("included_events_count", json!(included_items.len()));
+    insert("excluded_events_count", json!(excluded_items.len()));
+    insert("included_events_hash", json!(included_hash));
+    insert("excluded_events_hash", json!(excluded_hash));
+    insert("customer_review_ready", json!(true));
+    insert("invoice_ready", json!(false));
+    insert("credit_action_state", json!(credit_action_state));
+    insert("dispute_action_state", json!(dispute_action_state));
+    insert("pending_adjustment_entries_count", json!(pending_entries));
+    insert("disputed_entries_count", json!(disputed_entries));
+    insert(
+        "export_semantics",
+        json!({
             "surface_kind": "customer_review_report_only",
             "self_serve_state": "self_serve_ready_report_only",
             "invoice_grade": false,
@@ -5068,12 +5450,21 @@ fn build_statement_export_preview(
                 "suitability",
                 "evidence_pack_command"
             ]
-        },
-        "blocking_reasons": contractual_summary["blocking_reasons"].clone(),
-        "external_truth_manifest": report["token_budget_report"]["external_truth_manifest"].clone(),
-        "suitability": contractual_summary["suitability"].clone(),
-        "evidence_pack_available": true,
-        "evidence_pack_command": format!(
+        }),
+    );
+    insert(
+        "blocking_reasons",
+        contractual_summary["blocking_reasons"].clone(),
+    );
+    insert(
+        "external_truth_manifest",
+        report["token_budget_report"]["external_truth_manifest"].clone(),
+    );
+    insert("suitability", contractual_summary["suitability"].clone());
+    insert("evidence_pack_available", json!(true));
+    insert(
+        "evidence_pack_command",
+        json!(format!(
             "cargo run --release -- observe token-evidence-pack --scope {}{}",
             scope_code,
             if include_verify_events {
@@ -5081,14 +5472,23 @@ fn build_statement_export_preview(
             } else {
                 ""
             }
-        ),
-        "line_item_surfaces": {
+        )),
+    );
+    insert(
+        "line_item_surfaces",
+        json!({
             "statement_preview": statement_preview,
             "reconciliation_preview": reconciliation_preview,
             "margin_scope": margin_scope,
-        },
-        "note": "Это stable export preview для customer review: hashes и scope states уже зафиксированы, но invoice-grade settlement всё ещё не materialized."
-    });
+        }),
+    );
+    insert(
+        "note",
+        json!(
+            "Это stable export preview для customer review: hashes и scope states уже зафиксированы, но invoice-grade settlement всё ещё не materialized."
+        ),
+    );
+    let mut preview = Value::Object(preview);
     preview["settlement_report_preview"] = build_settlement_report_preview(contract, &preview);
     Ok(preview)
 }
@@ -5133,6 +5533,11 @@ fn build_contractual_evidence_pack(
         "settlement_stage_family": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["settlement_stage_family"].clone(),
         "next_settlement_stage_candidate": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["next_settlement_stage_candidate"].clone(),
         "next_settlement_stage_blockers": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["next_settlement_stage_blockers"].clone(),
+        "contractual_readiness_model_version": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["contractual_readiness_model_version"].clone(),
+        "internal_money_arithmetic_readiness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["internal_money_arithmetic_readiness_state"].clone(),
+        "internal_money_arithmetic_blocking_reasons": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["internal_money_arithmetic_blocking_reasons"].clone(),
+        "contractual_settlement_readiness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["contractual_settlement_readiness_state"].clone(),
+        "contractual_settlement_blocking_reasons": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["contractual_settlement_blocking_reasons"].clone(),
         "transactional_statuses": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["transactional_statuses"].clone(),
         "rate_card_status": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["rate_card_status"].clone(),
         "rate_card_truth_completeness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["rate_card_truth_completeness_state"].clone(),
@@ -10340,6 +10745,10 @@ mod tests {
             token_event["contract"]["suitability_model_version"],
             "token-suitability-v1"
         );
+        assert_eq!(
+            token_event["contract"]["contractual_readiness_model_version"],
+            "contractual-readiness-v1"
+        );
         assert_eq!(token_event["contract"]["billing_mode"], "report_only");
         assert_eq!(
             token_event["contract"]["reconciliation_contract_version"],
@@ -10355,7 +10764,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v13"
+            "contractual-evidence-pack-v14"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -12130,6 +12539,10 @@ effective_to_epoch_ms = 2000
             json!(["coverage_not_final"])
         );
         assert_eq!(
+            summary["contractual_readiness_model_version"],
+            "contractual-readiness-v1"
+        );
+        assert_eq!(
             summary["transactional_statuses"]["billable"]["status"],
             "billable_blocked_reserved"
         );
@@ -12220,6 +12633,26 @@ effective_to_epoch_ms = 2000
             "provider_identity_aligned"
         );
         assert_eq!(summary["margin_blocking_reasons"], json!([]));
+        assert_eq!(
+            summary["internal_money_arithmetic_readiness_state"],
+            "awaiting_pricing_truth"
+        );
+        assert_eq!(
+            summary["internal_money_arithmetic_blocking_reasons"],
+            json!(["pricing_truth_not_ready"])
+        );
+        assert_eq!(
+            summary["contractual_settlement_readiness_state"],
+            "review_not_yet_ready_report_only"
+        );
+        assert_eq!(
+            summary["contractual_settlement_blocking_reasons"],
+            json!([
+                "billing_mode_report_only",
+                "coverage_not_final",
+                "money_arithmetic_not_ready"
+            ])
+        );
         assert_eq!(summary["can_treat_scope_as_stable"], true);
         assert_eq!(summary["customer_review_ready"], true);
         assert_eq!(summary["invoice_ready"], false);
@@ -12313,6 +12746,7 @@ effective_to_epoch_ms = 2000
                             "disputed_reserved",
                             "closed_reserved"
                         ],
+                        "contractual_readiness_model_version": "contractual-readiness-v1",
                         "transactional_statuses": {
                             "review": {
                                 "status": "review_blocked_report_only"
@@ -12358,6 +12792,10 @@ effective_to_epoch_ms = 2000
                         "margin_temporal_truth_state": "scope_period_aligned",
                         "infra_cost_scope_alignment_state": "infra_cost_profile_not_bound",
                         "margin_blocking_reasons": ["rate_card_unpriced"],
+                        "internal_money_arithmetic_readiness_state": "awaiting_pricing_truth",
+                        "internal_money_arithmetic_blocking_reasons": ["pricing_truth_not_ready"],
+                        "contractual_settlement_readiness_state": "review_not_yet_ready_report_only",
+                        "contractual_settlement_blocking_reasons": ["coverage_not_final", "money_arithmetic_not_ready"],
                         "blocking_reasons": ["late_arrival_window_open"],
                         "suitability": {
                             "surfaces": {
@@ -12409,7 +12847,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v13");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v14");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -12463,6 +12901,26 @@ effective_to_epoch_ms = 2000
             "review_blocked_report_only"
         );
         assert_eq!(
+            preview["contractual_readiness_model_version"],
+            "contractual-readiness-v1"
+        );
+        assert_eq!(
+            preview["internal_money_arithmetic_readiness_state"],
+            "awaiting_pricing_truth"
+        );
+        assert_eq!(
+            preview["internal_money_arithmetic_blocking_reasons"],
+            json!(["pricing_truth_not_ready"])
+        );
+        assert_eq!(
+            preview["contractual_settlement_readiness_state"],
+            "review_not_yet_ready_report_only"
+        );
+        assert_eq!(
+            preview["contractual_settlement_blocking_reasons"],
+            json!(["coverage_not_final", "money_arithmetic_not_ready"])
+        );
+        assert_eq!(
             preview["export_semantics"]["surface_kind"],
             "customer_review_report_only"
         );
@@ -12481,7 +12939,7 @@ effective_to_epoch_ms = 2000
         assert_eq!(preview["evidence_pack_available"], true);
         assert_eq!(
             preview["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v4"
+            "settlement-report-preview-v5"
         );
         assert_eq!(
             preview["required_sources_for_usage_truth"],
@@ -12574,6 +13032,7 @@ effective_to_epoch_ms = 2000
                         "settlement_stage_family": "measured_report_only",
                         "next_settlement_stage_candidate": "billable_blocked",
                         "next_settlement_stage_blockers": ["billing_mode_report_only"],
+                        "contractual_readiness_model_version": "contractual-readiness-v1",
                         "transactional_statuses": {
                             "billable": {
                                 "status": "billable_blocked_reserved"
@@ -12597,6 +13056,10 @@ effective_to_epoch_ms = 2000
                         "optional_sources_for_margin_invoice_evidence": ["provider_invoice_export"],
                         "unready_required_sources_for_margin_truth": ["infra_cost_profile", "provider_rate_card"],
                         "margin_readiness_state": "awaiting_pricing_truth",
+                        "internal_money_arithmetic_readiness_state": "awaiting_pricing_truth",
+                        "internal_money_arithmetic_blocking_reasons": ["pricing_truth_not_ready"],
+                        "contractual_settlement_readiness_state": "customer_review_ready_settlement_activation_blocked_report_only",
+                        "contractual_settlement_blocking_reasons": ["billing_mode_report_only", "money_arithmetic_not_ready"],
                         "suitability": {
                             "surfaces": {
                                 "contractual_export": {
@@ -12610,7 +13073,7 @@ effective_to_epoch_ms = 2000
                 "statement_export_previews": {
                     "lifetime": {
                         "settlement_report_preview": {
-                            "model_version": "settlement-report-preview-v4",
+                            "model_version": "settlement-report-preview-v5",
                             "settlement_report_id": "preview-hash"
                         }
                     }
@@ -12661,7 +13124,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v13");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v14");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -12678,6 +13141,26 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             payload["transactional_statuses"]["billable"]["status"],
             "billable_blocked_reserved"
+        );
+        assert_eq!(
+            payload["contractual_readiness_model_version"],
+            "contractual-readiness-v1"
+        );
+        assert_eq!(
+            payload["internal_money_arithmetic_readiness_state"],
+            "awaiting_pricing_truth"
+        );
+        assert_eq!(
+            payload["internal_money_arithmetic_blocking_reasons"],
+            json!(["pricing_truth_not_ready"])
+        );
+        assert_eq!(
+            payload["contractual_settlement_readiness_state"],
+            "customer_review_ready_settlement_activation_blocked_report_only"
+        );
+        assert_eq!(
+            payload["contractual_settlement_blocking_reasons"],
+            json!(["billing_mode_report_only", "money_arithmetic_not_ready"])
         );
         assert_eq!(
             payload["rate_card_truth_completeness_state"],
@@ -12719,7 +13202,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             payload["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v4"
+            "settlement-report-preview-v5"
         );
         assert_eq!(
             payload["required_sources_for_usage_truth"],

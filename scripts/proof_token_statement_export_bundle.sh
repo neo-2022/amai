@@ -32,9 +32,18 @@ assert settlement_report["scope_code"] == "lifetime", settlement_report
 assert statement_export["scope_code"] == "lifetime", statement_export
 assert evidence_pack["scope_code"] == "lifetime", evidence_pack
 assert contractual_sources["scope_code"] == "lifetime", contractual_sources
-assert statement_export["model_version"] == "contractual-statement-export-v13", statement_export
-assert settlement_report["model_version"] == "settlement-report-preview-v4", settlement_report
-assert evidence_pack["pack_version"] == "contractual-evidence-pack-v13", evidence_pack
+assert statement_export["model_version"] == "contractual-statement-export-v14", statement_export
+assert settlement_report["model_version"] == "settlement-report-preview-v5", settlement_report
+assert evidence_pack["pack_version"] == "contractual-evidence-pack-v14", evidence_pack
+assert statement_export["contractual_readiness_model_version"] == "contractual-readiness-v1", statement_export
+assert settlement_report["contractual_readiness_model_version"] == "contractual-readiness-v1", settlement_report
+assert evidence_pack["contractual_readiness_model_version"] == "contractual-readiness-v1", evidence_pack
+assert statement_export["internal_money_arithmetic_readiness_state"] is not None, statement_export
+assert settlement_report["internal_money_arithmetic_readiness_state"] is not None, settlement_report
+assert evidence_pack["internal_money_arithmetic_readiness_state"] is not None, evidence_pack
+assert statement_export["contractual_settlement_readiness_state"] is not None, statement_export
+assert settlement_report["contractual_settlement_readiness_state"] is not None, settlement_report
+assert evidence_pack["contractual_settlement_readiness_state"] is not None, evidence_pack
 assert statement_export["external_truth_manifest"]["manifest_hash"], statement_export
 assert settlement_report["external_truth_manifest_hash"], settlement_report
 assert evidence_pack["external_truth_manifest"]["manifest_hash"], evidence_pack
