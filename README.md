@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 12:16 MSK
-Ручная сверка guide/docs: 2026-03-25 12:16 MSK
+modified_at: 2026-03-25 12:38 MSK
+Ручная сверка guide/docs: 2026-03-25 12:38 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1238,6 +1238,15 @@ preview, а не только raw count.
     а не сразу с full evidence pack.
   - export preview теперь ещё несёт `suitability`, чтобы review/export и будущие
     money-facing surface-ы не путались между собой.
+  - statement preview теперь ещё несёт `client_limit_meter_alignment`;
+  - в нём отдельно фиксируются:
+    - `alignment_state`
+    - `same_meter_as_client_limit`
+    - `live_events_count / non_live_events_count`
+    - `measured_components / missing_components`
+    - `blocking_reasons`
+  Это нужно затем, чтобы lower-bound savings не выглядели как уже эквивалентные
+  тому же самому метру, которым клиент считает живой лимит `5h`.
   - preview, settlement report preview и evidence pack теперь ещё несут общий
     `customer_contractual_boundary`;
   - в нём отдельно фиксируются:
@@ -1449,6 +1458,10 @@ preview, а не только raw count.
     - `internal money arithmetic ready`
     - `contractual settlement ready`
     - `future settlement activation governance`
+- operational metering contract теперь ещё несёт:
+  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v1`
+  - это отдельный truth-layer, который прямо объясняет, почему высокая measured
+    lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
 - metering freshness теперь тоже first-class:
   - `metering_freshness.current_session / rolling_window / lifetime`
   - она отдельно показывает:

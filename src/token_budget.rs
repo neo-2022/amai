@@ -74,6 +74,8 @@ struct TokenBudgetContractConfig {
     metering_freshness_model_version: String,
     #[serde(default = "default_agent_cycle_model_version")]
     agent_cycle_model_version: String,
+    #[serde(default = "default_client_limit_meter_alignment_version")]
+    client_limit_meter_alignment_version: String,
     #[serde(default = "default_excluded_taxonomy_version")]
     excluded_taxonomy_version: String,
     #[serde(default = "default_dedup_contract_version")]
@@ -150,6 +152,7 @@ impl Default for TokenBudgetContractConfig {
             coverage_model_version: default_coverage_model_version(),
             metering_freshness_model_version: default_metering_freshness_model_version(),
             agent_cycle_model_version: default_agent_cycle_model_version(),
+            client_limit_meter_alignment_version: default_client_limit_meter_alignment_version(),
             excluded_taxonomy_version: default_excluded_taxonomy_version(),
             dedup_contract_version: default_dedup_contract_version(),
             backfill_policy_version: default_backfill_policy_version(),
@@ -495,6 +498,10 @@ fn default_agent_cycle_model_version() -> String {
     "agent-cycle-lower-bound-v1".to_string()
 }
 
+fn default_client_limit_meter_alignment_version() -> String {
+    "client-limit-meter-alignment-v1".to_string()
+}
+
 fn default_excluded_taxonomy_version() -> String {
     "token-excluded-usage-v1".to_string()
 }
@@ -630,6 +637,7 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "coverage_model_version": contract.coverage_model_version.clone(),
         "metering_freshness_model_version": contract.metering_freshness_model_version.clone(),
         "agent_cycle_model_version": contract.agent_cycle_model_version.clone(),
+        "client_limit_meter_alignment_version": contract.client_limit_meter_alignment_version.clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
         "backfill_policy_version": contract.backfill_policy_version.clone(),
@@ -677,6 +685,8 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "quality_method_version": contract.quality_method_version.clone(),
         "coverage_model_version": contract.coverage_model_version.clone(),
         "metering_freshness_model_version": contract.metering_freshness_model_version.clone(),
+        "agent_cycle_model_version": contract.agent_cycle_model_version.clone(),
+        "client_limit_meter_alignment_version": contract.client_limit_meter_alignment_version.clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
         "backfill_policy_version": contract.backfill_policy_version.clone(),
@@ -5107,6 +5117,12 @@ fn build_statement_preview(
         ),
         "adjustment_preview": adjustment_preview.clone(),
         "coverage": summary["coverage"],
+        "client_limit_meter_alignment": build_client_limit_meter_alignment(
+            contract,
+            "statement_preview",
+            summary,
+            Some(events),
+        ),
         "freshness": metering_freshness.clone(),
         "internal_delivered_tokens": summary["delivered_tokens"],
         "internal_recovery_tokens": summary["recovery_tokens"],
@@ -8166,6 +8182,8 @@ fn summarize_events(
         return json!({
             "events_total": 0,
             "events_count": 0,
+            "live_events_count": 0,
+            "non_live_events_count": 0,
             "counted_events": 0,
             "task_success_like_counted_events": 0,
             "answer_like_counted_events": 0,
@@ -8212,6 +8230,11 @@ fn summarize_events(
         .iter()
         .map(|event| event.recovery_tokens)
         .sum::<u64>();
+    let live_events_count = events
+        .iter()
+        .filter(|event| event.traffic_class == "live")
+        .count();
+    let non_live_events_count = events.len().saturating_sub(live_events_count);
     let total_effective_saved_tokens = events
         .iter()
         .map(|event| event.effective_saved_tokens)
@@ -8391,6 +8414,8 @@ fn summarize_events(
     json!({
         "events_total": events.len(),
         "events_count": events.len(),
+        "live_events_count": live_events_count,
+        "non_live_events_count": non_live_events_count,
         "counted_events": verified_events.len(),
         "task_success_like_counted_events": task_like_events.len(),
         "answer_like_counted_events": answer_like_events.len(),
@@ -8629,6 +8654,127 @@ fn build_product_headline(summary: &Value, scope_label: &str) -> Value {
     }
 }
 
+fn client_limit_meter_alignment_counts(
+    summary: &Value,
+    events: Option<&[TokenBudgetEvent]>,
+) -> (u64, u64, u64, u64) {
+    let events_total = summary["events_total"]
+        .as_u64()
+        .or_else(|| events.map(|items| items.len() as u64))
+        .unwrap_or(0);
+    let live_events_count = summary["live_events_count"]
+        .as_u64()
+        .or_else(|| {
+            events.map(|items| {
+                items
+                    .iter()
+                    .filter(|event| event.traffic_class == "live")
+                    .count() as u64
+            })
+        })
+        .unwrap_or(0);
+    let non_live_events_count = summary["non_live_events_count"]
+        .as_u64()
+        .or_else(|| events_total.checked_sub(live_events_count))
+        .unwrap_or(0);
+    let counted_events = summary["counted_events"]
+        .as_u64()
+        .or_else(|| {
+            events.map(|items| {
+                items
+                    .iter()
+                    .filter(|event| event.traffic_class == "live" && event.quality_ok)
+                    .count() as u64
+            })
+        })
+        .unwrap_or(0);
+    (
+        events_total,
+        live_events_count,
+        non_live_events_count,
+        counted_events,
+    )
+}
+
+fn client_limit_meter_alignment_blocking_reasons(
+    summary: &Value,
+    events: Option<&[TokenBudgetEvent]>,
+) -> Vec<&'static str> {
+    let mut reasons = vec![
+        "client_prompt_unmeasured",
+        "assistant_generation_unmeasured",
+        "tool_overhead_outside_retrieval_unmeasured",
+        "continuity_restore_outside_retrieval_unmeasured",
+    ];
+    let (events_total, live_events_count, non_live_events_count, counted_events) =
+        client_limit_meter_alignment_counts(summary, events);
+
+    if events_total == 0 {
+        reasons.push("no_usage_observed_in_scope");
+    } else {
+        if live_events_count == 0 {
+            reasons.push("no_live_usage_in_scope");
+        }
+        if non_live_events_count > 0 {
+            reasons.push("non_live_events_present_in_scope");
+        }
+        if live_events_count > 0 && counted_events == 0 {
+            reasons.push("no_confirmed_live_usage_in_scope");
+        }
+    }
+    reasons
+}
+
+fn client_limit_meter_alignment_state(
+    summary: &Value,
+    events: Option<&[TokenBudgetEvent]>,
+) -> &'static str {
+    let (events_total, live_events_count, _non_live_events_count, counted_events) =
+        client_limit_meter_alignment_counts(summary, events);
+
+    if events_total == 0 {
+        "no_usage_observed"
+    } else if live_events_count == 0 {
+        "only_non_live_scope_activity"
+    } else if counted_events == 0 {
+        "live_usage_unconfirmed_not_meter_equivalent"
+    } else {
+        "partial_lower_bound_not_meter_equivalent"
+    }
+}
+
+fn build_client_limit_meter_alignment(
+    contract: &TokenBudgetContractConfig,
+    surface_kind: &str,
+    summary: &Value,
+    events: Option<&[TokenBudgetEvent]>,
+) -> Value {
+    let (events_total, live_events_count, non_live_events_count, counted_events) =
+        client_limit_meter_alignment_counts(summary, events);
+    json!({
+        "model_version": contract.client_limit_meter_alignment_version.clone(),
+        "surface_kind": surface_kind,
+        "alignment_state": client_limit_meter_alignment_state(summary, events),
+        "same_meter_as_client_limit": false,
+        "events_total": events_total,
+        "live_events_count": live_events_count,
+        "non_live_events_count": non_live_events_count,
+        "counted_live_events": counted_events,
+        "measured_components": [
+            "retrieval_payload",
+            "followup_recovery"
+        ],
+        "missing_components": [
+            "client_prompt",
+            "assistant_generation",
+            "tool_overhead_outside_retrieval",
+            "continuity_restore_outside_retrieval"
+        ],
+        "blocking_reasons": client_limit_meter_alignment_blocking_reasons(summary, events),
+        "note": "Этот слой честно показывает, что текущие savings пока считаются как lower-bound части агентного цикла и не эквивалентны тому же самому метру, которым клиент считает общий лимит сессии."
+    })
+}
+
 fn build_agent_cycle_economics(
     measurement: &MeasurementConfig,
     contract: &TokenBudgetContractConfig,
@@ -8646,6 +8792,28 @@ fn build_agent_cycle_economics(
             "status": "partial_lower_bound",
             "billing_mode": contract.billing_mode.clone(),
             "billing_policy_version": contract.billing_policy_version.clone(),
+            "client_limit_meter_alignment": {
+                "model_version": contract.client_limit_meter_alignment_version.clone(),
+                "alignment_state": "partial_lower_bound_not_meter_equivalent",
+                "same_meter_as_client_limit": false,
+                "measured_components": [
+                    "retrieval_payload",
+                    "followup_recovery"
+                ],
+                "missing_components": [
+                    "client_prompt",
+                    "assistant_generation",
+                    "tool_overhead_outside_retrieval",
+                    "continuity_restore_outside_retrieval"
+                ],
+                "blocking_reasons": [
+                    "client_prompt_unmeasured",
+                    "assistant_generation_unmeasured",
+                    "tool_overhead_outside_retrieval_unmeasured",
+                    "continuity_restore_outside_retrieval_unmeasured"
+                ],
+                "note": "Даже при высокой measured lower bound current meter ещё не эквивалентен полному клиентскому лимиту сессии."
+            },
             "rate_card_version": contract.rate_card_version.clone(),
             "currency_profile": contract.currency_profile.clone(),
             "settlement_status": contract.settlement_status.clone(),
@@ -8778,6 +8946,12 @@ fn build_agent_cycle_scope(
         "excluded_events_count": summary["excluded_events_count"].as_u64().unwrap_or(0),
         "coverage": summary["coverage"].clone(),
         "excluded_breakdown": summary["excluded_breakdown"].clone(),
+        "client_limit_meter_alignment": build_client_limit_meter_alignment(
+            contract,
+            "agent_cycle_scope",
+            &summary,
+            Some(&live_events),
+        ),
         "verified_share_pct": verified_share_pct,
         "without_amai_measured_tokens": summary["total_naive_tokens"].as_u64().unwrap_or(0),
         "with_amai_measured_tokens": with_amai_measured_tokens,
@@ -10960,6 +11134,10 @@ mod tests {
             "customer-contractual-boundary-v1"
         );
         assert_eq!(
+            token_event["contract"]["client_limit_meter_alignment_version"],
+            "client-limit-meter-alignment-v1"
+        );
+        assert_eq!(
             token_event["contract"]["settlement_activation_governance_version"],
             "settlement-activation-governance-v1"
         );
@@ -11537,6 +11715,30 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             preview["adjustment_preview"]["status"],
             "default_path_missing"
+        );
+        assert_eq!(
+            preview["client_limit_meter_alignment"]["model_version"],
+            "client-limit-meter-alignment-v1"
+        );
+        assert_eq!(
+            preview["client_limit_meter_alignment"]["surface_kind"],
+            "statement_preview"
+        );
+        assert_eq!(
+            preview["client_limit_meter_alignment"]["alignment_state"],
+            "partial_lower_bound_not_meter_equivalent"
+        );
+        assert_eq!(
+            preview["client_limit_meter_alignment"]["same_meter_as_client_limit"],
+            false
+        );
+        assert_eq!(
+            preview["client_limit_meter_alignment"]["live_events_count"],
+            1
+        );
+        assert_eq!(
+            preview["client_limit_meter_alignment"]["non_live_events_count"],
+            0
         );
         assert_eq!(preview["measured_non_billable_lower_bound_tokens"], 1234);
         assert_eq!(preview["billable_lower_bound_tokens"], json!(null));
@@ -13891,6 +14093,26 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             economics["contract"]["reporting_layers"]["billable"]["status"],
             "disabled_report_only"
+        );
+        assert_eq!(
+            economics["contract"]["client_limit_meter_alignment"]["model_version"],
+            "client-limit-meter-alignment-v1"
+        );
+        assert_eq!(
+            economics["current_session"]["client_limit_meter_alignment"]["surface_kind"],
+            "agent_cycle_scope"
+        );
+        assert_eq!(
+            economics["current_session"]["client_limit_meter_alignment"]["alignment_state"],
+            "partial_lower_bound_not_meter_equivalent"
+        );
+        assert_eq!(
+            economics["current_session"]["client_limit_meter_alignment"]["live_events_count"],
+            2
+        );
+        assert_eq!(
+            economics["current_session"]["client_limit_meter_alignment"]["non_live_events_count"],
+            0
         );
         assert_eq!(
             economics["current_session"]["coverage"]["completeness_state"],

@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 12:16 MSK
-Ручная сверка guide/docs: 2026-03-25 12:16 MSK
+modified_at: 2026-03-25 12:38 MSK
+Ручная сверка guide/docs: 2026-03-25 12:38 MSK
 
 # Token Ledger
 
@@ -1058,6 +1058,16 @@ Hashes по line items нужны затем, чтобы:
   measured/report-only стадии с будущими reserved billing стадиями;
 - preview и evidence pack теперь ещё несут `export_semantics`, чтобы customer review surface
   не смешивался с operational telemetry и не выглядел как invoice-grade settlement;
+- statement preview и `agent_cycle_economics` теперь ещё несут
+  `client_limit_meter_alignment`;
+- этот слой отдельно фиксирует:
+  - `alignment_state`
+  - `same_meter_as_client_limit`
+  - `live_events_count / non_live_events_count`
+  - `measured_components / missing_components`
+  - `blocking_reasons`
+  Это нужно затем, чтобы live lower-bound savings не притворялись уже эквивалентными
+  тому же самому полному метру, которым внешний клиент считает общий `5h` limit.
 - публикует `included_events_hash / excluded_events_hash`;
 - отдельно показывает `credit_action_state` и `dispute_action_state`;
 - и хранит рядом уже готовые `statement_preview / reconciliation_preview / margin_scope`;
@@ -1072,6 +1082,7 @@ Hashes по line items нужны затем, чтобы:
 - `contractual-statement-export-v16`
 - `settlement-report-preview-v7`
 - `contractual-evidence-pack-v16`
+- `client-limit-meter-alignment-v1`
 
 ## Preliminary vs stable
 
