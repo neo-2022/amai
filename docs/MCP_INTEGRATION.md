@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 21:25 MSK
-Ручная сверка guide/docs: 2026-03-25 21:25 MSK
+modified_at: 2026-03-25 21:26 MSK
+Ручная сверка guide/docs: 2026-03-25 21:26 MSK
 
 # MCP Integration
 
@@ -362,7 +362,11 @@ stack-а, но и какие deployment promises вообще честно до�
 - canonical startup prompt: `amai-continuity-startup`;
 - default namespace: `continuity`;
 - before substantive work клиент обязан получить
-  `continuity_startup_summary`, где уже surfaced `execctl_resume_state`.
+  `continuity_startup_summary`, где уже surfaced:
+  - `execctl_resume_state`;
+  - `execctl_resume_contract_summary`;
+  - `project_task_tree_summary`;
+  - `project_task_ledger_summary`.
 
 Кроме success-shape, handshake теперь публикует и `error_contracts`. Это даёт
 клиенту стабильную карту failure classes до первого сбоя, а в runtime:

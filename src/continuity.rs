@@ -2237,6 +2237,10 @@ fn build_chat_start_restore(
         .and_then(|value| value["pending_return_summary"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let execctl_resume_contract_summary = restore_node
+        .and_then(|value| value["execctl_resume_contract_summary"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let project_task_tree_summary = restore_node
         .and_then(|value| value["project_task_tree_summary"].as_str())
         .filter(|value| !value.is_empty())
@@ -2310,6 +2314,7 @@ fn build_chat_start_restore(
             "open_questions_summary": open_questions_summary,
             "workspace_graph_summary": workspace_graph_summary,
             "pending_return_summary": pending_return_summary,
+            "execctl_resume_contract_summary": execctl_resume_contract_summary,
             "project_task_tree_summary": project_task_tree_summary,
             "project_task_ledger_summary": project_task_ledger_summary,
             "execctl_resume_state": execctl_resume_state,
@@ -2358,6 +2363,10 @@ fn render_chat_start_prompt(
         restore_node.and_then(|value| workspace_graph::human_summary(&value["workspace_graph"]));
     let pending_return_summary = restore_node
         .and_then(|value| value["pending_return_summary"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let execctl_resume_contract_summary = restore_node
+        .and_then(|value| value["execctl_resume_contract_summary"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
     let project_task_tree_summary = restore_node
@@ -2411,6 +2420,9 @@ fn render_chat_start_prompt(
     if let Some(value) = pending_return_summary {
         lines.push(format!("Незавершённые линии к возврату: {value}"));
     }
+    if let Some(value) = execctl_resume_contract_summary {
+        lines.push(format!("Контракт возврата ExecCtl: {value}"));
+    }
     if let Some(value) = included_reasons_summary {
         lines.push(format!("Почему вошёл последний контекст: {value}"));
     }
@@ -2428,7 +2440,7 @@ fn render_chat_start_prompt(
     }
     if execctl_resume_state == "pending_return_queue_present" {
         lines.push(
-            "ExecCtl: есть незавершённые линии к возврату; не теряй их и не делай silent preemption."
+            "ExecCtl: есть незавершённые линии к возврату; не теряй их, не делай silent preemption и после active line возвращайся к required_return_task."
                 .to_string(),
         );
     }
@@ -2481,6 +2493,12 @@ fn print_chat_start_restore_human(value: &Value) {
         .filter(|value| !value.is_empty())
     {
         println!("- Незавершённые линии к возврату: {value}");
+    }
+    if let Some(value) = node["execctl_resume_contract_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Контракт возврата ExecCtl: {value}");
     }
     if let Some(value) = node["included_reasons_summary"]
         .as_str()
@@ -4088,6 +4106,7 @@ mod tests {
                 "restore_confidence": "high",
                 "execctl_resume_state": "pending_return_queue_present",
                 "pending_return_summary": "Same-meter spend control -> Materialize live assistant generation source.",
+                "execctl_resume_contract_summary": "return_required(1): Same-meter spend control -> Materialize live assistant generation source.",
                 "project_task_tree_summary": "active: Amai upstream thread-index enrich materialized; pending_return(1): Same-meter spend control -> Materialize live assistant generation source.",
                 "materialized_notes": [
                     "Enriched temporal summaries теперь пишутся upstream."
@@ -4123,6 +4142,9 @@ mod tests {
         ));
         assert!(prompt.contains(
             "Незавершённые линии к возврату: Same-meter spend control -> Materialize live assistant generation source."
+        ));
+        assert!(prompt.contains(
+            "Контракт возврата ExecCtl: return_required(1): Same-meter spend control -> Materialize live assistant generation source."
         ));
         assert!(prompt.contains("ExecCtl: есть незавершённые линии к возврату"));
         assert_eq!(node["thread_count"], json!(16));

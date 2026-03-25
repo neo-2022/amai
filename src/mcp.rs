@@ -1248,7 +1248,10 @@ async fn tool_continuity_startup(
             summary.headline,
             summary.next_step,
             summary.execctl_resume_state,
-            summary.pending_return_summary.as_deref().unwrap_or("none"),
+            summary
+                .execctl_resume_contract_summary
+                .as_deref()
+                .unwrap_or_else(|| summary.pending_return_summary.as_deref().unwrap_or("none")),
         ),
         json!({
             "continuity_startup": payload["continuity_startup"].clone(),
@@ -1266,6 +1269,7 @@ async fn tool_continuity_startup(
                 "prompt_text_present": summary.prompt_text_present,
                 "execctl_resume_state": summary.execctl_resume_state,
                 "pending_return_summary": summary.pending_return_summary,
+                "execctl_resume_contract_summary": summary.execctl_resume_contract_summary,
                 "project_task_tree_summary": summary.project_task_tree_summary,
                 "project_task_ledger_summary": summary.project_task_ledger_summary,
                 "included_reasons_summary": summary.included_reasons_summary,
@@ -1833,6 +1837,7 @@ struct ContinuityStartupSummary {
     prompt_text_present: bool,
     execctl_resume_state: String,
     pending_return_summary: Option<String>,
+    execctl_resume_contract_summary: Option<String>,
     project_task_tree_summary: Option<String>,
     project_task_ledger_summary: Option<String>,
     included_reasons_summary: Option<String>,
@@ -1872,6 +1877,11 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
             .unwrap_or("clear")
             .to_string(),
         pending_return_summary: payload["chat_start_restore"]["pending_return_summary"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        execctl_resume_contract_summary: payload["chat_start_restore"]
+            ["execctl_resume_contract_summary"]
             .as_str()
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
@@ -2296,6 +2306,7 @@ fn protocol_manifest() -> Value {
                     "thread_count",
                     "prompt_text_present",
                     "execctl_resume_state",
+                    "execctl_resume_contract_summary",
                     "project_task_tree_summary",
                     "project_task_ledger_summary"
                 ],
@@ -2304,6 +2315,7 @@ fn protocol_manifest() -> Value {
                     "chat_start_restore_prompt_text",
                     "execctl_resume_state",
                     "pending_return_summary",
+                    "execctl_resume_contract_summary",
                     "project_task_tree_summary",
                     "project_task_ledger_summary"
                 ],
@@ -4320,6 +4332,11 @@ mod tests {
         assert!(
             startup_required_fields
                 .iter()
+                .any(|field| field.as_str() == Some("execctl_resume_contract_summary"))
+        );
+        assert!(
+            startup_required_fields
+                .iter()
                 .any(|field| field.as_str() == Some("project_task_tree_summary"))
         );
         assert!(
@@ -4413,6 +4430,7 @@ mod tests {
                 "prompt_text": "CHAT_START_RESTORE\nProject: Art",
                 "execctl_resume_state": "pending_return_queue_present",
                 "pending_return_summary": "Same-meter spend control -> Materialize live assistant generation source.",
+                "execctl_resume_contract_summary": "return_required(1): Same-meter spend control -> Materialize live assistant generation source.",
                 "project_task_tree_summary": "active: Continue runtime auto-start guarantees.; pending_return(1): Same-meter spend control -> Materialize live assistant generation source.",
                 "project_task_ledger_summary": "active: Continue runtime auto-start guarantees.; pending_return(1); historical_handoffs(3)",
                 "included_reasons_summary": "exact_documents (1) — Exact layer matched.",
@@ -4430,6 +4448,12 @@ mod tests {
                 .pending_return_summary
                 .as_deref()
                 .is_some_and(|value| value.contains("Same-meter spend control"))
+        );
+        assert!(
+            summary
+                .execctl_resume_contract_summary
+                .as_deref()
+                .is_some_and(|value| value.contains("return_required(1)"))
         );
         assert!(
             summary

@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 21:18 MSK
-Ручная сверка guide/docs: 2026-03-25 21:18 MSK
+modified_at: 2026-03-25 21:26 MSK
+Ручная сверка guide/docs: 2026-03-25 21:26 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -93,6 +93,12 @@ modified_at: 2026-03-25 21:18 MSK
 - task inventory больше не живёт только внутри текущего restore-window;
 - continuity handoff пишет append-only task entry в SQL;
 - startup/restore поднимает project task ledger уже из durable storage lane, а restore-side ledger остаётся fallback/shadow-путём.
+
+Поверх durable ledger теперь surfaced ещё и machine-readable `ExecCtl resume contract`.
+Его смысл:
+- startup не только показывает, что есть pending lines;
+- startup явно говорит, есть ли `required_return_task`;
+- новый клиент или новый чат должен видеть это как обязательство к возврату, а не как свободный текстовый совет.
 
 Важно: continuity должна переживать не только новый чат, но и смену окна, IDE и локализации проекта.
 Для этого `Amai` держит project identity не только через один текущий `repo_root`, а через

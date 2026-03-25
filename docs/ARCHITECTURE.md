@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 21:18 MSK
-Ручная сверка guide/docs: 2026-03-25 21:18 MSK
+modified_at: 2026-03-25 21:26 MSK
+Ручная сверка guide/docs: 2026-03-25 21:26 MSK
 
 # Architecture
 
@@ -225,6 +225,8 @@ Code structure plane:
 - `pending_return_queue`
 - `pending_return_summary`
 - `execctl_resume_state`
+- `execctl_resume_contract`
+- `execctl_resume_contract_summary`
 - `project_task_tree`
 - `project_task_tree_summary`
 - `project_task_ledger`
@@ -239,6 +241,8 @@ Truthful статус теперь такой:
 
 Это ещё не финальный workflow engine, но уже fail-closed защита против silent preemption и против
 тихой потери project-bound task inventory после compaction, relocation или client switch.
+Новый слой `execctl_resume_contract` нужен именно затем, чтобы pending worklines поднимались не
+как свободный human hint, а как machine-readable `required_return_task`.
 Архитектурный закон здесь такой:
 - continuity не равна “последний headline победил”;
 - project-bound task memory должна помнить и active line, и обязательные линии к возврату,

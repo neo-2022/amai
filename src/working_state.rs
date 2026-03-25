@@ -605,6 +605,10 @@ fn compose_restore_bundle(
         &pending_return_queue,
     );
     let project_task_ledger_summary = summarize_project_task_ledger(&project_task_ledger);
+    let execctl_resume_contract =
+        build_execctl_resume_contract(&project_task_tree, &pending_return_queue);
+    let execctl_resume_contract_summary =
+        summarize_execctl_resume_contract(&execctl_resume_contract);
 
     json!({
         "working_state_restore": {
@@ -630,6 +634,8 @@ fn compose_restore_bundle(
             "pending_return_queue": pending_return_queue,
             "pending_return_summary": pending_return_summary,
             "execctl_resume_state": execctl_resume_state,
+            "execctl_resume_contract": execctl_resume_contract,
+            "execctl_resume_contract_summary": execctl_resume_contract_summary,
             "project_task_tree": project_task_tree,
             "project_task_tree_summary": project_task_tree_summary,
             "project_task_ledger": project_task_ledger,
@@ -1930,6 +1936,64 @@ fn build_durable_project_task_ledger(
     })
 }
 
+fn build_execctl_resume_contract(project_task_tree: &Value, pending_return_queue: &Value) -> Value {
+    let nodes = project_task_tree["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let active_task = nodes
+        .iter()
+        .find(|item| item["task_role"].as_str() == Some("active"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let required_return_task = nodes
+        .iter()
+        .find(|item| item["task_role"].as_str() == Some("pending_return"))
+        .cloned()
+        .or_else(|| {
+            pending_return_queue
+                .as_array()
+                .and_then(|items| items.first().cloned())
+        })
+        .unwrap_or(Value::Null);
+    let pending_return_count = nodes
+        .iter()
+        .filter(|item| item["task_role"].as_str() == Some("pending_return"))
+        .count();
+    let resume_state = if required_return_task.is_null() {
+        "clear"
+    } else {
+        "return_required"
+    };
+    json!({
+        "contract_version": "execctl-resume-contract-v1",
+        "resume_state": resume_state,
+        "no_silent_drop": true,
+        "pending_return_count": pending_return_count,
+        "active_task": active_task,
+        "required_return_task": required_return_task,
+    })
+}
+
+fn summarize_execctl_resume_contract(value: &Value) -> Option<String> {
+    if value["resume_state"].as_str() == Some("clear") {
+        return Some("clear".to_string());
+    }
+    let required = &value["required_return_task"];
+    let headline = required["headline"]
+        .as_str()
+        .filter(|item| !item.is_empty())
+        .unwrap_or("ещё нет данных");
+    let next_step = required["next_step"]
+        .as_str()
+        .filter(|item| !item.is_empty())
+        .unwrap_or("ещё нет данных");
+    let count = value["pending_return_count"].as_u64().unwrap_or(0);
+    Some(format!(
+        "return_required({count}): {headline} -> {next_step}"
+    ))
+}
+
 fn normalize_next_step_hint(value: &str) -> String {
     let mut normalized = value.trim().to_string();
     for _ in 0..3 {
@@ -2643,6 +2707,10 @@ mod tests {
             json!("pending_return_queue_present")
         );
         assert_eq!(
+            restore["execctl_resume_contract"]["resume_state"],
+            json!("return_required")
+        );
+        assert_eq!(
             restore["pending_return_queue"][0]["headline"],
             json!("Same-meter spend control")
         );
@@ -2650,6 +2718,11 @@ mod tests {
             restore["pending_return_summary"]
                 .as_str()
                 .is_some_and(|value| value.contains("Same-meter spend control"))
+        );
+        assert!(
+            restore["execctl_resume_contract_summary"]
+                .as_str()
+                .is_some_and(|value| value.contains("return_required(1)"))
         );
         assert_eq!(
             restore["project_task_tree"]["tree_version"],

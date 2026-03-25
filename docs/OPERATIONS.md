@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 21:18 MSK
-Ручная сверка guide/docs: 2026-03-25 21:18 MSK
+modified_at: 2026-03-25 21:26 MSK
+Ручная сверка guide/docs: 2026-03-25 21:26 MSK
 
 # Operations
 
@@ -398,6 +398,8 @@ cd /home/art/agent-memory-index
   - `recent_actions[].execution_state` разводит `attempted / succeeded / superseded / stale`;
   - `pending_return_queue`, `pending_return_summary` и `execctl_resume_state` не дают новому
     `continuity_handoff` тихо затереть прошлую рабочую линию;
+  - `execctl_resume_contract` и `execctl_resume_contract_summary` теперь machine-readable поднимают
+    `required_return_task`, чтобы новый чат или MCP-клиент видел obligation к возврату явно;
   - `project_task_tree` и `project_task_tree_summary` теперь поднимают active line и
     pending-return obligations как project-bound open-task tree;
   - `project_task_ledger` теперь truthful-ly prefers durable SQL lane
@@ -409,7 +411,7 @@ cd /home/art/agent-memory-index
   - для single exact-document pack и single symbol-only pack provenance теперь может честно materialize-ить минимальный graph без полного file-обхода; это режет cold latency, но не теряет source-of-truth по самому retrieved file/symbol;
   - `workspace_graph_summary` в `chat_start_restore` и startup-output нужен как короткий human-readable слой поверх этого graph;
   - тот же `chat_start_restore` теперь обязан печатать `Незавершённые линии к возврату` и
-    `ExecCtl` warning, если в проекте уже есть suspended workline, которую потом надо вернуть;
+    `Контракт возврата ExecCtl`, если в проекте уже есть suspended workline, которую потом надо вернуть;
   - при битом `session_id` restore-path теперь fail-closed и не смешивает несколько пустых сессий в один bundle.
   - product proof для этого minimal `ExecCtl` contour:
     `./scripts/proof_execctl_pending_return.sh`
