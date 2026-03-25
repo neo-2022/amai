@@ -1720,6 +1720,16 @@ pub fn render_html(refresh_ms: u64) -> String {
       if (cacheBits.length > 0) {
         rows.push(["Снимок панели", cacheBits.join(" • ")]);
       }
+      const refreshBits = [];
+      if (typeof meta.observe_refresh_total_ms === "number") {
+        refreshBits.push(`полный refresh ${Math.round(meta.observe_refresh_total_ms)} ms`);
+      }
+      if (meta.observe_refresh_slowest_stage && typeof meta.observe_refresh_slowest_stage_ms === "number") {
+        refreshBits.push(`узкое место ${meta.observe_refresh_slowest_stage} = ${Math.round(meta.observe_refresh_slowest_stage_ms)} ms`);
+      }
+      if (refreshBits.length > 0) {
+        rows.push(["Сборка снимка", refreshBits.join(" • ")]);
+      }
       rows.forEach(([label, value]) => {
         const row = document.createElement("div");
         row.appendChild(textNode("span", "", label));
@@ -2069,6 +2079,9 @@ pub fn build_payload(
     let captured_at_epoch_ms = snapshot["captured_at_epoch_ms"]
         .as_u64()
         .unwrap_or_default();
+    let observe_refresh_total_ms = snapshot["observe_refresh"]["total_ms"].as_u64();
+    let (observe_refresh_slowest_stage, observe_refresh_slowest_stage_ms) =
+        slowest_observe_refresh_stage(snapshot);
 
     Ok(json!({
         "meta": {
@@ -2079,6 +2092,9 @@ pub fn build_payload(
             "refresh_ms": refresh_ms,
             "refresh_seconds": refresh_ms / 1000,
             "base_url": base_url,
+            "observe_refresh_total_ms": observe_refresh_total_ms,
+            "observe_refresh_slowest_stage": observe_refresh_slowest_stage,
+            "observe_refresh_slowest_stage_ms": observe_refresh_slowest_stage_ms,
         },
         "headline": build_headline(snapshot, captured_at_epoch_ms),
         "hero_cards": build_hero_cards(snapshot),
@@ -2090,6 +2106,26 @@ pub fn build_payload(
         "glossary": build_glossary(),
         "links": build_links(&base_url),
     }))
+}
+
+fn slowest_observe_refresh_stage(snapshot: &Value) -> (Option<String>, Option<u64>) {
+    let mut slowest: Option<(&str, u64)> = None;
+    for (label, value) in snapshot["observe_refresh"]["stage_ms"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        let Some(duration_ms) = value.as_u64() else {
+            continue;
+        };
+        match slowest {
+            Some((_, current_max)) if current_max >= duration_ms => {}
+            _ => slowest = Some((label.as_str(), duration_ms)),
+        }
+    }
+    slowest
+        .map(|(label, duration_ms)| (Some(label.to_string()), Some(duration_ms)))
+        .unwrap_or((None, None))
 }
 
 fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {

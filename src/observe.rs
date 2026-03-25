@@ -14,6 +14,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::future::Future;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -611,70 +612,175 @@ pub async fn collect_snapshot_preview(cfg: &AppConfig) -> Result<Value> {
 }
 
 async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value> {
+    let snapshot_started = Instant::now();
     if persist_snapshot {
         maybe_cleanup_observability_snapshots(cfg).await?;
     }
     let profile = load_profile()?;
     let repo_root = discover_repo_root(None)?;
     let db = postgres::connect_admin(cfg).await?;
-    let previous = postgres::latest_observability_snapshot(&db, "system_snapshot").await?;
+    let mut observe_refresh_stage_ms = serde_json::Map::new();
+    let previous = timed_future(
+        &mut observe_refresh_stage_ms,
+        "previous_system_snapshot",
+        postgres::latest_observability_snapshot(&db, "system_snapshot"),
+    )
+    .await?;
     let http = http_client()?;
     let captured_at_epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
         .as_millis() as u64;
 
-    let mut postgres_live = collect_postgres_live(&db, &profile.snapshot).await?;
+    let mut postgres_live = timed_future(
+        &mut observe_refresh_stage_ms,
+        "collect_postgres_live",
+        collect_postgres_live(&db, &profile.snapshot),
+    )
+    .await?;
     if let Some(object) = postgres_live.as_object_mut() {
         object.insert(
             "captured_at_epoch_ms".to_string(),
             Value::from(captured_at_epoch_ms),
         );
     }
-    let qdrant_live = collect_qdrant_live(cfg, &http).await?;
-    let benchmark_qdrant_live = collect_optional_benchmark_qdrant_live(cfg, &http).await;
-    let nats_live = collect_nats_live(cfg, &http, &profile.snapshot).await?;
-    let s3_live = collect_s3_live(cfg).await?;
-    let compatibility_report = compatibility::check(cfg).await?;
+    let qdrant_live = timed_future(
+        &mut observe_refresh_stage_ms,
+        "collect_qdrant_live",
+        collect_qdrant_live(cfg, &http),
+    )
+    .await?;
+    let benchmark_qdrant_live = timed_future(
+        &mut observe_refresh_stage_ms,
+        "collect_benchmark_qdrant_live",
+        collect_optional_benchmark_qdrant_live(cfg, &http),
+    )
+    .await;
+    let nats_live = timed_future(
+        &mut observe_refresh_stage_ms,
+        "collect_nats_live",
+        collect_nats_live(cfg, &http, &profile.snapshot),
+    )
+    .await?;
+    let s3_live = timed_future(
+        &mut observe_refresh_stage_ms,
+        "collect_s3_live",
+        collect_s3_live(cfg),
+    )
+    .await?;
+    let compatibility_report = timed_future(
+        &mut observe_refresh_stage_ms,
+        "compatibility_check",
+        compatibility::check(cfg),
+    )
+    .await?;
 
-    let latest_hot =
-        postgres::latest_observability_snapshot(&db, "retrieval_benchmark_hot").await?;
-    let latest_cold =
-        postgres::latest_observability_snapshot(&db, "retrieval_benchmark_cold").await?;
-    let latest_index = postgres::latest_observability_snapshot(&db, "index_project").await?;
-    let latest_accuracy =
-        postgres::latest_observability_snapshot(&db, "retrieval_accuracy").await?;
+    let latest_hot = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_retrieval_hot",
+        postgres::latest_observability_snapshot(&db, "retrieval_benchmark_hot"),
+    )
+    .await?;
+    let latest_cold = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_retrieval_cold",
+        postgres::latest_observability_snapshot(&db, "retrieval_benchmark_cold"),
+    )
+    .await?;
+    let latest_index = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_index_project",
+        postgres::latest_observability_snapshot(&db, "index_project"),
+    )
+    .await?;
+    let latest_accuracy = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_retrieval_accuracy",
+        postgres::latest_observability_snapshot(&db, "retrieval_accuracy"),
+    )
+    .await?;
     let (latest_load_hot, latest_load_hot_raw) =
-        latest_clean_benchmark_snapshot(&db, "retrieval_load_hot", "load_verification").await?;
+        timed_future(
+            &mut observe_refresh_stage_ms,
+            "latest_retrieval_load_hot",
+            latest_clean_benchmark_snapshot(&db, "retrieval_load_hot", "load_verification"),
+        )
+        .await?;
     let (latest_load_cold, latest_load_cold_raw) =
-        latest_clean_benchmark_snapshot(&db, "retrieval_load_cold", "load_verification").await?;
-    let latest_token_benchmark =
-        postgres::latest_observability_snapshot(&db, "token_benchmark").await?;
-    let latest_cold_path_benchmark = latest_dashboard_cold_benchmark_snapshot(&db).await?;
+        timed_future(
+            &mut observe_refresh_stage_ms,
+            "latest_retrieval_load_cold",
+            latest_clean_benchmark_snapshot(&db, "retrieval_load_cold", "load_verification"),
+        )
+        .await?;
+    let latest_token_benchmark = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_token_benchmark",
+        postgres::latest_observability_snapshot(&db, "token_benchmark"),
+    )
+    .await?;
+    let latest_cold_path_benchmark = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_cold_path_benchmark",
+        latest_dashboard_cold_benchmark_snapshot(&db),
+    )
+    .await?;
     let cold_path_benchmark_progress = read_live_cold_benchmark_progress(&repo_root);
-    let cold_path_benchmark_progress =
-        enrich_live_cold_benchmark_progress(&db, cold_path_benchmark_progress).await?;
-    let latest_working_state_restore =
-        postgres::latest_observability_snapshot(&db, "working_state_restore").await?;
-    let latest_repo_working_state_restore =
-        match postgres::get_project_by_repo_root(&db, &repo_root.display().to_string()).await {
-            Ok(project) => {
-                postgres::latest_observability_snapshot_for_project(
-                    &db,
-                    "working_state_restore",
-                    "working_state_restore",
-                    &project.code,
-                )
-                .await?
+    let cold_path_benchmark_progress = timed_future(
+        &mut observe_refresh_stage_ms,
+        "cold_path_benchmark_progress",
+        enrich_live_cold_benchmark_progress(&db, cold_path_benchmark_progress),
+    )
+    .await?;
+    let latest_working_state_restore = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_working_state_restore",
+        postgres::latest_observability_snapshot(&db, "working_state_restore"),
+    )
+    .await?;
+    let latest_repo_working_state_restore = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_repo_working_state_restore",
+        async {
+            match postgres::get_project_by_repo_root(&db, &repo_root.display().to_string()).await {
+                Ok(project) => {
+                    postgres::latest_observability_snapshot_for_project(
+                        &db,
+                        "working_state_restore",
+                        "working_state_restore",
+                        &project.code,
+                    )
+                    .await
+                }
+                Err(_) => Ok(None),
             }
-            Err(_) => None,
-        };
-    let latest_degradation_verification =
-        postgres::latest_observability_snapshot(&db, "degradation_verification").await?;
-    let latest_continuity_verification =
-        postgres::latest_observability_snapshot(&db, "continuity_verification").await?;
-    let token_budget_report = token_budget::collect_default_report(&db).await?;
-    let artifact_cleanup_summary = artifact_cleanup::read_latest_summary(&repo_root)?
+        },
+    )
+    .await?;
+    let latest_degradation_verification = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_degradation_verification",
+        postgres::latest_observability_snapshot(&db, "degradation_verification"),
+    )
+    .await?;
+    let latest_continuity_verification = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_continuity_verification",
+        postgres::latest_observability_snapshot(&db, "continuity_verification"),
+    )
+    .await?;
+    let token_budget_report = timed_future(
+        &mut observe_refresh_stage_ms,
+        "token_budget_report",
+        token_budget::collect_default_report(&db),
+    )
+    .await?;
+    let artifact_cleanup_summary = timed_future(
+        &mut observe_refresh_stage_ms,
+        "artifact_cleanup_summary",
+        async { artifact_cleanup::read_latest_summary(&repo_root) },
+    )
+    .await?
         .unwrap_or_else(|| {
             json!({
                 "artifact_cleanup": {
@@ -741,6 +847,10 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_continuity_verification": payload["latest_continuity_verification"].clone(),
         "token_budget_report": payload["token_budget_report"].clone(),
         "artifact_cleanup": payload["artifact_cleanup"].clone(),
+        "observe_refresh": {
+            "total_ms": snapshot_started.elapsed().as_millis() as u64,
+            "stage_ms": observe_refresh_stage_ms,
+        },
         "degradation_model": degradation_model,
         "continuity_correctness_model": continuity_correctness_model,
         "sla": sla,
@@ -749,6 +859,23 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         let _ = postgres::insert_observability_snapshot(&db, "system_snapshot", &snapshot).await?;
     }
     Ok(snapshot)
+}
+
+async fn timed_future<T, F>(
+    timings: &mut serde_json::Map<String, Value>,
+    label: &str,
+    future: F,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    let started = Instant::now();
+    let value = future.await;
+    timings.insert(
+        label.to_string(),
+        Value::from(started.elapsed().as_millis() as u64),
+    );
+    value
 }
 
 fn build_continuity_correctness_model(payload: &Value) -> Result<Value> {

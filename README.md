@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 00:54 MSK
-Ручная сверка guide/docs: 2026-03-26 00:54 MSK
+modified_at: 2026-03-26 01:01 MSK
+Ручная сверка guide/docs: 2026-03-26 01:01 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -631,7 +631,8 @@ scripts\human_dashboard_down.cmd
 Но сам `observe serve` теперь не пересобирает полный live snapshot на каждый браузерный refresh:
 - тяжёлый `build_snapshot` живёт в фоновом cache-refresh контуре процесса;
 - `/api/dashboard`, `/api/snapshot`, `/metrics` и `/healthz` читают уже готовый последний снимок;
-- в summary панели теперь прямо видны `refresh`, `возраст` и состояние кэша, чтобы было ясно, страница ждёт браузер или сам snapshot-builder.
+- в summary панели теперь прямо видны `refresh`, `возраст` и состояние кэша, чтобы было ясно, страница ждёт браузер или сам snapshot-builder;
+- там же теперь выводится и самый дорогой stage последнего snapshot-refresh, чтобы operator сразу видел узкое место без отдельного raw JSON разбора.
 
 После запуска откройте в браузере:
 
