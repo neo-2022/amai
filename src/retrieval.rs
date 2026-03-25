@@ -245,8 +245,49 @@ async fn record_context_pack_token_budget_event(
     if !payload.is_object() {
         return Ok(());
     }
-    token_budget::record_context_pack_event(db, payload, &args.token_source_kind).await?;
+    let token_budget_payload = with_whole_cycle_observed_overrides(payload, args);
+    token_budget::record_context_pack_event(db, &token_budget_payload, &args.token_source_kind)
+        .await?;
     working_state::record_context_pack_event(db, payload).await
+}
+
+fn with_whole_cycle_observed_overrides(payload: &Value, args: &ContextPackArgs) -> Value {
+    if args.client_prompt_tokens.is_none()
+        && args.assistant_generation_tokens.is_none()
+        && args.tool_overhead_tokens.is_none()
+        && args.continuity_restore_tokens.is_none()
+    {
+        return payload.clone();
+    }
+    let mut augmented = payload.clone();
+    let Some(root) = augmented.as_object_mut() else {
+        return payload.clone();
+    };
+    let whole_cycle = root
+        .entry("whole_cycle_observed".to_string())
+        .or_insert_with(|| json!({}));
+    if !whole_cycle.is_object() {
+        *whole_cycle = json!({});
+    }
+    let Some(whole_cycle_object) = whole_cycle.as_object_mut() else {
+        return payload.clone();
+    };
+    if let Some(tokens) = args.client_prompt_tokens {
+        whole_cycle_object.insert("client_prompt_tokens".to_string(), Value::from(tokens));
+    }
+    if let Some(tokens) = args.assistant_generation_tokens {
+        whole_cycle_object.insert(
+            "assistant_generation_tokens".to_string(),
+            Value::from(tokens),
+        );
+    }
+    if let Some(tokens) = args.tool_overhead_tokens {
+        whole_cycle_object.insert("tool_overhead_tokens".to_string(), Value::from(tokens));
+    }
+    if let Some(tokens) = args.continuity_restore_tokens {
+        whole_cycle_object.insert("continuity_restore_tokens".to_string(), Value::from(tokens));
+    }
+    augmented
 }
 
 pub fn try_execute_context_pack_fast_cached(
@@ -2203,8 +2244,9 @@ mod tests {
         degradation_probe_stale_fast_cache, degradation_proof_scenarios, query_terms,
         semantic_fallback_result, semantic_hit_has_query_overlap,
         should_use_minimal_document_workspace_graph, should_use_minimal_symbol_workspace_graph,
-        synthetic_chunk_hit,
+        synthetic_chunk_hit, with_whole_cycle_observed_overrides,
     };
+    use crate::cli::ContextPackArgs;
     use crate::postgres::{DocumentHit, SymbolHit};
     use serde_json::json;
 
@@ -2284,6 +2326,42 @@ mod tests {
         assert_eq!(
             trace["scope"]["effective_retrieval_mode"].as_str(),
             Some("local_strict")
+        );
+    }
+
+    #[test]
+    fn whole_cycle_observed_overrides_are_added_to_payload() {
+        let payload = json!({
+            "query": "token report"
+        });
+        let args = ContextPackArgs {
+            project: "art".to_string(),
+            namespace: "default".to_string(),
+            query: "token report".to_string(),
+            retrieval_mode: None,
+            disable_cache: false,
+            limit_documents: 5,
+            limit_symbols: 8,
+            limit_chunks: 8,
+            limit_semantic_chunks: 8,
+            token_source_kind: "live_context_pack".to_string(),
+            client_prompt_tokens: Some(42),
+            assistant_generation_tokens: Some(24),
+            tool_overhead_tokens: Some(7),
+            continuity_restore_tokens: Some(3),
+        };
+
+        let updated = with_whole_cycle_observed_overrides(&payload, &args);
+
+        assert_eq!(updated["whole_cycle_observed"]["client_prompt_tokens"], 42);
+        assert_eq!(
+            updated["whole_cycle_observed"]["assistant_generation_tokens"],
+            24
+        );
+        assert_eq!(updated["whole_cycle_observed"]["tool_overhead_tokens"], 7);
+        assert_eq!(
+            updated["whole_cycle_observed"]["continuity_restore_tokens"],
+            3
         );
     }
 

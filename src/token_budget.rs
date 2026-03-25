@@ -7915,6 +7915,10 @@ async fn reverify_live_event_payload(
         limit_chunks: 8,
         limit_semantic_chunks: 8,
         token_source_kind: "proof_reverify_context_pack".to_string(),
+        client_prompt_tokens: None,
+        assistant_generation_tokens: None,
+        tool_overhead_tokens: None,
+        continuity_restore_tokens: None,
     };
 
     let result =

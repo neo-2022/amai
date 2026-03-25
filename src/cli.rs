@@ -367,6 +367,26 @@ pub struct ContextPackArgs {
         help = "Token ledger source kind for this context-pack call. Use proof_/verify_ prefixes for engineering runs so they do not contaminate live tokenonomics."
     )]
     pub token_source_kind: String,
+    #[arg(
+        long,
+        help = "Optional whole-cycle override for actual client-side prompt tokens in the same meter the upstream client/provider reports."
+    )]
+    pub client_prompt_tokens: Option<u64>,
+    #[arg(
+        long,
+        help = "Optional whole-cycle observed assistant generation tokens for this context-pack event."
+    )]
+    pub assistant_generation_tokens: Option<u64>,
+    #[arg(
+        long,
+        help = "Optional whole-cycle observed non-retrieval tool overhead tokens for this context-pack event."
+    )]
+    pub tool_overhead_tokens: Option<u64>,
+    #[arg(
+        long,
+        help = "Optional whole-cycle observed continuity-restore tokens outside retrieval for this context-pack event."
+    )]
+    pub continuity_restore_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -823,6 +823,10 @@ async fn run_case(
         limit_chunks: case.limit_chunks.unwrap_or(4),
         limit_semantic_chunks: case.limit_semantic_chunks.unwrap_or(4),
         token_source_kind: "benchmark_cold_context_pack".to_string(),
+        client_prompt_tokens: None,
+        assistant_generation_tokens: None,
+        tool_overhead_tokens: None,
+        continuity_restore_tokens: None,
     };
     let started = Instant::now();
     let pack =

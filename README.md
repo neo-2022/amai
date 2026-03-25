@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:02 MSK
-Ручная сверка guide/docs: 2026-03-25 14:02 MSK
+modified_at: 2026-03-25 14:15 MSK
+Ручная сверка guide/docs: 2026-03-25 14:15 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1494,6 +1494,14 @@ preview, а не только raw count.
     внутренний meter lower bound для provider drift/cost preview поднимается от
     `delivered + recovery` к `observed whole-cycle lower bound`, как только такие
     компоненты действительно materialized в ledger.
+  - runtime path тоже открыт честно: `ContextPackArgs` и CLI для context-pack теперь могут
+    нести observed overrides для
+    `client_prompt_tokens`,
+    `assistant_generation_tokens`,
+    `tool_overhead_tokens`,
+    `continuity_restore_tokens`,
+    чтобы upstream client мог передавать whole-cycle evidence прямо в ledger, а не через
+    задний repair path.
 - metering freshness теперь тоже first-class:
   - `metering_freshness.current_session / rolling_window / lifetime`
   - она отдельно показывает:

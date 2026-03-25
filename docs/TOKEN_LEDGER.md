@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:02 MSK
-Ручная сверка guide/docs: 2026-03-25 14:02 MSK
+modified_at: 2026-03-25 14:15 MSK
+Ручная сверка guide/docs: 2026-03-25 14:15 MSK
 
 # Token Ledger
 
@@ -453,6 +453,16 @@ Ledger обязан различать:
 
 Это нужно затем, чтобы progress к реальному client-limit meter был виден честно, без
 ложного переключения `same_meter_as_client_limit=true` раньше времени.
+
+Начиная с этого же слоя whole-cycle evidence можно подавать и в runtime path:
+- `ContextPackArgs` / CLI context-pack теперь умеют принимать optional observed fields:
+  - `client_prompt_tokens`
+  - `assistant_generation_tokens`
+  - `tool_overhead_tokens`
+  - `continuity_restore_tokens`
+- retrieval path не притворяется, что знает их сам;
+- но если upstream client уже знает эти числа честно, он может materialize-ить их прямо в
+  token ledger без repair/backfill обходов.
 
 ## Idempotency, backfill и corrections
 
