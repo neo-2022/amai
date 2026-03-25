@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 00:26 MSK
-Ручная сверка guide/docs: 2026-03-26 00:26 MSK
+modified_at: 2026-03-26 00:32 MSK
+Ручная сверка guide/docs: 2026-03-26 00:32 MSK
 
 # Operations
 
@@ -800,6 +800,8 @@ cargo run -- mcp serve
   `amai_continuity_startup` обязателен до retrieval и любой новой работы,
   а client runtime должен поднимать не только headline, но и
   `execctl_resume_state` вместе с pending-return obligations.
+- `execctl_active_lease` теперь тоже входит в required startup summary fields;
+  client runtime не имеет права считать lease owner необязательной косметикой.
 - тот же contract теперь несёт `resume_enforcement`, чтобы runtime не угадывал,
   как трактовать `execctl_resume_contract_summary`:
   если summary не `clear`, это `required_return_task`, а `no_silent_drop = true`

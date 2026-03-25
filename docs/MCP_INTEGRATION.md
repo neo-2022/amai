@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 00:26 MSK
-Ручная сверка guide/docs: 2026-03-26 00:26 MSK
+modified_at: 2026-03-26 00:32 MSK
+Ручная сверка guide/docs: 2026-03-26 00:32 MSK
 
 # MCP Integration
 
@@ -367,6 +367,7 @@ stack-а, но и какие deployment promises вообще честно до�
   - `execctl_resume_contract_summary`;
   - `execctl_resume_obligation`;
   - `startup_next_action`;
+  - `execctl_active_lease`;
   - `project_task_tree_summary`;
   - `project_task_ledger_summary`.
 - тот же handshake теперь публикует и `resume_enforcement`:

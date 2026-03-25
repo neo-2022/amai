@@ -394,6 +394,14 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     }
     if !required_summary_fields
         .iter()
+        .any(|field| field.as_str() == Some("execctl_active_lease"))
+    {
+        return Err(anyhow!(
+            "MCP startup contract is missing execctl_active_lease from required summary fields"
+        ));
+    }
+    if !required_summary_fields
+        .iter()
         .any(|field| field.as_str() == Some("execctl_active_lease_summary"))
     {
         return Err(anyhow!(
@@ -2458,6 +2466,7 @@ fn protocol_manifest() -> Value {
                     "execctl_resume_obligation",
                     "startup_next_action",
                     "startup_next_action_summary",
+                    "execctl_active_lease",
                     "execctl_active_lease_summary",
                     "project_task_tree_summary",
                     "project_task_ledger_summary"
@@ -4561,6 +4570,11 @@ mod tests {
             startup_required_fields
                 .iter()
                 .any(|field| field.as_str() == Some("startup_next_action"))
+        );
+        assert!(
+            startup_required_fields
+                .iter()
+                .any(|field| field.as_str() == Some("execctl_active_lease"))
         );
         assert!(
             startup_required_fields

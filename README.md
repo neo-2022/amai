@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 00:26 MSK
-Ручная сверка guide/docs: 2026-03-26 00:26 MSK
+modified_at: 2026-03-26 00:32 MSK
+Ручная сверка guide/docs: 2026-03-26 00:32 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1178,6 +1178,8 @@ preview, а не только raw count.
   `continuity_startup_summary`;
 - поднимать вместе с этим `execctl_resume_state` и `pending_return` obligations,
   а не только headline/next step.
+- `execctl_active_lease` теперь тоже считается обязательной частью startup summary,
+  а не необязательным бонусным полем.
 - читать `resume_enforcement` из startup contract:
   - `execctl_resume_contract_summary` является каноническим полем resume-obligation;
   - `execctl_resume_obligation` даёт тот же контур уже как machine-readable object;
