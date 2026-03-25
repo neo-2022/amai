@@ -6573,6 +6573,86 @@ pub async fn repair_legacy_token_events(
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct TokenLedgerRepairRequest {
+    pub limit: Option<i64>,
+    pub project: Option<String>,
+    pub project_prefix: Option<String>,
+    pub namespace: Option<String>,
+    pub source_kind: Option<String>,
+    pub rewrite_source_kind: Option<String>,
+    pub repair_reason: Option<String>,
+}
+
+impl TokenLedgerRepairRequest {
+    fn has_selector(&self) -> bool {
+        self.project.is_some()
+            || self.project_prefix.is_some()
+            || self.namespace.is_some()
+            || self.source_kind.is_some()
+    }
+}
+
+pub async fn repair_token_ledger_events(
+    db: &Client,
+    apply: bool,
+    request: TokenLedgerRepairRequest,
+) -> Result<()> {
+    if request.rewrite_source_kind.is_none() && request.has_selector() {
+        bail!(
+            "repair-token-ledger selectors require --rewrite-source-kind; otherwise use plain legacy repair without selectors"
+        );
+    }
+
+    if let Some(rewrite_source_kind) = request.rewrite_source_kind.as_deref() {
+        let rows = postgres::list_observability_snapshots_by_kinds(
+            db,
+            &["token_budget_event"],
+            request.limit,
+        )
+        .await?;
+        let mut scanned = 0_u64;
+        let mut matched = 0_u64;
+        let mut changed = 0_u64;
+        let repair_reason = request
+            .repair_reason
+            .as_deref()
+            .unwrap_or("operator_source_kind_rewrite");
+
+        for row in rows {
+            scanned += 1;
+            let Some(event) = parse_snapshot_event(&row)? else {
+                continue;
+            };
+            if !matches_token_ledger_repair_selector(&event, &request) {
+                continue;
+            }
+            matched += 1;
+            if let Some(payload) =
+                rewrite_token_ledger_source_kind_payload(&row, rewrite_source_kind, repair_reason)?
+            {
+                changed += 1;
+                if apply {
+                    postgres::update_observability_snapshot_payload(db, &row.snapshot_id, &payload)
+                        .await?;
+                }
+            }
+        }
+
+        println!(
+            "token ledger repair :: scanned={} matched={} changed={} rewrite_source_kind={} mode={}",
+            scanned,
+            matched,
+            changed,
+            rewrite_source_kind,
+            if apply { "apply" } else { "dry_run" }
+        );
+        return Ok(());
+    }
+
+    repair_legacy_token_events(db, apply, request.limit).await
+}
+
 pub async fn reverify_legacy_live_events(
     cfg: &AppConfig,
     db: &mut Client,
@@ -8069,12 +8149,8 @@ async fn enrich_live_event_payload(
     let session_gap_ms = profile.session_gap_minutes as i64 * 60_000;
     let mut events = load_events(db, false, Some(64)).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
-    let session_id = resolve_session_id(
-        &events,
-        timestamp_utc,
-        session_gap_ms,
-        &current_source_kind,
-    );
+    let session_id =
+        resolve_session_id(&events, timestamp_utc, session_gap_ms, &current_source_kind);
     node.insert("session_id".to_string(), Value::String(session_id));
     node.insert(
         "rolling_window_profile".to_string(),
@@ -8700,6 +8776,156 @@ fn needs_live_reverification(payload: &Value) -> bool {
     quality_method == "legacy_unverified"
         || (quality_method.is_empty() && !quality_ok)
         || needs_shape_upgrade
+}
+
+fn matches_token_ledger_repair_selector(
+    event: &TokenBudgetEvent,
+    request: &TokenLedgerRepairRequest,
+) -> bool {
+    if request
+        .project
+        .as_deref()
+        .is_some_and(|expected| event.project != expected)
+    {
+        return false;
+    }
+    if request
+        .project_prefix
+        .as_deref()
+        .is_some_and(|prefix| !event.project.starts_with(prefix))
+    {
+        return false;
+    }
+    if request
+        .namespace
+        .as_deref()
+        .is_some_and(|expected| event.namespace != expected)
+    {
+        return false;
+    }
+    if request
+        .source_kind
+        .as_deref()
+        .is_some_and(|expected| event.source_kind != expected)
+    {
+        return false;
+    }
+    true
+}
+
+fn rewrite_token_ledger_source_kind_payload(
+    row: &ObservabilitySnapshotRecord,
+    rewrite_source_kind: &str,
+    repair_reason: &str,
+) -> Result<Option<Value>> {
+    let mut updated = row.payload.clone();
+    let root = updated
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("token budget payload root is not an object"))?;
+    let node = root
+        .get_mut("token_budget_event")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("token budget payload missing token_budget_event"))?;
+    let previous_source_kind = node
+        .get("source_kind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let previous_traffic_class = node
+        .get("traffic_class")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| derive_traffic_class(&previous_source_kind));
+    let rewritten_traffic_class = derive_traffic_class(rewrite_source_kind);
+    if previous_source_kind == rewrite_source_kind
+        && previous_traffic_class == rewritten_traffic_class
+    {
+        return Ok(None);
+    }
+
+    let event_id = node
+        .get("event_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let correlation_id = node
+        .get("correlation_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            node.get("context_pack_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| event_id.clone());
+    let payload_origin = if rewritten_traffic_class == "live" {
+        "context_pack_token_budget".to_string()
+    } else {
+        rewrite_source_kind.to_string()
+    };
+    node.insert(
+        "source_kind".to_string(),
+        Value::String(rewrite_source_kind.to_string()),
+    );
+    node.insert(
+        "traffic_class".to_string(),
+        Value::String(rewritten_traffic_class.clone()),
+    );
+    node.insert(
+        "payload_origin".to_string(),
+        Value::String(payload_origin.clone()),
+    );
+    node.insert(
+        "usage_identity".to_string(),
+        json!({
+            "dedup_key": usage_dedup_key(rewrite_source_kind, &event_id),
+            "idempotency_scope": "source_kind + event_id",
+            "canonical_window_time_field": "occurred_at_epoch_ms",
+            "event_id": event_id,
+            "correlation_id": correlation_id,
+        }),
+    );
+    let repair = ensure_nested_object(node, "repair")?;
+    repair.insert(
+        "operator_source_kind_rewrite".to_string(),
+        json!({
+            "repaired_at_utc": current_epoch_ms()?,
+            "repair_reason": repair_reason,
+            "previous_source_kind": previous_source_kind,
+            "previous_traffic_class": previous_traffic_class,
+            "rewritten_source_kind": rewrite_source_kind,
+            "rewritten_traffic_class": rewritten_traffic_class,
+            "rewritten_payload_origin": payload_origin,
+        }),
+    );
+    let observability = ensure_nested_object(root, "_observability")?;
+    observability.insert(
+        "source_kind".to_string(),
+        Value::String(rewrite_source_kind.to_string()),
+    );
+
+    let rebuilt = parse_snapshot_event(&ObservabilitySnapshotRecord {
+        snapshot_id: row.snapshot_id,
+        snapshot_kind: row.snapshot_kind.clone(),
+        payload: updated.clone(),
+        created_at_epoch_ms: row.created_at_epoch_ms,
+    })?
+    .ok_or_else(|| anyhow!("failed to rebuild token budget event after source kind rewrite"))?;
+    let node = updated["token_budget_event"]
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("token budget payload missing token_budget_event after rebuild"))?;
+    node.insert(
+        "usage_state".to_string(),
+        json!({
+            "lifecycle_status": usage_lifecycle_status(&rebuilt),
+            "reporting_layer": usage_reporting_layer(&rebuilt),
+            "included_in_verified_rollup": usage_excluded_reason_code(&rebuilt).is_none(),
+            "excluded_reason_code": usage_excluded_reason_code(&rebuilt),
+            "backfill_status": usage_backfill_status(&rebuilt),
+            "settlement_status": rebuilt.settlement_status,
+        }),
+    );
+    Ok(Some(updated))
 }
 
 fn usage_dedup_key(source_kind: &str, event_id: &str) -> String {
@@ -12639,7 +12865,7 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
 mod tests {
     use super::{
         MeasurementConfig, NaiveScope, TokenBudgetContractConfig, TokenBudgetEvent,
-        apply_reverification_metadata, baseline_strategy_breakdown,
+        TokenLedgerRepairRequest, apply_reverification_metadata, baseline_strategy_breakdown,
         bind_infra_cost_profile_json_from_source, bind_rate_card_json_from_source,
         build_adjustment_registry_json, build_adjustment_request_schema_json,
         build_baseline_contract_json, build_billing_policy_json,
@@ -12653,28 +12879,31 @@ mod tests {
         build_usage_event_schema_json, configured_provider_rate_card_source,
         configured_provider_usage_source, contractual_line_item_json,
         count_cli_context_pack_output_overhead_tokens, count_tool_overhead_tokens,
-        default_adjustment_preview_model_version, default_adjustment_registry_version,
-        default_adjustment_request_schema_version, default_backfill_policy_version,
-        default_baseline_method_version, default_billing_mode, default_billing_policy_version,
-        default_contractual_evidence_pack_version, default_correction_policy_version,
-        default_coverage_model_version, default_currency_profile, default_dedup_contract_version,
-        default_dispute_policy_version, default_event_time_policy_version,
-        default_excluded_taxonomy_version, default_freeze_close_policy_version,
-        default_infra_cost_profile_version, default_late_arrival_policy_version,
-        default_margin_model_version, default_metering_freshness_model_version,
+        current_session_events, default_adjustment_preview_model_version,
+        default_adjustment_registry_version, default_adjustment_request_schema_version,
+        default_backfill_policy_version, default_baseline_method_version, default_billing_mode,
+        default_billing_policy_version, default_contractual_evidence_pack_version,
+        default_correction_policy_version, default_coverage_model_version,
+        default_currency_profile, default_dedup_contract_version, default_dispute_policy_version,
+        default_event_time_policy_version, default_excluded_taxonomy_version,
+        default_freeze_close_policy_version, default_infra_cost_profile_version,
+        default_late_arrival_policy_version, default_margin_model_version,
+        default_metering_event_schema_version, default_metering_freshness_model_version,
         default_quality_method_version, default_rate_card_binding_model_version,
         default_rate_card_version, default_reconciliation_contract_version,
         default_settlement_lifecycle_model_version, default_settlement_statement_version,
         default_settlement_status, default_statement_period_governance_version,
         default_suitability_model_version, default_telemetry_surface_split_version,
+        default_usage_event_schema_version, default_usage_lifecycle_model_version,
         derive_baseline_strategy, derive_quality_verdict, derive_query_type, derive_traffic_class,
         event_to_json, followup_queries_related, hex_sha256, include_traffic_class_in_report,
         latency_slice_breakdown, load_adjustment_registry_from_source,
         load_provider_invoice_binding_from_source, load_provider_usage_binding_from_source,
-        needs_live_reverification, parse_infra_cost_profile_file, parse_rate_card_file,
-        parse_snapshot_event, provider_rate_card_default_path, provider_usage_default_path,
-        current_session_events, reconcile_followup_recovery, repair_legacy_token_event_payload,
-        report_contract_json, resolve_session_id, summarize_events,
+        matches_token_ledger_repair_selector, needs_live_reverification,
+        parse_infra_cost_profile_file, parse_rate_card_file, parse_snapshot_event,
+        provider_rate_card_default_path, provider_usage_default_path, reconcile_followup_recovery,
+        repair_legacy_token_event_payload, report_contract_json, resolve_session_id,
+        rewrite_token_ledger_source_kind_payload, summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -16657,6 +16886,280 @@ effective_to_epoch_ms = 2000
                 }
             }
         })));
+    }
+
+    #[test]
+    fn token_ledger_repair_selector_matches_project_prefix_namespace_and_source_kind() {
+        let event = TokenBudgetEvent {
+            created_at_epoch_ms: 0,
+            event_id: "event-1".to_string(),
+            correlation_id: "corr-1".to_string(),
+            payload_origin: "context_pack_token_budget".to_string(),
+            session_id: "session-1".to_string(),
+            rolling_window_profile: "codex_5h".to_string(),
+            timestamp_utc: 1,
+            occurred_at_epoch_ms: 1,
+            ingested_at_epoch_ms: 1,
+            snapshot_kind: "token_budget_event".to_string(),
+            source_kind: "live_context_pack".to_string(),
+            traffic_class: "live".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+            usage_event_schema_version: default_usage_event_schema_version(),
+            settlement_statement_version: default_settlement_statement_version(),
+            metering_event_schema_version: default_metering_event_schema_version(),
+            usage_lifecycle_model_version: default_usage_lifecycle_model_version(),
+            baseline_method_version: default_baseline_method_version(),
+            quality_method_version: default_quality_method_version(),
+            coverage_model_version: default_coverage_model_version(),
+            metering_freshness_model_version: default_metering_freshness_model_version(),
+            excluded_taxonomy_version: default_excluded_taxonomy_version(),
+            dedup_contract_version: default_dedup_contract_version(),
+            backfill_policy_version: default_backfill_policy_version(),
+            correction_policy_version: default_correction_policy_version(),
+            freeze_close_policy_version: default_freeze_close_policy_version(),
+            late_arrival_policy_version: default_late_arrival_policy_version(),
+            dispute_policy_version: default_dispute_policy_version(),
+            settlement_lifecycle_model_version: default_settlement_lifecycle_model_version(),
+            statement_period_governance_version: default_statement_period_governance_version(),
+            adjustment_preview_model_version: default_adjustment_preview_model_version(),
+            adjustment_request_schema_version: default_adjustment_request_schema_version(),
+            adjustment_registry_version: default_adjustment_registry_version(),
+            rate_card_binding_model_version: default_rate_card_binding_model_version(),
+            telemetry_surface_split_version: default_telemetry_surface_split_version(),
+            event_time_policy_version: default_event_time_policy_version(),
+            billing_policy_version: default_billing_policy_version(),
+            suitability_model_version: default_suitability_model_version(),
+            billing_mode: default_billing_mode(),
+            reconciliation_contract_version: default_reconciliation_contract_version(),
+            margin_model_version: default_margin_model_version(),
+            infra_cost_profile_version: default_infra_cost_profile_version(),
+            contractual_evidence_pack_version: default_contractual_evidence_pack_version(),
+            rate_card_version: default_rate_card_version(),
+            currency_profile: default_currency_profile(),
+            settlement_status: default_settlement_status(),
+            project: "memory_eval_archival_read".to_string(),
+            namespace: "continuity".to_string(),
+            query: "shared_runtime_marker".to_string(),
+            query_hash: "hash".to_string(),
+            query_type: "architecture_question".to_string(),
+            target_kind: "file".to_string(),
+            baseline_hit_target: true,
+            amai_hit_target: true,
+            cold_warm_state: "warm".to_string(),
+            baseline_strategy: "semantic_top_k".to_string(),
+            retrieval_mode: Some("local_plus_related".to_string()),
+            tokenizer: "o200k_base".to_string(),
+            latency_ms: 12.0,
+            saved_tokens: 50,
+            naive_tokens: 100,
+            context_tokens: 50,
+            recovery_tokens: 0,
+            effective_saved_tokens: 50,
+            savings_factor: 2.0,
+            savings_percent: 50.0,
+            effective_savings_percent: 50.0,
+            quality_ok: true,
+            quality_score: 1.0,
+            quality_method: "hybrid_answer_proxy".to_string(),
+            quality_tier: "task_success_recovered".to_string(),
+            head_hit_target: true,
+            needed_followup: false,
+            followup_count: 0,
+            followup_of_event_id: None,
+            resolved_by_event_id: None,
+            fallback_triggered: false,
+            fallback_count: 0,
+            document_hits: 1,
+            symbol_hits_count: 0,
+            file_hits: 1,
+            sources_count: 1,
+            chunks_count: 1,
+            pack_token_count: 50,
+            deduped_token_count: 50,
+            client_prompt_tokens: None,
+            assistant_generation_tokens: None,
+            tool_overhead_tokens: None,
+            continuity_restore_tokens: None,
+        };
+
+        let matches = matches_token_ledger_repair_selector(
+            &event,
+            &TokenLedgerRepairRequest {
+                limit: None,
+                project: None,
+                project_prefix: Some("memory_eval".to_string()),
+                namespace: Some("continuity".to_string()),
+                source_kind: Some("live_context_pack".to_string()),
+                rewrite_source_kind: Some("verify_memory_matrix_context_pack".to_string()),
+                repair_reason: None,
+            },
+        );
+        assert!(matches);
+        let mismatched = matches_token_ledger_repair_selector(
+            &event,
+            &TokenLedgerRepairRequest {
+                limit: None,
+                project: None,
+                project_prefix: Some("project_alpha".to_string()),
+                namespace: Some("continuity".to_string()),
+                source_kind: Some("live_context_pack".to_string()),
+                rewrite_source_kind: Some("verify_memory_matrix_context_pack".to_string()),
+                repair_reason: None,
+            },
+        );
+        assert!(!mismatched);
+    }
+
+    #[test]
+    fn source_kind_rewrite_updates_usage_state_and_observability_source() {
+        let row = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::nil(),
+            snapshot_kind: "token_budget_event".to_string(),
+            created_at_epoch_ms: 123,
+            payload: json!({
+                "_observability": {
+                    "source_kind": "live_context_pack",
+                    "scope_project_code": "project_alpha",
+                    "scope_namespace_code": "review",
+                    "captured_at_epoch_ms": 123
+                },
+                "token_budget_event": {
+                    "event_id": "event-1",
+                    "correlation_id": "corr-1",
+                    "source_kind": "live_context_pack",
+                    "traffic_class": "live",
+                    "measurement_scope": "retrieval_lower_bound",
+                    "payload_origin": "context_pack_token_budget",
+                    "project": "project_alpha",
+                    "project_code": "project_alpha",
+                    "namespace": "review",
+                    "namespace_code": "review",
+                    "query": "shared_runtime_marker",
+                    "query_hash": "hash",
+                    "query_type": "architecture_question",
+                    "target_kind": "file",
+                    "baseline_hit_target": true,
+                    "amai_hit_target": true,
+                    "cold_warm_state": "warm",
+                    "baseline_strategy": "semantic_top_k",
+                    "retrieval_mode": "local_plus_related",
+                    "tokenizer": "o200k_base",
+                    "latency_ms": 12.0,
+                    "created_at_epoch_ms": 123,
+                    "timestamp_utc": 123,
+                    "occurred_at_epoch_ms": 123,
+                    "ingested_at_epoch_ms": 123,
+                    "session_id": "session-1",
+                    "rolling_window_profile": "codex_5h",
+                    "contract": {
+                        "usage_event_schema_version": "billing-usage-event-v2",
+                        "settlement_statement_version": "settlement-preview-v0",
+                        "metering_event_schema_version": "token-budget-event-v3",
+                        "usage_lifecycle_model_version": "usage-lifecycle-v0",
+                        "baseline_method_version": "retrieval-baseline-v0",
+                        "quality_method_version": "quality-gate-v0",
+                        "coverage_model_version": "token-coverage-v0",
+                        "metering_freshness_model_version": "metering-freshness-v0",
+                        "excluded_taxonomy_version": "token-excluded-usage-v0",
+                        "dedup_contract_version": "event-id-source-kind-v0",
+                        "backfill_policy_version": "report-only-backfill-v0",
+                        "correction_policy_version": "report-only-correction-v0",
+                        "freeze_close_policy_version": "freeze-close-v0",
+                        "late_arrival_policy_version": "late-arrival-v0",
+                        "dispute_policy_version": "report-only-dispute-v0",
+                        "settlement_lifecycle_model_version": "settlement-lifecycle-v0",
+                        "statement_period_governance_version": "statement-period-governance-v0",
+                        "adjustment_preview_model_version": "adjustment-preview-v0",
+                        "adjustment_request_schema_version": "adjustment-request-v0",
+                        "adjustment_registry_version": "adjustment-registry-v0",
+                        "rate_card_binding_model_version": "rate-card-binding-v0",
+                        "telemetry_surface_split_version": "tokenonomics-surface-split-v0",
+                        "event_time_policy_version": "client-visible-ingest-v0",
+                        "billing_policy_version": "report-only-v0",
+                        "suitability_model_version": "token-suitability-v0",
+                        "billing_mode": "report_only",
+                        "reconciliation_contract_version": "provider-reconciliation-v0",
+                        "margin_model_version": "margin-view-v0",
+                        "infra_cost_profile_version": "unpriced-infra-v0",
+                        "contractual_evidence_pack_version": "contractual-evidence-pack-v0",
+                        "rate_card_version": "unpriced-v0",
+                        "currency_profile": "unpriced",
+                        "settlement_status": "unsettled_report_only"
+                    },
+                    "naive_scope": {
+                        "tokens": 100
+                    },
+                    "context_pack_render": {
+                        "tokens": 40
+                    },
+                    "recovery": {
+                        "recovery_tokens": 0,
+                        "fallback_triggered": false,
+                        "fallback_count": 0
+                    },
+                    "savings": {
+                        "saved_tokens": 60,
+                        "effective_saved_tokens": 60,
+                        "savings_factor": 2.5,
+                        "savings_percent": 60.0,
+                        "effective_savings_percent": 60.0
+                    },
+                    "quality": {
+                        "quality_ok": true,
+                        "quality_score": 1.0,
+                        "quality_method": "hybrid_answer_proxy",
+                        "quality_tier": "task_success_recovered",
+                        "head_hit_target": true
+                    },
+                    "followup": {
+                        "needed_followup": false,
+                        "followup_count": 0
+                    },
+                    "shape": {
+                        "document_hits": 1,
+                        "symbol_hits": 0,
+                        "file_hits": 1,
+                        "sources_count": 1,
+                        "chunks_count": 1,
+                        "pack_token_count": 40,
+                        "deduped_token_count": 40
+                    }
+                }
+            }),
+        };
+
+        let rewritten = rewrite_token_ledger_source_kind_payload(
+            &row,
+            "proof_mcp_context_pack",
+            "test_reclassify",
+        )
+        .expect("rewrite should succeed")
+        .expect("rewrite should change payload");
+        let event = &rewritten["token_budget_event"];
+        assert_eq!(event["source_kind"], "proof_mcp_context_pack");
+        assert_eq!(event["traffic_class"], "proof");
+        assert_eq!(
+            rewritten["_observability"]["source_kind"],
+            "proof_mcp_context_pack"
+        );
+        assert_eq!(
+            event["usage_identity"]["dedup_key"],
+            "proof_mcp_context_pack:event-1"
+        );
+        assert_eq!(
+            event["usage_state"]["excluded_reason_code"],
+            "non_live_other"
+        );
+        assert_eq!(event["usage_state"]["reporting_layer"], "excluded");
+        assert_eq!(event["usage_state"]["backfill_status"], "synthetic_ingest");
+        assert_eq!(
+            event["repair"]["operator_source_kind_rewrite"]["previous_source_kind"],
+            "live_context_pack"
+        );
+        assert_eq!(
+            event["repair"]["operator_source_kind_rewrite"]["rewritten_source_kind"],
+            "proof_mcp_context_pack"
+        );
     }
 
     #[test]

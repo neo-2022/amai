@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 22:49 MSK
-Ручная сверка guide/docs: 2026-03-25 22:49 MSK
+modified_at: 2026-03-25 22:55 MSK
+Ручная сверка guide/docs: 2026-03-25 22:55 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -89,6 +89,11 @@ modified_at: 2026-03-25 22:49 MSK
   старый live хвост только потому, что между ними не было большого time-gap.
 - для этого слоя есть отдельный runtime proof:
   `scripts/proof_token_session_boundary.sh`
+- если старый synthetic/proof хвост уже успел попасть в `rolling_window`, его теперь можно
+  чинить не только новым session boundary, но и явным operator-driven repair path по selector-ам:
+  `project`, `project_prefix`, `namespace`, `source_kind` и `rewrite_source_kind`;
+- этот путь не делает silent background rewrite: оператор сам задаёт, какой именно contamination
+  переводится из `live` в `proof/verify`, а `repair_reason` остаётся в payload как audit-trace.
 
 Поверх этого `Amai` теперь автоматически собирает ещё и `chat-start restore pack`.
 
@@ -1827,6 +1832,19 @@ cargo run --release -- observe repair-token-ledger --apply
 cargo run --release -- observe reverify-token-ledger --apply
 ```
 
+Если contamination уже не legacy, а просто был честно, но ошибочно записан в `live`-lane,
+используйте explicit reclassification path:
+
+```bash
+cargo run --release -- observe repair-token-ledger \
+  --apply \
+  --project-prefix memory_eval \
+  --namespace continuity \
+  --source-kind live_context_pack \
+  --rewrite-source-kind verify_memory_matrix_context_pack \
+  --repair-reason operator_memory_eval_cleanup
+```
+
 Если нужен report-only contractual export по одному scope, используйте:
 
 ```bash
@@ -1850,6 +1868,8 @@ cargo run --release -- observe token-evidence-pack --scope rolling_window --outp
 Что делают эти команды:
 - `repair-token-ledger`
   - достраивает недостающие поля старого формата;
+  - либо по явным selector-ам переводит уже записанные события в другой `source_kind`,
+    если contamination попал не в тот telemetry lane;
 - `reverify-token-ledger`
   - заново прогоняет старые live-запросы через текущий retrieval contour;
   - поднимает их из `legacy_unverified` в quality-gated live-выборку, если retrieval реально проходит.

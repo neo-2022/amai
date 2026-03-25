@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 22:49 MSK
-Ручная сверка guide/docs: 2026-03-25 22:49 MSK
+modified_at: 2026-03-25 22:55 MSK
+Ручная сверка guide/docs: 2026-03-25 22:55 MSK
 
 # Operations
 
@@ -2266,6 +2266,28 @@ cargo run --release -- observe cleanup-snapshots --apply --limit 2000
 - apply-path удаляет только те записи, которые policy реально разрешает удалить;
 - benchmark history не переписывается in-place, потому что benchmark snapshot теперь stamped как `immutable_snapshot`;
 - версия правил и retention profile приходят из [config/observability.toml](/home/art/agent-memory-index/config/observability.toml) и materialize-ятся в `_observability`.
+
+Для non-legacy contamination, который уже успел записаться в `live`-lane, теперь есть отдельный
+operator-driven repair path без ручного SQL:
+
+```bash
+cargo run --release -- observe repair-token-ledger \
+  --project-prefix memory_eval \
+  --namespace continuity \
+  --source-kind live_context_pack \
+  --rewrite-source-kind verify_memory_matrix_context_pack \
+  --repair-reason operator_memory_eval_cleanup
+```
+
+Важно:
+- selector-ы без `--rewrite-source-kind` запрещены fail-closed;
+- rewrite path не делает semantic guess, а переводит только те события, которые оператор явно
+  выбрал по `project/project_prefix + namespace + source_kind`;
+- факт repair остаётся внутри `token_budget_event.repair.operator_source_kind_rewrite`;
+- runtime proof этого контура:
+  - `scripts/proof_token_ledger_reclassify.sh`;
+  - `scripts/proof_token_session_boundary.sh` теперь сам переводит свои synthetic live события в
+    `proof_*`, чтобы не пачкать рабочее окно после PASS.
 
 Для rebuildable локального хвоста теперь есть отдельный policy-driven cleanup:
 

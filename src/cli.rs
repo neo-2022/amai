@@ -849,6 +849,18 @@ pub struct ObserveRepairTokenLedgerArgs {
     pub apply: bool,
     #[arg(long)]
     pub limit: Option<i64>,
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub project_prefix: Option<String>,
+    #[arg(long)]
+    pub namespace: Option<String>,
+    #[arg(long)]
+    pub source_kind: Option<String>,
+    #[arg(long)]
+    pub rewrite_source_kind: Option<String>,
+    #[arg(long)]
+    pub repair_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 22:49 MSK
-Ручная сверка guide/docs: 2026-03-25 22:49 MSK
+modified_at: 2026-03-25 22:55 MSK
+Ручная сверка guide/docs: 2026-03-25 22:55 MSK
 
 # Token Ledger
 
@@ -89,6 +89,10 @@ Ledger не имеет права смешивать:
   карточки текущей сессии и рабочего окна;
 - если старая текущая сессия уже успела нахватать `live_context_pack` ещё до этого разделения,
   она честно остаётся загрязнённой до нового session window или явного repair/reverify path;
+- этот явный repair path теперь умеет не только legacy shape-upgrade, но и operator-driven
+  source-kind rewrite по selector-ам `project/project_prefix + namespace + source_kind`;
+- rewrite path обязан оставлять audit след в `token_budget_event.repair.operator_source_kind_rewrite`
+  и не имеет права молча переписывать весь rolling window без явного operator selector-а;
 - тихо переписывать такую историю задним числом запрещено.
 
 ## Обязательные поля события

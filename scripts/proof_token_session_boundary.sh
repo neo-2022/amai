@@ -94,4 +94,20 @@ test -n "${latest_context_session}"
 test "${latest_startup_session}" != "${previous_startup_session}"
 test "${latest_context_session}" = "${latest_startup_session}"
 
+./target/release/amai observe repair-token-ledger \
+  --apply \
+  --project "${project_code}" \
+  --namespace continuity \
+  --source-kind live_continuity_startup \
+  --rewrite-source-kind proof_session_boundary_startup \
+  --repair-reason proof_session_boundary_cleanup >/dev/null
+
+./target/release/amai observe repair-token-ledger \
+  --apply \
+  --project "${project_code}" \
+  --namespace continuity \
+  --source-kind live_context_pack \
+  --rewrite-source-kind proof_session_boundary_context_pack \
+  --repair-reason proof_session_boundary_cleanup >/dev/null
+
 printf 'proof_token_session_boundary: PASS\n'
