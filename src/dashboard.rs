@@ -1704,6 +1704,22 @@ pub fn render_html(refresh_ms: u64) -> String {
         ["Почему такой статус", headline.status_reason],
         ["Сейчас", `${headline.token_value} (${headline.token_scope})`],
       ];
+      const cacheBits = [];
+      if (typeof meta.cache_refresh_duration_ms === "number") {
+        cacheBits.push(`refresh ${Math.round(meta.cache_refresh_duration_ms)} ms`);
+      }
+      if (typeof meta.cache_snapshot_age_ms === "number") {
+        cacheBits.push(`возраст ${Math.round(meta.cache_snapshot_age_ms)} ms`);
+      }
+      if (meta.cache_refresh_completed_at_label) {
+        cacheBits.push(`обновлён ${meta.cache_refresh_completed_at_label}`);
+      }
+      if (typeof meta.cache_stale === "boolean") {
+        cacheBits.push(meta.cache_stale ? "кэш устарел" : "кэш актуален");
+      }
+      if (cacheBits.length > 0) {
+        rows.push(["Снимок панели", cacheBits.join(" • ")]);
+      }
       rows.forEach(([label, value]) => {
         const row = document.createElement("div");
         row.appendChild(textNode("span", "", label));

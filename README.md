@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 00:32 MSK
-Ручная сверка guide/docs: 2026-03-26 00:32 MSK
+modified_at: 2026-03-26 00:54 MSK
+Ручная сверка guide/docs: 2026-03-26 00:54 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -628,6 +628,10 @@ scripts\human_dashboard_down.cmd
 На Linux launcher сначала поднимает `observe serve` как `systemd --user` сервис `amai-human-dashboard.service`, а если user-level `systemd` недоступен, честно уходит в обычный detached fallback.
 Для Linux статус и логи теперь правильно смотреть через `systemctl --user status amai-human-dashboard.service` и `journalctl --user -u amai-human-dashboard.service`.
 По умолчанию панель обновляется раз в `1` секунду, чтобы live-цифры были ближе к реальному состоянию, а не висели как старый снимок.
+Но сам `observe serve` теперь не пересобирает полный live snapshot на каждый браузерный refresh:
+- тяжёлый `build_snapshot` живёт в фоновом cache-refresh контуре процесса;
+- `/api/dashboard`, `/api/snapshot`, `/metrics` и `/healthz` читают уже готовый последний снимок;
+- в summary панели теперь прямо видны `refresh`, `возраст` и состояние кэша, чтобы было ясно, страница ждёт браузер или сам snapshot-builder.
 
 После запуска откройте в браузере:
 

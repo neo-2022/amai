@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 00:32 MSK
-Ручная сверка guide/docs: 2026-03-26 00:32 MSK
+modified_at: 2026-03-26 00:54 MSK
+Ручная сверка guide/docs: 2026-03-26 00:54 MSK
 
 # Operations
 
@@ -2633,6 +2633,11 @@ Grafana login берётся из `.env`:
 - ручной `observe cleanup-artifacts --aggressive --apply` остаётся отдельным operator-only reclaim path, когда нужно быстро вернуть место без затрагивания live state;
 - benchmark snapshot запрещено переписывать update-path-ом: для них действует `immutable_snapshot`, а lifecycle дальше управляется retention policy, а не тихим in-place drift.
 - human dashboard использует тот же read-only snapshot contour и тоже не пишет state на каждый refresh;
+- сам HTTP path human dashboard теперь не имеет права заново собирать весь live snapshot на каждый browser refresh:
+  - тяжёлый `build_snapshot` вынесен в background cache-refresh внутри `observe serve`;
+  - `/api/dashboard`, `/api/snapshot`, `/metrics` и `/healthz` читают последний готовый снимок из process-local cache;
+  - из-за этого даже если очередной snapshot дорогой, страница должна отдавать последний готовый слой быстро, а не висеть на полном probe-contour;
+  - summary панели теперь обязана поднимать `refresh`, `возраст` и stale-state этого process-local cache;
 - верхние hero-карты human dashboard теперь intentionally живут только на real live ledger:
   - текущая сессия;
   - текущее рабочее окно профиля;

@@ -17,15 +17,27 @@ use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
 #[derive(Clone)]
 struct ObserveState {
-    cfg: AppConfig,
-    bind: String,
     dashboard_refresh_ms: u64,
+    cache: Arc<RwLock<ObserveCache>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ObserveCache {
+    snapshot: Option<Value>,
+    dashboard_payload: Option<Value>,
+    last_refresh_started_epoch_ms: Option<u64>,
+    last_refresh_completed_epoch_ms: Option<u64>,
+    last_refresh_duration_ms: Option<u64>,
+    refresh_in_progress: bool,
+    last_error: Option<String>,
 }
 
 const SNAPSHOT_RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
@@ -231,6 +243,28 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
     let profile = load_profile()?;
     maybe_cleanup_observability_snapshots(cfg).await?;
     maybe_cleanup_local_artifacts().await?;
+    let cache = Arc::new(RwLock::new(ObserveCache::default()));
+    refresh_observe_cache(cache.clone(), cfg.clone(), bind.to_string(), profile.dashboard.refresh_ms)
+        .await?;
+    let refresh_cache = cache.clone();
+    let refresh_cfg = cfg.clone();
+    let refresh_bind = bind.to_string();
+    let refresh_interval_ms = profile.dashboard.refresh_ms.max(250);
+    tokio::spawn(async move {
+        loop {
+            if let Err(error) = refresh_observe_cache(
+                refresh_cache.clone(),
+                refresh_cfg.clone(),
+                refresh_bind.clone(),
+                refresh_interval_ms,
+            )
+            .await
+            {
+                eprintln!("observe cache refresh failed: {error:#}");
+            }
+            tokio::time::sleep(Duration::from_millis(refresh_interval_ms)).await;
+        }
+    });
     let cleanup_cfg = cfg.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(SNAPSHOT_RETENTION_SWEEP_INTERVAL);
@@ -270,9 +304,8 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
         .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz_handler))
         .with_state(ObserveState {
-            cfg: cfg.clone(),
-            bind: bind.to_string(),
             dashboard_refresh_ms: profile.dashboard.refresh_ms,
+            cache,
         });
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -1491,7 +1524,7 @@ fn expired_retention_candidates(
 }
 
 async fn metrics_handler(State(state): State<ObserveState>) -> impl IntoResponse {
-    match build_snapshot(&state.cfg, false).await {
+    match cached_snapshot_with_meta(&state).await {
         Ok(snapshot) => {
             let body = render_prometheus_metrics(&snapshot);
             let headers = [(
@@ -1502,7 +1535,7 @@ async fn metrics_handler(State(state): State<ObserveState>) -> impl IntoResponse
         }
         Err(error) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("observe exporter failed to collect snapshot: {error:#}"),
+            format!("observe exporter failed to read cached snapshot: {error:#}"),
         )
             .into_response(),
     }
@@ -1600,16 +1633,7 @@ async fn favicon_handler() -> impl IntoResponse {
 }
 
 async fn dashboard_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
-    match build_snapshot(&state.cfg, false)
-        .await
-        .and_then(|snapshot| {
-            dashboard::build_payload(
-                &state.cfg,
-                &snapshot,
-                &state.bind,
-                state.dashboard_refresh_ms,
-            )
-        }) {
+    match cached_dashboard_payload(&state).await {
         Ok(payload) => {
             let headers = [(
                 header::CONTENT_TYPE,
@@ -1631,7 +1655,7 @@ async fn dashboard_api_handler(State(state): State<ObserveState>) -> impl IntoRe
 }
 
 async fn snapshot_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
-    match build_snapshot(&state.cfg, false).await {
+    match cached_snapshot_with_meta(&state).await {
         Ok(snapshot) => {
             let headers = [(
                 header::CONTENT_TYPE,
@@ -1653,12 +1677,13 @@ async fn snapshot_api_handler(State(state): State<ObserveState>) -> impl IntoRes
 }
 
 async fn healthz_handler(State(state): State<ObserveState>) -> impl IntoResponse {
-    match build_snapshot(&state.cfg, false).await {
+    match cached_snapshot_with_meta(&state).await {
         Ok(snapshot) => {
             let summary = &snapshot["sla"]["summary"];
             let critical = summary["critical"].as_u64().unwrap_or(0);
             let unknown = summary["unknown"].as_u64().unwrap_or(0);
-            let status = if critical == 0 && unknown == 0 {
+            let cache_stale = snapshot["observe_cache"]["stale"].as_bool().unwrap_or(true);
+            let status = if critical == 0 && unknown == 0 && !cache_stale {
                 StatusCode::OK
             } else {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -1680,6 +1705,170 @@ async fn healthz_handler(State(state): State<ObserveState>) -> impl IntoResponse
         )
             .into_response(),
     }
+}
+
+async fn refresh_observe_cache(
+    cache: Arc<RwLock<ObserveCache>>,
+    cfg: AppConfig,
+    bind: String,
+    refresh_ms: u64,
+) -> Result<()> {
+    let started_epoch_ms = now_epoch_ms();
+    {
+        let mut state = cache.write().await;
+        state.last_refresh_started_epoch_ms = Some(started_epoch_ms);
+        state.refresh_in_progress = true;
+    }
+    let started = Instant::now();
+    let result = build_snapshot(&cfg, false).await.and_then(|snapshot| {
+        dashboard::build_payload(&cfg, &snapshot, &bind, refresh_ms).map(|payload| (snapshot, payload))
+    });
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let completed_epoch_ms = now_epoch_ms();
+    let mut state = cache.write().await;
+    state.last_refresh_completed_epoch_ms = Some(completed_epoch_ms);
+    state.last_refresh_duration_ms = Some(elapsed_ms);
+    state.refresh_in_progress = false;
+    match result {
+        Ok((snapshot, payload)) => {
+            state.snapshot = Some(snapshot);
+            state.dashboard_payload = Some(payload);
+            state.last_error = None;
+            Ok(())
+        }
+        Err(error) => {
+            state.last_error = Some(format!("{error:#}"));
+            Err(error)
+        }
+    }
+}
+
+async fn cached_dashboard_payload(state: &ObserveState) -> Result<Value> {
+    let cache = state.cache.read().await;
+    let payload = cache
+        .dashboard_payload
+        .clone()
+        .ok_or_else(|| anyhow!("dashboard cache not ready"))?;
+    Ok(attach_observe_cache_to_dashboard_payload(
+        payload,
+        &cache,
+        state.dashboard_refresh_ms,
+    ))
+}
+
+async fn cached_snapshot_with_meta(state: &ObserveState) -> Result<Value> {
+    let cache = state.cache.read().await;
+    let snapshot = cache
+        .snapshot
+        .clone()
+        .ok_or_else(|| anyhow!("snapshot cache not ready"))?;
+    Ok(attach_observe_cache_to_snapshot(
+        snapshot,
+        &cache,
+        state.dashboard_refresh_ms,
+    ))
+}
+
+fn attach_observe_cache_to_dashboard_payload(
+    mut payload: Value,
+    cache: &ObserveCache,
+    refresh_ms: u64,
+) -> Value {
+    let cache_meta = observe_cache_meta(cache, refresh_ms);
+    if let Some(root) = payload.as_object_mut() {
+        root.insert("observe_cache".to_string(), cache_meta.clone());
+    }
+    if let Some(meta) = payload["meta"].as_object_mut() {
+        if let Some(started_at) = cache.last_refresh_started_epoch_ms {
+            meta.insert(
+                "cache_refresh_started_at_epoch_ms".to_string(),
+                Value::from(started_at),
+            );
+        }
+        if let Some(completed_at) = cache.last_refresh_completed_epoch_ms {
+            meta.insert(
+                "cache_refresh_completed_at_epoch_ms".to_string(),
+                Value::from(completed_at),
+            );
+            meta.insert(
+                "cache_refresh_completed_at_label".to_string(),
+                Value::from(completed_at.to_string()),
+            );
+        }
+        if let Some(duration_ms) = cache.last_refresh_duration_ms {
+            meta.insert(
+                "cache_refresh_duration_ms".to_string(),
+                Value::from(duration_ms),
+            );
+        }
+        meta.insert(
+            "cache_snapshot_age_ms".to_string(),
+            Value::from(cache_snapshot_age_ms(cache).unwrap_or_default()),
+        );
+        meta.insert(
+            "cache_stale".to_string(),
+            Value::Bool(observe_cache_stale(cache, refresh_ms)),
+        );
+        if let Some(error) = &cache.last_error {
+            meta.insert("cache_last_error".to_string(), Value::from(error.clone()));
+        }
+    }
+    payload
+}
+
+fn attach_observe_cache_to_snapshot(
+    mut snapshot: Value,
+    cache: &ObserveCache,
+    refresh_ms: u64,
+) -> Value {
+    if let Some(root) = snapshot.as_object_mut() {
+        root.insert(
+            "observe_cache".to_string(),
+            observe_cache_meta(cache, refresh_ms),
+        );
+    }
+    snapshot
+}
+
+fn observe_cache_meta(cache: &ObserveCache, refresh_ms: u64) -> Value {
+    let age_ms = cache_snapshot_age_ms(cache);
+    json!({
+        "refresh_ms": refresh_ms,
+        "last_refresh_started_epoch_ms": cache.last_refresh_started_epoch_ms,
+        "last_refresh_completed_epoch_ms": cache.last_refresh_completed_epoch_ms,
+        "last_refresh_completed_label": cache
+            .last_refresh_completed_epoch_ms
+            .map(|epoch_ms| epoch_ms.to_string()),
+        "last_refresh_duration_ms": cache.last_refresh_duration_ms,
+        "refresh_in_progress": cache.refresh_in_progress,
+        "snapshot_age_ms": age_ms,
+        "stale": observe_cache_stale(cache, refresh_ms),
+        "last_error": cache.last_error.clone(),
+    })
+}
+
+fn cache_snapshot_age_ms(cache: &ObserveCache) -> Option<u64> {
+    cache.last_refresh_completed_epoch_ms.map(|completed_at| {
+        now_epoch_ms().saturating_sub(completed_at)
+    })
+}
+
+fn observe_cache_stale(cache: &ObserveCache, refresh_ms: u64) -> bool {
+    if cache.snapshot.is_none() {
+        return true;
+    }
+    let max_age_ms = refresh_ms
+        .max(1000)
+        .saturating_mul(3)
+        .max(
+            cache
+                .last_refresh_duration_ms
+                .unwrap_or_default()
+                .saturating_add(refresh_ms.max(1000).saturating_mul(2)),
+        );
+    cache_snapshot_age_ms(cache)
+        .map(|age_ms| age_ms > max_age_ms)
+        .unwrap_or(true)
 }
 
 async fn collect_postgres_live(
