@@ -170,6 +170,7 @@ pub enum ObserveCommand {
     TokenStatementExport(ObserveTokenStatementExportArgs),
     TokenAdjustmentRegistry(ObserveTokenAdjustmentRegistryArgs),
     TokenAdjustmentAdd(ObserveTokenAdjustmentAddArgs),
+    TokenWholeCycleAttach(ObserveTokenWholeCycleAttachArgs),
     CleanupSnapshots(ObserveCleanupSnapshotsArgs),
     CleanupArtifacts(ObserveCleanupArtifactsArgs),
     RepairTokenLedger(ObserveRepairTokenLedgerArgs),
@@ -784,6 +785,20 @@ pub struct ObserveTokenAdjustmentAddArgs {
     pub include_verify_events: Option<bool>,
     #[arg(long)]
     pub adjustment_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveTokenWholeCycleAttachArgs {
+    #[arg(long)]
+    pub context_pack_id: String,
+    #[arg(long)]
+    pub client_prompt_tokens: Option<u64>,
+    #[arg(long)]
+    pub assistant_generation_tokens: Option<u64>,
+    #[arg(long)]
+    pub tool_overhead_tokens: Option<u64>,
+    #[arg(long)]
+    pub continuity_restore_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Args)]

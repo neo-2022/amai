@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:42 MSK
-Ручная сверка guide/docs: 2026-03-25 14:42 MSK
+modified_at: 2026-03-25 14:53 MSK
+Ручная сверка guide/docs: 2026-03-25 14:53 MSK
 
 # Operations
 
@@ -1975,6 +1975,7 @@ cargo run --release -- observe token-evidence-pack --scope current_session --out
 ./scripts/proof_token_suitability.sh
 ./scripts/proof_token_meter_alignment.sh
 ./scripts/proof_token_mcp_tool_overhead.sh
+./scripts/proof_token_mcp_assistant_generation.sh
 ```
 
 Dashboard hero-cards теперь тоже обязаны поднимать `client_limit_meter_alignment`.
@@ -1988,6 +1989,16 @@ MCP `amai_context_pack` теперь тоже участвует в same-meter p
 - для этого path есть отдельный proof `scripts/proof_token_mcp_tool_overhead.sh`;
 - engineering/proof вызовы MCP должны уводиться через `token_source_kind = proof_* /
   verify_*`, чтобы не contaminate live lane.
+
+`assistant_generation` теперь тоже получил честный post-call attach path:
+- CLI:
+  `cargo run --release -- observe token-whole-cycle-attach --context-pack-id ... --assistant-generation-tokens ...`
+- MCP:
+  `amai_observe_whole_cycle`
+- для front-door proof есть отдельный сценарий:
+  `scripts/proof_token_mcp_assistant_generation.sh`
+- conflicting overwrite запрещён:
+  если observed value уже materialized, другой attach с новым числом должен fail-closed.
 
 Customer-facing contractual export surface теперь тоже обязан поднимать
 `adjustment_activation_governance`, чтобы future adjustment path был виден отдельно от

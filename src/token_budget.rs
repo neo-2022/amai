@@ -1,7 +1,7 @@
 use crate::cli::{
     ContextPackArgs, ObserveTokenAdjustmentAddArgs, ObserveTokenAdjustmentRegistryArgs,
     ObserveTokenContractualSourcesArgs, ObserveTokenEvidencePackArgs, ObserveTokenReportArgs,
-    ObserveTokenStatementExportArgs,
+    ObserveTokenStatementExportArgs, ObserveTokenWholeCycleAttachArgs,
 };
 use crate::config::{self, AppConfig};
 use crate::language;
@@ -6650,15 +6650,58 @@ pub async fn observe_context_pack_tool_overhead(
     let config = load_config(&repo_root)?;
     let tool_overhead_tokens =
         count_tool_overhead_tokens(&config.measurement, text, structured_content)?;
-    attach_context_pack_whole_cycle_observed(
+    Ok(
+        attach_context_pack_whole_cycle_observed(
+            db,
+            context_pack_id,
+            None,
+            None,
+            Some(tool_overhead_tokens),
+            None,
+        )
+        .await?
+        .is_some(),
+    )
+}
+
+pub async fn attach_whole_cycle_observed_to_context_pack(
+    db: &Client,
+    context_pack_id: &str,
+    client_prompt_tokens: Option<u64>,
+    assistant_generation_tokens: Option<u64>,
+    tool_overhead_tokens: Option<u64>,
+    continuity_restore_tokens: Option<u64>,
+) -> Result<Value> {
+    let Some(result) = attach_context_pack_whole_cycle_observed(
         db,
         context_pack_id,
-        None,
-        None,
-        Some(tool_overhead_tokens),
-        None,
+        client_prompt_tokens,
+        assistant_generation_tokens,
+        tool_overhead_tokens,
+        continuity_restore_tokens,
     )
-    .await
+    .await?
+    else {
+        bail!("token_budget_event not found for context_pack_id={context_pack_id}");
+    };
+    Ok(result)
+}
+
+pub async fn attach_whole_cycle_observed_for_context_pack(
+    db: &Client,
+    args: &ObserveTokenWholeCycleAttachArgs,
+) -> Result<()> {
+    let payload = attach_whole_cycle_observed_to_context_pack(
+        db,
+        &args.context_pack_id,
+        args.client_prompt_tokens,
+        args.assistant_generation_tokens,
+        args.tool_overhead_tokens,
+        args.continuity_restore_tokens,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
 }
 
 pub async fn record_continuity_restore_observed_event(
@@ -10251,9 +10294,19 @@ async fn attach_context_pack_whole_cycle_observed(
     assistant_generation_tokens: Option<u64>,
     tool_overhead_tokens: Option<u64>,
     continuity_restore_tokens: Option<u64>,
-) -> Result<bool> {
+) -> Result<Option<Value>> {
+    if context_pack_id.trim().is_empty() {
+        bail!("context_pack_id must not be empty");
+    }
+    if client_prompt_tokens.is_none()
+        && assistant_generation_tokens.is_none()
+        && tool_overhead_tokens.is_none()
+        && continuity_restore_tokens.is_none()
+    {
+        bail!("whole-cycle attach requires at least one observed token field");
+    }
     let rows =
-        postgres::list_observability_snapshots_by_kinds(db, &["token_budget_event"], Some(256))
+        postgres::list_observability_snapshots_by_kinds(db, &["token_budget_event"], Some(2048))
             .await?;
     let Some(row) = rows
         .into_iter()
@@ -10264,31 +10317,118 @@ async fn attach_context_pack_whole_cycle_observed(
         })
         .max_by_key(|row| row.created_at_epoch_ms)
     else {
-        return Ok(false);
+        return Ok(None);
     };
 
     let mut payload = row.payload.clone();
-    let node = payload["token_budget_event"]
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("token budget payload missing token_budget_event"))?;
-    let whole_cycle = ensure_nested_object(node, "whole_cycle_observed")?;
-    if let Some(tokens) = client_prompt_tokens {
-        whole_cycle.insert("client_prompt_tokens".to_string(), Value::from(tokens));
-    }
-    if let Some(tokens) = assistant_generation_tokens {
-        whole_cycle.insert(
-            "assistant_generation_tokens".to_string(),
-            Value::from(tokens),
-        );
-    }
-    if let Some(tokens) = tool_overhead_tokens {
-        whole_cycle.insert("tool_overhead_tokens".to_string(), Value::from(tokens));
-    }
-    if let Some(tokens) = continuity_restore_tokens {
-        whole_cycle.insert("continuity_restore_tokens".to_string(), Value::from(tokens));
-    }
+    let (
+        event_id,
+        correlation_id,
+        source_kind,
+        traffic_class,
+        measurement_scope,
+        updated_fields,
+        retained_fields,
+        whole_cycle_observed,
+        attached,
+    ) = {
+        let node = payload["token_budget_event"]
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("token budget payload missing token_budget_event"))?;
+        let mut updated_fields = Vec::new();
+        let mut retained_fields = Vec::new();
+        {
+            let whole_cycle = ensure_nested_object(node, "whole_cycle_observed")?;
+            apply_whole_cycle_observed_token(
+                whole_cycle,
+                "client_prompt_tokens",
+                client_prompt_tokens,
+                &mut updated_fields,
+                &mut retained_fields,
+            )?;
+            apply_whole_cycle_observed_token(
+                whole_cycle,
+                "assistant_generation_tokens",
+                assistant_generation_tokens,
+                &mut updated_fields,
+                &mut retained_fields,
+            )?;
+            apply_whole_cycle_observed_token(
+                whole_cycle,
+                "tool_overhead_tokens",
+                tool_overhead_tokens,
+                &mut updated_fields,
+                &mut retained_fields,
+            )?;
+            apply_whole_cycle_observed_token(
+                whole_cycle,
+                "continuity_restore_tokens",
+                continuity_restore_tokens,
+                &mut updated_fields,
+                &mut retained_fields,
+            )?;
+        }
+        (
+            node.get("event_id").cloned().unwrap_or(Value::Null),
+            node.get("correlation_id").cloned().unwrap_or(Value::Null),
+            node.get("source_kind").cloned().unwrap_or(Value::Null),
+            node.get("traffic_class").cloned().unwrap_or(Value::Null),
+            node.get("measurement_scope").cloned().unwrap_or(Value::Null),
+            updated_fields.clone(),
+            retained_fields.clone(),
+            node.get("whole_cycle_observed").cloned().unwrap_or(Value::Null),
+            !updated_fields.is_empty(),
+        )
+    };
     postgres::update_observability_snapshot_payload(db, &row.snapshot_id, &payload).await?;
-    Ok(true)
+    Ok(Some(json!({
+        "whole_cycle_observed_attach": {
+            "selector": {
+                "context_pack_id": context_pack_id
+            },
+            "snapshot_id": row.snapshot_id,
+            "event_id": event_id,
+            "correlation_id": correlation_id,
+            "source_kind": source_kind,
+            "traffic_class": traffic_class,
+            "measurement_scope": measurement_scope,
+            "updated_fields": updated_fields,
+            "retained_fields": retained_fields,
+            "whole_cycle_observed": whole_cycle_observed,
+            "attached": attached,
+            "note": "Conflicting overwrite is fail-closed; reattaching the same observed value is allowed."
+        }
+    })))
+}
+
+fn apply_whole_cycle_observed_token(
+    whole_cycle: &mut serde_json::Map<String, Value>,
+    field: &str,
+    new_value: Option<u64>,
+    updated_fields: &mut Vec<String>,
+    retained_fields: &mut Vec<String>,
+) -> Result<()> {
+    let Some(new_value) = new_value else {
+        return Ok(());
+    };
+    match whole_cycle.get(field).and_then(Value::as_u64) {
+        Some(existing) if existing == new_value => {
+            retained_fields.push(field.to_string());
+        }
+        Some(existing) => {
+            bail!(
+                "conflicting whole-cycle observed overwrite for {}: existing={} new={}",
+                field,
+                existing,
+                new_value
+            );
+        }
+        None => {
+            whole_cycle.insert(field.to_string(), Value::from(new_value));
+            updated_fields.push(field.to_string());
+        }
+    }
+    Ok(())
 }
 
 fn build_continuity_restore_observed_event(

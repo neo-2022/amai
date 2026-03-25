@@ -360,6 +360,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         "amai_benchmark_coverage".to_string(),
         "amai_list_projects".to_string(),
         "amai_list_namespaces".to_string(),
+        "amai_observe_whole_cycle".to_string(),
         "amai_stack_preflight".to_string(),
         "amai_context_pack".to_string(),
         "amai_token_benchmark".to_string(),
@@ -501,6 +502,27 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             args.context.project
         ));
     }
+    let context_pack_id = context_pack["stats"]["context_pack_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("MCP context pack returned invalid stats.context_pack_id"))?;
+    let whole_cycle_attach = session
+        .tool_call(
+            "amai_observe_whole_cycle",
+            json!({
+                "context_pack_id": context_pack_id,
+                "assistant_generation_tokens": 31,
+            }),
+        )
+        .await
+        .context("MCP amai_observe_whole_cycle failed")?;
+    if whole_cycle_attach["whole_cycle_observed_attach"]["whole_cycle_observed"]["assistant_generation_tokens"]
+        .as_u64()
+        != Some(31)
+    {
+        return Err(anyhow!(
+            "MCP whole-cycle observe did not attach assistant_generation_tokens=31"
+        ));
+    }
 
     let token_benchmark = session
         .tool_call(
@@ -567,6 +589,15 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     if session_events == 0 {
         return Err(anyhow!(
             "MCP token report returned zero current session events"
+        ));
+    }
+    let observed_assistant_generation_tokens = token_report["token_budget_report"]["current_session"]
+        ["observed_assistant_generation_tokens"]
+        .as_u64()
+        .unwrap_or_default();
+    if observed_assistant_generation_tokens == 0 {
+        return Err(anyhow!(
+            "MCP token report did not materialize observed assistant generation tokens"
         ));
     }
 
@@ -884,6 +915,12 @@ async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> McpToolR
                 .await
                 .map_err(McpError::tool_runtime)
         }
+        "amai_observe_whole_cycle" => {
+            let args: ObserveWholeCycleToolArgs = parse_arguments(request.arguments)?;
+            tool_observe_whole_cycle(cfg, args)
+                .await
+                .map_err(McpError::tool_runtime)
+        }
         "amai_token_benchmark" => {
             let args: TokenBenchmarkToolArgs = parse_arguments(request.arguments)?;
             tool_token_benchmark(cfg, args)
@@ -1177,6 +1214,51 @@ async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result
     )
     .await?;
     Ok(tool_result(summary, structured))
+}
+
+async fn tool_observe_whole_cycle(
+    cfg: &AppConfig,
+    args: ObserveWholeCycleToolArgs,
+) -> Result<Value> {
+    compatibility::assert_supported(cfg).await?;
+    let db = postgres::connect_admin(cfg).await?;
+    let structured = token_budget::attach_whole_cycle_observed_to_context_pack(
+        &db,
+        &args.context_pack_id,
+        args.client_prompt_tokens,
+        args.assistant_generation_tokens,
+        args.tool_overhead_tokens,
+        args.continuity_restore_tokens,
+    )
+    .await?;
+    let attach = &structured["whole_cycle_observed_attach"];
+    let updated = attach["updated_fields"]
+        .as_array()
+        .map(|items| {
+            items.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "none".to_string());
+    let retained = attach["retained_fields"]
+        .as_array()
+        .map(|items| {
+            items.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "none".to_string());
+    Ok(tool_result(
+        format!(
+            "whole-cycle observed attached for {} :: updated={} retained={}",
+            args.context_pack_id, updated, retained
+        ),
+        structured,
+    ))
 }
 
 async fn tool_token_benchmark(cfg: &AppConfig, args: TokenBenchmarkToolArgs) -> Result<Value> {
@@ -1876,6 +1958,7 @@ fn server_instructions() -> String {
         "Use amai_list_namespaces before querying an unfamiliar project.",
         "Use amai_stack_preflight when you need to know what this machine can honestly support.",
         "Use amai_context_pack for retrieval instead of asking for whole repositories.",
+        "Use amai_observe_whole_cycle when the client only learns assistant output tokens after the context-pack tool call and needs to attach real whole-cycle evidence back to the same event.",
         "Use amai_token_benchmark when you need a measured token-economy comparison.",
         "Use amai_token_report when you need cumulative token savings for the current session, budget window, or lifetime.",
         "Use amai_benchmark_coverage when you need the external benchmark and eval coverage map for Amai.",
@@ -1910,6 +1993,10 @@ fn protocol_manifest() -> Value {
             "amai_context_pack": {
                 "summary_field": "context_pack_summary",
                 "short_summary_contract": "layer totals plus included/excluded retrieval reasons",
+            },
+            "amai_observe_whole_cycle": {
+                "summary_field": "whole_cycle_observed_attach",
+                "short_summary_contract": "post-call attachment result for whole-cycle observed tokens on an existing context-pack event",
             },
             "amai_token_benchmark": {
                 "summary_field": "token_benchmark_summary",
@@ -2060,6 +2147,18 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": context_pack_input_schema(true),
             "annotations": {
                 "title": "Build Context Pack",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+            }
+        }),
+        json!({
+            "name": "amai_observe_whole_cycle",
+            "description": "Attach post-call whole-cycle observed tokens such as assistant generation back to an existing context-pack event.",
+            "inputSchema": observe_whole_cycle_input_schema(),
+            "annotations": {
+                "title": "Attach Whole-Cycle Observed Tokens",
                 "readOnlyHint": false,
                 "destructiveHint": false,
                 "idempotentHint": false,
@@ -2431,6 +2530,40 @@ fn token_report_input_schema() -> Value {
                 "default": false
             }
         },
+        "additionalProperties": false
+    })
+}
+
+fn observe_whole_cycle_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "context_pack_id": {
+                "type": "string",
+                "description": "Context-pack id returned by amai_context_pack for the event that should receive whole-cycle observed tokens."
+            },
+            "client_prompt_tokens": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "description": "Optional observed client prompt tokens in the same meter the client/provider reports."
+            },
+            "assistant_generation_tokens": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "description": "Optional observed assistant generation tokens learned after the client finished its answer."
+            },
+            "tool_overhead_tokens": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "description": "Optional observed non-retrieval tool overhead tokens for the same context-pack event."
+            },
+            "continuity_restore_tokens": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "description": "Optional observed continuity-restore tokens outside retrieval for the same context-pack event."
+            }
+        },
+        "required": ["context_pack_id"],
         "additionalProperties": false
     })
 }
@@ -2916,6 +3049,20 @@ struct ContextPackToolArgs {
     persist: bool,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ObserveWholeCycleToolArgs {
+    #[serde(default)]
+    context_pack_id: String,
+    #[serde(default)]
+    client_prompt_tokens: Option<u64>,
+    #[serde(default)]
+    assistant_generation_tokens: Option<u64>,
+    #[serde(default)]
+    tool_overhead_tokens: Option<u64>,
+    #[serde(default)]
+    continuity_restore_tokens: Option<u64>,
+}
+
 impl ContextPackToolArgs {
     fn to_context_args(&self) -> ContextPackArgs {
         ContextPackArgs {
@@ -3081,9 +3228,10 @@ mod tests {
     use super::{
         ContextPackToolArgs, McpConfigArgs, McpError, benchmark_coverage_summary,
         context_pack_input_schema, context_pack_summary, mcp_tool_error_result,
-        memory_matrix_summary, observe_snapshot_summary, protocol_manifest, render_client_config,
-        stack_preflight_summary, summarize_codes, summarize_namespace_modes,
-        token_benchmark_summary, token_report_summary, warm_cache_summary,
+        memory_matrix_summary, observe_snapshot_summary, observe_whole_cycle_input_schema,
+        protocol_manifest, render_client_config, stack_preflight_summary, summarize_codes,
+        summarize_namespace_modes, token_benchmark_summary, token_report_summary,
+        warm_cache_summary,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -3217,6 +3365,17 @@ mod tests {
         assert_eq!(context.assistant_generation_tokens, Some(24));
         assert_eq!(context.tool_overhead_tokens, Some(7));
         assert_eq!(context.continuity_restore_tokens, Some(3));
+    }
+
+    #[test]
+    fn observe_whole_cycle_schema_requires_context_pack_id() {
+        let schema = observe_whole_cycle_input_schema();
+        let properties = schema["properties"]
+            .as_object()
+            .expect("properties must be object");
+        assert!(properties.contains_key("context_pack_id"));
+        assert!(properties.contains_key("assistant_generation_tokens"));
+        assert_eq!(schema["required"], json!(["context_pack_id"]));
     }
 
     #[test]
@@ -3578,6 +3737,10 @@ mod tests {
         assert_eq!(
             manifest["tool_contracts"]["amai_context_pack"]["summary_field"].as_str(),
             Some("context_pack_summary")
+        );
+        assert_eq!(
+            manifest["tool_contracts"]["amai_observe_whole_cycle"]["summary_field"].as_str(),
+            Some("whole_cycle_observed_attach")
         );
         assert_eq!(
             manifest["tool_contracts"]["amai_warm_cache"]["summary_field"].as_str(),

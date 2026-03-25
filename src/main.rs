@@ -416,6 +416,12 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 token_budget::add_adjustment_entry(&args).await?;
             }
+            ObserveCommand::TokenWholeCycleAttach(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                let db = postgres::connect_admin(&cfg).await?;
+                token_budget::attach_whole_cycle_observed_for_context_pack(&db, &args).await?;
+            }
             ObserveCommand::CleanupSnapshots(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

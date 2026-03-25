@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:42 MSK
-Ручная сверка guide/docs: 2026-03-25 14:42 MSK
+modified_at: 2026-03-25 14:53 MSK
+Ручная сверка guide/docs: 2026-03-25 14:53 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1512,6 +1512,16 @@ preview, а не только raw count.
     компонентом и при этом не происходило двойного счёта retrieval tokens;
   - тот же MCP front door теперь принимает и `token_source_kind`, чтобы proof/verify
     вызовы можно было уводить в `proof_*` / `verify_*`, а не contaminate live lane;
+  - отдельный post-call attach path теперь materialized и для `assistant_generation`:
+    после того как upstream client уже узнал реальные output tokens своего ответа,
+    он может привязать их к тому же `context_pack_id` через:
+    - CLI `amai observe token-whole-cycle-attach --context-pack-id ... --assistant-generation-tokens ...`
+    - MCP tool `amai_observe_whole_cycle`
+  - этот path сделан именно post-call, потому что `assistant_generation` становится известен
+    только после ответа клиента, а не в момент build-time у `amai_context_pack`;
+  - conflicting overwrite тут fail-closed:
+    новое число нельзя тихо переписать поверх уже наблюдённого другого значения;
+    разрешён только первый attach или повтор того же самого значения;
   - `continuity startup` тоже начал материализовать self-observed component:
     он может записывать `continuity_restore_tokens` от собственного `CHAT_START_RESTORE`
     prompt-text, а engineering/proof вызовы обязаны уводить это в `proof_/verify_`

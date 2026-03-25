@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:42 MSK
-Ручная сверка guide/docs: 2026-03-25 14:42 MSK
+modified_at: 2026-03-25 14:53 MSK
+Ручная сверка guide/docs: 2026-03-25 14:53 MSK
 
 # Token Ledger
 
@@ -478,6 +478,18 @@ Ledger обязан различать:
     materialize-иться без двойного счёта retrieval tokens;
   - тот же MCP path теперь тоже принимает `token_source_kind`, чтобы engineering traffic
     можно было отделять от live usage тем же truth guardrail;
+- отдельно materialized post-call assistant-generation path:
+  - `assistant_generation_tokens` нельзя честно требовать только pre-call, потому что
+    upstream client узнаёт их уже после собственного ответа;
+  - поэтому для того же `context_pack_id` теперь есть attach path:
+    - CLI `observe token-whole-cycle-attach`
+    - MCP tool `amai_observe_whole_cycle`
+  - attach разрешён только fail-closed:
+    первый attach допустим,
+    повтор того же самого значения допустим,
+    конфликтный overwrite другим числом запрещён;
+  - это нужно затем, чтобы last missing same-meter component не оставался навсегда
+    неobserved только из-за timing mismatch между tool call и финальным ответом клиента;
 - это означает, что live caller может materialize-ить same-meter evidence не только через
   прямой бинарь `amai`, но и через MCP/bridge path;
 - retrieval path не притворяется, что знает их сам;
