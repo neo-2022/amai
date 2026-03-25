@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 13:12 MSK
-Ручная сверка guide/docs: 2026-03-25 13:12 MSK
+modified_at: 2026-03-25 13:27 MSK
+Ручная сверка guide/docs: 2026-03-25 13:27 MSK
 
 # Token Ledger
 
@@ -432,6 +432,21 @@ reporting layers:
 
 То есть денежный режим ещё не включён. Пока это report-only lower bound со строгим
 разделением уже измеренной и ещё не измеренной части цикла.
+
+При этом whole-cycle measurement теперь можно materialize-ить не только целиком или никак.
+Ledger обязан различать:
+- полностью не наблюдаемые компоненты;
+- частично наблюдаемые whole-cycle компоненты;
+- whole-cycle observed компоненты при всё ещё partial baseline.
+
+Именно поэтому `client_limit_meter_alignment` теперь должен публиковать ещё и:
+- `partially_measured_components`;
+- `component_event_coverage`;
+- state `whole_cycle_partially_observed_not_meter_equivalent`;
+- state `whole_cycle_observed_baseline_partial`.
+
+Это нужно затем, чтобы progress к реальному client-limit meter был виден честно, без
+ложного переключения `same_meter_as_client_limit=true` раньше времени.
 
 ## Idempotency, backfill и corrections
 
@@ -1064,7 +1079,8 @@ Hashes по line items нужны затем, чтобы:
   - `alignment_state`
   - `same_meter_as_client_limit`
   - `live_events_count / non_live_events_count`
-  - `measured_components / missing_components`
+  - `measured_components / partially_measured_components / missing_components`
+  - `component_event_coverage`
   - `blocking_reasons`
   Это нужно затем, чтобы live lower-bound savings не притворялись уже эквивалентными
   тому же самому полному метру, которым внешний клиент считает общий `5h` limit.
@@ -1072,7 +1088,9 @@ Hashes по line items нужны затем, чтобы:
   - отдельная строка `Связь с лимитом клиента`;
   - честное различение `only_non_live_scope_activity`,
     `live_usage_unconfirmed_not_meter_equivalent` и
-    `partial_lower_bound_not_meter_equivalent`;
+    `partial_lower_bound_not_meter_equivalent`,
+    `whole_cycle_partially_observed_not_meter_equivalent`,
+    `whole_cycle_observed_baseline_partial`;
   - note карточки обязан прямо сказать, почему её число не обязано совпадать
     с внешней клиентской шкалой лимита.
 - публикует `included_events_hash / excluded_events_hash`;
@@ -1089,7 +1107,7 @@ Hashes по line items нужны затем, чтобы:
 - `contractual-statement-export-v17`
 - `settlement-report-preview-v8`
 - `contractual-evidence-pack-v17`
-- `client-limit-meter-alignment-v1`
+- `client-limit-meter-alignment-v2`
 - `adjustment-activation-governance-v1`
 
 Теперь те же customer-facing surface-ы ещё несут `adjustment_activation_governance`.

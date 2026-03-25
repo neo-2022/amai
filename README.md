@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 13:12 MSK
-Ручная сверка guide/docs: 2026-03-25 13:12 MSK
+modified_at: 2026-03-25 13:27 MSK
+Ручная сверка guide/docs: 2026-03-25 13:27 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1243,10 +1243,17 @@ preview, а не только raw count.
     - `alignment_state`
     - `same_meter_as_client_limit`
     - `live_events_count / non_live_events_count`
-    - `measured_components / missing_components`
+    - `measured_components / partially_measured_components / missing_components`
+    - `component_event_coverage`
     - `blocking_reasons`
   Это нужно затем, чтобы lower-bound savings не выглядели как уже эквивалентные
   тому же самому метру, которым клиент считает живой лимит `5h`.
+  - тот же слой теперь ещё честно различает:
+    - `partial_lower_bound_not_meter_equivalent`
+    - `whole_cycle_partially_observed_not_meter_equivalent`
+    - `whole_cycle_observed_baseline_partial`
+  Это нужно затем, чтобы по мере materialize-инга observed whole-cycle fields было видно,
+  что покрытие уже стало шире, но baseline всё ещё не разрешено выдавать за full same-meter.
   - dashboard token-cards теперь поднимают этот же слой в user-facing surface:
     - добавляют строку `Связь с лимитом клиента`;
     - прямо показывают, когда текущий scope содержит только `non-live` активность;
@@ -1472,7 +1479,7 @@ preview, а не только raw count.
     - `future settlement activation governance`
     - `future adjustment activation governance`
 - operational metering contract теперь ещё несёт:
-  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v1`
+  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v2`
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
 - metering freshness теперь тоже first-class:

@@ -406,6 +406,10 @@ struct TokenBudgetEvent {
     chunks_count: u64,
     pack_token_count: u64,
     deduped_token_count: u64,
+    client_prompt_tokens: Option<u64>,
+    assistant_generation_tokens: Option<u64>,
+    tool_overhead_tokens: Option<u64>,
+    continuity_restore_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -467,7 +471,7 @@ fn default_late_arrival_grace_minutes() -> u64 {
 }
 
 fn default_usage_event_schema_version() -> String {
-    "billing-usage-event-v1".to_string()
+    "billing-usage-event-v2".to_string()
 }
 
 fn default_settlement_statement_version() -> String {
@@ -475,7 +479,7 @@ fn default_settlement_statement_version() -> String {
 }
 
 fn default_metering_event_schema_version() -> String {
-    "token-budget-event-v2".to_string()
+    "token-budget-event-v3".to_string()
 }
 
 fn default_usage_lifecycle_model_version() -> String {
@@ -499,11 +503,11 @@ fn default_metering_freshness_model_version() -> String {
 }
 
 fn default_agent_cycle_model_version() -> String {
-    "agent-cycle-lower-bound-v1".to_string()
+    "agent-cycle-lower-bound-v2".to_string()
 }
 
 fn default_client_limit_meter_alignment_version() -> String {
-    "client-limit-meter-alignment-v1".to_string()
+    "client-limit-meter-alignment-v2".to_string()
 }
 
 fn default_excluded_taxonomy_version() -> String {
@@ -789,6 +793,16 @@ fn build_usage_event_schema_json(contract: &TokenBudgetContractConfig) -> Value 
             "policy_version": contract.correction_policy_version.clone(),
             "status": "mutable_snapshot_report_only",
             "note": "До settlement layer corrections остаются report-only snapshot updates, а не invoice-grade credit workflow."
+        },
+        "whole_cycle_observed": {
+            "status": "optional_progressive_measurement",
+            "component_fields": [
+                "client_prompt_tokens",
+                "assistant_generation_tokens",
+                "tool_overhead_tokens",
+                "continuity_restore_tokens"
+            ],
+            "note": "Observed whole-cycle fields можно materialize-ить постепенно: их наличие расширяет видимость клиентского spend meter, но не даёт права объявлять same-meter savings без baseline-equivalent semantics."
         }
     })
 }
@@ -5287,6 +5301,12 @@ fn contractual_line_item_json(event: &TokenBudgetEvent) -> Value {
         "baseline_tokens": event.naive_tokens,
         "delivered_tokens": event.context_tokens,
         "recovery_tokens": event.recovery_tokens,
+        "whole_cycle_observed": {
+            "client_prompt_tokens": event.client_prompt_tokens,
+            "assistant_generation_tokens": event.assistant_generation_tokens,
+            "tool_overhead_tokens": event.tool_overhead_tokens,
+            "continuity_restore_tokens": event.continuity_restore_tokens,
+        },
         "effective_saved_tokens": event.effective_saved_tokens,
         "quality_ok": event.quality_ok,
         "quality_method": event.quality_method.clone(),
@@ -7656,6 +7676,12 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
     let deduped_token_count = node["shape"]["deduped_token_count"]
         .as_u64()
         .unwrap_or(context_tokens);
+    let client_prompt_tokens = node["whole_cycle_observed"]["client_prompt_tokens"].as_u64();
+    let assistant_generation_tokens =
+        node["whole_cycle_observed"]["assistant_generation_tokens"].as_u64();
+    let tool_overhead_tokens = node["whole_cycle_observed"]["tool_overhead_tokens"].as_u64();
+    let continuity_restore_tokens =
+        node["whole_cycle_observed"]["continuity_restore_tokens"].as_u64();
 
     Ok(Some(TokenBudgetEvent {
         created_at_epoch_ms: row.created_at_epoch_ms,
@@ -7743,6 +7769,10 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         chunks_count,
         pack_token_count,
         deduped_token_count,
+        client_prompt_tokens,
+        assistant_generation_tokens,
+        tool_overhead_tokens,
+        continuity_restore_tokens,
     }))
 }
 
@@ -8320,6 +8350,16 @@ fn summarize_events(
             "baseline_tokens": 0,
             "delivered_tokens": 0,
             "recovery_tokens": 0,
+            "observed_client_prompt_tokens": 0,
+            "observed_assistant_generation_tokens": 0,
+            "observed_tool_overhead_tokens": 0,
+            "observed_continuity_restore_tokens": 0,
+            "observed_client_prompt_live_events": 0,
+            "observed_assistant_generation_live_events": 0,
+            "observed_tool_overhead_live_events": 0,
+            "observed_continuity_restore_live_events": 0,
+            "observed_whole_cycle_with_amai_tokens": 0,
+            "verified_observed_whole_cycle_with_amai_tokens": 0,
             "effective_saved_tokens": 0,
             "total_saved_tokens": 0,
             "total_effective_saved_tokens": 0,
@@ -8358,6 +8398,22 @@ fn summarize_events(
         .iter()
         .map(|event| event.recovery_tokens)
         .sum::<u64>();
+    let observed_client_prompt_tokens = events
+        .iter()
+        .filter_map(|event| event.client_prompt_tokens)
+        .sum::<u64>();
+    let observed_assistant_generation_tokens = events
+        .iter()
+        .filter_map(|event| event.assistant_generation_tokens)
+        .sum::<u64>();
+    let observed_tool_overhead_tokens = events
+        .iter()
+        .filter_map(|event| event.tool_overhead_tokens)
+        .sum::<u64>();
+    let observed_continuity_restore_tokens = events
+        .iter()
+        .filter_map(|event| event.continuity_restore_tokens)
+        .sum::<u64>();
     let live_events_count = events
         .iter()
         .filter(|event| event.traffic_class == "live")
@@ -8387,6 +8443,52 @@ fn summarize_events(
         .iter()
         .map(|event| event.recovery_tokens)
         .sum::<u64>();
+    let verified_observed_client_prompt_tokens = verified_events
+        .iter()
+        .filter_map(|event| event.client_prompt_tokens)
+        .sum::<u64>();
+    let verified_observed_assistant_generation_tokens = verified_events
+        .iter()
+        .filter_map(|event| event.assistant_generation_tokens)
+        .sum::<u64>();
+    let verified_observed_tool_overhead_tokens = verified_events
+        .iter()
+        .filter_map(|event| event.tool_overhead_tokens)
+        .sum::<u64>();
+    let verified_observed_continuity_restore_tokens = verified_events
+        .iter()
+        .filter_map(|event| event.continuity_restore_tokens)
+        .sum::<u64>();
+    let observed_client_prompt_live_events = events
+        .iter()
+        .filter(|event| event.traffic_class == "live" && event.client_prompt_tokens.is_some())
+        .count() as u64;
+    let observed_assistant_generation_live_events = events
+        .iter()
+        .filter(|event| {
+            event.traffic_class == "live" && event.assistant_generation_tokens.is_some()
+        })
+        .count() as u64;
+    let observed_tool_overhead_live_events = events
+        .iter()
+        .filter(|event| event.traffic_class == "live" && event.tool_overhead_tokens.is_some())
+        .count() as u64;
+    let observed_continuity_restore_live_events = events
+        .iter()
+        .filter(|event| event.traffic_class == "live" && event.continuity_restore_tokens.is_some())
+        .count() as u64;
+    let observed_whole_cycle_with_amai_tokens = total_context_tokens
+        .saturating_add(total_recovery_tokens)
+        .saturating_add(observed_client_prompt_tokens)
+        .saturating_add(observed_assistant_generation_tokens)
+        .saturating_add(observed_tool_overhead_tokens)
+        .saturating_add(observed_continuity_restore_tokens);
+    let verified_observed_whole_cycle_with_amai_tokens = verified_delivered_tokens
+        .saturating_add(verified_recovery_tokens)
+        .saturating_add(verified_observed_client_prompt_tokens)
+        .saturating_add(verified_observed_assistant_generation_tokens)
+        .saturating_add(verified_observed_tool_overhead_tokens)
+        .saturating_add(verified_observed_continuity_restore_tokens);
     let excluded_events = events
         .iter()
         .filter(|event| !(event.traffic_class == "live" && event.quality_ok))
@@ -8552,6 +8654,16 @@ fn summarize_events(
         "baseline_tokens": total_naive_tokens,
         "delivered_tokens": total_context_tokens,
         "recovery_tokens": total_recovery_tokens,
+        "observed_client_prompt_tokens": observed_client_prompt_tokens,
+        "observed_assistant_generation_tokens": observed_assistant_generation_tokens,
+        "observed_tool_overhead_tokens": observed_tool_overhead_tokens,
+        "observed_continuity_restore_tokens": observed_continuity_restore_tokens,
+        "observed_client_prompt_live_events": observed_client_prompt_live_events,
+        "observed_assistant_generation_live_events": observed_assistant_generation_live_events,
+        "observed_tool_overhead_live_events": observed_tool_overhead_live_events,
+        "observed_continuity_restore_live_events": observed_continuity_restore_live_events,
+        "observed_whole_cycle_with_amai_tokens": observed_whole_cycle_with_amai_tokens,
+        "verified_observed_whole_cycle_with_amai_tokens": verified_observed_whole_cycle_with_amai_tokens,
         "effective_saved_tokens": total_effective_saved_tokens,
         "total_saved_tokens": total_saved_tokens,
         "total_effective_saved_tokens": total_effective_saved_tokens,
@@ -8824,30 +8936,97 @@ fn client_limit_meter_alignment_counts(
     )
 }
 
+fn client_limit_component_stats(summary: &Value) -> [(&'static str, u64, u64); 4] {
+    [
+        (
+            "client_prompt",
+            summary["observed_client_prompt_live_events"]
+                .as_u64()
+                .unwrap_or(0),
+            summary["observed_client_prompt_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+        ),
+        (
+            "assistant_generation",
+            summary["observed_assistant_generation_live_events"]
+                .as_u64()
+                .unwrap_or(0),
+            summary["observed_assistant_generation_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+        ),
+        (
+            "tool_overhead_outside_retrieval",
+            summary["observed_tool_overhead_live_events"]
+                .as_u64()
+                .unwrap_or(0),
+            summary["observed_tool_overhead_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+        ),
+        (
+            "continuity_restore_outside_retrieval",
+            summary["observed_continuity_restore_live_events"]
+                .as_u64()
+                .unwrap_or(0),
+            summary["observed_continuity_restore_tokens"]
+                .as_u64()
+                .unwrap_or(0),
+        ),
+    ]
+}
+
+fn client_limit_component_event_coverage(summary: &Value, live_events_count: u64) -> Vec<Value> {
+    client_limit_component_stats(summary)
+        .into_iter()
+        .map(|(code, observed_live_events, observed_tokens)| {
+            json!({
+                "code": code,
+                "observed_live_events": observed_live_events,
+                "live_events_count": live_events_count,
+                "event_coverage_pct": percent_share(observed_live_events, live_events_count),
+                "observed_tokens": observed_tokens,
+            })
+        })
+        .collect()
+}
+
 fn client_limit_meter_alignment_blocking_reasons(
     summary: &Value,
     events: Option<&[TokenBudgetEvent]>,
-) -> Vec<&'static str> {
-    let mut reasons = vec![
-        "client_prompt_unmeasured",
-        "assistant_generation_unmeasured",
-        "tool_overhead_outside_retrieval_unmeasured",
-        "continuity_restore_outside_retrieval_unmeasured",
-    ];
+) -> Vec<String> {
+    let mut reasons = Vec::new();
     let (events_total, live_events_count, non_live_events_count, counted_events) =
         client_limit_meter_alignment_counts(summary, events);
+    for (code, observed_live_events, _observed_tokens) in client_limit_component_stats(summary) {
+        if live_events_count == 0 || observed_live_events == 0 {
+            reasons.push(format!("{code}_unmeasured"));
+        } else if observed_live_events < live_events_count {
+            reasons.push(format!("{code}_partially_measured"));
+        }
+    }
 
     if events_total == 0 {
-        reasons.push("no_usage_observed_in_scope");
+        reasons.push("no_usage_observed_in_scope".to_string());
     } else {
         if live_events_count == 0 {
-            reasons.push("no_live_usage_in_scope");
+            reasons.push("no_live_usage_in_scope".to_string());
         }
         if non_live_events_count > 0 {
-            reasons.push("non_live_events_present_in_scope");
+            reasons.push("non_live_events_present_in_scope".to_string());
         }
         if live_events_count > 0 && counted_events == 0 {
-            reasons.push("no_confirmed_live_usage_in_scope");
+            reasons.push("no_confirmed_live_usage_in_scope".to_string());
+        }
+        if live_events_count > 0
+            && client_limit_component_stats(summary).into_iter().all(
+                |(_code, observed_live_events, _observed_tokens)| {
+                    observed_live_events == live_events_count
+                },
+            )
+        {
+            reasons.push("same_meter_baseline_unmeasured".to_string());
         }
     }
     reasons
@@ -8859,6 +9038,16 @@ fn client_limit_meter_alignment_state(
 ) -> &'static str {
     let (events_total, live_events_count, _non_live_events_count, counted_events) =
         client_limit_meter_alignment_counts(summary, events);
+    let component_stats = client_limit_component_stats(summary);
+    let all_components_observed = live_events_count > 0
+        && component_stats
+            .iter()
+            .all(|(_code, observed_live_events, _observed_tokens)| {
+                *observed_live_events == live_events_count
+            });
+    let any_component_observed = component_stats
+        .iter()
+        .any(|(_code, observed_live_events, _observed_tokens)| *observed_live_events > 0);
 
     if events_total == 0 {
         "no_usage_observed"
@@ -8866,6 +9055,10 @@ fn client_limit_meter_alignment_state(
         "only_non_live_scope_activity"
     } else if counted_events == 0 {
         "live_usage_unconfirmed_not_meter_equivalent"
+    } else if all_components_observed {
+        "whole_cycle_observed_baseline_partial"
+    } else if any_component_observed {
+        "whole_cycle_partially_observed_not_meter_equivalent"
     } else {
         "partial_lower_bound_not_meter_equivalent"
     }
@@ -8879,6 +9072,24 @@ fn build_client_limit_meter_alignment(
 ) -> Value {
     let (events_total, live_events_count, non_live_events_count, counted_events) =
         client_limit_meter_alignment_counts(summary, events);
+    let component_coverage = client_limit_component_event_coverage(summary, live_events_count);
+    let component_stats = client_limit_component_stats(summary);
+    let mut measured_components = vec![
+        "retrieval_payload".to_string(),
+        "followup_recovery".to_string(),
+    ];
+    let mut partially_measured_components = Vec::new();
+    let mut missing_components = Vec::new();
+    for (code, observed_live_events, _observed_tokens) in component_stats {
+        if live_events_count > 0 && observed_live_events == live_events_count {
+            measured_components.push(code.to_string());
+        } else {
+            missing_components.push(code.to_string());
+            if observed_live_events > 0 {
+                partially_measured_components.push(code.to_string());
+            }
+        }
+    }
     json!({
         "model_version": contract.client_limit_meter_alignment_version.clone(),
         "surface_kind": surface_kind,
@@ -8888,18 +9099,12 @@ fn build_client_limit_meter_alignment(
         "live_events_count": live_events_count,
         "non_live_events_count": non_live_events_count,
         "counted_live_events": counted_events,
-        "measured_components": [
-            "retrieval_payload",
-            "followup_recovery"
-        ],
-        "missing_components": [
-            "client_prompt",
-            "assistant_generation",
-            "tool_overhead_outside_retrieval",
-            "continuity_restore_outside_retrieval"
-        ],
+        "measured_components": measured_components,
+        "partially_measured_components": partially_measured_components,
+        "missing_components": missing_components,
+        "component_event_coverage": component_coverage,
         "blocking_reasons": client_limit_meter_alignment_blocking_reasons(summary, events),
-        "note": "Этот слой честно показывает, что текущие savings пока считаются как lower-bound части агентного цикла и не эквивалентны тому же самому метру, которым клиент считает общий лимит сессии."
+        "note": "Этот слой честно показывает, что текущие savings пока считаются как lower-bound части агентного цикла. Whole-cycle observed components могут постепенно materialize-иться, но same meter с клиентским лимитом нельзя объявлять раньше, чем появится и полное observed покрытие, и baseline-equivalent semantics."
     })
 }
 
@@ -8928,6 +9133,13 @@ fn build_agent_cycle_economics(
                     "retrieval_payload",
                     "followup_recovery"
                 ],
+                "partially_measured_components": [],
+                "observable_components": [
+                    "client_prompt",
+                    "assistant_generation",
+                    "tool_overhead_outside_retrieval",
+                    "continuity_restore_outside_retrieval"
+                ],
                 "missing_components": [
                     "client_prompt",
                     "assistant_generation",
@@ -8940,7 +9152,7 @@ fn build_agent_cycle_economics(
                     "tool_overhead_outside_retrieval_unmeasured",
                     "continuity_restore_outside_retrieval_unmeasured"
                 ],
-                "note": "Даже при высокой measured lower bound current meter ещё не эквивалентен полному клиентскому лимиту сессии."
+                "note": "Даже при высокой measured lower bound current meter ещё не эквивалентен полному клиентскому лимиту сессии. Whole-cycle observed components можно materialize-ить по мере появления event-level evidence, но same-meter claim запрещён раньше baseline-equivalent semantics."
             },
             "rate_card_version": contract.rate_card_version.clone(),
             "currency_profile": contract.currency_profile.clone(),
@@ -9061,6 +9273,13 @@ fn build_agent_cycle_scope(
         .as_u64()
         .unwrap_or(0)
         .saturating_add(summary["verified_recovery_tokens"].as_u64().unwrap_or(0));
+    let observed_whole_cycle_with_amai_tokens = summary["observed_whole_cycle_with_amai_tokens"]
+        .as_u64()
+        .unwrap_or(with_amai_measured_tokens);
+    let verified_observed_whole_cycle_with_amai_tokens =
+        summary["verified_observed_whole_cycle_with_amai_tokens"]
+            .as_u64()
+            .unwrap_or(verified_with_amai_measured_tokens);
     let verified_share_pct = percent_share(
         summary["counted_events"].as_u64().unwrap_or(0),
         summary["events_total"].as_u64().unwrap_or(0),
@@ -9080,13 +9299,19 @@ fn build_agent_cycle_scope(
             &summary,
             Some(&live_events),
         ),
+        "observed_client_prompt_tokens": summary["observed_client_prompt_tokens"].clone(),
+        "observed_assistant_generation_tokens": summary["observed_assistant_generation_tokens"].clone(),
+        "observed_tool_overhead_tokens": summary["observed_tool_overhead_tokens"].clone(),
+        "observed_continuity_restore_tokens": summary["observed_continuity_restore_tokens"].clone(),
         "verified_share_pct": verified_share_pct,
         "without_amai_measured_tokens": summary["total_naive_tokens"].as_u64().unwrap_or(0),
         "with_amai_measured_tokens": with_amai_measured_tokens,
+        "observed_whole_cycle_with_amai_tokens": observed_whole_cycle_with_amai_tokens,
         "measured_saved_tokens": summary["total_effective_saved_tokens"].as_i64().unwrap_or(0),
         "measured_saved_pct": summary["effective_savings_pct"].as_f64().unwrap_or(0.0),
         "verified_without_amai_measured_tokens": summary["verified_baseline_tokens"].as_u64().unwrap_or(0),
         "verified_with_amai_measured_tokens": verified_with_amai_measured_tokens,
+        "verified_observed_whole_cycle_with_amai_tokens": verified_observed_whole_cycle_with_amai_tokens,
         "verified_measured_saved_tokens": summary["verified_effective_saved_tokens"].as_i64().unwrap_or(0),
         "verified_measured_saved_pct": summary["verified_effective_savings_pct"].as_f64().unwrap_or(0.0),
         "answer_like_counted_events": summary["answer_like_counted_events"].as_u64().unwrap_or(0),
@@ -9712,6 +9937,15 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
         "deduped_token_count".to_string(),
         Value::from(event.deduped_token_count),
     );
+    object.insert(
+        "whole_cycle_observed".to_string(),
+        json!({
+            "client_prompt_tokens": event.client_prompt_tokens,
+            "assistant_generation_tokens": event.assistant_generation_tokens,
+            "tool_overhead_tokens": event.tool_overhead_tokens,
+            "continuity_restore_tokens": event.continuity_restore_tokens,
+        }),
+    );
     Value::Object(object)
 }
 
@@ -9771,6 +10005,11 @@ fn build_event_payload(
     let timestamp_utc = current_epoch_ms()?;
     let correlation_id = context_pack_id.clone().unwrap_or_else(|| event_id.clone());
     let latency_ms = total_latency_ms(payload);
+    let whole_cycle_observed = &payload["whole_cycle_observed"];
+    let client_prompt_tokens = whole_cycle_observed["client_prompt_tokens"].as_u64();
+    let assistant_generation_tokens = whole_cycle_observed["assistant_generation_tokens"].as_u64();
+    let tool_overhead_tokens = whole_cycle_observed["tool_overhead_tokens"].as_u64();
+    let continuity_restore_tokens = whole_cycle_observed["continuity_restore_tokens"].as_u64();
 
     Ok(json!({
         "token_budget_event": {
@@ -9819,6 +10058,12 @@ fn build_event_payload(
             "context_pack_render": {
                 "rendered_bytes": context_prompt.len(),
                 "tokens": context_tokens,
+            },
+            "whole_cycle_observed": {
+                "client_prompt_tokens": client_prompt_tokens,
+                "assistant_generation_tokens": assistant_generation_tokens,
+                "tool_overhead_tokens": tool_overhead_tokens,
+                "continuity_restore_tokens": continuity_restore_tokens,
             },
             "recovery": {
                 "recovery_tokens": recovery_tokens,
@@ -10921,9 +11166,9 @@ mod tests {
                     source_kind: "live_context_pack".to_string(),
                     traffic_class: "live".to_string(),
                     measurement_scope: "retrieval_lower_bound".to_string(),
-                    usage_event_schema_version: "billing-usage-event-v1".to_string(),
+                    usage_event_schema_version: "billing-usage-event-v2".to_string(),
                     settlement_statement_version: default_settlement_statement_version(),
-                    metering_event_schema_version: "token-budget-event-v2".to_string(),
+                    metering_event_schema_version: "token-budget-event-v3".to_string(),
                     usage_lifecycle_model_version: "usage-lifecycle-v1".to_string(),
                     baseline_method_version: default_baseline_method_version(),
                     quality_method_version: default_quality_method_version(),
@@ -10993,6 +11238,10 @@ mod tests {
                     chunks_count: 1,
                     pack_token_count: 0,
                     deduped_token_count: 0,
+                    client_prompt_tokens: None,
+                    assistant_generation_tokens: None,
+                    tool_overhead_tokens: None,
+                    continuity_restore_tokens: None,
                 };
                 $(event.$field = $value;)+
                 event
@@ -11219,6 +11468,12 @@ mod tests {
             "symbol_hits": 0,
             "pack_token_count": 120,
             "deduped_token_count": 120,
+            "whole_cycle_observed": {
+                "client_prompt_tokens": 30,
+                "assistant_generation_tokens": 20,
+                "tool_overhead_tokens": 5,
+                "continuity_restore_tokens": 4
+            },
             "scope_snapshot": {
                 "project_code": "art",
                 "namespace_code": "continuity"
@@ -11239,11 +11494,11 @@ mod tests {
         assert_eq!(token_event["measurement_scope"], "retrieval_lower_bound");
         assert_eq!(
             token_event["contract"]["usage_event_schema_version"],
-            "billing-usage-event-v1"
+            "billing-usage-event-v2"
         );
         assert_eq!(
             token_event["contract"]["metering_event_schema_version"],
-            "token-budget-event-v2"
+            "token-budget-event-v3"
         );
         assert_eq!(
             token_event["contract"]["billing_policy_version"],
@@ -11263,7 +11518,15 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_meter_alignment_version"],
-            "client-limit-meter-alignment-v1"
+            "client-limit-meter-alignment-v2"
+        );
+        assert_eq!(
+            token_event["whole_cycle_observed"]["client_prompt_tokens"],
+            30
+        );
+        assert_eq!(
+            token_event["whole_cycle_observed"]["assistant_generation_tokens"],
+            20
         );
         assert_eq!(
             token_event["contract"]["settlement_activation_governance_version"],
@@ -11398,7 +11661,7 @@ mod tests {
     #[test]
     fn usage_event_schema_contract_is_machine_readable() {
         let schema = build_usage_event_schema_json(&contract_fixture());
-        assert_eq!(schema["schema_version"], "billing-usage-event-v1");
+        assert_eq!(schema["schema_version"], "billing-usage-event-v2");
         assert_eq!(
             schema["identity"]["dedup_key_format"],
             "source_kind:event_id"
@@ -11850,7 +12113,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v1"
+            "client-limit-meter-alignment-v2"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -14058,6 +14321,12 @@ effective_to_epoch_ms = 2000
                         "pack_token_count": 400,
                         "deduped_token_count": 400
                     },
+                    "whole_cycle_observed": {
+                        "client_prompt_tokens": 90,
+                        "assistant_generation_tokens": 45,
+                        "tool_overhead_tokens": 10,
+                        "continuity_restore_tokens": 5
+                    },
                     "savings": {
                         "saved_tokens": 1100,
                         "effective_saved_tokens": 1060,
@@ -14075,6 +14344,8 @@ effective_to_epoch_ms = 2000
         assert_eq!(parsed.namespace, "continuity");
         assert_eq!(parsed.naive_tokens, 1500);
         assert_eq!(parsed.context_tokens, 400);
+        assert_eq!(parsed.client_prompt_tokens, Some(90));
+        assert_eq!(parsed.assistant_generation_tokens, Some(45));
         assert_eq!(parsed.savings_percent, 73.3333333333);
     }
 
@@ -14189,6 +14460,10 @@ effective_to_epoch_ms = 2000
                 chunks_count: 1,
                 pack_token_count: 40,
                 deduped_token_count: 40,
+                client_prompt_tokens: Some(30),
+                assistant_generation_tokens: Some(20),
+                tool_overhead_tokens: Some(10),
+                continuity_restore_tokens: Some(5),
             },
             token_event! {
                 created_at_epoch_ms: 20,
@@ -14236,6 +14511,10 @@ effective_to_epoch_ms = 2000
                 chunks_count: 1,
                 pack_token_count: 60,
                 deduped_token_count: 60,
+                client_prompt_tokens: Some(15),
+                assistant_generation_tokens: Some(12),
+                tool_overhead_tokens: Some(4),
+                continuity_restore_tokens: Some(3),
             },
         ];
 
@@ -14249,7 +14528,7 @@ effective_to_epoch_ms = 2000
             "Обычная рабочая машина",
         );
 
-        assert_eq!(economics["model_version"], "agent-cycle-lower-bound-v1");
+        assert_eq!(economics["model_version"], "agent-cycle-lower-bound-v2");
         assert_eq!(economics["status"], "partial_lower_bound");
         assert_eq!(
             economics["current_session"]["without_amai_measured_tokens"],
@@ -14286,7 +14565,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v1"
+            "client-limit-meter-alignment-v2"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["surface_kind"],
@@ -14294,7 +14573,11 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["alignment_state"],
-            "partial_lower_bound_not_meter_equivalent"
+            "whole_cycle_observed_baseline_partial"
+        );
+        assert_eq!(
+            economics["current_session"]["client_limit_meter_alignment"]["partially_measured_components"],
+            json!([])
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["live_events_count"],
@@ -14305,8 +14588,59 @@ effective_to_epoch_ms = 2000
             0
         );
         assert_eq!(
+            economics["current_session"]["observed_whole_cycle_with_amai_tokens"],
+            224
+        );
+        assert_eq!(
+            economics["current_session"]["verified_observed_whole_cycle_with_amai_tokens"],
+            105
+        );
+        assert_eq!(
             economics["current_session"]["coverage"]["completeness_state"],
             "partially_confirmed"
+        );
+    }
+
+    #[test]
+    fn client_limit_meter_alignment_marks_partial_whole_cycle_observation() {
+        let summary = json!({
+            "events_total": 2,
+            "live_events_count": 2,
+            "non_live_events_count": 0,
+            "counted_events": 2,
+            "observed_client_prompt_tokens": 30,
+            "observed_assistant_generation_tokens": 0,
+            "observed_tool_overhead_tokens": 0,
+            "observed_continuity_restore_tokens": 0,
+            "observed_client_prompt_live_events": 1,
+            "observed_assistant_generation_live_events": 0,
+            "observed_tool_overhead_live_events": 0,
+            "observed_continuity_restore_live_events": 0
+        });
+
+        let alignment = super::build_client_limit_meter_alignment(
+            &contract_fixture(),
+            "statement_preview",
+            &summary,
+            None,
+        );
+
+        assert_eq!(
+            alignment["alignment_state"],
+            "whole_cycle_partially_observed_not_meter_equivalent"
+        );
+        assert_eq!(
+            alignment["partially_measured_components"],
+            json!(["client_prompt"])
+        );
+        assert!(
+            alignment["blocking_reasons"]
+                .as_array()
+                .is_some_and(|reasons| {
+                    reasons
+                        .iter()
+                        .any(|reason| reason == "client_prompt_partially_measured")
+                })
         );
     }
 

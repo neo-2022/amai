@@ -5752,6 +5752,16 @@ fn client_limit_alignment_metric_row(alignment: &Value) -> Option<Value> {
                 format_u64(Some(live_events)),
                 format_u64(Some(non_live_events))
             ),
+            "whole_cycle_partially_observed_not_meter_equivalent" => format!(
+                "нет: cycle observed частично (live {} / non-live {})",
+                format_u64(Some(live_events)),
+                format_u64(Some(non_live_events))
+            ),
+            "whole_cycle_observed_baseline_partial" => format!(
+                "нет: cycle observed, baseline ещё partial (live {} / non-live {})",
+                format_u64(Some(live_events)),
+                format_u64(Some(non_live_events))
+            ),
             other => format!("нет: {other}"),
         }
     };
@@ -5776,6 +5786,12 @@ fn client_limit_alignment_note_sentence(alignment: &Value) -> Option<String> {
         }
         "partial_lower_bound_not_meter_equivalent" => {
             "Даже здесь это пока lower bound части агентного цикла, а не тот же полный метр, которым клиент считает лимит сессии.".to_string()
+        }
+        "whole_cycle_partially_observed_not_meter_equivalent" => {
+            "Здесь уже начали появляться observed whole-cycle компоненты, но покрытие ещё неполное, поэтому эта цифра всё ещё не эквивалентна шкале лимита клиента.".to_string()
+        }
+        "whole_cycle_observed_baseline_partial" => {
+            "Здесь whole-cycle observed компоненты уже видны по live событиям, но baseline всё ещё не эквивалентен полному клиентскому лимиту, поэтому метрика остаётся честно non-equivalent.".to_string()
         }
         other => format!(
             "Этот срез пока не эквивалентен клиентскому лимиту сессии: state={other}."
@@ -5807,6 +5823,12 @@ fn client_limit_alignment_tooltip(alignment: &Value) -> Option<String> {
         "partial_lower_bound_not_meter_equivalent" => {
             "Даже подтверждённая цифра здесь пока описывает только lower bound части агентного цикла."
         }
+        "whole_cycle_partially_observed_not_meter_equivalent" => {
+            "Whole-cycle observed компоненты уже начали materialize-иться, но покрытие по live событиям ещё неполное."
+        }
+        "whole_cycle_observed_baseline_partial" => {
+            "Whole-cycle observed компоненты уже видны по live событиям, но baseline-equivalent semantics для клиентского лимита ещё не materialized."
+        }
         _ => "Этот scope пока не эквивалентен лимиту клиента.",
     };
     let mut tooltip = String::from(
@@ -5837,6 +5859,21 @@ fn human_client_limit_alignment_reason(reason: &str) -> Option<&'static str> {
         "continuity_restore_outside_retrieval_unmeasured" => {
             Some("в этот слой пока не входит continuity-restore overhead вне retrieval")
         }
+        "client_prompt_partially_measured" => {
+            Some("токены исходного запроса клиента уже видны только на части live-событий")
+        }
+        "assistant_generation_partially_measured" => {
+            Some("токены генерации ответа уже видны только на части live-событий")
+        }
+        "tool_overhead_outside_retrieval_partially_measured" => {
+            Some("tool/orchestration overhead вне retrieval уже виден только на части live-событий")
+        }
+        "continuity_restore_outside_retrieval_partially_measured" => {
+            Some("continuity-restore overhead вне retrieval уже виден только на части live-событий")
+        }
+        "same_meter_baseline_unmeasured" => Some(
+            "whole-cycle observed слой уже виден, но baseline ещё не эквивалентен клиентскому spend meter",
+        ),
         "no_usage_observed_in_scope" => Some("в этом scope ещё не было usage-событий"),
         "no_live_usage_in_scope" => Some("в этом scope пока нет live usage"),
         "non_live_events_present_in_scope" => Some(
