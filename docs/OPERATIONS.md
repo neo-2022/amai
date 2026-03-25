@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:33 MSK
-Ручная сверка guide/docs: 2026-03-25 15:33 MSK
+modified_at: 2026-03-25 15:42 MSK
+Ручная сверка guide/docs: 2026-03-25 15:42 MSK
 
 # Operations
 
@@ -2026,6 +2026,10 @@ CLI `context pack` front door теперь тоже участвует в same-m
 - если пересечение между usable rollout IDs и текущим session/window correlation set равно
   нулю, `assistant_generation` в этом scope должен честно остаться `unmeasured`;
   это не баг surface, а truthful source-gap.
+- этот source-gap теперь обязан быть виден machine-readable в
+  `client_limit_meter_alignment.assistant_generation_observation_source`, чтобы operator
+  мог увидеть состояния `rollout_source_unavailable / no_scope_overlap /
+  partial_scope_overlap / covers_missing_scope`, а не только общую blocker-строку.
 
 Customer-facing contractual export surface теперь тоже обязан поднимать
 `adjustment_activation_governance`, чтобы future adjustment path был виден отдельно от

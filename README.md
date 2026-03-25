@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:33 MSK
-Ручная сверка guide/docs: 2026-03-25 15:33 MSK
+modified_at: 2026-03-25 15:42 MSK
+Ручная сверка guide/docs: 2026-03-25 15:42 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1484,12 +1484,18 @@ preview, а не только raw count.
     - `future settlement activation governance`
     - `future adjustment activation governance`
   - operational metering contract теперь ещё несёт:
-  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v3`
+  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v4`
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
-  - начиная с `v3` слой ещё и честно поднимает `client_prompt` как observed component
+  - начиная с `v4` слой ещё и честно поднимает `client_prompt` как observed component
     из уже записанных `query + tokenizer`, даже если старое событие не несло
     отдельный `whole_cycle_observed.client_prompt_tokens`.
+  - тот же `v4` теперь ещё публикует
+    `assistant_generation_observation_source`, чтобы `current_session /
+    rolling_window` можно было объяснить не только общей missing-меткой, но и
+    machine-readable source-gap причиной:
+    `rollout_source_unavailable / rollout_source_no_scope_overlap /
+    rollout_source_partial_scope_overlap / rollout_source_covers_missing_scope`.
   - statement/reconciliation path теперь тоже перестал быть retrieval-only:
     внутренний meter lower bound для provider drift/cost preview поднимается от
     `delivered + recovery` к `observed whole-cycle lower bound`, как только такие
@@ -1550,6 +1556,10 @@ preview, а не только raw count.
     если usable rollout `context_pack_id` не пересекаются с `current_session /
     rolling_window` correlation set, `assistant_generation` в этих scope честно остаётся
     unmeasured, даже если lifetime уже начал получать rollout-backed observed values;
+  - теперь этот gap не прячется внутри общей blocker-строки:
+    `client_limit_meter_alignment` отдельно публикует
+    `assistant_generation_observation_source`, чтобы оператор видел, есть ли
+    rollout source вообще и покрывает ли он missing live scope;
   - `continuity startup` тоже начал материализовать self-observed component:
     он может записывать `continuity_restore_tokens` от собственного `CHAT_START_RESTORE`
     prompt-text, а engineering/proof вызовы обязаны уводить это в `proof_/verify_`

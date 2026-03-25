@@ -509,7 +509,7 @@ fn default_agent_cycle_model_version() -> String {
 }
 
 fn default_client_limit_meter_alignment_version() -> String {
-    "client-limit-meter-alignment-v3".to_string()
+    "client-limit-meter-alignment-v4".to_string()
 }
 
 fn default_excluded_taxonomy_version() -> String {
@@ -5150,6 +5150,7 @@ fn build_statement_preview(
     rate_card: &Value,
     reconciliation_contract: &Value,
     metering_freshness: &Value,
+    rollout_observations: &[codex_threads::RolloutAssistantGenerationObservation],
 ) -> Value {
     let adjustment_preview =
         build_adjustment_preview_json(scope_code, contract, adjustment_registry);
@@ -5285,6 +5286,7 @@ fn build_statement_preview(
             "statement_preview",
             summary,
             Some(events),
+            Some(rollout_observations),
         ),
         "freshness": metering_freshness.clone(),
         "internal_delivered_tokens": internal_delivered_tokens,
@@ -6794,14 +6796,20 @@ pub async fn observe_rollout_assistant_generation(
     Ok(())
 }
 
+fn rollout_assistant_generation_observations_for_repo(
+    repo_root: &Path,
+) -> Result<Vec<codex_threads::RolloutAssistantGenerationObservation>> {
+    let Some(repo_root_str) = repo_root.to_str() else {
+        return Ok(Vec::new());
+    };
+    codex_threads::rollout_assistant_generation_observations(repo_root_str, None)
+}
+
 async fn sync_rollout_assistant_generation_for_events(
     db: &Client,
-    repo_root: &Path,
     events: &[TokenBudgetEvent],
+    observations: &[codex_threads::RolloutAssistantGenerationObservation],
 ) -> Result<bool> {
-    let Some(repo_root_str) = repo_root.to_str() else {
-        return Ok(false);
-    };
     let target_context_pack_ids = events
         .iter()
         .filter(|event| {
@@ -6815,8 +6823,6 @@ async fn sync_rollout_assistant_generation_for_events(
     if target_context_pack_ids.is_empty() {
         return Ok(false);
     }
-    let observations =
-        codex_threads::rollout_assistant_generation_observations(repo_root_str, None)?;
     if observations.is_empty() {
         return Ok(false);
     }
@@ -6957,11 +6963,12 @@ async fn collect_report(
 ) -> Result<Value> {
     let config = load_config(repo_root)?;
     let profile = resolve_profile(&config, requested_profile, repo_root)?;
+    let rollout_observations = rollout_assistant_generation_observations_for_repo(repo_root)?;
     let mut events = load_events(db, include_verify_events, limit).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
     let mut events =
         reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
-    if sync_rollout_assistant_generation_for_events(db, repo_root, &events).await? {
+    if sync_rollout_assistant_generation_for_events(db, &events, &rollout_observations).await? {
         let mut refreshed = load_events(db, include_verify_events, limit).await?;
         refreshed.sort_by_key(|event| event.created_at_epoch_ms);
         events =
@@ -7032,6 +7039,7 @@ async fn collect_report(
             .map(|_| rolling_window_events.as_slice()),
         &events,
         &profile.display_name,
+        &rollout_observations,
     );
     let current_session_metering_freshness = build_metering_freshness_summary(
         &config.contract,
@@ -7085,6 +7093,7 @@ async fn collect_report(
         &rate_card,
         &reconciliation_contract,
         &current_session_metering_freshness,
+        &rollout_observations,
     );
     let rolling_window_statement_preview = if profile.rolling_window_hours.is_some() {
         build_statement_preview(
@@ -7099,6 +7108,7 @@ async fn collect_report(
             &rate_card,
             &reconciliation_contract,
             &rolling_window_metering_freshness,
+            &rollout_observations,
         )
     } else {
         Value::Null
@@ -7115,6 +7125,7 @@ async fn collect_report(
         &rate_card,
         &reconciliation_contract,
         &lifetime_metering_freshness,
+        &rollout_observations,
     );
     let current_session_reconciliation_preview = build_reconciliation_preview(
         "current_session",
@@ -9374,11 +9385,70 @@ fn client_limit_meter_alignment_state(
     }
 }
 
+fn assistant_generation_missing_scope_context_pack_ids(
+    events: Option<&[TokenBudgetEvent]>,
+) -> BTreeSet<String> {
+    events
+        .into_iter()
+        .flatten()
+        .filter(|event| {
+            event.traffic_class == "live"
+                && event.measurement_scope == "retrieval_lower_bound"
+                && event.assistant_generation_tokens.is_none()
+        })
+        .map(|event| event.correlation_id.clone())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn assistant_generation_observation_source_status(
+    events: Option<&[TokenBudgetEvent]>,
+    rollout_observations: Option<&[codex_threads::RolloutAssistantGenerationObservation]>,
+) -> Value {
+    let target_ids = assistant_generation_missing_scope_context_pack_ids(events);
+    let available_ids = rollout_observations
+        .into_iter()
+        .flatten()
+        .map(|observation| observation.context_pack_id.clone())
+        .collect::<BTreeSet<_>>();
+    let matched_ids = target_ids
+        .intersection(&available_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+    let unmatched_ids = target_ids
+        .difference(&available_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+    let state = if target_ids.is_empty() {
+        "no_missing_live_retrieval_events"
+    } else if available_ids.is_empty() {
+        "rollout_source_unavailable"
+    } else if matched_ids.is_empty() {
+        "rollout_source_no_scope_overlap"
+    } else if matched_ids.len() < target_ids.len() {
+        "rollout_source_partial_scope_overlap"
+    } else {
+        "rollout_source_covers_missing_scope"
+    };
+    json!({
+        "source_kind": "codex_rollout_last_token_usage_sum_v1",
+        "state": state,
+        "usable_rollout_context_pack_ids": available_ids.len(),
+        "target_missing_context_pack_ids": target_ids.len(),
+        "matched_context_pack_ids": matched_ids.len(),
+        "unmatched_context_pack_ids": unmatched_ids.len(),
+        "matched_context_pack_id_sample": matched_ids.into_iter().take(8).collect::<Vec<_>>(),
+        "unmatched_context_pack_id_sample": unmatched_ids.into_iter().take(8).collect::<Vec<_>>(),
+        "note": "Этот слой показывает не общий факт missing assistant_generation, а покрывает ли доступный rollout source именно текущий live retrieval scope."
+    })
+}
+
 fn build_client_limit_meter_alignment(
     contract: &TokenBudgetContractConfig,
     surface_kind: &str,
     summary: &Value,
     events: Option<&[TokenBudgetEvent]>,
+    rollout_observations: Option<&[codex_threads::RolloutAssistantGenerationObservation]>,
 ) -> Value {
     let (events_total, live_events_count, non_live_events_count, counted_events) =
         client_limit_meter_alignment_counts(summary, events);
@@ -9400,6 +9470,22 @@ fn build_client_limit_meter_alignment(
             }
         }
     }
+    let assistant_generation_observation_source =
+        assistant_generation_observation_source_status(events, rollout_observations);
+    let mut blocking_reasons = client_limit_meter_alignment_blocking_reasons(summary, events);
+    match assistant_generation_observation_source["state"].as_str().unwrap_or_default() {
+        "rollout_source_unavailable" => {
+            blocking_reasons.push("assistant_generation_rollout_source_unavailable".to_string());
+        }
+        "rollout_source_no_scope_overlap" => {
+            blocking_reasons.push("assistant_generation_rollout_source_no_scope_overlap".to_string());
+        }
+        "rollout_source_partial_scope_overlap" => {
+            blocking_reasons
+                .push("assistant_generation_rollout_source_partial_scope_overlap".to_string());
+        }
+        _ => {}
+    }
     json!({
         "model_version": contract.client_limit_meter_alignment_version.clone(),
         "surface_kind": surface_kind,
@@ -9413,7 +9499,8 @@ fn build_client_limit_meter_alignment(
         "partially_measured_components": partially_measured_components,
         "missing_components": missing_components,
         "component_event_coverage": component_coverage,
-        "blocking_reasons": client_limit_meter_alignment_blocking_reasons(summary, events),
+        "blocking_reasons": blocking_reasons,
+        "assistant_generation_observation_source": assistant_generation_observation_source,
         "note": "Этот слой честно показывает, что текущие savings пока считаются как lower-bound части агентного цикла. Whole-cycle observed components могут постепенно materialize-иться, но same meter с клиентским лимитом нельзя объявлять раньше, чем появится и полное observed покрытие, и baseline-equivalent semantics."
     })
 }
@@ -9426,6 +9513,7 @@ fn build_agent_cycle_economics(
     rolling_window_events: Option<&[TokenBudgetEvent]>,
     lifetime_events: &[TokenBudgetEvent],
     rolling_window_label: &str,
+    rollout_observations: &[codex_threads::RolloutAssistantGenerationObservation],
 ) -> Value {
     json!({
         "model_version": contract.agent_cycle_model_version.clone(),
@@ -9534,6 +9622,7 @@ fn build_agent_cycle_economics(
             "текущая сессия",
             current_session_events,
             AGENT_CYCLE_TIMELINE_MAX_POINTS / 2,
+            rollout_observations,
         ),
         "rolling_window": rolling_window_events
             .map(|events| {
@@ -9545,6 +9634,7 @@ fn build_agent_cycle_economics(
                     &format!("окно {}", rolling_window_label),
                     events,
                     AGENT_CYCLE_TIMELINE_MAX_POINTS,
+                    rollout_observations,
                 )
             })
             .unwrap_or(Value::Null),
@@ -9556,6 +9646,7 @@ fn build_agent_cycle_economics(
             "всё время записи",
             lifetime_events,
             AGENT_CYCLE_TIMELINE_MAX_POINTS,
+            rollout_observations,
         ),
     })
 }
@@ -9568,6 +9659,7 @@ fn build_agent_cycle_scope(
     scope_label: &str,
     events: &[TokenBudgetEvent],
     max_points: usize,
+    rollout_observations: &[codex_threads::RolloutAssistantGenerationObservation],
 ) -> Value {
     let live_events = events
         .iter()
@@ -9608,6 +9700,7 @@ fn build_agent_cycle_scope(
             "agent_cycle_scope",
             &summary,
             Some(&live_events),
+            Some(rollout_observations),
         ),
         "observed_client_prompt_tokens": summary["observed_client_prompt_tokens"].clone(),
         "observed_assistant_generation_tokens": summary["observed_assistant_generation_tokens"].clone(),
@@ -12127,7 +12220,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_meter_alignment_version"],
-            "client-limit-meter-alignment-v3"
+            "client-limit-meter-alignment-v4"
         );
         assert_eq!(
             token_event["whole_cycle_observed"]["client_prompt_tokens"],
@@ -12628,6 +12721,7 @@ effective_to_epoch_ms = 2000
             &rate_card,
             &reconciliation_contract,
             &freshness,
+            &[],
         );
 
         assert_eq!(
@@ -12722,7 +12816,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v3"
+            "client-limit-meter-alignment-v4"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -12789,6 +12883,7 @@ effective_to_epoch_ms = 2000
             &rate_card,
             &reconciliation_contract,
             &freshness,
+            &[],
         );
 
         assert_eq!(
@@ -12885,6 +12980,7 @@ effective_to_epoch_ms = 2000
             &rate_card,
             &reconciliation_contract,
             &freshness,
+            &[],
         );
 
         assert_eq!(preview["internal_delivered_tokens"], 200);
@@ -13062,6 +13158,7 @@ effective_to_epoch_ms = 2000
             &rate_card,
             &reconciliation_contract,
             &freshness,
+            &[],
         );
         let reconciliation = build_reconciliation_preview(
             "current_session",
@@ -13236,6 +13333,7 @@ effective_to_epoch_ms = 2000
             &rate_card,
             &reconciliation_contract,
             &freshness,
+            &[],
         );
         let reconciliation = build_reconciliation_preview(
             "lifetime",
@@ -13368,6 +13466,7 @@ effective_to_epoch_ms = 2000
             &rate_card,
             &reconciliation_contract,
             &freshness,
+            &[],
         );
         let reconciliation = build_reconciliation_preview(
             "current_session",
@@ -13518,6 +13617,7 @@ effective_to_epoch_ms = 2000
             &rate_card,
             &reconciliation_contract,
             &freshness,
+            &[],
         );
         let reconciliation = build_reconciliation_preview(
             "current_session",
@@ -13688,6 +13788,7 @@ effective_to_epoch_ms = 2000
             &rate_card,
             &reconciliation_contract,
             &freshness,
+            &[],
         );
         let reconciliation = build_reconciliation_preview(
             "current_session",
@@ -13802,6 +13903,7 @@ effective_to_epoch_ms = 2000
             &rate_card,
             &reconciliation_contract,
             &freshness,
+            &[],
         );
         let reconciliation = build_reconciliation_preview(
             "current_session",
@@ -15204,6 +15306,7 @@ effective_to_epoch_ms = 2000
             Some(&events),
             &events,
             "Обычная рабочая машина",
+            &[],
         );
 
         assert_eq!(economics["model_version"], "agent-cycle-lower-bound-v3");
@@ -15243,7 +15346,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v3"
+            "client-limit-meter-alignment-v4"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["surface_kind"],
@@ -15301,6 +15404,7 @@ effective_to_epoch_ms = 2000
             "statement_preview",
             &summary,
             None,
+            None,
         );
 
         assert_eq!(
@@ -15354,6 +15458,7 @@ effective_to_epoch_ms = 2000
             "statement_preview",
             &summary,
             Some(&events),
+            None,
         );
         assert_eq!(
             alignment["alignment_state"],

@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:33 MSK
-Ручная сверка guide/docs: 2026-03-25 15:33 MSK
+modified_at: 2026-03-25 15:42 MSK
+Ручная сверка guide/docs: 2026-03-25 15:42 MSK
 
 # Token Ledger
 
@@ -439,7 +439,7 @@ Ledger обязан различать:
 - частично наблюдаемые whole-cycle компоненты;
 - whole-cycle observed компоненты при всё ещё partial baseline.
 
-Начиная с `client-limit-meter-alignment-v3` `client_prompt` считается observed component
+Начиная с `client-limit-meter-alignment-v4` `client_prompt` считается observed component
 не только если он явно пришёл в `whole_cycle_observed`, но и как derived fallback из
 уже записанных `query + tokenizer`. Это нужно затем, чтобы progress к client-limit meter
 был виден честно даже на исторических live events, где старый payload ещё не нёс
@@ -450,9 +450,23 @@ Ledger обязан различать:
 - `component_event_coverage`;
 - state `whole_cycle_partially_observed_not_meter_equivalent`;
 - state `whole_cycle_observed_baseline_partial`.
+- `assistant_generation_observation_source`.
 
 Это нужно затем, чтобы progress к реальному client-limit meter был виден честно, без
 ложного переключения `same_meter_as_client_limit=true` раньше времени.
+
+`assistant_generation_observation_source` обязан показывать не просто общий blocker
+`assistant_generation_unmeasured`, а конкретный source-gap:
+- `rollout_source_unavailable`
+- `rollout_source_no_scope_overlap`
+- `rollout_source_partial_scope_overlap`
+- `rollout_source_covers_missing_scope`
+
+Это нужно затем, чтобы оператор мог отличить:
+- отсутствие usable rollout source вообще;
+- отсутствие пересечения между usable rollout IDs и текущим live scope;
+- частичное покрытие missing scope;
+- достаточное покрытие при всё ещё неcomplete same-meter path.
 
 Начиная с этого же слоя whole-cycle evidence можно подавать и в runtime path:
 - `ContextPackArgs` / CLI context-pack умеют принимать optional observed fields:
@@ -1187,7 +1201,7 @@ Hashes по line items нужны затем, чтобы:
 - `contractual-statement-export-v18`
 - `settlement-report-preview-v9`
 - `contractual-evidence-pack-v18`
-- `client-limit-meter-alignment-v3`
+- `client-limit-meter-alignment-v4`
 - `adjustment-activation-governance-v1`
 
 Теперь те же customer-facing surface-ы ещё несут `adjustment_activation_governance`.
