@@ -124,6 +124,28 @@ pub struct ObservabilitySnapshotRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct ExecCtlTaskLedgerEntryRecord {
+    pub ledger_entry_id: Uuid,
+    pub source_snapshot_id: Option<Uuid>,
+    pub source_event_id: String,
+    pub event_kind: String,
+    pub source_kind: String,
+    pub agent_scope: String,
+    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub headline: String,
+    pub next_step: String,
+    pub summary: String,
+    pub active_files: Value,
+    pub open_questions: Value,
+    pub materialized_notes: Value,
+    pub pending_return_queue: Value,
+    pub local_path: Option<String>,
+    pub recorded_at_epoch_ms: i64,
+    pub created_at_epoch_ms: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ObservabilityRetentionCandidate {
     pub snapshot_id: Uuid,
     pub snapshot_kind: String,
@@ -211,6 +233,28 @@ pub struct ContextPackInsert<'a> {
     pub visible_projects: &'a Value,
     pub payload: &'a Value,
     pub artifact_ref_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecCtlTaskLedgerEntryInsert<'a> {
+    pub project_id: Uuid,
+    pub namespace_id: Uuid,
+    pub agent_scope: &'a str,
+    pub session_id: Option<&'a str>,
+    pub thread_id: Option<&'a str>,
+    pub source_snapshot_id: Option<Uuid>,
+    pub source_event_id: &'a str,
+    pub event_kind: &'a str,
+    pub source_kind: &'a str,
+    pub headline: &'a str,
+    pub next_step: &'a str,
+    pub summary: &'a str,
+    pub active_files: &'a Value,
+    pub open_questions: &'a Value,
+    pub materialized_notes: &'a Value,
+    pub pending_return_queue: &'a Value,
+    pub local_path: Option<&'a str>,
+    pub recorded_at_epoch_ms: i64,
 }
 
 pub async fn connect_admin(cfg: &AppConfig) -> Result<Client> {
@@ -1752,6 +1796,152 @@ pub async fn insert_observability_snapshot(
         existing_source_event_id.as_deref(),
         existing_captured_at_epoch_ms,
     ))
+}
+
+pub async fn insert_execctl_task_ledger_entry(
+    client: &Client,
+    entry: &ExecCtlTaskLedgerEntryInsert<'_>,
+) -> Result<Uuid> {
+    if entry.source_event_id.trim().is_empty() {
+        return Err(anyhow!("execctl task ledger source_event_id must not be empty"));
+    }
+    if entry.agent_scope.trim().is_empty() {
+        return Err(anyhow!("execctl task ledger agent_scope must not be empty"));
+    }
+    let inserted = client
+        .query_opt(
+            r#"
+            INSERT INTO ami.execctl_task_ledger_entries(
+                project_id,
+                namespace_id,
+                agent_scope,
+                session_id,
+                thread_id,
+                source_snapshot_id,
+                source_event_id,
+                event_kind,
+                source_kind,
+                headline,
+                next_step,
+                summary,
+                active_files,
+                open_questions,
+                materialized_notes,
+                pending_return_queue,
+                local_path,
+                recorded_at_epoch_ms
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+            )
+            ON CONFLICT (source_event_id) DO NOTHING
+            RETURNING ledger_entry_id
+            "#,
+            &[
+                &entry.project_id,
+                &entry.namespace_id,
+                &entry.agent_scope,
+                &entry.session_id,
+                &entry.thread_id,
+                &entry.source_snapshot_id,
+                &entry.source_event_id,
+                &entry.event_kind,
+                &entry.source_kind,
+                &entry.headline,
+                &entry.next_step,
+                &entry.summary,
+                entry.active_files,
+                entry.open_questions,
+                entry.materialized_notes,
+                entry.pending_return_queue,
+                &entry.local_path,
+                &entry.recorded_at_epoch_ms,
+            ],
+        )
+        .await
+        .context("failed to insert execctl task ledger entry")?;
+    if let Some(row) = inserted {
+        return Ok(row.get(0));
+    }
+
+    let existing = client
+        .query_one(
+            r#"
+            SELECT ledger_entry_id
+            FROM ami.execctl_task_ledger_entries
+            WHERE source_event_id = $1
+            "#,
+            &[&entry.source_event_id],
+        )
+        .await
+        .context("failed to resolve existing execctl task ledger entry")?;
+    Ok(existing.get(0))
+}
+
+pub async fn list_execctl_task_ledger_entries(
+    client: &Client,
+    project_id: Uuid,
+    namespace_id: Uuid,
+    agent_scope: &str,
+    limit: Option<i64>,
+) -> Result<Vec<ExecCtlTaskLedgerEntryRecord>> {
+    let limit = limit.unwrap_or(i64::MAX);
+    let rows = client
+        .query(
+            r#"
+            SELECT
+                ledger_entry_id,
+                source_snapshot_id,
+                source_event_id,
+                event_kind,
+                source_kind,
+                agent_scope,
+                session_id,
+                thread_id,
+                headline,
+                next_step,
+                summary,
+                active_files,
+                open_questions,
+                materialized_notes,
+                pending_return_queue,
+                local_path,
+                recorded_at_epoch_ms,
+                (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms
+            FROM ami.execctl_task_ledger_entries
+            WHERE project_id = $1
+              AND namespace_id = $2
+              AND agent_scope = $3
+            ORDER BY recorded_at_epoch_ms DESC, created_at DESC
+            LIMIT $4
+            "#,
+            &[&project_id, &namespace_id, &agent_scope, &limit],
+        )
+        .await
+        .context("failed to list execctl task ledger entries")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ExecCtlTaskLedgerEntryRecord {
+            ledger_entry_id: row.get(0),
+            source_snapshot_id: row.get(1),
+            source_event_id: row.get(2),
+            event_kind: row.get(3),
+            source_kind: row.get(4),
+            agent_scope: row.get(5),
+            session_id: row.get(6),
+            thread_id: row.get(7),
+            headline: row.get(8),
+            next_step: row.get(9),
+            summary: row.get(10),
+            active_files: row.get(11),
+            open_questions: row.get(12),
+            materialized_notes: row.get(13),
+            pending_return_queue: row.get(14),
+            local_path: row.get(15),
+            recorded_at_epoch_ms: row.get(16),
+            created_at_epoch_ms: row.get(17),
+        })
+        .collect())
 }
 
 pub async fn delete_observability_snapshots_by_scope(

@@ -55,9 +55,19 @@ jq -e '.working_state_restore.project_task_tree.open_tasks_count == 2' "${restor
 jq -e '.working_state_restore.project_task_tree.nodes[0].task_role == "active"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_tree.nodes[1].task_role == "pending_return"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_tree_summary | contains("pending_return(1)")' "${restore_output}" >/dev/null
-jq -e '.working_state_restore.project_task_ledger.ledger_version == "project-task-ledger-v1"' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_ledger.ledger_version == "project-task-ledger-v2"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_ledger.open_tasks_count == 2' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_ledger.persistence_state == "durable_postgres"' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_ledger.storage_lane == "ami.execctl_task_ledger_entries"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_ledger.entries[0].task_role == "active"' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_ledger.entries[0].ledger_entry_id | length > 0' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_ledger_summary | contains("historical_handoffs(0)")' "${restore_output}" >/dev/null
+
+ledger_count="$(psql "${dsn}" -Atqc \
+  "SELECT COUNT(*)
+     FROM ami.execctl_task_ledger_entries e
+     JOIN ami.projects p ON p.project_id = e.project_id
+    WHERE p.code = '${project_code}'")"
+[ "${ledger_count}" = "2" ]
 
 printf 'proof_execctl_pending_return: PASS\n'

@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 22:10 MSK
-Ручная сверка guide/docs: 2026-03-25 22:10 MSK
+modified_at: 2026-03-25 21:18 MSK
+Ручная сверка guide/docs: 2026-03-25 21:18 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -87,6 +87,12 @@ modified_at: 2026-03-25 22:10 MSK
 - confidence recovery.
 
 То есть новый чат теперь должен видеть не только summary “о чём проект”, а уже компактный готовый стартовый контекст для продолжения работы.
+
+Поверх этого `ExecCtl` теперь уже держит и durable project-bound task ledger в `PostgreSQL`.
+Это значит:
+- task inventory больше не живёт только внутри текущего restore-window;
+- continuity handoff пишет append-only task entry в SQL;
+- startup/restore поднимает project task ledger уже из durable storage lane, а restore-side ledger остаётся fallback/shadow-путём.
 
 Важно: continuity должна переживать не только новый чат, но и смену окна, IDE и локализации проекта.
 Для этого `Amai` держит project identity не только через один текущий `repo_root`, а через

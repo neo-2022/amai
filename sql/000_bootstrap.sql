@@ -549,6 +549,35 @@ BEFORE INSERT OR UPDATE ON ami.observability_snapshots
 FOR EACH ROW
 EXECUTE FUNCTION ami.fill_observability_snapshot_defaults();
 
+CREATE TABLE IF NOT EXISTS ami.execctl_task_ledger_entries (
+    ledger_entry_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    namespace_id UUID NOT NULL REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
+    agent_scope TEXT NOT NULL CHECK (btrim(agent_scope) <> ''),
+    session_id TEXT,
+    thread_id TEXT,
+    source_snapshot_id UUID REFERENCES ami.observability_snapshots(snapshot_id) ON DELETE SET NULL,
+    source_event_id TEXT NOT NULL UNIQUE CHECK (btrim(source_event_id) <> ''),
+    event_kind TEXT NOT NULL CHECK (event_kind IN ('continuity_handoff')),
+    source_kind TEXT NOT NULL,
+    headline TEXT NOT NULL,
+    next_step TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    active_files JSONB NOT NULL DEFAULT '[]'::jsonb,
+    open_questions JSONB NOT NULL DEFAULT '[]'::jsonb,
+    materialized_notes JSONB NOT NULL DEFAULT '[]'::jsonb,
+    pending_return_queue JSONB NOT NULL DEFAULT '[]'::jsonb,
+    local_path TEXT,
+    recorded_at_epoch_ms BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_execctl_task_ledger_scope_recorded
+    ON ami.execctl_task_ledger_entries(project_id, namespace_id, agent_scope, recorded_at_epoch_ms DESC);
+
+CREATE INDEX IF NOT EXISTS idx_execctl_task_ledger_snapshot
+    ON ami.execctl_task_ledger_entries(source_snapshot_id);
+
 CREATE INDEX IF NOT EXISTS idx_ami_namespaces_project ON ami.namespaces(project_id);
 CREATE INDEX IF NOT EXISTS idx_ami_relations_source_target ON ami.project_relations(source_project_id, target_project_id);
 CREATE INDEX IF NOT EXISTS idx_ami_documents_project_namespace ON ami.code_documents(project_id, namespace_id);

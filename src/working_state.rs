@@ -1,4 +1,6 @@
-use crate::postgres::{self, NamespaceRecord, ObservabilitySnapshotRecord, ProjectRecord};
+use crate::postgres::{
+    self, ExecCtlTaskLedgerEntryRecord, NamespaceRecord, ObservabilitySnapshotRecord, ProjectRecord,
+};
 use crate::retrieval_science;
 use crate::token_budget;
 use crate::workspace_graph;
@@ -21,8 +23,9 @@ const MAX_OPEN_QUESTIONS: usize = 6;
 const MAX_MATERIALIZED_NOTES: usize = 6;
 const MAX_RECENT_DECISION_TRACES: usize = 3;
 const MAX_PENDING_RETURN_QUEUE: usize = 6;
+const MAX_EXECCTL_LEDGER_ENTRIES: i64 = 256;
 const PROJECT_TASK_TREE_VERSION: &str = "project-task-tree-v1";
-const PROJECT_TASK_LEDGER_VERSION: &str = "project-task-ledger-v1";
+const PROJECT_TASK_LEDGER_VERSION: &str = "project-task-ledger-v2";
 
 pub async fn record_handoff_event(
     db: &Client,
@@ -54,10 +57,15 @@ pub async fn record_handoff_event(
         recorded_at_epoch_ms,
     )
     .await?;
+    let event_id = Uuid::new_v4().to_string();
     let active_files = extract_paths_from_text(details);
+    let recent_paths = active_files.clone();
+    let summary = summarize_details(details, headline, &next_step);
+    let open_questions = derive_open_questions(details);
+    let materialized_notes = extract_materialized_notes(details);
     let payload = json!({
         "working_state_event": {
-            "event_id": Uuid::new_v4().to_string(),
+            "event_id": event_id,
             "project": project_json(project),
             "namespace": namespace_json(namespace),
             "recorded_at_epoch_ms": recorded_at_epoch_ms,
@@ -68,24 +76,49 @@ pub async fn record_handoff_event(
             "source_kind": "continuity_handoff",
             "headline": headline,
             "next_step_hint": next_step,
-            "summary": summarize_details(details, headline, &next_step),
+            "summary": summary,
             "active_files": active_files,
-            "recent_paths": extract_paths_from_text(details),
+            "recent_paths": recent_paths,
             "visible_projects": vec![project.code.clone()],
             "query": Value::Null,
             "query_type": Value::Null,
             "target_kind": "handoff",
             "current_hypothesis": extract_first_question(details),
             "rejected_hypotheses": Vec::<String>::new(),
-            "open_questions": derive_open_questions(details),
-            "materialized_notes": extract_materialized_notes(details),
+            "open_questions": open_questions,
+            "materialized_notes": materialized_notes,
             "pending_return_queue": pending_return_queue,
             "last_command": "continuity handoff".to_string(),
             "last_results_summary": format!("Зафиксирован handoff для {} :: {}", project.code, namespace.code),
             "local_path": local_path,
         }
     });
-    postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
+    let snapshot_id =
+        postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
+    postgres::insert_execctl_task_ledger_entry(
+        db,
+        &postgres::ExecCtlTaskLedgerEntryInsert {
+            project_id: project.project_id,
+            namespace_id: namespace.namespace_id,
+            agent_scope: &agent_scope,
+            session_id: Some(session_id.as_str()),
+            thread_id: thread_id.as_deref(),
+            source_snapshot_id: Some(snapshot_id),
+            source_event_id: event_id.as_str(),
+            event_kind: "continuity_handoff",
+            source_kind: "continuity_handoff",
+            headline,
+            next_step: &next_step,
+            summary: summary.as_str(),
+            active_files: &payload["working_state_event"]["active_files"],
+            open_questions: &payload["working_state_event"]["open_questions"],
+            materialized_notes: &payload["working_state_event"]["materialized_notes"],
+            pending_return_queue: &payload["working_state_event"]["pending_return_queue"],
+            local_path: Some(local_path),
+            recorded_at_epoch_ms: recorded_at_epoch_ms as i64,
+        },
+    )
+    .await?;
     refresh_restore_snapshot(db, project, namespace).await?;
     Ok(())
 }
@@ -231,26 +264,37 @@ pub async fn build_restore_bundle(
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
 ) -> Result<Option<Value>> {
+    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
     let snapshots = postgres::list_observability_snapshots_by_kinds(
         db,
         &[WORKING_STATE_EVENT_KIND],
         Some(MAX_RESTORE_EVENTS),
     )
     .await?;
-    let events = select_relevant_events(
-        snapshots,
-        &project.code,
-        &namespace.code,
-        &current_agent_scope_for(&project.code, &namespace.code),
-    );
+    let events = select_relevant_events(snapshots, &project.code, &namespace.code, &agent_scope);
     if events.is_empty() {
         return Ok(None);
     }
-    Ok(Some(compose_restore_bundle(
+    let mut bundle = compose_restore_bundle(
         &project_json(project),
         &namespace_json(namespace),
         &events,
-    )))
+    );
+    let durable_entries = postgres::list_execctl_task_ledger_entries(
+        db,
+        project.project_id,
+        namespace.namespace_id,
+        &agent_scope,
+        Some(MAX_EXECCTL_LEDGER_ENTRIES),
+    )
+    .await?;
+    overlay_durable_project_task_ledger(
+        &mut bundle,
+        &project_json(project),
+        &namespace_json(namespace),
+        &durable_entries,
+    );
+    Ok(Some(bundle))
 }
 
 pub fn print_restore_bundle_human(restore: &Value) {
@@ -1711,6 +1755,8 @@ fn build_project_task_ledger(
         "entries_count": entries.len(),
         "open_tasks_count": open_tasks_count,
         "historical_handoffs_count": historical_handoffs_count,
+        "persistence_state": "restore_side_only",
+        "storage_lane": "working_state_restore_window",
         "entries": entries,
     })
 }
@@ -1738,6 +1784,150 @@ fn summarize_project_task_ledger(value: &Value) -> Option<String> {
     Some(format!(
         "active: {active_headline}; pending_return({pending}); historical_handoffs({historical})"
     ))
+}
+
+fn overlay_durable_project_task_ledger(
+    bundle: &mut Value,
+    project: &Value,
+    namespace: &Value,
+    durable_entries: &[ExecCtlTaskLedgerEntryRecord],
+) {
+    let Some(restore) = bundle
+        .get_mut("working_state_restore")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if durable_entries.is_empty() {
+        if let Some(ledger) = restore
+            .get_mut("project_task_ledger")
+            .and_then(Value::as_object_mut)
+        {
+            ledger.insert("persistence_state".to_string(), json!("restore_side_only"));
+            ledger.insert(
+                "storage_lane".to_string(),
+                json!("working_state_restore_window"),
+            );
+        }
+        return;
+    }
+
+    let pending_return_queue = restore
+        .get("pending_return_queue")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let authoritative_event_id = restore
+        .get("state_lineage")
+        .and_then(|value| value["authoritative_event_id"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    let ledger = build_durable_project_task_ledger(
+        project,
+        namespace,
+        durable_entries,
+        &authoritative_event_id,
+        &pending_return_queue,
+    );
+    let summary = summarize_project_task_ledger(&ledger);
+    restore.insert("project_task_ledger".to_string(), ledger);
+    if let Some(summary) = summary {
+        restore.insert("project_task_ledger_summary".to_string(), json!(summary));
+    }
+}
+
+fn build_durable_project_task_ledger(
+    project: &Value,
+    namespace: &Value,
+    entries: &[ExecCtlTaskLedgerEntryRecord],
+    authoritative_event_id: &str,
+    pending_return_queue: &Value,
+) -> Value {
+    let project_code = project["code"].as_str().unwrap_or_default();
+    let namespace_code = namespace["code"].as_str().unwrap_or_default();
+    let pending_event_ids = pending_return_queue
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["authoritative_event_id"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let mut serialized_entries = Vec::new();
+
+    for entry in entries {
+        let task_role =
+            if !authoritative_event_id.is_empty() && entry.source_event_id == authoritative_event_id
+            {
+                "active"
+            } else if pending_event_ids
+                .iter()
+                .any(|value| value == &entry.source_event_id)
+            {
+                "pending_return"
+            } else {
+                "historical_handoff"
+            };
+        let task_state = match task_role {
+            "active" => "active",
+            "pending_return" => "suspended",
+            _ => "superseded",
+        };
+        let resume_state = match task_role {
+            "active" => "active",
+            "pending_return" => "pending_return",
+            _ => "historical_only",
+        };
+        serialized_entries.push(json!({
+            "ledger_entry_id": entry.ledger_entry_id.to_string(),
+            "task_id": format!("task::{}", entry.source_event_id),
+            "headline": entry.headline,
+            "next_step": entry.next_step,
+            "summary": entry.summary,
+            "task_role": task_role,
+            "task_state": task_state,
+            "resume_state": resume_state,
+            "authoritative_event_id": entry.source_event_id,
+            "recorded_at_epoch_ms": entry.recorded_at_epoch_ms,
+            "created_at_epoch_ms": entry.created_at_epoch_ms,
+            "event_kind": entry.event_kind,
+            "source_kind": entry.source_kind,
+            "source_snapshot_id": entry.source_snapshot_id.map(|value| value.to_string()),
+            "agent_scope": entry.agent_scope,
+            "session_id": entry.session_id,
+            "thread_id": entry.thread_id,
+            "active_files": entry.active_files,
+            "open_questions": entry.open_questions,
+            "materialized_notes": entry.materialized_notes,
+            "pending_return_queue": entry.pending_return_queue,
+            "local_path": entry.local_path,
+        }));
+    }
+
+    let open_tasks_count = serialized_entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry["task_role"].as_str().unwrap_or_default(),
+                "active" | "pending_return"
+            )
+        })
+        .count();
+    let historical_handoffs_count = serialized_entries
+        .iter()
+        .filter(|entry| entry["task_role"].as_str() == Some("historical_handoff"))
+        .count();
+
+    json!({
+        "ledger_version": PROJECT_TASK_LEDGER_VERSION,
+        "project_code": project_code,
+        "namespace_code": namespace_code,
+        "entries_count": serialized_entries.len(),
+        "open_tasks_count": open_tasks_count,
+        "historical_handoffs_count": historical_handoffs_count,
+        "persistence_state": "durable_postgres",
+        "storage_lane": "ami.execctl_task_ledger_entries",
+        "entries": serialized_entries,
+    })
 }
 
 fn normalize_next_step_hint(value: &str) -> String {
@@ -2481,12 +2671,16 @@ mod tests {
         );
         assert_eq!(
             restore["project_task_ledger"]["ledger_version"],
-            json!("project-task-ledger-v1")
+            json!("project-task-ledger-v2")
         );
         assert_eq!(restore["project_task_ledger"]["open_tasks_count"], json!(2));
         assert_eq!(
             restore["project_task_ledger"]["historical_handoffs_count"],
             json!(0)
+        );
+        assert_eq!(
+            restore["project_task_ledger"]["persistence_state"],
+            json!("restore_side_only")
         );
         assert_eq!(
             restore["project_task_ledger"]["entries"][0]["task_role"],
@@ -2496,6 +2690,102 @@ mod tests {
             restore["project_task_ledger_summary"]
                 .as_str()
                 .is_some_and(|value| value.contains("historical_handoffs(0)"))
+        );
+    }
+
+    #[test]
+    fn overlay_durable_project_task_ledger_prefers_postgres_entries() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let latest_handoff = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "handoff-1",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "event_kind": "continuity_handoff",
+                    "headline": "Project relocation contour",
+                    "next_step_hint": "Dovetail runtime auto-start guarantees.",
+                    "summary": "Relocation contour materialized.",
+                    "recorded_at_epoch_ms": base,
+                    "pending_return_queue": [
+                        {
+                            "headline": "Same-meter spend control",
+                            "next_step": "Materialize live assistant generation source.",
+                            "queued_at_epoch_ms": base - 1,
+                            "resume_state": "pending_return",
+                            "queued_reason": "interrupted_by_new_handoff"
+                        }
+                    ]
+                }
+            }),
+            created_at_epoch_ms: base,
+        };
+        let mut bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[latest_handoff],
+        );
+        let durable_entries = vec![ExecCtlTaskLedgerEntryRecord {
+            ledger_entry_id: Uuid::new_v4(),
+            source_snapshot_id: Some(Uuid::new_v4()),
+            source_event_id: "handoff-1".to_string(),
+            event_kind: "continuity_handoff".to_string(),
+            source_kind: "continuity_handoff".to_string(),
+            agent_scope: "art::continuity::default".to_string(),
+            session_id: Some("session-a".to_string()),
+            thread_id: None,
+            headline: "Project relocation contour".to_string(),
+            next_step: "Dovetail runtime auto-start guarantees.".to_string(),
+            summary: "Relocation contour materialized.".to_string(),
+            active_files: json!(["/home/art/agent-memory-index/src/continuity.rs"]),
+            open_questions: json!(["How to enforce auto-start?"]),
+            materialized_notes: json!(["Relocation contour materialized."]),
+            pending_return_queue: json!([
+                {
+                    "headline": "Same-meter spend control",
+                    "next_step": "Materialize live assistant generation source.",
+                    "queued_at_epoch_ms": base - 1,
+                    "resume_state": "pending_return",
+                    "queued_reason": "interrupted_by_new_handoff"
+                }
+            ]),
+            local_path: Some("/home/art/agent-memory-index/.amai-continuity/live-handoff/HANDOFF.md".to_string()),
+            recorded_at_epoch_ms: base,
+            created_at_epoch_ms: base,
+        }];
+
+        overlay_durable_project_task_ledger(
+            &mut bundle,
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &durable_entries,
+        );
+        let restore = &bundle["working_state_restore"];
+        assert_eq!(
+            restore["project_task_ledger"]["ledger_version"],
+            json!("project-task-ledger-v2")
+        );
+        assert_eq!(
+            restore["project_task_ledger"]["persistence_state"],
+            json!("durable_postgres")
+        );
+        assert_eq!(
+            restore["project_task_ledger"]["storage_lane"],
+            json!("ami.execctl_task_ledger_entries")
+        );
+        assert_eq!(
+            restore["project_task_ledger"]["entries"][0]["source_snapshot_id"]
+                .as_str()
+                .is_some(),
+            true
+        );
+        assert_eq!(
+            restore["project_task_ledger"]["entries"][0]["task_role"],
+            json!("active")
         );
     }
 

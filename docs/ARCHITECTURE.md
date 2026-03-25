@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 22:10 MSK
-Ручная сверка guide/docs: 2026-03-25 22:10 MSK
+modified_at: 2026-03-25 21:18 MSK
+Ручная сверка guide/docs: 2026-03-25 21:18 MSK
 
 # Architecture
 
@@ -211,8 +211,8 @@ Code structure plane:
 
 ## First ExecCtl slice
 
-Полный durable task store в PostgreSQL ещё впереди, но append-only restore-side task ledger
-как `ExecCtl` contour теперь уже materialized внутри `working_state`.
+Полный workflow/state-machine layer для `ExecCtl` ещё впереди, но первый durable task store
+в `PostgreSQL` уже materialized поверх restore-side contour.
 
 Его задача простая:
 - новый `continuity handoff` не должен тихо стирать предыдущую рабочую линию;
@@ -229,8 +229,16 @@ Code structure plane:
 - `project_task_tree_summary`
 - `project_task_ledger`
 - `project_task_ledger_summary`
+- `ami.execctl_task_ledger_entries`
 
-Это ещё не финальный durable task ledger, но уже fail-closed защита против silent preemption.
+Truthful статус теперь такой:
+- `working_state` всё ещё собирает restore-side append-only ledger как fallback/shadow lane;
+- каждый `continuity_handoff` параллельно пишет durable task entry в `ami.execctl_task_ledger_entries`;
+- startup/restore предпочитает этот durable SQL lane и только при его отсутствии падает обратно
+  на restore-side ledger.
+
+Это ещё не финальный workflow engine, но уже fail-closed защита против silent preemption и против
+тихой потери project-bound task inventory после compaction, relocation или client switch.
 Архитектурный закон здесь такой:
 - continuity не равна “последний headline победил”;
 - project-bound task memory должна помнить и active line, и обязательные линии к возврату,

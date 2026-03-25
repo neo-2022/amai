@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 22:10 MSK
-Ручная сверка guide/docs: 2026-03-25 22:10 MSK
+modified_at: 2026-03-25 21:18 MSK
+Ручная сверка guide/docs: 2026-03-25 21:18 MSK
 
 # Operations
 
@@ -400,6 +400,8 @@ cd /home/art/agent-memory-index
     `continuity_handoff` тихо затереть прошлую рабочую линию;
   - `project_task_tree` и `project_task_tree_summary` теперь поднимают active line и
     pending-return obligations как project-bound open-task tree;
+  - `project_task_ledger` теперь truthful-ly prefers durable SQL lane
+    `ami.execctl_task_ledger_entries`, а restore-side ledger остаётся fallback/shadow path;
   - `state_lineage` хранит `lineage_model_version = lineage-v2`, authoritative event, supporting event ids, truth ranking и явный graph-слой `nodes / edges`;
   - `workspace_graph` хранит versioned structural runtime/workspace graph:
     `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref / call_ref`,
@@ -411,7 +413,8 @@ cd /home/art/agent-memory-index
   - при битом `session_id` restore-path теперь fail-closed и не смешивает несколько пустых сессий в один bundle.
   - product proof для этого minimal `ExecCtl` contour:
     `./scripts/proof_execctl_pending_return.sh`
-    и тот же proof теперь проверяет уже не только queue, но и `project_task_tree`.
+    и тот же proof теперь проверяет уже не только queue и `project_task_tree`, но и durable
+    `project_task_ledger` из SQL.
 
 Если передан `--question`, helper сам должен:
 - распознать `прошлый / текущий чат`;
