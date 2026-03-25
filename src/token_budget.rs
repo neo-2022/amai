@@ -475,7 +475,7 @@ fn default_usage_event_schema_version() -> String {
 }
 
 fn default_settlement_statement_version() -> String {
-    "settlement-preview-v4".to_string()
+    "settlement-preview-v5".to_string()
 }
 
 fn default_metering_event_schema_version() -> String {
@@ -603,11 +603,11 @@ fn default_billing_mode() -> String {
 }
 
 fn default_reconciliation_contract_version() -> String {
-    "provider-reconciliation-v9".to_string()
+    "provider-reconciliation-v10".to_string()
 }
 
 fn default_margin_model_version() -> String {
-    "margin-view-v8".to_string()
+    "margin-view-v9".to_string()
 }
 
 fn default_infra_cost_profile_version() -> String {
@@ -615,15 +615,15 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v17".to_string()
+    "contractual-evidence-pack-v18".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v17".to_string()
+    "contractual-statement-export-v18".to_string()
 }
 
 fn default_settlement_report_preview_version() -> String {
-    "settlement-report-preview-v8".to_string()
+    "settlement-report-preview-v9".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -3418,6 +3418,8 @@ fn build_reconciliation_preview(
         "internal_provider_cost_estimate_amount": internal_provider_cost_estimate,
         "internal_delivered_tokens": statement_preview["internal_delivered_tokens"].clone(),
         "internal_recovery_tokens": statement_preview["internal_recovery_tokens"].clone(),
+        "internal_observed_whole_cycle_lower_bound_tokens": statement_preview["internal_observed_whole_cycle_lower_bound_tokens"].clone(),
+        "verified_internal_observed_whole_cycle_lower_bound_tokens": statement_preview["verified_internal_observed_whole_cycle_lower_bound_tokens"].clone(),
         "internal_measured_non_billable_lower_bound_tokens": statement_preview["measured_non_billable_lower_bound_tokens"].clone(),
         "billable_lower_bound_tokens": statement_preview["billable_lower_bound_tokens"].clone(),
         "external_provider_usage_tokens": external_provider_usage_tokens,
@@ -4973,6 +4975,14 @@ fn build_contractual_statement_summary(
         reconciliation_preview["internal_provider_billed_tokens"].clone(),
     );
     insert(
+        "internal_observed_whole_cycle_lower_bound_tokens",
+        reconciliation_preview["internal_observed_whole_cycle_lower_bound_tokens"].clone(),
+    );
+    insert(
+        "verified_internal_observed_whole_cycle_lower_bound_tokens",
+        reconciliation_preview["verified_internal_observed_whole_cycle_lower_bound_tokens"].clone(),
+    );
+    insert(
         "internal_provider_cost_estimate_amount",
         reconciliation_preview["internal_provider_cost_estimate_amount"].clone(),
     );
@@ -5203,6 +5213,21 @@ fn build_statement_preview(
         &billing_close_barriers,
         &adjustment_preview,
     );
+    let internal_delivered_tokens = summary["delivered_tokens"].as_u64().unwrap_or(0);
+    let internal_recovery_tokens = summary["recovery_tokens"].as_u64().unwrap_or(0);
+    let internal_observed_whole_cycle_lower_bound_tokens =
+        summary["observed_whole_cycle_with_amai_tokens"]
+            .as_u64()
+            .unwrap_or(internal_delivered_tokens.saturating_add(internal_recovery_tokens));
+    let verified_internal_observed_whole_cycle_lower_bound_tokens =
+        summary["verified_observed_whole_cycle_with_amai_tokens"]
+            .as_u64()
+            .unwrap_or(
+                summary["verified_delivered_tokens"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .saturating_add(summary["verified_recovery_tokens"].as_u64().unwrap_or(0)),
+            );
     json!({
         "scope_code": scope_code,
         "scope_label": scope_label,
@@ -5260,10 +5285,11 @@ fn build_statement_preview(
             Some(events),
         ),
         "freshness": metering_freshness.clone(),
-        "internal_delivered_tokens": summary["delivered_tokens"],
-        "internal_recovery_tokens": summary["recovery_tokens"],
-        "internal_provider_billed_tokens": summary["delivered_tokens"].as_u64().unwrap_or(0)
-            .saturating_add(summary["recovery_tokens"].as_u64().unwrap_or(0)),
+        "internal_delivered_tokens": internal_delivered_tokens,
+        "internal_recovery_tokens": internal_recovery_tokens,
+        "internal_observed_whole_cycle_lower_bound_tokens": internal_observed_whole_cycle_lower_bound_tokens,
+        "verified_internal_observed_whole_cycle_lower_bound_tokens": verified_internal_observed_whole_cycle_lower_bound_tokens,
+        "internal_provider_billed_tokens": internal_observed_whole_cycle_lower_bound_tokens,
         "measured_non_billable_lower_bound_tokens": measured_non_billable_lower_bound_tokens,
         "adjusted_measured_non_billable_lower_bound_tokens": measured_non_billable_lower_bound_tokens
             .saturating_add(applied_tokens_delta),
@@ -11573,11 +11599,11 @@ mod tests {
         assert_eq!(token_event["contract"]["billing_mode"], "report_only");
         assert_eq!(
             token_event["contract"]["reconciliation_contract_version"],
-            "provider-reconciliation-v9"
+            "provider-reconciliation-v10"
         );
         assert_eq!(
             token_event["contract"]["margin_model_version"],
-            "margin-view-v8"
+            "margin-view-v9"
         );
         assert_eq!(
             token_event["contract"]["infra_cost_profile_version"],
@@ -11585,7 +11611,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v17"
+            "contractual-evidence-pack-v18"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -12057,7 +12083,7 @@ effective_to_epoch_ms = 2000
 
         assert_eq!(
             settlement_contract["statement_version"],
-            "settlement-preview-v4"
+            "settlement-preview-v5"
         );
         assert_eq!(
             settlement_contract["settlement_lifecycle_model_version"],
@@ -12267,6 +12293,65 @@ effective_to_epoch_ms = 2000
     }
 
     #[test]
+    fn statement_preview_uses_observed_whole_cycle_lower_bound_for_internal_meter() {
+        let contract = contract_fixture();
+        let profile = profile_fixture();
+        let adjustment_registry = adjustment_registry_fixture(&contract);
+        let rate_card = rate_card_fixture(&contract);
+        let reconciliation_contract = build_reconciliation_contract_json(
+            &contract,
+            &build_external_truth_sources_json(Path::new("/tmp/amai-no-sources")),
+            &provider_usage_binding_fixture(&rate_card),
+            &provider_invoice_binding_fixture(),
+            &rate_card,
+        );
+        let summary = json!({
+            "coverage": {
+                "completeness_state": "partially_confirmed"
+            },
+            "verified_effective_saved_tokens": 777,
+            "delivered_tokens": 200,
+            "recovery_tokens": 10,
+            "observed_whole_cycle_with_amai_tokens": 260,
+            "verified_observed_whole_cycle_with_amai_tokens": 230
+        });
+        let events = vec![token_event! {
+            occurred_at_epoch_ms: 1_000,
+            naive_tokens: 1037,
+            context_tokens: 200,
+            recovery_tokens: 10,
+            effective_saved_tokens: 827,
+        }];
+        let freshness =
+            build_metering_freshness_summary(&contract, &measurement_fixture(), 2_000, &events);
+        let preview = build_statement_preview(
+            "current_session",
+            "текущая сессия",
+            2_000,
+            &events,
+            &profile,
+            &summary,
+            &contract,
+            &adjustment_registry,
+            &rate_card,
+            &reconciliation_contract,
+            &freshness,
+        );
+
+        assert_eq!(preview["internal_delivered_tokens"], 200);
+        assert_eq!(preview["internal_recovery_tokens"], 10);
+        assert_eq!(
+            preview["internal_observed_whole_cycle_lower_bound_tokens"],
+            260
+        );
+        assert_eq!(
+            preview["verified_internal_observed_whole_cycle_lower_bound_tokens"],
+            230
+        );
+        assert_eq!(preview["internal_provider_billed_tokens"], 260);
+    }
+
+    #[test]
     fn telemetry_surfaces_split_operational_and_contractual_fields() {
         let surfaces = build_telemetry_surfaces_json(&contract_fixture());
         assert_eq!(surfaces["model_version"], "tokenonomics-surface-split-v1");
@@ -12317,7 +12402,7 @@ effective_to_epoch_ms = 2000
 
         assert_eq!(
             reconciliation["contract_version"],
-            "provider-reconciliation-v9"
+            "provider-reconciliation-v10"
         );
         assert_eq!(reconciliation["status"], "awaiting_provider_usage_source");
         assert_eq!(
@@ -12513,7 +12598,7 @@ effective_to_epoch_ms = 2000
             &reconciliation,
         );
 
-        assert_eq!(margin["model_version"], "margin-view-v8");
+        assert_eq!(margin["model_version"], "margin-view-v9");
         assert_eq!(margin["infra_cost_profile_version"], "unpriced-infra-v1");
         assert_eq!(margin["status"], "awaiting_rate_card");
         assert_eq!(
@@ -13315,6 +13400,8 @@ effective_to_epoch_ms = 2000
             }),
             &json!({
                 "internal_provider_billed_tokens": 456,
+                "internal_observed_whole_cycle_lower_bound_tokens": 456,
+                "verified_internal_observed_whole_cycle_lower_bound_tokens": 430,
                 "external_provider_usage_tokens": 500,
                 "external_provider_cost_amount": 0.12,
                 "external_invoice_amount": 0.13,
@@ -13445,6 +13532,14 @@ effective_to_epoch_ms = 2000
         assert_eq!(summary["contractual_lag_state"], "lag_window_elapsed");
         assert_eq!(summary["contractual_freshness_state"], "stable");
         assert_eq!(summary["internal_provider_billed_tokens"], 456);
+        assert_eq!(
+            summary["internal_observed_whole_cycle_lower_bound_tokens"],
+            456
+        );
+        assert_eq!(
+            summary["verified_internal_observed_whole_cycle_lower_bound_tokens"],
+            430
+        );
         assert_eq!(summary["external_provider_usage_tokens"], 500);
         assert_eq!(summary["drift_tokens"], -44);
         assert_eq!(
@@ -13692,7 +13787,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v17");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v18");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -13872,7 +13967,7 @@ effective_to_epoch_ms = 2000
         assert_eq!(preview["evidence_pack_available"], true);
         assert_eq!(
             preview["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v8"
+            "settlement-report-preview-v9"
         );
         assert_eq!(
             preview["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],
@@ -14010,7 +14105,7 @@ effective_to_epoch_ms = 2000
                 "statement_export_previews": {
                     "lifetime": {
                         "settlement_report_preview": {
-                            "model_version": "settlement-report-preview-v8",
+                            "model_version": "settlement-report-preview-v9",
                             "settlement_report_id": "preview-hash"
                         },
                         "customer_contractual_boundary": {
@@ -14110,7 +14205,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v17");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v18");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -14256,7 +14351,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             payload["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v8"
+            "settlement-report-preview-v9"
         );
         assert_eq!(
             payload["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],

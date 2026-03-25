@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 13:40 MSK
-Ручная сверка guide/docs: 2026-03-25 13:40 MSK
+modified_at: 2026-03-25 14:02 MSK
+Ручная сверка guide/docs: 2026-03-25 14:02 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1394,7 +1394,12 @@ preview, а не только raw count.
   - там теперь отдельно видны:
     - `internal_delivered_tokens`
     - `internal_recovery_tokens`
+    - `internal_observed_whole_cycle_lower_bound_tokens`
     - `internal_provider_billed_tokens`
+  - `internal_provider_billed_tokens` теперь больше не равен только `delivered + recovery`:
+    он поднимается до всей честно наблюдаемой `whole-cycle lower bound`, то есть включает
+    retrieval payload, recovery и те observed whole-cycle компоненты, которые уже
+    materialized без гадания;
   - drift по токенам теперь считается только как
     `internal_provider_billed_tokens - external_provider_usage_tokens`;
   - это сделано специально, чтобы не сравнивать provider usage с saved tokens;
@@ -1469,22 +1474,26 @@ preview, а не только raw count.
   - это уже customer-facing review surface с hashes и contract states, но всё ещё строго
     `report_only`, а не invoice.
   - export/evidence surface versions теперь подняты до:
-    - `contractual-statement-export-v17`
-    - `settlement-report-preview-v8`
-    - `contractual-evidence-pack-v17`
+    - `contractual-statement-export-v18`
+    - `settlement-report-preview-v9`
+    - `contractual-evidence-pack-v18`
   потому что customer-facing payload теперь уже явно различает:
     - `customer review ready`
     - `internal money arithmetic ready`
     - `contractual settlement ready`
     - `future settlement activation governance`
     - `future adjustment activation governance`
-- operational metering contract теперь ещё несёт:
+  - operational metering contract теперь ещё несёт:
   - `client_limit_meter_alignment_version = client-limit-meter-alignment-v3`
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
   - начиная с `v3` слой ещё и честно поднимает `client_prompt` как observed component
     из уже записанных `query + tokenizer`, даже если старое событие не несло
     отдельный `whole_cycle_observed.client_prompt_tokens`.
+  - statement/reconciliation path теперь тоже перестал быть retrieval-only:
+    внутренний meter lower bound для provider drift/cost preview поднимается от
+    `delivered + recovery` к `observed whole-cycle lower bound`, как только такие
+    компоненты действительно materialized в ledger.
 - metering freshness теперь тоже first-class:
   - `metering_freshness.current_session / rolling_window / lifetime`
   - она отдельно показывает:

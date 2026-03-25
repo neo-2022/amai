@@ -137,7 +137,7 @@ assert payload["statement_export_preview"]["internal_money_arithmetic_blocking_r
 assert payload["statement_export_preview"]["contractual_settlement_readiness_state"] == "review_not_yet_ready_report_only", payload
 assert "billing_mode_report_only" in payload["statement_export_preview"]["contractual_settlement_blocking_reasons"], payload
 assert "money_arithmetic_not_ready" not in payload["statement_export_preview"]["contractual_settlement_blocking_reasons"], payload
-assert payload["settlement_report_preview"]["model_version"] == "settlement-report-preview-v7", payload
+assert payload["settlement_report_preview"]["model_version"] == "settlement-report-preview-v9", payload
 assert payload["settlement_report_preview"]["contractual_readiness_model_version"] == "contractual-readiness-v1", payload
 assert payload["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"] == "customer_settlement_report_preview_report_only", payload
 assert payload["settlement_report_preview"]["settlement_activation_governance"]["model_version"] == "settlement-activation-governance-v1", payload

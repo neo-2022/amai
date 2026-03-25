@@ -18,7 +18,7 @@ preview = payload["statement_previews"]["current_session"]
 summary = payload["contractual_statement_summaries"]["current_session"]
 period = preview["period"]
 
-assert contract["statement_version"] == "settlement-preview-v4", contract
+assert contract["statement_version"] == "settlement-preview-v5", contract
 assert contract["freeze_close_policy_version"] == "freeze-close-v2", contract
 assert contract["late_arrival_policy_version"] == "late-arrival-v2", contract
 assert contract["settlement_lifecycle_model_version"] == "settlement-lifecycle-v4", contract

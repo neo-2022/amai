@@ -26,15 +26,15 @@ statement_export = json.loads((root / "statement_export_preview.json").read_text
 evidence_pack = json.loads((root / "contractual_evidence_pack.json").read_text())
 contractual_sources = json.loads((root / "token_contractual_sources.json").read_text())
 
-assert manifest["bundle_version"] == "token-statement-export-bundle-v2", manifest
+assert manifest["bundle_version"] == "token-statement-export-bundle-v3", manifest
 assert manifest["scope_code"] == "lifetime", manifest
 assert settlement_report["scope_code"] == "lifetime", settlement_report
 assert statement_export["scope_code"] == "lifetime", statement_export
 assert evidence_pack["scope_code"] == "lifetime", evidence_pack
 assert contractual_sources["scope_code"] == "lifetime", contractual_sources
-assert statement_export["model_version"] == "contractual-statement-export-v16", statement_export
-assert settlement_report["model_version"] == "settlement-report-preview-v7", settlement_report
-assert evidence_pack["pack_version"] == "contractual-evidence-pack-v16", evidence_pack
+assert statement_export["model_version"] == "contractual-statement-export-v18", statement_export
+assert settlement_report["model_version"] == "settlement-report-preview-v9", settlement_report
+assert evidence_pack["pack_version"] == "contractual-evidence-pack-v18", evidence_pack
 assert statement_export["contractual_readiness_model_version"] == "contractual-readiness-v1", statement_export
 assert settlement_report["contractual_readiness_model_version"] == "contractual-readiness-v1", settlement_report
 assert evidence_pack["contractual_readiness_model_version"] == "contractual-readiness-v1", evidence_pack

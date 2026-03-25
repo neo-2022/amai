@@ -1,5 +1,5 @@
-modified_at = "2026-03-25 13:40 MSK"
-"Ручная сверка guide/docs" = "2026-03-25 13:40 MSK"
+modified_at = "2026-03-25 14:02 MSK"
+"Ручная сверка guide/docs" = "2026-03-25 14:02 MSK"
 
 default_profile = "local_default"
 
@@ -14,7 +14,7 @@ late_arrival_grace_minutes = 60
 
 [contract]
 usage_event_schema_version = "billing-usage-event-v2"
-settlement_statement_version = "settlement-preview-v4"
+settlement_statement_version = "settlement-preview-v5"
 metering_event_schema_version = "token-budget-event-v3"
 usage_lifecycle_model_version = "usage-lifecycle-v1"
 baseline_method_version = "retrieval-baseline-v1"
@@ -45,16 +45,16 @@ customer_contractual_boundary_version = "customer-contractual-boundary-v1"
 settlement_activation_governance_version = "settlement-activation-governance-v1"
 adjustment_activation_governance_version = "adjustment-activation-governance-v1"
 billing_mode = "report_only"
-reconciliation_contract_version = "provider-reconciliation-v9"
-margin_model_version = "margin-view-v8"
+reconciliation_contract_version = "provider-reconciliation-v10"
+margin_model_version = "margin-view-v9"
 infra_cost_profile_version = "unpriced-infra-v1"
 rate_card_binding_model_version = "rate-card-binding-v3"
 rate_card_version = "unpriced-v1"
 currency_profile = "unpriced"
 settlement_status = "unsettled_report_only"
-contractual_statement_export_version = "contractual-statement-export-v17"
-settlement_report_preview_version = "settlement-report-preview-v8"
-contractual_evidence_pack_version = "contractual-evidence-pack-v17"
+contractual_statement_export_version = "contractual-statement-export-v18"
+settlement_report_preview_version = "settlement-report-preview-v9"
+contractual_evidence_pack_version = "contractual-evidence-pack-v18"
 
 [profiles.local_default]
 display_name = "Обычная рабочая машина"

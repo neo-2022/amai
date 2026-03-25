@@ -134,7 +134,7 @@ root = report["token_budget_report"]
 assert root["rate_card"]["status"] == "priced_bound", root["rate_card"]
 assert root["infra_cost_profile"]["status"] == "priced_bound", root["infra_cost_profile"]
 assert root["external_truth_sources"]["infra_cost_profile"]["status"] == "configured_existing_path", root["external_truth_sources"]
-assert root["reconciliation_contract"]["contract_version"] == "provider-reconciliation-v9", root["reconciliation_contract"]
+assert root["reconciliation_contract"]["contract_version"] == "provider-reconciliation-v10", root["reconciliation_contract"]
 assert root["reconciliation_contract"]["provider_cost_truth_completeness_state"] == "provider_cost_bound", root["reconciliation_contract"]
 assert root["reconciliation_contract"]["invoice_evidence_completeness_state"] == "provider_invoice_bound", root["reconciliation_contract"]
 assert root["reconciliation_contract"]["provider_identity_state"] == "provider_identity_aligned", root["reconciliation_contract"]
@@ -147,7 +147,7 @@ assert root["reconciliation_contract"]["source_requirements"]["unready_optional_
 assert root["external_truth_manifest"]["manifest_hash"], root["external_truth_manifest"]
 assert root["external_truth_manifest"]["entries"]["provider_rate_card"]["source_sha256"], root["external_truth_manifest"]
 assert root["margin_contract"]["status"] == "priced_preview_report_only", root["margin_contract"]
-assert root["margin_contract"]["model_version"] == "margin-view-v8", root["margin_contract"]
+assert root["margin_contract"]["model_version"] == "margin-view-v9", root["margin_contract"]
 assert root["margin_contract"]["pricing_truth_completeness_state"] == "pricing_truth_ready", root["margin_contract"]
 assert root["margin_contract"]["customer_savings_money_truth_completeness_state"] == "customer_savings_lower_bound_ready_report_only", root["margin_contract"]
 assert root["margin_contract"]["amai_cost_truth_completeness_state"] == "amai_cost_preview_ready_report_only", root["margin_contract"]
@@ -231,7 +231,7 @@ assert statement_export["internal_money_arithmetic_blocking_reasons"] == [], sta
 assert statement_export["contractual_settlement_readiness_state"] == "review_not_yet_ready_report_only", statement_export
 assert "billing_mode_report_only" in statement_export["contractual_settlement_blocking_reasons"], statement_export
 assert "money_arithmetic_not_ready" not in statement_export["contractual_settlement_blocking_reasons"], statement_export
-assert statement_export["settlement_report_preview"]["model_version"] == "settlement-report-preview-v7", statement_export
+assert statement_export["settlement_report_preview"]["model_version"] == "settlement-report-preview-v9", statement_export
 assert statement_export["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"] == "customer_settlement_report_preview_report_only", statement_export
 assert statement_export["settlement_report_preview"]["settlement_activation_governance"]["model_version"] == "settlement-activation-governance-v1", statement_export
 assert statement_export["required_sources_for_usage_truth"] == ["provider_usage_export"], statement_export

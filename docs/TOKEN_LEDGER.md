@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 13:40 MSK
-Ручная сверка guide/docs: 2026-03-25 13:40 MSK
+modified_at: 2026-03-25 14:02 MSK
+Ручная сверка guide/docs: 2026-03-25 14:02 MSK
 
 # Token Ledger
 
@@ -549,7 +549,7 @@ Ledger обязан различать:
 - закрыт ли уже реальный денежный workflow или это всё ещё report-only preview.
 
 Текущий truthful status:
-- `statement_version = settlement-preview-v4`
+- `statement_version = settlement-preview-v5`
 - `settlement_lifecycle_model_version = settlement-lifecycle-v4`
 - `statement_period_governance_version = statement-period-governance-v2`
 - `adjustment_preview_model_version = adjustment-preview-v1`
@@ -733,7 +733,7 @@ Operator-safe report-only команды:
 - готовы ли мы вообще к external reconciliation.
 
 Текущий truthful status:
-- `reconciliation_contract_version = provider-reconciliation-v9`
+- `reconciliation_contract_version = provider-reconciliation-v10`
 - `ready_for_external_reconciliation` теперь зависит от реального bind provider usage export,
   а не от одного факта, что где-то прописан путь;
 - contract теперь ещё отдельно публикует:
@@ -817,7 +817,11 @@ Customer-facing export bundle:
 
 Именно поэтому truthful `reconciliation_previews` теперь обязаны выглядеть так:
 - `internal_measured_non_billable_lower_bound_tokens` остаётся про lower bound savings;
-- `internal_provider_billed_tokens` отдельно показывает внутренний delivered usage;
+- `internal_provider_billed_tokens` отдельно показывает внутреннюю observed whole-cycle
+  lower bound для того же usage-мера;
+- `internal_observed_whole_cycle_lower_bound_tokens` и
+  `verified_internal_observed_whole_cycle_lower_bound_tokens` делают этот переход явным и не
+  дают перепутать retrieval-only usage с уже materialized same-meter компонентами;
 - отдельный governance-layer теперь показывает:
   - есть ли уже `usage truth`
   - есть ли уже `money truth`
@@ -860,7 +864,7 @@ Customer-facing export bundle:
 - включена ли money-margin арифметика.
 
 Текущий truthful status:
-- `margin_model_version = margin-view-v8`
+- `margin_model_version = margin-view-v9`
 - `infra_cost_binding_model_version = infra-cost-binding-v3`
 - `infra_cost_profile_version = unpriced-infra-v1`
 - `money_margin_enabled` включается только после честного bind на
@@ -1110,9 +1114,9 @@ Hashes по line items нужны затем, чтобы:
 - и только потом, в будущем, settlement/dispute workflow.
 
 Текущие surface versions для этого слоя:
-- `contractual-statement-export-v17`
-- `settlement-report-preview-v8`
-- `contractual-evidence-pack-v17`
+- `contractual-statement-export-v18`
+- `settlement-report-preview-v9`
+- `contractual-evidence-pack-v18`
 - `client-limit-meter-alignment-v3`
 - `adjustment-activation-governance-v1`
 
