@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 19:52 MSK
-Ручная сверка guide/docs: 2026-03-25 19:52 MSK
+modified_at: 2026-03-25 20:04 MSK
+Ручная сверка guide/docs: 2026-03-25 20:04 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1106,8 +1106,18 @@ preview, а не только raw count.
 В нём зафиксированы:
 - версия MCP contract layer;
 - базовые safety laws;
+- startup contracts для нового или resumed чата;
 - prompt contracts;
 - per-tool `summary_field`, который внешний клиент может ожидать в structured output.
+
+Отдельно `startup_contracts` теперь machine-readable фиксируют, что клиент
+обязан делать до первого содержательного хода:
+- вызвать `amai_continuity_startup`;
+- использовать namespace `continuity` по умолчанию;
+- не переходить к retrieval и новым действиям, пока не получен
+  `continuity_startup_summary`;
+- поднимать вместе с этим `execctl_resume_state` и `pending_return` obligations,
+  а не только headline/next step.
 
 Тот же manifest теперь фиксирует и `error_contracts`. Это даёт внешнему клиенту
 стабильные machine-readable failure classes:

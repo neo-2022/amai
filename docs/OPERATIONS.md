@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 19:52 MSK
-Ручная сверка guide/docs: 2026-03-25 19:52 MSK
+modified_at: 2026-03-25 20:04 MSK
+Ручная сверка guide/docs: 2026-03-25 20:04 MSK
 
 # Operations
 
@@ -744,7 +744,12 @@ cargo run -- mcp serve
   по памяти и изоляции без ручного разбора полного verify payload.
 - `initialize` теперь тоже отдаёт `amai_protocol_manifest`:
   versioned contract layer с `default_scope_rule`, `default_retrieval_mode`,
-  `tool_contracts`, `prompt_contracts` и `safety_laws`.
+  `startup_contracts`, `tool_contracts`, `prompt_contracts` и `safety_laws`.
+- `startup_contracts.project_chat_startup` теперь отдельно фиксирует
+  canonical resume path для нового или resumed чата:
+  `amai_continuity_startup` обязателен до retrieval и любой новой работы,
+  а client runtime должен поднимать не только headline, но и
+  `execctl_resume_state` вместе с pending-return obligations.
 - тот же `amai_protocol_manifest` теперь несёт `error_contracts`, а `tools/call`
   и JSON-RPC errors отдают machine-readable taxonomy вместо голого текста:
   `invalid_json_rpc_payload`, `invalid_request`, `method_not_found`,

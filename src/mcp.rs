@@ -350,6 +350,33 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     }
 
     let mut session = spawn_proof_session(cfg).await?;
+    let startup_contract = &session.protocol_manifest["startup_contracts"]["project_chat_startup"];
+    if startup_contract["tool"].as_str() != Some("amai_continuity_startup") {
+        return Err(anyhow!(
+            "MCP startup contract does not point to amai_continuity_startup"
+        ));
+    }
+    if startup_contract["must_call_before_substantive_work"].as_bool() != Some(true) {
+        return Err(anyhow!(
+            "MCP startup contract does not require continuity startup before substantive work"
+        ));
+    }
+    if startup_contract["default_namespace"].as_str() != Some("continuity") {
+        return Err(anyhow!(
+            "MCP startup contract lost default continuity namespace"
+        ));
+    }
+    let required_summary_fields = startup_contract["required_summary_fields"]
+        .as_array()
+        .ok_or_else(|| anyhow!("MCP startup contract is missing required_summary_fields"))?;
+    if !required_summary_fields
+        .iter()
+        .any(|field| field.as_str() == Some("execctl_resume_state"))
+    {
+        return Err(anyhow!(
+            "MCP startup contract is missing execctl_resume_state from required summary fields"
+        ));
+    }
 
     let tools = session.request("tools/list", json!({})).await?;
     let tool_names = tools["tools"]
@@ -751,6 +778,7 @@ pub(crate) struct McpProofSession {
     stdin: ChildStdin,
     stdout: tokio::io::Lines<BufReader<ChildStdout>>,
     next_id: u64,
+    protocol_manifest: Value,
 }
 
 impl McpProofSession {
@@ -854,6 +882,7 @@ pub(crate) async fn spawn_proof_session(cfg: &AppConfig) -> Result<McpProofSessi
         stdin,
         stdout: BufReader::new(stdout).lines(),
         next_id: 1,
+        protocol_manifest: Value::Null,
     };
 
     let init = session
@@ -876,10 +905,12 @@ pub(crate) async fn spawn_proof_session(cfg: &AppConfig) -> Result<McpProofSessi
             server_info["name"]
         ));
     }
+    let protocol_manifest = init["amai_protocol_manifest"].clone();
     session
         .notify("notifications/initialized", json!({}))
         .await
         .context("failed to send MCP initialized notification")?;
+    session.protocol_manifest = protocol_manifest;
     Ok(session)
 }
 
@@ -2201,9 +2232,52 @@ fn server_instructions() -> String {
 
 fn protocol_manifest() -> Value {
     json!({
-        "version": "mcp-contract-v1",
+        "version": "mcp-contract-v2",
         "default_scope_rule": "project_scoped_fail_closed",
         "default_retrieval_mode": "local_strict",
+        "startup_contracts": {
+            "project_chat_startup": {
+                "contract_version": "continuity-startup-contract-v1",
+                "tool": "amai_continuity_startup",
+                "prompt": "amai-continuity-startup",
+                "purpose": "project-scoped continuity restore before any substantive work in a new or resumed chat",
+                "must_call_before_substantive_work": true,
+                "must_call_before_tools": [
+                    "amai_context_pack",
+                    "amai_token_benchmark",
+                    "amai_token_report",
+                    "amai_observe_snapshot",
+                    "amai_memory_matrix",
+                    "amai_warm_cache"
+                ],
+                "project_binding_rule": "registered_project_fail_closed",
+                "default_namespace": "continuity",
+                "required_arguments": ["project"],
+                "optional_arguments": ["repo_root", "namespace", "token_source_kind"],
+                "summary_field": "continuity_startup_summary",
+                "required_summary_fields": [
+                    "project_code",
+                    "namespace_code",
+                    "headline",
+                    "next_step",
+                    "restore_confidence",
+                    "thread_count",
+                    "prompt_text_present",
+                    "execctl_resume_state"
+                ],
+                "restored_obligations": [
+                    "active_workline",
+                    "chat_start_restore_prompt_text",
+                    "execctl_resume_state",
+                    "pending_return_summary"
+                ],
+                "fail_closed_conditions": [
+                    "project_unregistered",
+                    "repo_root_binding_ambiguous",
+                    "continuity_restore_unavailable"
+                ]
+            }
+        },
         "tool_contracts": {
             "amai_list_projects": {
                 "summary_field": "projects_summary",
@@ -4186,7 +4260,23 @@ mod tests {
     #[test]
     fn protocol_manifest_lists_summary_contracts() {
         let manifest = protocol_manifest();
-        assert_eq!(manifest["version"].as_str(), Some("mcp-contract-v1"));
+        assert_eq!(manifest["version"].as_str(), Some("mcp-contract-v2"));
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool"].as_str(),
+            Some("amai_continuity_startup")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["prompt"].as_str(),
+            Some("amai-continuity-startup")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["must_call_before_substantive_work"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["project_binding_rule"].as_str(),
+            Some("registered_project_fail_closed")
+        );
         assert_eq!(
             manifest["tool_contracts"]["amai_continuity_startup"]["summary_field"].as_str(),
             Some("continuity_startup_summary")
