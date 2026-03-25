@@ -17,6 +17,8 @@ grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' AGENTS.md
 grep -q 'project `AGENTS.md`' AGENTS.md
 grep -q 'execctl_resume_contract_summary' AGENTS.md
 grep -q 'execctl_resume_obligation' AGENTS.md
+grep -q 'startup_next_action' AGENTS.md
+grep -q 'resume_required_return_task' AGENTS.md
 grep -q 'required_return_task' AGENTS.md
 
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client codex
@@ -36,6 +38,8 @@ test -f .cursor/rules/amai-continuity-startup.mdc
 grep -q 'amai_continuity_startup' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'execctl_resume_contract_summary' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'execctl_resume_obligation' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'startup_next_action' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'resume_required_return_task' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'required_return_task' .cursor/rules/amai-continuity-startup.mdc
 
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client cursor
@@ -56,6 +60,8 @@ grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' CLAUDE.md
 grep -q 'amai_continuity_startup' CLAUDE.md
 grep -q 'execctl_resume_contract_summary' CLAUDE.md
 grep -q 'execctl_resume_obligation' CLAUDE.md
+grep -q 'startup_next_action' CLAUDE.md
+grep -q 'resume_required_return_task' CLAUDE.md
 grep -q 'required_return_task' CLAUDE.md
 
 ./scripts/disconnect_local.sh --client claude-code
