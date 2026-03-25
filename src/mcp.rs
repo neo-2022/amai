@@ -2311,6 +2311,38 @@ fn context_pack_input_schema(include_persist: bool) -> Value {
                 "default": 8
             }),
         ),
+        (
+            "client_prompt_tokens".to_string(),
+            json!({
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "description": "Optional upstream-observed client prompt tokens in the same meter the client/provider reports."
+            }),
+        ),
+        (
+            "assistant_generation_tokens".to_string(),
+            json!({
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "description": "Optional upstream-observed assistant generation tokens for the same context-pack event."
+            }),
+        ),
+        (
+            "tool_overhead_tokens".to_string(),
+            json!({
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "description": "Optional upstream-observed non-retrieval tool overhead tokens for the same context-pack event."
+            }),
+        ),
+        (
+            "continuity_restore_tokens".to_string(),
+            json!({
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "description": "Optional upstream-observed continuity-restore tokens outside retrieval for the same context-pack event."
+            }),
+        ),
     ]);
     if include_persist {
         properties.insert(
@@ -2847,6 +2879,14 @@ struct ContextPackToolArgs {
     limit_chunks: usize,
     #[serde(default = "default_limit_semantic_chunks")]
     limit_semantic_chunks: usize,
+    #[serde(default)]
+    client_prompt_tokens: Option<u64>,
+    #[serde(default)]
+    assistant_generation_tokens: Option<u64>,
+    #[serde(default)]
+    tool_overhead_tokens: Option<u64>,
+    #[serde(default)]
+    continuity_restore_tokens: Option<u64>,
     #[serde(default = "default_true")]
     persist: bool,
 }
@@ -2864,10 +2904,10 @@ impl ContextPackToolArgs {
             limit_chunks: self.limit_chunks,
             limit_semantic_chunks: self.limit_semantic_chunks,
             token_source_kind: "live_context_pack".to_string(),
-            client_prompt_tokens: None,
-            assistant_generation_tokens: None,
-            tool_overhead_tokens: None,
-            continuity_restore_tokens: None,
+            client_prompt_tokens: self.client_prompt_tokens,
+            assistant_generation_tokens: self.assistant_generation_tokens,
+            tool_overhead_tokens: self.tool_overhead_tokens,
+            continuity_restore_tokens: self.continuity_restore_tokens,
         }
     }
 }
@@ -3010,9 +3050,10 @@ fn default_warm_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        McpConfigArgs, McpError, benchmark_coverage_summary, context_pack_summary,
-        mcp_tool_error_result, memory_matrix_summary, observe_snapshot_summary, protocol_manifest,
-        render_client_config, stack_preflight_summary, summarize_codes, summarize_namespace_modes,
+        ContextPackToolArgs, McpConfigArgs, McpError, benchmark_coverage_summary,
+        context_pack_input_schema, context_pack_summary, mcp_tool_error_result,
+        memory_matrix_summary, observe_snapshot_summary, protocol_manifest, render_client_config,
+        stack_preflight_summary, summarize_codes, summarize_namespace_modes,
         token_benchmark_summary, token_report_summary, warm_cache_summary,
     };
     use serde_json::json;
@@ -3103,6 +3144,48 @@ mod tests {
             .expect("args must be array");
         assert_eq!(args[0], "ops@example-host");
         assert_eq!(args[1], "cd '/srv/amai' && ./scripts/run_mcp_stdio.sh");
+    }
+
+    #[test]
+    fn context_pack_schema_exposes_whole_cycle_observed_fields() {
+        let schema = context_pack_input_schema(true);
+        let properties = schema["properties"]
+            .as_object()
+            .expect("properties must be object");
+        for field in [
+            "client_prompt_tokens",
+            "assistant_generation_tokens",
+            "tool_overhead_tokens",
+            "continuity_restore_tokens",
+        ] {
+            assert!(properties.contains_key(field), "missing field {field}");
+        }
+    }
+
+    #[test]
+    fn context_pack_tool_args_forward_whole_cycle_observed_fields() {
+        let args = ContextPackToolArgs {
+            project: "art".to_string(),
+            namespace: "continuity".to_string(),
+            query: "same meter".to_string(),
+            retrieval_mode: Some("local_strict".to_string()),
+            disable_cache: false,
+            limit_documents: 5,
+            limit_symbols: 8,
+            limit_chunks: 8,
+            limit_semantic_chunks: 8,
+            client_prompt_tokens: Some(42),
+            assistant_generation_tokens: Some(24),
+            tool_overhead_tokens: Some(7),
+            continuity_restore_tokens: Some(3),
+            persist: true,
+        };
+
+        let context = args.to_context_args();
+        assert_eq!(context.client_prompt_tokens, Some(42));
+        assert_eq!(context.assistant_generation_tokens, Some(24));
+        assert_eq!(context.tool_overhead_tokens, Some(7));
+        assert_eq!(context.continuity_restore_tokens, Some(3));
     }
 
     #[test]

@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:15 MSK
-Ручная сверка guide/docs: 2026-03-25 14:15 MSK
+modified_at: 2026-03-25 14:22 MSK
+Ручная сверка guide/docs: 2026-03-25 14:22 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1494,8 +1494,9 @@ preview, а не только raw count.
     внутренний meter lower bound для provider drift/cost preview поднимается от
     `delivered + recovery` к `observed whole-cycle lower bound`, как только такие
     компоненты действительно materialized в ledger.
-  - runtime path тоже открыт честно: `ContextPackArgs` и CLI для context-pack теперь могут
-    нести observed overrides для
+  - runtime path тоже открыт честно: `ContextPackArgs`, прямой CLI `context pack`,
+    MCP `amai_context_pack` / `amai_token_benchmark` и compatibility `memory search`
+    теперь могут нести observed overrides для
     `client_prompt_tokens`,
     `assistant_generation_tokens`,
     `tool_overhead_tokens`,

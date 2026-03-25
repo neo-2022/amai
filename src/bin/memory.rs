@@ -60,6 +60,14 @@ struct SearchArgs {
     limit_chunks: usize,
     #[arg(long, default_value_t = 8)]
     limit_semantic_chunks: usize,
+    #[arg(long)]
+    client_prompt_tokens: Option<u64>,
+    #[arg(long)]
+    assistant_generation_tokens: Option<u64>,
+    #[arg(long)]
+    tool_overhead_tokens: Option<u64>,
+    #[arg(long)]
+    continuity_restore_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -263,6 +271,13 @@ async fn run_search(paths: &BridgePaths, args: &SearchArgs) -> Result<()> {
         .arg(args.limit_semantic_chunks.to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    append_whole_cycle_observed_args(
+        &mut command,
+        args.client_prompt_tokens,
+        args.assistant_generation_tokens,
+        args.tool_overhead_tokens,
+        args.continuity_restore_tokens,
+    );
     let output = command
         .output()
         .with_context(|| "failed to run Amai context pack")?;
@@ -389,6 +404,35 @@ fn apply_default_agent_scope(
             "AMAI_AGENT_SCOPE",
             format!("{project_code}::{namespace}::memory-bridge::{suffix}"),
         );
+    }
+}
+
+fn append_whole_cycle_observed_args(
+    command: &mut Command,
+    client_prompt_tokens: Option<u64>,
+    assistant_generation_tokens: Option<u64>,
+    tool_overhead_tokens: Option<u64>,
+    continuity_restore_tokens: Option<u64>,
+) {
+    if let Some(tokens) = client_prompt_tokens {
+        command
+            .arg("--client-prompt-tokens")
+            .arg(tokens.to_string());
+    }
+    if let Some(tokens) = assistant_generation_tokens {
+        command
+            .arg("--assistant-generation-tokens")
+            .arg(tokens.to_string());
+    }
+    if let Some(tokens) = tool_overhead_tokens {
+        command
+            .arg("--tool-overhead-tokens")
+            .arg(tokens.to_string());
+    }
+    if let Some(tokens) = continuity_restore_tokens {
+        command
+            .arg("--continuity-restore-tokens")
+            .arg(tokens.to_string());
     }
 }
 
@@ -832,6 +876,9 @@ fn print_bridge_help() {
     println!("Поддерживаемые команды:");
     println!("- memory context [--project [code]] [--repo-root PATH]");
     println!("- memory search <запрос> [--project [code]] [--repo-root PATH]");
+    println!(
+        "  memory search также принимает optional whole-cycle flags: --client-prompt-tokens, --assistant-generation-tokens, --tool-overhead-tokens, --continuity-restore-tokens"
+    );
     println!("- memory details <номер>");
     println!("- memory save --title ... [--what ... --why ... --impact ...]");
     println!("- memory mcp");
@@ -847,8 +894,10 @@ fn now_epoch_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BridgePaths, build_search_hits, decision_trace_summary, is_amai_root, render_save_details,
+        BridgePaths, Cli, append_whole_cycle_observed_args, build_search_hits,
+        decision_trace_summary, is_amai_root, render_save_details,
     };
+    use clap::Parser;
     use serde_json::json;
     use std::fs;
     use std::path::Path;
@@ -976,5 +1025,57 @@ mod tests {
         let command = paths.amai_command().expect("release command");
         assert_eq!(command.get_program(), release_binary.as_os_str());
         let _ = fs::remove_dir_all(&amai_root);
+    }
+
+    #[test]
+    fn search_cli_accepts_whole_cycle_observed_flags() {
+        let cli = Cli::parse_from([
+            "memory",
+            "search",
+            "same meter",
+            "--client-prompt-tokens",
+            "42",
+            "--assistant-generation-tokens",
+            "24",
+            "--tool-overhead-tokens",
+            "7",
+            "--continuity-restore-tokens",
+            "3",
+        ]);
+
+        let super::Cli {
+            command: Some(super::MemoryCommand::Search(args)),
+        } = cli
+        else {
+            panic!("expected search command");
+        };
+
+        assert_eq!(args.client_prompt_tokens, Some(42));
+        assert_eq!(args.assistant_generation_tokens, Some(24));
+        assert_eq!(args.tool_overhead_tokens, Some(7));
+        assert_eq!(args.continuity_restore_tokens, Some(3));
+    }
+
+    #[test]
+    fn append_whole_cycle_observed_args_adds_expected_flags() {
+        let mut command = std::process::Command::new("echo");
+        append_whole_cycle_observed_args(&mut command, Some(42), Some(24), Some(7), Some(3));
+        let args: Vec<_> = command
+            .get_args()
+            .map(|item| item.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "--client-prompt-tokens",
+                "42",
+                "--assistant-generation-tokens",
+                "24",
+                "--tool-overhead-tokens",
+                "7",
+                "--continuity-restore-tokens",
+                "3",
+            ]
+        );
     }
 }

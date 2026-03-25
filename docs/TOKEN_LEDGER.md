@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:15 MSK
-Ручная сверка guide/docs: 2026-03-25 14:15 MSK
+modified_at: 2026-03-25 14:22 MSK
+Ручная сверка guide/docs: 2026-03-25 14:22 MSK
 
 # Token Ledger
 
@@ -455,11 +455,17 @@ Ledger обязан различать:
 ложного переключения `same_meter_as_client_limit=true` раньше времени.
 
 Начиная с этого же слоя whole-cycle evidence можно подавать и в runtime path:
-- `ContextPackArgs` / CLI context-pack теперь умеют принимать optional observed fields:
+- `ContextPackArgs` / CLI context-pack умеют принимать optional observed fields:
   - `client_prompt_tokens`
   - `assistant_generation_tokens`
   - `tool_overhead_tokens`
   - `continuity_restore_tokens`
+- те же поля теперь подняты и в front-door surfaces:
+  - MCP `amai_context_pack`
+  - MCP `amai_token_benchmark`
+  - compatibility `memory search`
+- это означает, что live caller может materialize-ить same-meter evidence не только через
+  прямой бинарь `amai`, но и через MCP/bridge path;
 - retrieval path не притворяется, что знает их сам;
 - но если upstream client уже знает эти числа честно, он может materialize-ить их прямо в
   token ledger без repair/backfill обходов.
