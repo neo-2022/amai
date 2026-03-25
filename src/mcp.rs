@@ -384,6 +384,14 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract is missing execctl_resume_state from required summary fields"
         ));
     }
+    if !required_summary_fields
+        .iter()
+        .any(|field| field.as_str() == Some("startup_next_action"))
+    {
+        return Err(anyhow!(
+            "MCP startup contract is missing startup_next_action from required summary fields"
+        ));
+    }
 
     let tools = session.request("tools/list", json!({})).await?;
     let tool_names = tools["tools"]
@@ -553,6 +561,11 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     {
         return Err(anyhow!(
             "MCP continuity startup did not surface project_task_ledger_summary"
+        ));
+    }
+    if !continuity_startup["continuity_startup_summary"]["startup_next_action"].is_object() {
+        return Err(anyhow!(
+            "MCP continuity startup did not surface startup_next_action"
         ));
     }
 
@@ -1301,6 +1314,8 @@ async fn tool_continuity_startup(
                 "pending_return_summary": summary.pending_return_summary,
                 "execctl_resume_contract_summary": summary.execctl_resume_contract_summary,
                 "execctl_resume_obligation": summary.execctl_resume_obligation,
+                "startup_next_action": summary.startup_next_action,
+                "startup_next_action_summary": summary.startup_next_action_summary,
                 "project_task_tree_summary": summary.project_task_tree_summary,
                 "project_task_ledger_summary": summary.project_task_ledger_summary,
                 "included_reasons_summary": summary.included_reasons_summary,
@@ -1870,6 +1885,8 @@ struct ContinuityStartupSummary {
     pending_return_summary: Option<String>,
     execctl_resume_contract_summary: Option<String>,
     execctl_resume_obligation: Value,
+    startup_next_action: Value,
+    startup_next_action_summary: Option<String>,
     project_task_tree_summary: Option<String>,
     project_task_ledger_summary: Option<String>,
     included_reasons_summary: Option<String>,
@@ -1933,6 +1950,26 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
                 "required_return_next_step": Value::Null,
             })
         },
+        startup_next_action: if payload["chat_start_restore"]["startup_next_action"].is_object() {
+            payload["chat_start_restore"]["startup_next_action"].clone()
+        } else {
+            json!({
+                "action_version": "startup-next-action-v1",
+                "action_kind": "continue_active_workline",
+                "blocking": false,
+                "reason": "active_workline_restored",
+                "resume_state": payload["chat_start_restore"]["execctl_resume_state"]
+                    .as_str()
+                    .unwrap_or("clear"),
+                "no_silent_drop": true,
+                "headline": payload["chat_start_restore"]["headline"].as_str().unwrap_or(""),
+                "next_step": payload["chat_start_restore"]["next_step"].as_str().unwrap_or(""),
+            })
+        },
+        startup_next_action_summary: payload["chat_start_restore"]["startup_next_action_summary"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
         project_task_tree_summary: payload["chat_start_restore"]["project_task_tree_summary"]
             .as_str()
             .filter(|value| !value.is_empty())
@@ -2327,7 +2364,7 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v1",
+                "contract_version": "continuity-startup-contract-v2",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore before any substantive work in a new or resumed chat",
@@ -2356,6 +2393,8 @@ fn protocol_manifest() -> Value {
                     "execctl_resume_state",
                     "execctl_resume_contract_summary",
                     "execctl_resume_obligation",
+                    "startup_next_action",
+                    "startup_next_action_summary",
                     "project_task_tree_summary",
                     "project_task_ledger_summary"
                 ],
@@ -2366,6 +2405,7 @@ fn protocol_manifest() -> Value {
                     "pending_return_summary",
                     "execctl_resume_contract_summary",
                     "execctl_resume_obligation",
+                    "startup_next_action",
                     "project_task_tree_summary",
                     "project_task_ledger_summary"
                 ],
@@ -2373,7 +2413,10 @@ fn protocol_manifest() -> Value {
                     "contract_field": "execctl_resume_contract_summary",
                     "resume_state_field": "execctl_resume_state",
                     "obligation_field": "execctl_resume_obligation",
+                    "startup_next_action_field": "startup_next_action",
                     "must_resume_required_return_task_before_unrelated_work": true,
+                    "required_action_kind_when_resume_required": "resume_required_return_task",
+                    "default_action_kind_when_clear": "continue_active_workline",
                     "no_silent_drop": true
                 },
                 "fail_closed_conditions": [
@@ -2801,7 +2844,7 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
                     "content": {
                         "type": "text",
                         "text": format!(
-                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, and execctl_resume_obligation. If execctl_resume_obligation.resume_state is not clear, treat it as a required return obligation and do not silently switch to unrelated work."
+                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, and startup_next_action. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away."
                         )
                     }
                 }]
@@ -4448,6 +4491,11 @@ mod tests {
         assert!(
             startup_required_fields
                 .iter()
+                .any(|field| field.as_str() == Some("startup_next_action"))
+        );
+        assert!(
+            startup_required_fields
+                .iter()
                 .any(|field| field.as_str() == Some("project_task_tree_summary"))
         );
         assert!(
@@ -4463,9 +4511,21 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
+                ["startup_next_action_field"]
+                .as_str(),
+            Some("startup_next_action")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
                 ["must_resume_required_return_task_before_unrelated_work"]
                 .as_bool(),
             Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
+                ["required_action_kind_when_resume_required"]
+                .as_str(),
+            Some("resume_required_return_task")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
@@ -4544,7 +4604,8 @@ mod tests {
         assert!(text.contains("pending_return_queue"));
         assert!(text.contains("execctl_resume_contract_summary"));
         assert!(text.contains("execctl_resume_obligation"));
-        assert!(text.contains("do not silently switch to unrelated work"));
+        assert!(text.contains("startup_next_action"));
+        assert!(text.contains("resume_required_return_task"));
     }
 
     #[test]
@@ -4571,6 +4632,13 @@ mod tests {
                     "required_return_headline": "Same-meter spend control",
                     "required_return_next_step": "Materialize live assistant generation source."
                 },
+                "startup_next_action": {
+                    "action_kind": "resume_required_return_task",
+                    "blocking": true,
+                    "headline": "Same-meter spend control",
+                    "next_step": "Materialize live assistant generation source."
+                },
+                "startup_next_action_summary": "resume_required_return_task: Same-meter spend control -> Materialize live assistant generation source.",
                 "project_task_tree_summary": "active: Continue runtime auto-start guarantees.; pending_return(1): Same-meter spend control -> Materialize live assistant generation source.",
                 "project_task_ledger_summary": "active: Continue runtime auto-start guarantees.; pending_return(1); historical_handoffs(3)",
                 "included_reasons_summary": "exact_documents (1) — Exact layer matched.",
@@ -4602,6 +4670,16 @@ mod tests {
         assert_eq!(
             summary.execctl_resume_obligation["required_return_headline"],
             json!("Same-meter spend control")
+        );
+        assert_eq!(
+            summary.startup_next_action["action_kind"],
+            json!("resume_required_return_task")
+        );
+        assert!(
+            summary
+                .startup_next_action_summary
+                .as_deref()
+                .is_some_and(|value| value.contains("resume_required_return_task"))
         );
         assert!(
             summary

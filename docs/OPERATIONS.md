@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 23:21 MSK
-Ручная сверка guide/docs: 2026-03-25 23:21 MSK
+modified_at: 2026-03-25 23:34 MSK
+Ручная сверка guide/docs: 2026-03-25 23:34 MSK
 
 # Operations
 
@@ -849,6 +849,9 @@ cargo run -- mcp config --client vscode --cwd /path/to/art-memory-agent-index
 - просто открыть папку проекта недостаточно, если сам клиент ещё не подключён к `Amai`;
 - первое сообщение пользователя должно быть обычным рабочим сообщением, а не специальной
   фразой для восстановления continuity.
+- если startup вернул `startup_next_action.action_kind = resume_required_return_task`,
+  клиент обязан взять именно это действие как первый ход после restore, а не оставлять
+  pending-return только в human summary.
 
 Текущий truthful runtime contour по клиентам теперь такой:
 - `VS Code`

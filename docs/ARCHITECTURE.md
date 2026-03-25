@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 21:26 MSK
-Ручная сверка guide/docs: 2026-03-25 21:26 MSK
+modified_at: 2026-03-25 23:34 MSK
+Ручная сверка guide/docs: 2026-03-25 23:34 MSK
 
 # Architecture
 
@@ -227,6 +227,8 @@ Code structure plane:
 - `execctl_resume_state`
 - `execctl_resume_contract`
 - `execctl_resume_contract_summary`
+- `startup_next_action`
+- `startup_next_action_summary`
 - `project_task_tree`
 - `project_task_tree_summary`
 - `project_task_ledger`

@@ -606,6 +606,9 @@ fn compose_restore_bundle(
         build_execctl_resume_contract(&project_task_tree, &pending_return_queue);
     let execctl_resume_contract_summary =
         summarize_execctl_resume_contract(&execctl_resume_contract);
+    let startup_next_action =
+        build_startup_next_action(&current_goal, &next_step, &execctl_resume_contract);
+    let startup_next_action_summary = summarize_startup_next_action(&startup_next_action);
 
     json!({
         "working_state_restore": {
@@ -633,6 +636,8 @@ fn compose_restore_bundle(
             "execctl_resume_state": execctl_resume_state,
             "execctl_resume_contract": execctl_resume_contract,
             "execctl_resume_contract_summary": execctl_resume_contract_summary,
+            "startup_next_action": startup_next_action,
+            "startup_next_action_summary": startup_next_action_summary,
             "project_task_tree": project_task_tree,
             "project_task_tree_summary": project_task_tree_summary,
             "project_task_ledger": project_task_ledger,
@@ -1991,6 +1996,65 @@ fn summarize_execctl_resume_contract(value: &Value) -> Option<String> {
     ))
 }
 
+fn build_startup_next_action(current_goal: &str, next_step: &str, contract: &Value) -> Value {
+    let resume_state = contract["resume_state"].as_str().unwrap_or("clear");
+    let no_silent_drop = contract["no_silent_drop"].as_bool().unwrap_or(true);
+    let active_task = &contract["active_task"];
+    let required_return_task = &contract["required_return_task"];
+    let active_headline = active_task["headline"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(current_goal);
+    let active_next_step = active_task["next_step"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(next_step);
+    let required_headline = required_return_task["headline"]
+        .as_str()
+        .filter(|value| !value.is_empty());
+    let required_next_step = required_return_task["next_step"]
+        .as_str()
+        .filter(|value| !value.is_empty());
+    if resume_state != "clear" && required_headline.is_some() {
+        json!({
+            "action_version": "startup-next-action-v1",
+            "action_kind": "resume_required_return_task",
+            "blocking": true,
+            "reason": "execctl_return_required",
+            "resume_state": resume_state,
+            "no_silent_drop": no_silent_drop,
+            "headline": required_headline,
+            "next_step": required_next_step,
+        })
+    } else {
+        json!({
+            "action_version": "startup-next-action-v1",
+            "action_kind": "continue_active_workline",
+            "blocking": false,
+            "reason": "active_workline_restored",
+            "resume_state": resume_state,
+            "no_silent_drop": no_silent_drop,
+            "headline": active_headline,
+            "next_step": active_next_step,
+        })
+    }
+}
+
+fn summarize_startup_next_action(value: &Value) -> Option<String> {
+    let action_kind = value["action_kind"]
+        .as_str()
+        .filter(|item| !item.is_empty())?;
+    let headline = value["headline"]
+        .as_str()
+        .filter(|item| !item.is_empty())
+        .unwrap_or("ещё нет данных");
+    let next_step = value["next_step"]
+        .as_str()
+        .filter(|item| !item.is_empty())
+        .unwrap_or("ещё нет данных");
+    Some(format!("{action_kind}: {headline} -> {next_step}"))
+}
+
 fn normalize_next_step_hint(value: &str) -> String {
     let mut normalized = value.trim().to_string();
     for _ in 0..3 {
@@ -2720,6 +2784,19 @@ mod tests {
             restore["execctl_resume_contract_summary"]
                 .as_str()
                 .is_some_and(|value| value.contains("return_required(1)"))
+        );
+        assert_eq!(
+            restore["startup_next_action"]["action_kind"],
+            json!("resume_required_return_task")
+        );
+        assert_eq!(
+            restore["startup_next_action"]["headline"],
+            json!("Same-meter spend control")
+        );
+        assert!(
+            restore["startup_next_action_summary"]
+                .as_str()
+                .is_some_and(|value| value.contains("resume_required_return_task"))
         );
         assert_eq!(
             restore["project_task_tree"]["tree_version"],

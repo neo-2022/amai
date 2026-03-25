@@ -2244,6 +2244,17 @@ fn build_chat_start_restore(
     let execctl_resume_obligation = restore_node
         .map(|value| summarize_execctl_resume_obligation(&value["execctl_resume_contract"]))
         .unwrap_or_else(|| default_execctl_resume_obligation(None, "clear"));
+    let startup_next_action = restore_node
+        .filter(|value| value["startup_next_action"].is_object())
+        .map(|value| value["startup_next_action"].clone())
+        .unwrap_or_else(|| {
+            default_startup_next_action(&current_goal, &next_step, &execctl_resume_obligation)
+        });
+    let startup_next_action_summary = restore_node
+        .and_then(|value| value["startup_next_action_summary"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| summarize_startup_next_action(&startup_next_action));
     let project_task_tree_summary = restore_node
         .and_then(|value| value["project_task_tree_summary"].as_str())
         .filter(|value| !value.is_empty())
@@ -2319,6 +2330,8 @@ fn build_chat_start_restore(
             "pending_return_summary": pending_return_summary,
             "execctl_resume_contract_summary": execctl_resume_contract_summary,
             "execctl_resume_obligation": execctl_resume_obligation,
+            "startup_next_action": startup_next_action,
+            "startup_next_action_summary": startup_next_action_summary,
             "project_task_tree_summary": project_task_tree_summary,
             "project_task_ledger_summary": project_task_ledger_summary,
             "execctl_resume_state": execctl_resume_state,
@@ -2373,6 +2386,67 @@ fn summarize_execctl_resume_obligation(contract: &Value) -> Value {
     })
 }
 
+fn default_startup_next_action(
+    current_goal: &str,
+    next_step: &str,
+    execctl_resume_obligation: &Value,
+) -> Value {
+    let resume_state = execctl_resume_obligation["resume_state"]
+        .as_str()
+        .unwrap_or("clear");
+    let no_silent_drop = execctl_resume_obligation["no_silent_drop"]
+        .as_bool()
+        .unwrap_or(true);
+    let active_headline = execctl_resume_obligation["active_task_headline"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(current_goal);
+    let required_headline = execctl_resume_obligation["required_return_headline"]
+        .as_str()
+        .filter(|value| !value.is_empty());
+    let required_next_step = execctl_resume_obligation["required_return_next_step"]
+        .as_str()
+        .filter(|value| !value.is_empty());
+    if resume_state != "clear" && required_headline.is_some() {
+        json!({
+            "action_version": "startup-next-action-v1",
+            "action_kind": "resume_required_return_task",
+            "blocking": true,
+            "reason": "execctl_return_required",
+            "resume_state": resume_state,
+            "no_silent_drop": no_silent_drop,
+            "headline": required_headline,
+            "next_step": required_next_step,
+        })
+    } else {
+        json!({
+            "action_version": "startup-next-action-v1",
+            "action_kind": "continue_active_workline",
+            "blocking": false,
+            "reason": "active_workline_restored",
+            "resume_state": resume_state,
+            "no_silent_drop": no_silent_drop,
+            "headline": active_headline,
+            "next_step": next_step,
+        })
+    }
+}
+
+fn summarize_startup_next_action(value: &Value) -> Option<String> {
+    let action_kind = value["action_kind"]
+        .as_str()
+        .filter(|item| !item.is_empty())?;
+    let headline = value["headline"]
+        .as_str()
+        .filter(|item| !item.is_empty())
+        .unwrap_or("ещё нет данных");
+    let next_step = value["next_step"]
+        .as_str()
+        .filter(|item| !item.is_empty())
+        .unwrap_or("ещё нет данных");
+    Some(format!("{action_kind}: {headline} -> {next_step}"))
+}
+
 fn render_chat_start_prompt(
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
@@ -2409,6 +2483,20 @@ fn render_chat_start_prompt(
         .and_then(|value| value["execctl_resume_contract_summary"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let execctl_resume_obligation = restore_node
+        .map(|value| summarize_execctl_resume_obligation(&value["execctl_resume_contract"]))
+        .unwrap_or_else(|| default_execctl_resume_obligation(None, "clear"));
+    let startup_next_action = restore_node
+        .filter(|value| value["startup_next_action"].is_object())
+        .map(|value| value["startup_next_action"].clone())
+        .unwrap_or_else(|| {
+            default_startup_next_action(current_goal, &next_step, &execctl_resume_obligation)
+        });
+    let startup_next_action_summary = restore_node
+        .and_then(|value| value["startup_next_action_summary"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| summarize_startup_next_action(&startup_next_action));
     let project_task_tree_summary = restore_node
         .and_then(|value| value["project_task_tree_summary"].as_str())
         .filter(|value| !value.is_empty())
@@ -2463,6 +2551,11 @@ fn render_chat_start_prompt(
     if let Some(value) = execctl_resume_contract_summary {
         lines.push(format!("Контракт возврата ExecCtl: {value}"));
     }
+    if let Some(value) = startup_next_action_summary {
+        lines.push(format!(
+            "Первое обязательное действие после startup: {value}"
+        ));
+    }
     if let Some(value) = included_reasons_summary {
         lines.push(format!("Почему вошёл последний контекст: {value}"));
     }
@@ -2480,7 +2573,7 @@ fn render_chat_start_prompt(
     }
     if execctl_resume_state == "pending_return_queue_present" {
         lines.push(
-            "ExecCtl: есть незавершённые линии к возврату; не теряй их, не делай silent preemption и после active line возвращайся к required_return_task."
+            "ExecCtl: есть незавершённые линии к возврату; первое действие после startup теперь machine-readable задано как required return, не теряй его и не делай silent preemption."
                 .to_string(),
         );
     }
@@ -2539,6 +2632,12 @@ fn print_chat_start_restore_human(value: &Value) {
         .filter(|value| !value.is_empty())
     {
         println!("- Контракт возврата ExecCtl: {value}");
+    }
+    if let Some(value) = node["startup_next_action_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Первое обязательное действие после startup: {value}");
     }
     if let Some(value) = node["included_reasons_summary"]
         .as_str()
@@ -4159,6 +4258,13 @@ mod tests {
                     }
                 },
                 "execctl_resume_contract_summary": "return_required(1): Same-meter spend control -> Materialize live assistant generation source.",
+                "startup_next_action": {
+                    "action_kind": "resume_required_return_task",
+                    "blocking": true,
+                    "headline": "Same-meter spend control",
+                    "next_step": "Materialize live assistant generation source."
+                },
+                "startup_next_action_summary": "resume_required_return_task: Same-meter spend control -> Materialize live assistant generation source.",
                 "project_task_tree_summary": "active: Amai upstream thread-index enrich materialized; pending_return(1): Same-meter spend control -> Materialize live assistant generation source.",
                 "materialized_notes": [
                     "Enriched temporal summaries теперь пишутся upstream."
@@ -4198,6 +4304,9 @@ mod tests {
         assert!(prompt.contains(
             "Контракт возврата ExecCtl: return_required(1): Same-meter spend control -> Materialize live assistant generation source."
         ));
+        assert!(prompt.contains(
+            "Первое обязательное действие после startup: resume_required_return_task: Same-meter spend control -> Materialize live assistant generation source."
+        ));
         assert!(prompt.contains("ExecCtl: есть незавершённые линии к возврату"));
         assert_eq!(node["thread_count"], json!(16));
         assert_eq!(
@@ -4210,6 +4319,14 @@ mod tests {
         );
         assert_eq!(
             node["execctl_resume_obligation"]["required_return_headline"],
+            json!("Same-meter spend control")
+        );
+        assert_eq!(
+            node["startup_next_action"]["action_kind"],
+            json!("resume_required_return_task")
+        );
+        assert_eq!(
+            node["startup_next_action"]["headline"],
             json!("Same-meter spend control")
         );
     }

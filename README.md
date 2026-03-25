@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 23:21 MSK
-Ручная сверка guide/docs: 2026-03-25 23:21 MSK
+modified_at: 2026-03-25 23:34 MSK
+Ручная сверка guide/docs: 2026-03-25 23:34 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1163,7 +1163,9 @@ preview, а не только raw count.
 - читать `resume_enforcement` из startup contract:
   - `execctl_resume_contract_summary` является каноническим полем resume-obligation;
   - `execctl_resume_obligation` даёт тот же контур уже как machine-readable object;
-  - если summary не `clear`, клиент обязан трактовать её как `required_return_task`;
+  - `startup_next_action` теперь даёт первое обязательное действие после startup;
+  - если `startup_next_action.action_kind = resume_required_return_task`, клиент обязан
+    выполнить именно этот return path до unrelated work;
   - `no_silent_drop = true` запрещает тихо переключаться на unrelated work.
 
 Следующий practical contour теперь тоже materialized не только в docs, но и в onboarding:
