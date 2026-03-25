@@ -275,11 +275,8 @@ pub async fn build_restore_bundle(
     if events.is_empty() {
         return Ok(None);
     }
-    let mut bundle = compose_restore_bundle(
-        &project_json(project),
-        &namespace_json(namespace),
-        &events,
-    );
+    let mut bundle =
+        compose_restore_bundle(&project_json(project), &namespace_json(namespace), &events);
     let durable_entries = postgres::list_execctl_task_ledger_entries(
         db,
         project.project_id,
@@ -1861,18 +1858,18 @@ fn build_durable_project_task_ledger(
     let mut serialized_entries = Vec::new();
 
     for entry in entries {
-        let task_role =
-            if !authoritative_event_id.is_empty() && entry.source_event_id == authoritative_event_id
-            {
-                "active"
-            } else if pending_event_ids
-                .iter()
-                .any(|value| value == &entry.source_event_id)
-            {
-                "pending_return"
-            } else {
-                "historical_handoff"
-            };
+        let task_role = if !authoritative_event_id.is_empty()
+            && entry.source_event_id == authoritative_event_id
+        {
+            "active"
+        } else if pending_event_ids
+            .iter()
+            .any(|value| value == &entry.source_event_id)
+        {
+            "pending_return"
+        } else {
+            "historical_handoff"
+        };
         let task_state = match task_role {
             "active" => "active",
             "pending_return" => "suspended",
@@ -2826,7 +2823,9 @@ mod tests {
                     "queued_reason": "interrupted_by_new_handoff"
                 }
             ]),
-            local_path: Some("/home/art/agent-memory-index/.amai-continuity/live-handoff/HANDOFF.md".to_string()),
+            local_path: Some(
+                "/home/art/agent-memory-index/.amai-continuity/live-handoff/HANDOFF.md".to_string(),
+            ),
             recorded_at_epoch_ms: base,
             created_at_epoch_ms: base,
         }];

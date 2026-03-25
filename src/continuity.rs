@@ -2337,7 +2337,10 @@ fn build_chat_start_restore(
     })
 }
 
-fn default_execctl_resume_obligation(required_return_task: Option<&Value>, resume_state: &str) -> Value {
+fn default_execctl_resume_obligation(
+    required_return_task: Option<&Value>,
+    resume_state: &str,
+) -> Value {
     let required_headline = required_return_task
         .and_then(|task| task["headline"].as_str())
         .filter(|value| !value.is_empty());

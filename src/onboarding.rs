@@ -1574,17 +1574,28 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     let resume_enforcement = &contract["resume_enforcement"];
     let resume_contract_field = resume_enforcement["contract_field"]
         .as_str()
-        .ok_or_else(|| anyhow!("project_chat_startup contract is missing resume_enforcement.contract_field"))?;
+        .ok_or_else(|| {
+            anyhow!("project_chat_startup contract is missing resume_enforcement.contract_field")
+        })?;
     let resume_state_field = resume_enforcement["resume_state_field"]
         .as_str()
-        .ok_or_else(|| anyhow!("project_chat_startup contract is missing resume_enforcement.resume_state_field"))?;
-    let resume_obligation_field = resume_enforcement["obligation_field"]
-        .as_str()
-        .ok_or_else(|| anyhow!("project_chat_startup contract is missing resume_enforcement.obligation_field"))?;
-    let must_resume_before_unrelated = resume_enforcement
-        ["must_resume_required_return_task_before_unrelated_work"]
-        .as_bool()
-        .unwrap_or(false);
+        .ok_or_else(|| {
+            anyhow!(
+                "project_chat_startup contract is missing resume_enforcement.resume_state_field"
+            )
+        })?;
+    let resume_obligation_field =
+        resume_enforcement["obligation_field"]
+            .as_str()
+            .ok_or_else(|| {
+                anyhow!(
+                    "project_chat_startup contract is missing resume_enforcement.obligation_field"
+                )
+            })?;
+    let must_resume_before_unrelated =
+        resume_enforcement["must_resume_required_return_task_before_unrelated_work"]
+            .as_bool()
+            .unwrap_or(false);
     let no_silent_drop = resume_enforcement["no_silent_drop"]
         .as_bool()
         .unwrap_or(false);

@@ -1803,7 +1803,9 @@ pub async fn insert_execctl_task_ledger_entry(
     entry: &ExecCtlTaskLedgerEntryInsert<'_>,
 ) -> Result<Uuid> {
     if entry.source_event_id.trim().is_empty() {
-        return Err(anyhow!("execctl task ledger source_event_id must not be empty"));
+        return Err(anyhow!(
+            "execctl task ledger source_event_id must not be empty"
+        ));
     }
     if entry.agent_scope.trim().is_empty() {
         return Err(anyhow!("execctl task ledger agent_scope must not be empty"));
