@@ -1,9 +1,26 @@
-modified_at: 2026-03-24 03:25 MSK
-Ручная сверка guide/docs: 2026-03-24 03:25 MSK
+modified_at: 2026-03-25 11:55 MSK
+Ручная сверка guide/docs: 2026-03-25 11:55 MSK
 
 # Architecture
 
 ## Цель
+
+`Amai` должен расти не только по возможностям, но и по дисциплине.
+
+Архитектурно это означает:
+- новая функциональность не имеет права ухудшать старые контуры незаметно;
+- новый claim сначала должен быть machine-readable, затем proof-driven, и только потом user-facing;
+- новый UX не может обгонять safety/truth semantics;
+- рост ledger/history требует semantic compaction, а не бесконечного накопления без модели;
+- moat `Amai` должен жить прежде всего в `semantics`, `proofs`, `evidence`, `replay corpus`
+  и `failure libraries`, а не во внешнем ornament-слое.
+
+Эти правила относятся ко всем доменам:
+- retrieval;
+- continuity;
+- tokenonomics;
+- observability;
+- будущий execution-control contour.
 
 Сделать внешний стек для ИИ-агентов, который:
 - по умолчанию держит проекты раздельно;

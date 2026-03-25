@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 11:28 MSK
-Ручная сверка guide/docs: 2026-03-25 11:28 MSK
+modified_at: 2026-03-25 11:55 MSK
+Ручная сверка guide/docs: 2026-03-25 11:55 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -866,6 +866,48 @@ cargo run -- deployment explain --target kubernetes_server
 Главная разница простыми словами:
 - `default` = полноценная рабочая база;
 - `lite_vps` = дешёвый удалённый режим без обещания топовых цифр.
+
+## Законы роста проекта
+
+По мере роста `Amai` обязаны одновременно усиливаться четыре линии:
+- скорость;
+- точность;
+- правдивость;
+- безопасность и isolation.
+
+Нельзя усиливать одну из них ценой тихой деградации другой.
+
+Отсюда следуют постоянные engineering laws:
+- `performance budget per contour`
+  Любой новый слой обязан иметь явный budget по `latency`, `CPU/RAM` и при необходимости по
+  token-cost, иначе проект станет умнее, но тяжелее и медленнее.
+- `truth budget`
+  Новый surface не имеет права расширять claims быстрее, чем появляются `measurement`, `proof`
+  и живое runtime evidence.
+- `safety gates before UX growth`
+  Нельзя делать новый удобный UI/UX surface, если он усиливает ложную уверенность или маскирует
+  неполный truth.
+- `semantic compaction`
+  Рост ledger/snapshot/event history нельзя лечить только бесконечным хранением; нужен controlled
+  compaction без потери truth, replay correctness и audit anchors.
+- `operability-first`
+  Для каждого нового контура сразу обязательны: `metrics`, `proof`, `incident bundle`,
+  `reconcile path`.
+- `complexity guard`
+  Если новый слой делает систему умнее, но хуже объяснимой, хуже проверяемой или тяжелее
+  в эксплуатации, он считается дефектным.
+- `regression pressure tracking`
+  Нужно мерить не только новые успехи, но и цену роста: `latency drift`, `recovery drift`,
+  `wrong-resume risk`, `proof coverage gaps`.
+- `anti-copy through semantics, not ornament`
+  Ядро преимущества `Amai` должно жить в `semantics`, `evidence`, `proofs`, `replay corpus`,
+  `failure libraries`, а не в одном только внешнем UX.
+- `claim expansion gate`
+  Любой новый product claim сначала проходит через machine-readable contract, затем через proof,
+  и только потом попадает в dashboard/export/marketing contour.
+- `reference environments`
+  Изменения нельзя считать честно materialized, пока они не держатся хотя бы на `main Linux host`,
+  `Windows VM`, `ALT Linux laptop` и по возможности на одном более слабом профиле.
 
 ## Что `Amai` делает внутри
 

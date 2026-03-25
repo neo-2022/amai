@@ -1,9 +1,27 @@
-modified_at: 2026-03-25 00:18 MSK
-Ручная сверка guide/docs: 2026-03-25 00:18 MSK
+modified_at: 2026-03-25 11:55 MSK
+Ручная сверка guide/docs: 2026-03-25 11:55 MSK
 
 # Operations
 
 Каноническое имя проекта:
+
+## Growth guardrails
+
+Operations contour обязан удерживать не одну локальную метрику, а весь набор project laws:
+- скорость не должна тихо деградировать;
+- точность не должна уступать удобству;
+- правдивость claim-ов не должна расширяться быстрее proof/evidence;
+- безопасность и isolation не должны уступать ни UX, ни скорости.
+
+Для этого любой новый operational contour обязан сразу materialize-ить:
+- `performance budget` и способ его recheck;
+- `proof/gate` или честный evidence gap;
+- `incident bundle` для расследования;
+- `reconcile path`, если автоматический путь может fail-closed остановиться;
+- `degradation matrix`, если contour может частично ломаться.
+
+Если новый слой не даёт этих вещей, он считается operationally незавершённым даже при зелёных
+локальных тестах.
 - `Art-memory-agent-index`
 - short name: `Amai`
 - текущий path: `/home/art/agent-memory-index`
