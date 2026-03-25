@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:29 MSK
-Ручная сверка guide/docs: 2026-03-25 14:29 MSK
+modified_at: 2026-03-25 14:42 MSK
+Ручная сверка guide/docs: 2026-03-25 14:42 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1503,6 +1503,15 @@ preview, а не только raw count.
     `continuity_restore_tokens`,
     чтобы upstream client мог передавать whole-cycle evidence прямо в ledger, а не через
     задний repair path.
+  - MCP `amai_context_pack` теперь ещё materialize-ит и свой собственный
+    `tool_overhead_outside_retrieval` path:
+    после построения context pack tool result он связывает ответ с тем же
+    `context_pack_id` и дописывает в это же usage event observed `tool_overhead_tokens`
+    только по MCP summary/stats payload, а не по полному retrieval payload;
+  - это нужно затем, чтобы tool result envelope не оставался полностью тёмным same-meter
+    компонентом и при этом не происходило двойного счёта retrieval tokens;
+  - тот же MCP front door теперь принимает и `token_source_kind`, чтобы proof/verify
+    вызовы можно было уводить в `proof_*` / `verify_*`, а не contaminate live lane;
   - `continuity startup` тоже начал материализовать self-observed component:
     он может записывать `continuity_restore_tokens` от собственного `CHAT_START_RESTORE`
     prompt-text, а engineering/proof вызовы обязаны уводить это в `proof_/verify_`

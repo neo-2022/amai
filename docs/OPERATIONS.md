@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 13:12 MSK
-Ручная сверка guide/docs: 2026-03-25 13:12 MSK
+modified_at: 2026-03-25 14:42 MSK
+Ручная сверка guide/docs: 2026-03-25 14:42 MSK
 
 # Operations
 
@@ -1974,12 +1974,20 @@ cargo run --release -- observe token-evidence-pack --scope current_session --out
 ./scripts/proof_token_freeze_close_semantics.sh
 ./scripts/proof_token_suitability.sh
 ./scripts/proof_token_meter_alignment.sh
+./scripts/proof_token_mcp_tool_overhead.sh
 ```
 
 Dashboard hero-cards теперь тоже обязаны поднимать `client_limit_meter_alignment`.
 Это нужно затем, чтобы оператор видел distinction между:
 - lower-bound savings inside Amai;
 - и тем самым внешним meter, которым клиент реально сжигает свой live `5h` лимит.
+
+MCP `amai_context_pack` теперь тоже участвует в same-meter path:
+- tool result после построения summary/stats дописывает observed `tool_overhead_tokens`
+  в то же usage event по `context_pack_id`;
+- для этого path есть отдельный proof `scripts/proof_token_mcp_tool_overhead.sh`;
+- engineering/proof вызовы MCP должны уводиться через `token_source_kind = proof_* /
+  verify_*`, чтобы не contaminate live lane.
 
 Customer-facing contractual export surface теперь тоже обязан поднимать
 `adjustment_activation_governance`, чтобы future adjustment path был виден отдельно от

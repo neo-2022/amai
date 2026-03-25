@@ -483,6 +483,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
                 "limit_symbols": args.context.limit_symbols,
                 "limit_chunks": args.context.limit_chunks,
                 "limit_semantic_chunks": args.context.limit_semantic_chunks,
+                "token_source_kind": args.context.token_source_kind,
                 "persist": true,
             }),
         )
@@ -513,6 +514,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
                 "limit_symbols": args.context.limit_symbols,
                 "limit_chunks": args.context.limit_chunks,
                 "limit_semantic_chunks": args.context.limit_semantic_chunks,
+                "token_source_kind": args.context.token_source_kind,
                 "tokenizer": args.tokenizer,
                 "naive_limit_files": args.naive_limit_files,
                 "naive_max_bytes_per_file": args.naive_max_bytes_per_file,
@@ -1116,33 +1118,35 @@ async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result
     let result =
         retrieval::execute_context_pack_capture(cfg, &mut db, &context, args.persist).await?;
     let context_summary = context_pack_summary(&result.payload);
+    let summary_block = json!({
+        "included_reasons_summary": context_summary.included_reasons_summary.clone(),
+        "excluded_reasons_summary": context_summary.excluded_reasons_summary.clone(),
+    });
+    let stats_block = json!({
+        "context_pack_id": result.stats.context_pack_id,
+        "exact_documents": result.stats.exact_documents,
+        "symbol_hits": result.stats.symbol_hits,
+        "lexical_chunks": result.stats.lexical_chunks,
+        "semantic_chunks": result.stats.semantic_chunks,
+        "cache_hit": result.stats.cache_hit,
+        "scope_signature": result.stats.scope_signature,
+        "timings_ms": {
+            "resolve_scope_ms": result.stats.timings.resolve_scope_ms,
+            "cache_lookup_ms": result.stats.timings.cache_lookup_ms,
+            "exact_lookup_ms": result.stats.timings.exact_lookup_ms,
+            "symbol_lookup_ms": result.stats.timings.symbol_lookup_ms,
+            "lexical_lookup_ms": result.stats.timings.lexical_lookup_ms,
+            "query_embed_ms": result.stats.timings.query_embed_ms,
+            "semantic_search_ms": result.stats.timings.semantic_search_ms,
+            "semantic_hydrate_ms": result.stats.timings.semantic_hydrate_ms,
+            "serialize_ms": result.stats.timings.serialize_ms,
+            "persist_ms": result.stats.timings.persist_ms,
+        }
+    });
     let structured = json!({
         "context_pack": result.payload,
-        "context_pack_summary": {
-            "included_reasons_summary": context_summary.included_reasons_summary,
-            "excluded_reasons_summary": context_summary.excluded_reasons_summary,
-        },
-        "stats": {
-            "context_pack_id": result.stats.context_pack_id,
-            "exact_documents": result.stats.exact_documents,
-            "symbol_hits": result.stats.symbol_hits,
-            "lexical_chunks": result.stats.lexical_chunks,
-            "semantic_chunks": result.stats.semantic_chunks,
-            "cache_hit": result.stats.cache_hit,
-            "scope_signature": result.stats.scope_signature,
-            "timings_ms": {
-                "resolve_scope_ms": result.stats.timings.resolve_scope_ms,
-                "cache_lookup_ms": result.stats.timings.cache_lookup_ms,
-                "exact_lookup_ms": result.stats.timings.exact_lookup_ms,
-                "symbol_lookup_ms": result.stats.timings.symbol_lookup_ms,
-                "lexical_lookup_ms": result.stats.timings.lexical_lookup_ms,
-                "query_embed_ms": result.stats.timings.query_embed_ms,
-                "semantic_search_ms": result.stats.timings.semantic_search_ms,
-                "semantic_hydrate_ms": result.stats.timings.semantic_hydrate_ms,
-                "serialize_ms": result.stats.timings.serialize_ms,
-                "persist_ms": result.stats.timings.persist_ms,
-            }
-        }
+        "context_pack_summary": summary_block.clone(),
+        "stats": stats_block.clone(),
     });
     let summary = format!(
         "context pack built for {}:{} :: docs={} symbols={} lexical={} semantic={} cache_hit={}",
@@ -1161,6 +1165,17 @@ async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result
     if let Some(value) = &context_summary.excluded_reasons_summary {
         summary.push_str(&format!(" excluded={value}"));
     }
+    let tool_overhead_structured = json!({
+        "context_pack_summary": summary_block,
+        "stats": stats_block,
+    });
+    token_budget::observe_context_pack_tool_overhead(
+        &mut db,
+        &result.stats.context_pack_id.to_string(),
+        &summary,
+        &tool_overhead_structured,
+    )
+    .await?;
     Ok(tool_result(summary, structured))
 }
 
@@ -2312,6 +2327,14 @@ fn context_pack_input_schema(include_persist: bool) -> Value {
             }),
         ),
         (
+            "token_source_kind".to_string(),
+            json!({
+                "type": "string",
+                "default": "live_context_pack",
+                "description": "Token ledger source kind for this context-pack call. Use proof_/verify_ prefixes for engineering calls."
+            }),
+        ),
+        (
             "client_prompt_tokens".to_string(),
             json!({
                 "type": ["integer", "null"],
@@ -2879,6 +2902,8 @@ struct ContextPackToolArgs {
     limit_chunks: usize,
     #[serde(default = "default_limit_semantic_chunks")]
     limit_semantic_chunks: usize,
+    #[serde(default = "default_context_pack_token_source_kind")]
+    token_source_kind: String,
     #[serde(default)]
     client_prompt_tokens: Option<u64>,
     #[serde(default)]
@@ -2903,7 +2928,7 @@ impl ContextPackToolArgs {
             limit_symbols: self.limit_symbols,
             limit_chunks: self.limit_chunks,
             limit_semantic_chunks: self.limit_semantic_chunks,
-            token_source_kind: "live_context_pack".to_string(),
+            token_source_kind: self.token_source_kind.clone(),
             client_prompt_tokens: self.client_prompt_tokens,
             assistant_generation_tokens: self.assistant_generation_tokens,
             tool_overhead_tokens: self.tool_overhead_tokens,
@@ -3009,6 +3034,10 @@ fn default_limit_chunks() -> usize {
 
 fn default_limit_semantic_chunks() -> usize {
     8
+}
+
+fn default_context_pack_token_source_kind() -> String {
+    "live_context_pack".to_string()
 }
 
 fn default_true() -> bool {
@@ -3174,6 +3203,7 @@ mod tests {
             limit_symbols: 8,
             limit_chunks: 8,
             limit_semantic_chunks: 8,
+            token_source_kind: "proof_mcp_context_pack".to_string(),
             client_prompt_tokens: Some(42),
             assistant_generation_tokens: Some(24),
             tool_overhead_tokens: Some(7),
@@ -3182,6 +3212,7 @@ mod tests {
         };
 
         let context = args.to_context_args();
+        assert_eq!(context.token_source_kind, "proof_mcp_context_pack");
         assert_eq!(context.client_prompt_tokens, Some(42));
         assert_eq!(context.assistant_generation_tokens, Some(24));
         assert_eq!(context.tool_overhead_tokens, Some(7));

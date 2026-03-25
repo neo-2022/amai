@@ -6640,6 +6640,27 @@ pub async fn record_context_pack_event(
     Ok(())
 }
 
+pub async fn observe_context_pack_tool_overhead(
+    db: &Client,
+    context_pack_id: &str,
+    text: &str,
+    structured_content: &Value,
+) -> Result<bool> {
+    let repo_root = config::discover_repo_root(None)?;
+    let config = load_config(&repo_root)?;
+    let tool_overhead_tokens =
+        count_tool_overhead_tokens(&config.measurement, text, structured_content)?;
+    attach_context_pack_whole_cycle_observed(
+        db,
+        context_pack_id,
+        None,
+        None,
+        Some(tool_overhead_tokens),
+        None,
+    )
+    .await
+}
+
 pub async fn record_continuity_restore_observed_event(
     db: &Client,
     project_code: &str,
@@ -10201,6 +10222,75 @@ fn build_event_payload(
     }))
 }
 
+fn observed_tool_overhead_payload(text: &str, structured_content: &Value) -> Value {
+    json!({
+        "content": [{
+            "type": "text",
+            "text": text
+        }],
+        "structuredContent": structured_content
+    })
+}
+
+fn count_tool_overhead_tokens(
+    measurement: &MeasurementConfig,
+    text: &str,
+    structured_content: &Value,
+) -> Result<u64> {
+    let tokenizer = build_tokenizer(&measurement.tokenizer)?;
+    let payload = observed_tool_overhead_payload(text, structured_content);
+    let rendered =
+        serde_json::to_string(&payload).context("failed to serialize tool overhead payload")?;
+    Ok(tokenizer.encode_with_special_tokens(&rendered).len() as u64)
+}
+
+async fn attach_context_pack_whole_cycle_observed(
+    db: &Client,
+    context_pack_id: &str,
+    client_prompt_tokens: Option<u64>,
+    assistant_generation_tokens: Option<u64>,
+    tool_overhead_tokens: Option<u64>,
+    continuity_restore_tokens: Option<u64>,
+) -> Result<bool> {
+    let rows =
+        postgres::list_observability_snapshots_by_kinds(db, &["token_budget_event"], Some(256))
+            .await?;
+    let Some(row) = rows
+        .into_iter()
+        .filter(|row| {
+            row.payload["token_budget_event"]["context_pack_id"]
+                .as_str()
+                .is_some_and(|value| value == context_pack_id)
+        })
+        .max_by_key(|row| row.created_at_epoch_ms)
+    else {
+        return Ok(false);
+    };
+
+    let mut payload = row.payload.clone();
+    let node = payload["token_budget_event"]
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("token budget payload missing token_budget_event"))?;
+    let whole_cycle = ensure_nested_object(node, "whole_cycle_observed")?;
+    if let Some(tokens) = client_prompt_tokens {
+        whole_cycle.insert("client_prompt_tokens".to_string(), Value::from(tokens));
+    }
+    if let Some(tokens) = assistant_generation_tokens {
+        whole_cycle.insert(
+            "assistant_generation_tokens".to_string(),
+            Value::from(tokens),
+        );
+    }
+    if let Some(tokens) = tool_overhead_tokens {
+        whole_cycle.insert("tool_overhead_tokens".to_string(), Value::from(tokens));
+    }
+    if let Some(tokens) = continuity_restore_tokens {
+        whole_cycle.insert("continuity_restore_tokens".to_string(), Value::from(tokens));
+    }
+    postgres::update_observability_snapshot_payload(db, &row.snapshot_id, &payload).await?;
+    Ok(true)
+}
+
 fn build_continuity_restore_observed_event(
     project_code: &str,
     namespace_code: &str,
@@ -11258,7 +11348,7 @@ mod tests {
         build_reconciliation_preview, build_settlement_contract_json,
         build_statement_export_preview, build_statement_preview, build_telemetry_surfaces_json,
         build_usage_event_schema_json, configured_provider_rate_card_source,
-        configured_provider_usage_source, contractual_line_item_json,
+        configured_provider_usage_source, contractual_line_item_json, count_tool_overhead_tokens,
         default_adjustment_preview_model_version, default_adjustment_registry_version,
         default_adjustment_request_schema_version, default_backfill_policy_version,
         default_baseline_method_version, default_billing_mode, default_billing_policy_version,
@@ -15718,6 +15808,27 @@ effective_to_epoch_ms = 2000
         assert_eq!(event["delivered_tokens"], 0);
         assert_eq!(event["quality"]["quality_ok"], true);
         assert_eq!(event["query_hash"], hex_sha256(prompt_text.as_bytes()));
+    }
+
+    #[test]
+    fn tool_overhead_token_counter_is_positive_for_mcp_payload() {
+        let measurement = measurement_fixture();
+        let tokens = count_tool_overhead_tokens(
+            &measurement,
+            "context pack built for art:continuity",
+            &json!({
+                "context_pack_summary": {
+                    "included_reasons_summary": "exact",
+                    "excluded_reasons_summary": "none"
+                },
+                "stats": {
+                    "context_pack_id": "ctx-pack-1",
+                    "exact_documents": 1
+                }
+            }),
+        )
+        .expect("token count");
+        assert!(tokens > 0);
     }
 
     fn unique_test_repo_root(name: &str) -> PathBuf {

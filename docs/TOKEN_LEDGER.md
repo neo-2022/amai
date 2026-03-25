@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:29 MSK
-Ручная сверка guide/docs: 2026-03-25 14:29 MSK
+modified_at: 2026-03-25 14:42 MSK
+Ручная сверка guide/docs: 2026-03-25 14:42 MSK
 
 # Token Ledger
 
@@ -469,6 +469,15 @@ Ledger обязан различать:
     собственного `CHAT_START_RESTORE` prompt-text;
   - для proof/verify запусков source kind обязан переводиться через
     `--token-source-kind proof_* / verify_*`, чтобы не contaminate live lane;
+- отдельно materialized MCP tool-overhead path:
+  - `amai_context_pack` после построения tool result связывает ответ с тем же
+    `context_pack_id` и дописывает observed `tool_overhead_tokens` в исходное usage event;
+  - для счёта берётся только MCP envelope поверх `context_pack_summary + stats`,
+    а не полный retrieval payload;
+  - это нужно затем, чтобы `tool_overhead_outside_retrieval` начинал честно
+    materialize-иться без двойного счёта retrieval tokens;
+  - тот же MCP path теперь тоже принимает `token_source_kind`, чтобы engineering traffic
+    можно было отделять от live usage тем же truth guardrail;
 - это означает, что live caller может materialize-ить same-meter evidence не только через
   прямой бинарь `amai`, но и через MCP/bridge path;
 - retrieval path не притворяется, что знает их сам;
