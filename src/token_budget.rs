@@ -6826,14 +6826,13 @@ async fn sync_rollout_assistant_generation_for_events(
     if observations.is_empty() {
         return Ok(false);
     }
+    let latest_rows = latest_token_budget_snapshots_for_context_packs(db, &target_context_pack_ids).await?;
     let mut changed = false;
     for observation in observations {
         if !target_context_pack_ids.contains(&observation.context_pack_id) {
             continue;
         }
-        let Some(row) =
-            latest_token_budget_snapshot_for_context_pack(db, &observation.context_pack_id).await?
-        else {
+        let Some(row) = latest_rows.get(&observation.context_pack_id) else {
             continue;
         };
         let existing = row.payload["token_budget_event"]["whole_cycle_observed"]
@@ -6843,17 +6842,88 @@ async fn sync_rollout_assistant_generation_for_events(
             Some(tokens) if tokens == observation.assistant_generation_tokens => {}
             Some(_) => {}
             None => {
-                let _attached = attach_whole_cycle_observed_to_context_pack(
+                let attached = attach_whole_cycle_observed_to_snapshot(
                     db,
-                    &observation.context_pack_id,
+                    row,
+                    Some(json!({ "context_pack_id": observation.context_pack_id })),
                     None,
                     Some(observation.assistant_generation_tokens),
                     None,
                     None,
                 )
                 .await?;
-                changed = true;
+                if attached
+                    .as_ref()
+                    .and_then(|value| value["whole_cycle_observed_attach"]["attached"].as_bool())
+                    .unwrap_or(false)
+                {
+                    changed = true;
+                }
             }
+        }
+    }
+    Ok(changed)
+}
+
+async fn sync_context_pack_tool_overhead_for_events(
+    db: &Client,
+    repo_root: &Path,
+    events: &[TokenBudgetEvent],
+) -> Result<bool> {
+    let target_context_pack_ids = events
+        .iter()
+        .filter(|event| {
+            event.traffic_class == "live"
+                && event.measurement_scope == "retrieval_lower_bound"
+                && event.tool_overhead_tokens.is_none()
+        })
+        .map(|event| event.correlation_id.clone())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>();
+    if target_context_pack_ids.is_empty() {
+        return Ok(false);
+    }
+    let config = load_config(repo_root)?;
+    let latest_rows = latest_token_budget_snapshots_for_context_packs(db, &target_context_pack_ids).await?;
+    let mut changed = false;
+    for context_pack_id in target_context_pack_ids {
+        let Some(row) = latest_rows.get(&context_pack_id) else {
+            continue;
+        };
+        let existing = row.payload["token_budget_event"]["whole_cycle_observed"]["tool_overhead_tokens"]
+            .as_u64();
+        if existing.is_some() {
+            continue;
+        }
+        let delivered_tokens = row.payload["token_budget_event"]["context_pack_render"]["tokens"]
+            .as_u64()
+            .or_else(|| row.payload["token_budget_event"]["delivered_tokens"].as_u64())
+            .unwrap_or(0);
+        let Some(output_json) = stored_context_pack_payload_json(db, &context_pack_id).await?
+        else {
+            continue;
+        };
+        let tool_overhead_tokens = count_cli_context_pack_output_overhead_tokens(
+            &config.measurement,
+            &output_json,
+            delivered_tokens,
+        )?;
+        let attached = attach_whole_cycle_observed_to_snapshot(
+            db,
+            row,
+            Some(json!({ "context_pack_id": context_pack_id })),
+            None,
+            None,
+            Some(tool_overhead_tokens),
+            None,
+        )
+        .await?;
+        if attached
+            .as_ref()
+            .and_then(|value| value["whole_cycle_observed_attach"]["attached"].as_bool())
+            .unwrap_or(false)
+        {
+            changed = true;
         }
     }
     Ok(changed)
@@ -6968,20 +7038,13 @@ async fn collect_report(
     events.sort_by_key(|event| event.created_at_epoch_ms);
     let mut events =
         reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
-    if sync_rollout_assistant_generation_for_events(db, &events, &rollout_observations).await? {
-        let mut refreshed = load_events(db, include_verify_events, limit).await?;
-        refreshed.sort_by_key(|event| event.created_at_epoch_ms);
-        events =
-            reconcile_followup_recovery(&refreshed, profile.session_gap_minutes as i64 * 60_000);
-    }
-
     let now_epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
         .as_millis() as i64;
     let session_gap_ms = profile.session_gap_minutes.saturating_mul(60_000) as i64;
-    let session_events = current_session_events(&events, session_gap_ms);
-    let rolling_window_events = profile
+    let mut session_events = current_session_events(&events, session_gap_ms);
+    let mut rolling_window_events = profile
         .rolling_window_hours
         .map(|hours| {
             let lower_bound = now_epoch_ms.saturating_sub((hours as i64).saturating_mul(3_600_000));
@@ -6992,6 +7055,31 @@ async fn collect_report(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let sync_scope_events = active_same_meter_scope_events(&session_events, &rolling_window_events);
+    let tool_overhead_changed =
+        sync_context_pack_tool_overhead_for_events(db, repo_root, &sync_scope_events).await?;
+    let assistant_generation_changed =
+        sync_rollout_assistant_generation_for_events(db, &sync_scope_events, &rollout_observations)
+            .await?;
+    if tool_overhead_changed || assistant_generation_changed {
+        let mut refreshed = load_events(db, include_verify_events, limit).await?;
+        refreshed.sort_by_key(|event| event.created_at_epoch_ms);
+        events =
+            reconcile_followup_recovery(&refreshed, profile.session_gap_minutes as i64 * 60_000);
+        session_events = current_session_events(&events, session_gap_ms);
+        rolling_window_events = profile
+            .rolling_window_hours
+            .map(|hours| {
+                let lower_bound =
+                    now_epoch_ms.saturating_sub((hours as i64).saturating_mul(3_600_000));
+                events
+                    .iter()
+                    .filter(|event| event.created_at_epoch_ms >= lower_bound)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+    }
 
     let latest_event = events
         .last()
@@ -8453,6 +8541,20 @@ fn current_session_events(
     }
     session.reverse();
     session
+}
+
+fn active_same_meter_scope_events(
+    session_events: &[TokenBudgetEvent],
+    rolling_window_events: &[TokenBudgetEvent],
+) -> Vec<TokenBudgetEvent> {
+    let mut seen = BTreeSet::new();
+    let mut scoped = Vec::new();
+    for event in session_events.iter().chain(rolling_window_events.iter()) {
+        if seen.insert(event.event_id.clone()) {
+            scoped.push(event.clone());
+        }
+    }
+    scoped
 }
 
 fn resolve_session_id(events: &[TokenBudgetEvent], current_ts: i64, session_gap_ms: i64) -> String {
@@ -10616,17 +10718,66 @@ async fn latest_token_budget_snapshot_for_context_pack(
     db: &Client,
     context_pack_id: &str,
 ) -> Result<Option<ObservabilitySnapshotRecord>> {
+    let mut rows = latest_token_budget_snapshots_for_context_packs(
+        db,
+        &std::iter::once(context_pack_id.to_string()).collect(),
+    )
+    .await?;
+    Ok(rows.remove(context_pack_id))
+}
+
+async fn latest_token_budget_snapshots_for_context_packs(
+    db: &Client,
+    context_pack_ids: &BTreeSet<String>,
+) -> Result<BTreeMap<String, ObservabilitySnapshotRecord>> {
+    if context_pack_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
     let rows =
-        postgres::list_observability_snapshots_by_kinds(db, &["token_budget_event"], Some(2048))
+        postgres::list_observability_snapshots_by_kinds(db, &["token_budget_event"], Some(4096))
             .await?;
-    Ok(rows
-        .into_iter()
-        .filter(|row| {
-            row.payload["token_budget_event"]["context_pack_id"]
-                .as_str()
-                .is_some_and(|value| value == context_pack_id)
-        })
-        .max_by_key(|row| row.created_at_epoch_ms))
+    let mut latest = BTreeMap::<String, ObservabilitySnapshotRecord>::new();
+    for row in rows {
+        let Some(context_pack_id) = row.payload["token_budget_event"]["context_pack_id"]
+            .as_str()
+            .map(ToOwned::to_owned)
+        else {
+            continue;
+        };
+        if !context_pack_ids.contains(&context_pack_id) {
+            continue;
+        }
+        match latest.get(&context_pack_id) {
+            Some(existing) if existing.created_at_epoch_ms >= row.created_at_epoch_ms => {}
+            _ => {
+                latest.insert(context_pack_id, row);
+            }
+        }
+    }
+    Ok(latest)
+}
+
+async fn stored_context_pack_payload_json(
+    db: &Client,
+    context_pack_id: &str,
+) -> Result<Option<String>> {
+    let Ok(context_pack_uuid) = Uuid::parse_str(context_pack_id) else {
+        return Ok(None);
+    };
+    let row = db
+        .query_opt(
+            "SELECT payload FROM ami.context_packs WHERE context_pack_id = $1 LIMIT 1",
+            &[&context_pack_uuid],
+        )
+        .await
+        .context("failed to load stored context pack payload")?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let payload: Value = row.get(0);
+    Ok(Some(
+        serde_json::to_string(&payload).context("failed to serialize stored context pack")?,
+    ))
 }
 
 async fn attach_context_pack_whole_cycle_observed(
@@ -10647,11 +10798,30 @@ async fn attach_context_pack_whole_cycle_observed(
     {
         bail!("whole-cycle attach requires at least one observed token field");
     }
-    let Some(row) = latest_token_budget_snapshot_for_context_pack(db, context_pack_id).await?
-    else {
+    let Some(row) = latest_token_budget_snapshot_for_context_pack(db, context_pack_id).await? else {
         return Ok(None);
     };
+    attach_whole_cycle_observed_to_snapshot(
+        db,
+        &row,
+        Some(json!({ "context_pack_id": context_pack_id })),
+        client_prompt_tokens,
+        assistant_generation_tokens,
+        tool_overhead_tokens,
+        continuity_restore_tokens,
+    )
+    .await
+}
 
+async fn attach_whole_cycle_observed_to_snapshot(
+    db: &Client,
+    row: &ObservabilitySnapshotRecord,
+    selector: Option<Value>,
+    client_prompt_tokens: Option<u64>,
+    assistant_generation_tokens: Option<u64>,
+    tool_overhead_tokens: Option<u64>,
+    continuity_restore_tokens: Option<u64>,
+) -> Result<Option<Value>> {
     let mut payload = row.payload.clone();
     let (
         event_id,
@@ -10719,9 +10889,7 @@ async fn attach_context_pack_whole_cycle_observed(
     postgres::update_observability_snapshot_payload(db, &row.snapshot_id, &payload).await?;
     Ok(Some(json!({
         "whole_cycle_observed_attach": {
-            "selector": {
-                "context_pack_id": context_pack_id
-            },
+            "selector": selector.unwrap_or(Value::Null),
             "snapshot_id": row.snapshot_id,
             "event_id": event_id,
             "correlation_id": correlation_id,

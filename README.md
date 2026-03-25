@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:52 MSK
-Ручная сверка guide/docs: 2026-03-25 15:52 MSK
+modified_at: 2026-03-25 16:32 MSK
+Ручная сверка guide/docs: 2026-03-25 16:32 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1532,6 +1532,13 @@ preview, а не только raw count.
     `context_pack_id`;
   - для этого path есть отдельный proof:
     `scripts/proof_token_cli_tool_overhead.sh`;
+  - report path теперь умеет не только ждать будущие новые CLI/MCP события:
+    если в текущем `current_session / rolling_window` есть live retrieval events без
+    `tool_overhead_tokens`, но corresponding `context_pack` уже сохранён в registry,
+    `token-report` сам честно достаёт stored payload по `context_pack_id`,
+    пересчитывает CLI-equivalent output overhead и дописывает его в missing scope;
+  - для этого repair-free auto-sync есть отдельный proof:
+    `scripts/proof_token_report_tool_overhead_autosync.sh`;
   - отдельный post-call attach path теперь materialized и для `assistant_generation`:
     после того как upstream client уже узнал реальные output tokens своего ответа,
     он может привязать их к тому же `context_pack_id` через:

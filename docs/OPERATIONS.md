@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:52 MSK
-Ручная сверка guide/docs: 2026-03-25 15:52 MSK
+modified_at: 2026-03-25 16:32 MSK
+Ручная сверка guide/docs: 2026-03-25 16:32 MSK
 
 # Operations
 
@@ -1976,6 +1976,7 @@ cargo run --release -- observe token-evidence-pack --scope current_session --out
 ./scripts/proof_token_meter_alignment.sh
 ./scripts/proof_token_mcp_tool_overhead.sh
 ./scripts/proof_token_cli_tool_overhead.sh
+./scripts/proof_token_report_tool_overhead_autosync.sh
 ./scripts/proof_token_mcp_assistant_generation.sh
 ./scripts/proof_token_rollout_assistant_generation.sh
 ```
@@ -1999,6 +2000,15 @@ CLI `context pack` front door теперь тоже участвует в same-m
   `scripts/proof_token_cli_tool_overhead.sh`;
 - это нужно затем, чтобы same-meter coverage по `tool_overhead_outside_retrieval`
   не зависел только от MCP front door.
+
+Если missing `tool_overhead_tokens` остались в active live scope после старых context-pack events,
+report path теперь умеет auto-sync их из stored `ami.context_packs.payload`:
+- `observe token-report` берёт только active scope (`current_session / rolling_window`), а не весь
+  lifetime ledger;
+- по `context_pack_id` он достаёт сохранённый payload, пересчитывает CLI-equivalent output
+  overhead и дописывает `tool_overhead_tokens` в latest snapshot;
+- для этого path есть отдельный proof:
+  `scripts/proof_token_report_tool_overhead_autosync.sh`
 
 `assistant_generation` теперь тоже получил честный post-call attach path:
 - CLI:

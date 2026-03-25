@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:52 MSK
-Ручная сверка guide/docs: 2026-03-25 15:52 MSK
+modified_at: 2026-03-25 16:32 MSK
+Ручная сверка guide/docs: 2026-03-25 16:32 MSK
 
 # Token Ledger
 
@@ -514,6 +514,19 @@ whole-cycle компонент на одинаковое число всех liv
     `scripts/proof_token_cli_tool_overhead.sh`;
   - это нужно затем, чтобы same-meter coverage не зависел только от MCP path и не терял
     фронтовой overhead у прямого `amai context pack`;
+- отдельно materialized report-time tool-overhead auto-sync path:
+  - если live retrieval event уже записан, но `tool_overhead_tokens` в нём ещё отсутствуют,
+    `token-report` теперь может взять stored `context_pack` payload из registry по
+    `context_pack_id`, пересчитать CLI-equivalent output overhead и дописать observed
+    `tool_overhead_tokens` прямо в missing current scope;
+  - это намеренно scoped only:
+    auto-sync не бегает по всему lifetime, а работает только по active live scope
+    (`current_session / rolling_window`), чтобы same-meter repair не превращался в
+    бесконтрольный background rewrite;
+  - proof:
+    `scripts/proof_token_report_tool_overhead_autosync.sh`;
+  - это важно затем, чтобы `tool_overhead_outside_retrieval` не оставался last-mile gap
+    только потому, что событие было записано до materialization этого слоя;
 - отдельно materialized post-call assistant-generation path:
   - `assistant_generation_tokens` нельзя честно требовать только pre-call, потому что
     upstream client узнаёт их уже после собственного ответа;
