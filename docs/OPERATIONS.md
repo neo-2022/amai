@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 23:34 MSK
-Ручная сверка guide/docs: 2026-03-25 23:34 MSK
+modified_at: 2026-03-26 00:16 MSK
+Ручная сверка guide/docs: 2026-03-26 00:16 MSK
 
 # Operations
 
@@ -49,6 +49,24 @@ proof/verify события.
   `./scripts/proof_token_session_boundary.sh`;
 - если contamination уже попал в текущую live session до этого guardrail, repair выполняется только
   честным reverify/new window path, а не тихим задним переписыванием истории.
+
+## Operational continuity schema sync
+
+`continuity startup`, `continuity restore`, `continuity answer` и `continuity handoff` теперь
+обязаны сами делать `bootstrap_schema` сразу после admin-connect.
+
+Это operationally важно по двум причинам:
+- новый `ExecCtl` lane уже использует durable SQL storage
+  (`ami.execctl_task_ledger_entries`, `ami.execctl_task_leases`);
+- partial-upgrade не имеет права ломать новый chat-start только потому, что конкретная БД ещё не
+  видела последнюю таблицу или индекс.
+
+Практическое следствие:
+- если runtime уже обновлён, а schema ещё старая, первый `continuity` front door сам доводит schema
+  до совместимого состояния;
+- startup не должен падать на `relation ami.execctl_task_leases does not exist`;
+- product proof для этого контура теперь идёт не только через обычный `proof_execctl_pending_return`,
+  но и через вариант, где `ami.execctl_task_leases` специально удаляется перед новым handoff.
 
 ## Bootstrap
 

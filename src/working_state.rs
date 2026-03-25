@@ -1,5 +1,6 @@
 use crate::postgres::{
-    self, ExecCtlTaskLedgerEntryRecord, NamespaceRecord, ObservabilitySnapshotRecord, ProjectRecord,
+    self, ExecCtlTaskLeaseRecord, ExecCtlTaskLedgerEntryRecord, NamespaceRecord,
+    ObservabilitySnapshotRecord, ProjectRecord,
 };
 use crate::retrieval_science;
 use crate::token_budget;
@@ -24,6 +25,7 @@ const MAX_MATERIALIZED_NOTES: usize = 6;
 const MAX_RECENT_DECISION_TRACES: usize = 3;
 const MAX_PENDING_RETURN_QUEUE: usize = 6;
 const MAX_EXECCTL_LEDGER_ENTRIES: i64 = 256;
+const EXECCTL_LEASE_TTL_MS: u64 = SESSION_GAP_MS;
 const PROJECT_TASK_TREE_VERSION: &str = "project-task-tree-v1";
 const PROJECT_TASK_LEDGER_VERSION: &str = "project-task-ledger-v2";
 
@@ -116,6 +118,29 @@ pub async fn record_handoff_event(
             pending_return_queue: &payload["working_state_event"]["pending_return_queue"],
             local_path: Some(local_path),
             recorded_at_epoch_ms: recorded_at_epoch_ms as i64,
+        },
+    )
+    .await?;
+    let lease_expires_at_epoch_ms =
+        recorded_at_epoch_ms.saturating_add(EXECCTL_LEASE_TTL_MS) as i64;
+    postgres::upsert_execctl_task_lease(
+        db,
+        &postgres::ExecCtlTaskLeaseInsert {
+            project_id: project.project_id,
+            namespace_id: namespace.namespace_id,
+            agent_scope: &agent_scope,
+            owner_session_id: Some(session_id.as_str()),
+            owner_thread_id: thread_id.as_deref(),
+            source_snapshot_id: Some(snapshot_id),
+            source_event_id: event_id.as_str(),
+            source_kind: "continuity_handoff",
+            lease_state: "active",
+            headline,
+            next_step: &next_step,
+            local_path: Some(local_path),
+            acquired_at_epoch_ms: recorded_at_epoch_ms as i64,
+            heartbeat_at_epoch_ms: recorded_at_epoch_ms as i64,
+            expires_at_epoch_ms: lease_expires_at_epoch_ms,
         },
     )
     .await?;
@@ -291,6 +316,15 @@ pub async fn build_restore_bundle(
         &namespace_json(namespace),
         &durable_entries,
     );
+    let active_lease = postgres::get_execctl_task_lease(
+        db,
+        project.project_id,
+        namespace.namespace_id,
+        &agent_scope,
+        now_epoch_ms()? as i64,
+    )
+    .await?;
+    overlay_execctl_active_lease(&mut bundle, active_lease.as_ref());
     Ok(Some(bundle))
 }
 
@@ -314,6 +348,12 @@ pub fn print_restore_bundle_human(restore: &Value) {
         node["current_goal"].as_str().unwrap_or("ещё нет данных")
     );
     println!("- Ближайший следующий шаг: {}", next_step);
+    if let Some(value) = node["execctl_active_lease_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Активный lease ExecCtl: {value}");
+    }
     if let Some(value) = node["restore_confidence"]
         .as_str()
         .filter(|value| *value == "preliminary")
@@ -1794,6 +1834,19 @@ fn summarize_project_task_ledger(value: &Value) -> Option<String> {
     ))
 }
 
+fn summarize_execctl_active_lease(value: &Value) -> Option<String> {
+    let owner_state = value["lease_owner_state"]
+        .as_str()
+        .filter(|item| !item.is_empty())
+        .unwrap_or("unknown_owner");
+    let headline = value["headline"].as_str().filter(|item| !item.is_empty())?;
+    let next_step = value["next_step"]
+        .as_str()
+        .filter(|item| !item.is_empty())
+        .unwrap_or("ещё нет данных");
+    Some(format!("{owner_state}: {headline} -> {next_step}"))
+}
+
 fn overlay_durable_project_task_ledger(
     bundle: &mut Value,
     project: &Value,
@@ -1840,6 +1893,52 @@ fn overlay_durable_project_task_ledger(
     restore.insert("project_task_ledger".to_string(), ledger);
     if let Some(summary) = summary {
         restore.insert("project_task_ledger_summary".to_string(), json!(summary));
+    }
+}
+
+fn overlay_execctl_active_lease(bundle: &mut Value, active_lease: Option<&ExecCtlTaskLeaseRecord>) {
+    let Some(restore) = bundle
+        .get_mut("working_state_restore")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(lease) = active_lease else {
+        return;
+    };
+    let session_id = restore
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let owner_state = if lease.owner_session_id.as_deref() == Some(session_id) {
+        "same_session_owner"
+    } else {
+        "previous_session_owner"
+    };
+    let lease_value = json!({
+        "lease_version": "execctl-active-lease-v1",
+        "lease_id": lease.lease_id.to_string(),
+        "agent_scope": lease.agent_scope,
+        "lease_state": lease.lease_state,
+        "owner_session_id": lease.owner_session_id,
+        "owner_thread_id": lease.owner_thread_id,
+        "lease_owner_state": owner_state,
+        "source_snapshot_id": lease.source_snapshot_id.map(|value| value.to_string()),
+        "source_event_id": lease.source_event_id,
+        "source_kind": lease.source_kind,
+        "headline": lease.headline,
+        "next_step": lease.next_step,
+        "local_path": lease.local_path,
+        "acquired_at_epoch_ms": lease.acquired_at_epoch_ms,
+        "heartbeat_at_epoch_ms": lease.heartbeat_at_epoch_ms,
+        "expires_at_epoch_ms": lease.expires_at_epoch_ms,
+        "created_at_epoch_ms": lease.created_at_epoch_ms,
+        "updated_at_epoch_ms": lease.updated_at_epoch_ms,
+        "storage_lane": "ami.execctl_task_leases",
+    });
+    restore.insert("execctl_active_lease".to_string(), lease_value.clone());
+    if let Some(summary) = summarize_execctl_active_lease(&lease_value) {
+        restore.insert("execctl_active_lease_summary".to_string(), json!(summary));
     }
 }
 
@@ -2935,6 +3034,73 @@ mod tests {
         assert_eq!(
             restore["project_task_ledger"]["entries"][0]["task_role"],
             json!("active")
+        );
+    }
+
+    #[test]
+    fn overlay_execctl_active_lease_surfaces_current_owner() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let latest_handoff = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "handoff-1",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "event_kind": "continuity_handoff",
+                    "headline": "Project relocation contour",
+                    "next_step_hint": "Dovetail runtime auto-start guarantees.",
+                    "summary": "Relocation contour materialized.",
+                    "recorded_at_epoch_ms": base
+                }
+            }),
+            created_at_epoch_ms: base,
+        };
+        let mut bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[latest_handoff],
+        );
+        let lease = ExecCtlTaskLeaseRecord {
+            lease_id: Uuid::new_v4(),
+            source_snapshot_id: Some(Uuid::new_v4()),
+            source_event_id: "handoff-1".to_string(),
+            source_kind: "continuity_handoff".to_string(),
+            agent_scope: "art::continuity::default".to_string(),
+            owner_session_id: Some("session-a".to_string()),
+            owner_thread_id: Some("thread-a".to_string()),
+            lease_state: "active".to_string(),
+            headline: "Project relocation contour".to_string(),
+            next_step: "Dovetail runtime auto-start guarantees.".to_string(),
+            local_path: Some("/tmp/HANDOFF.md".to_string()),
+            acquired_at_epoch_ms: base,
+            heartbeat_at_epoch_ms: base,
+            expires_at_epoch_ms: base + 30_000,
+            created_at_epoch_ms: base,
+            updated_at_epoch_ms: base,
+        };
+
+        overlay_execctl_active_lease(&mut bundle, Some(&lease));
+        let restore = &bundle["working_state_restore"];
+        assert_eq!(
+            restore["execctl_active_lease"]["lease_owner_state"],
+            json!("same_session_owner")
+        );
+        assert_eq!(
+            restore["execctl_active_lease"]["headline"],
+            json!("Project relocation contour")
+        );
+        assert_eq!(
+            restore["execctl_active_lease"]["storage_lane"],
+            json!("ami.execctl_task_leases")
+        );
+        assert!(
+            restore["execctl_active_lease_summary"]
+                .as_str()
+                .is_some_and(|value| value.contains("same_session_owner"))
         );
     }
 

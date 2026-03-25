@@ -146,6 +146,26 @@ pub struct ExecCtlTaskLedgerEntryRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct ExecCtlTaskLeaseRecord {
+    pub lease_id: Uuid,
+    pub source_snapshot_id: Option<Uuid>,
+    pub source_event_id: String,
+    pub source_kind: String,
+    pub agent_scope: String,
+    pub owner_session_id: Option<String>,
+    pub owner_thread_id: Option<String>,
+    pub lease_state: String,
+    pub headline: String,
+    pub next_step: String,
+    pub local_path: Option<String>,
+    pub acquired_at_epoch_ms: i64,
+    pub heartbeat_at_epoch_ms: i64,
+    pub expires_at_epoch_ms: i64,
+    pub created_at_epoch_ms: i64,
+    pub updated_at_epoch_ms: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ObservabilityRetentionCandidate {
     pub snapshot_id: Uuid,
     pub snapshot_kind: String,
@@ -255,6 +275,25 @@ pub struct ExecCtlTaskLedgerEntryInsert<'a> {
     pub pending_return_queue: &'a Value,
     pub local_path: Option<&'a str>,
     pub recorded_at_epoch_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecCtlTaskLeaseInsert<'a> {
+    pub project_id: Uuid,
+    pub namespace_id: Uuid,
+    pub agent_scope: &'a str,
+    pub owner_session_id: Option<&'a str>,
+    pub owner_thread_id: Option<&'a str>,
+    pub source_snapshot_id: Option<Uuid>,
+    pub source_event_id: &'a str,
+    pub source_kind: &'a str,
+    pub lease_state: &'a str,
+    pub headline: &'a str,
+    pub next_step: &'a str,
+    pub local_path: Option<&'a str>,
+    pub acquired_at_epoch_ms: i64,
+    pub heartbeat_at_epoch_ms: i64,
+    pub expires_at_epoch_ms: i64,
 }
 
 pub async fn connect_admin(cfg: &AppConfig) -> Result<Client> {
@@ -1944,6 +1983,144 @@ pub async fn list_execctl_task_ledger_entries(
             created_at_epoch_ms: row.get(17),
         })
         .collect())
+}
+
+pub async fn upsert_execctl_task_lease(
+    client: &Client,
+    lease: &ExecCtlTaskLeaseInsert<'_>,
+) -> Result<Uuid> {
+    if lease.agent_scope.trim().is_empty() {
+        return Err(anyhow!("execctl task lease agent_scope must not be empty"));
+    }
+    if lease.source_event_id.trim().is_empty() {
+        return Err(anyhow!(
+            "execctl task lease source_event_id must not be empty"
+        ));
+    }
+    let row = client
+        .query_one(
+            r#"
+            INSERT INTO ami.execctl_task_leases(
+                project_id,
+                namespace_id,
+                agent_scope,
+                owner_session_id,
+                owner_thread_id,
+                source_snapshot_id,
+                source_event_id,
+                source_kind,
+                lease_state,
+                headline,
+                next_step,
+                local_path,
+                acquired_at_epoch_ms,
+                heartbeat_at_epoch_ms,
+                expires_at_epoch_ms
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+            )
+            ON CONFLICT (project_id, namespace_id, agent_scope) DO UPDATE
+            SET owner_session_id = EXCLUDED.owner_session_id,
+                owner_thread_id = EXCLUDED.owner_thread_id,
+                source_snapshot_id = EXCLUDED.source_snapshot_id,
+                source_event_id = EXCLUDED.source_event_id,
+                source_kind = EXCLUDED.source_kind,
+                lease_state = EXCLUDED.lease_state,
+                headline = EXCLUDED.headline,
+                next_step = EXCLUDED.next_step,
+                local_path = EXCLUDED.local_path,
+                acquired_at_epoch_ms = EXCLUDED.acquired_at_epoch_ms,
+                heartbeat_at_epoch_ms = EXCLUDED.heartbeat_at_epoch_ms,
+                expires_at_epoch_ms = EXCLUDED.expires_at_epoch_ms,
+                updated_at = now()
+            RETURNING lease_id
+            "#,
+            &[
+                &lease.project_id,
+                &lease.namespace_id,
+                &lease.agent_scope,
+                &lease.owner_session_id,
+                &lease.owner_thread_id,
+                &lease.source_snapshot_id,
+                &lease.source_event_id,
+                &lease.source_kind,
+                &lease.lease_state,
+                &lease.headline,
+                &lease.next_step,
+                &lease.local_path,
+                &lease.acquired_at_epoch_ms,
+                &lease.heartbeat_at_epoch_ms,
+                &lease.expires_at_epoch_ms,
+            ],
+        )
+        .await
+        .context("failed to upsert execctl task lease")?;
+    Ok(row.get(0))
+}
+
+pub async fn get_execctl_task_lease(
+    client: &Client,
+    project_id: Uuid,
+    namespace_id: Uuid,
+    agent_scope: &str,
+    min_expires_at_epoch_ms: i64,
+) -> Result<Option<ExecCtlTaskLeaseRecord>> {
+    let row = client
+        .query_opt(
+            r#"
+            SELECT
+                lease_id,
+                source_snapshot_id,
+                source_event_id,
+                source_kind,
+                agent_scope,
+                owner_session_id,
+                owner_thread_id,
+                lease_state,
+                headline,
+                next_step,
+                local_path,
+                acquired_at_epoch_ms,
+                heartbeat_at_epoch_ms,
+                expires_at_epoch_ms,
+                (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms,
+                (EXTRACT(EPOCH FROM updated_at) * 1000)::bigint AS updated_at_epoch_ms
+            FROM ami.execctl_task_leases
+            WHERE project_id = $1
+              AND namespace_id = $2
+              AND agent_scope = $3
+              AND expires_at_epoch_ms >= $4
+            ORDER BY updated_at DESC
+            LIMIT 1
+            "#,
+            &[
+                &project_id,
+                &namespace_id,
+                &agent_scope,
+                &min_expires_at_epoch_ms,
+            ],
+        )
+        .await
+        .context("failed to fetch execctl task lease")?;
+    Ok(row.map(|row| ExecCtlTaskLeaseRecord {
+        lease_id: row.get(0),
+        source_snapshot_id: row.get(1),
+        source_event_id: row.get(2),
+        source_kind: row.get(3),
+        agent_scope: row.get(4),
+        owner_session_id: row.get(5),
+        owner_thread_id: row.get(6),
+        lease_state: row.get(7),
+        headline: row.get(8),
+        next_step: row.get(9),
+        local_path: row.get(10),
+        acquired_at_epoch_ms: row.get(11),
+        heartbeat_at_epoch_ms: row.get(12),
+        expires_at_epoch_ms: row.get(13),
+        created_at_epoch_ms: row.get(14),
+        updated_at_epoch_ms: row.get(15),
+    }))
 }
 
 pub async fn delete_observability_snapshots_by_scope(

@@ -392,6 +392,14 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract is missing startup_next_action from required summary fields"
         ));
     }
+    if !required_summary_fields
+        .iter()
+        .any(|field| field.as_str() == Some("execctl_active_lease_summary"))
+    {
+        return Err(anyhow!(
+            "MCP startup contract is missing execctl_active_lease_summary from required summary fields"
+        ));
+    }
 
     let tools = session.request("tools/list", json!({})).await?;
     let tool_names = tools["tools"]
@@ -566,6 +574,14 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     if !continuity_startup["continuity_startup_summary"]["startup_next_action"].is_object() {
         return Err(anyhow!(
             "MCP continuity startup did not surface startup_next_action"
+        ));
+    }
+    if continuity_startup["continuity_startup_summary"]["execctl_active_lease_summary"]
+        .as_str()
+        .is_none()
+    {
+        return Err(anyhow!(
+            "MCP continuity startup did not surface execctl_active_lease_summary"
         ));
     }
 
@@ -1316,6 +1332,8 @@ async fn tool_continuity_startup(
                 "execctl_resume_obligation": summary.execctl_resume_obligation,
                 "startup_next_action": summary.startup_next_action,
                 "startup_next_action_summary": summary.startup_next_action_summary,
+                "execctl_active_lease": summary.execctl_active_lease,
+                "execctl_active_lease_summary": summary.execctl_active_lease_summary,
                 "project_task_tree_summary": summary.project_task_tree_summary,
                 "project_task_ledger_summary": summary.project_task_ledger_summary,
                 "included_reasons_summary": summary.included_reasons_summary,
@@ -1887,6 +1905,8 @@ struct ContinuityStartupSummary {
     execctl_resume_obligation: Value,
     startup_next_action: Value,
     startup_next_action_summary: Option<String>,
+    execctl_active_lease: Value,
+    execctl_active_lease_summary: Option<String>,
     project_task_tree_summary: Option<String>,
     project_task_ledger_summary: Option<String>,
     included_reasons_summary: Option<String>,
@@ -1967,6 +1987,15 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
             })
         },
         startup_next_action_summary: payload["chat_start_restore"]["startup_next_action_summary"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        execctl_active_lease: if payload["chat_start_restore"]["execctl_active_lease"].is_object() {
+            payload["chat_start_restore"]["execctl_active_lease"].clone()
+        } else {
+            Value::Null
+        },
+        execctl_active_lease_summary: payload["chat_start_restore"]["execctl_active_lease_summary"]
             .as_str()
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
@@ -2364,7 +2393,7 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v2",
+                "contract_version": "continuity-startup-contract-v3",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore before any substantive work in a new or resumed chat",
@@ -2395,6 +2424,7 @@ fn protocol_manifest() -> Value {
                     "execctl_resume_obligation",
                     "startup_next_action",
                     "startup_next_action_summary",
+                    "execctl_active_lease_summary",
                     "project_task_tree_summary",
                     "project_task_ledger_summary"
                 ],
@@ -2406,6 +2436,7 @@ fn protocol_manifest() -> Value {
                     "execctl_resume_contract_summary",
                     "execctl_resume_obligation",
                     "startup_next_action",
+                    "execctl_active_lease_summary",
                     "project_task_tree_summary",
                     "project_task_ledger_summary"
                 ],
@@ -2844,7 +2875,7 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
                     "content": {
                         "type": "text",
                         "text": format!(
-                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, and startup_next_action. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away."
+                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_next_action, and execctl_active_lease_summary. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away."
                         )
                     }
                 }]
@@ -4496,6 +4527,11 @@ mod tests {
         assert!(
             startup_required_fields
                 .iter()
+                .any(|field| field.as_str() == Some("execctl_active_lease_summary"))
+        );
+        assert!(
+            startup_required_fields
+                .iter()
                 .any(|field| field.as_str() == Some("project_task_tree_summary"))
         );
         assert!(
@@ -4605,6 +4641,7 @@ mod tests {
         assert!(text.contains("execctl_resume_contract_summary"));
         assert!(text.contains("execctl_resume_obligation"));
         assert!(text.contains("startup_next_action"));
+        assert!(text.contains("execctl_active_lease_summary"));
         assert!(text.contains("resume_required_return_task"));
     }
 
@@ -4639,6 +4676,13 @@ mod tests {
                     "next_step": "Materialize live assistant generation source."
                 },
                 "startup_next_action_summary": "resume_required_return_task: Same-meter spend control -> Materialize live assistant generation source.",
+                "execctl_active_lease": {
+                    "lease_owner_state": "previous_session_owner",
+                    "headline": "Continue runtime auto-start guarantees.",
+                    "next_step": "Re-enter the active workline.",
+                    "storage_lane": "ami.execctl_task_leases"
+                },
+                "execctl_active_lease_summary": "previous_session_owner: Continue runtime auto-start guarantees. -> Re-enter the active workline.",
                 "project_task_tree_summary": "active: Continue runtime auto-start guarantees.; pending_return(1): Same-meter spend control -> Materialize live assistant generation source.",
                 "project_task_ledger_summary": "active: Continue runtime auto-start guarantees.; pending_return(1); historical_handoffs(3)",
                 "included_reasons_summary": "exact_documents (1) — Exact layer matched.",
@@ -4680,6 +4724,16 @@ mod tests {
                 .startup_next_action_summary
                 .as_deref()
                 .is_some_and(|value| value.contains("resume_required_return_task"))
+        );
+        assert_eq!(
+            summary.execctl_active_lease["storage_lane"],
+            json!("ami.execctl_task_leases")
+        );
+        assert!(
+            summary
+                .execctl_active_lease_summary
+                .as_deref()
+                .is_some_and(|value| value.contains("previous_session_owner"))
         );
         assert!(
             summary

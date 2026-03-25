@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 23:34 MSK
-Ручная сверка guide/docs: 2026-03-25 23:34 MSK
+modified_at: 2026-03-26 00:16 MSK
+Ручная сверка guide/docs: 2026-03-26 00:16 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -120,6 +120,24 @@ modified_at: 2026-03-25 23:34 MSK
 - startup не только показывает, что есть pending lines;
 - startup явно говорит, есть ли `required_return_task`;
 - новый клиент или новый чат должен видеть это как обязательство к возврату, а не как свободный текстовый совет.
+
+Поверх этого же baseline `ExecCtl` теперь surfaced и active lease:
+- `execctl_active_lease`
+- `execctl_active_lease_summary`
+- durable SQL lane `ami.execctl_task_leases`
+
+И ещё одна важная practical detail:
+- `continuity startup`
+- `continuity restore`
+- `continuity answer`
+- `continuity handoff`
+
+теперь сами сначала делают schema-sync через `bootstrap_schema`.
+Это нужно затем, чтобы partial-upgrade не ломал новый startup contour на ошибке вида
+`relation ami.execctl_task_leases does not exist`.
+То есть новый `ExecCtl` lane уже не требует отдельного ручного bootstrap шага перед каждым
+startup/handoff: front-door сам приводит schema в совместимое состояние и только потом читает
+или пишет lease/task state.
 
 Важно: continuity должна переживать не только новый чат, но и смену окна, IDE и локализации проекта.
 Для этого `Amai` держит project identity не только через один текущий `repo_root`, а через

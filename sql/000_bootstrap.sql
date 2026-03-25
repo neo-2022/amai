@@ -578,6 +578,31 @@ CREATE INDEX IF NOT EXISTS idx_execctl_task_ledger_scope_recorded
 CREATE INDEX IF NOT EXISTS idx_execctl_task_ledger_snapshot
     ON ami.execctl_task_ledger_entries(source_snapshot_id);
 
+CREATE TABLE IF NOT EXISTS ami.execctl_task_leases (
+    lease_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    namespace_id UUID NOT NULL REFERENCES ami.namespaces(namespace_id) ON DELETE CASCADE,
+    agent_scope TEXT NOT NULL CHECK (btrim(agent_scope) <> ''),
+    owner_session_id TEXT,
+    owner_thread_id TEXT,
+    source_snapshot_id UUID REFERENCES ami.observability_snapshots(snapshot_id) ON DELETE SET NULL,
+    source_event_id TEXT NOT NULL CHECK (btrim(source_event_id) <> ''),
+    source_kind TEXT NOT NULL,
+    lease_state TEXT NOT NULL CHECK (lease_state IN ('active')),
+    headline TEXT NOT NULL,
+    next_step TEXT NOT NULL,
+    local_path TEXT,
+    acquired_at_epoch_ms BIGINT NOT NULL,
+    heartbeat_at_epoch_ms BIGINT NOT NULL,
+    expires_at_epoch_ms BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (project_id, namespace_id, agent_scope)
+);
+
+CREATE INDEX IF NOT EXISTS idx_execctl_task_leases_scope_expiry
+    ON ami.execctl_task_leases(project_id, namespace_id, agent_scope, expires_at_epoch_ms DESC);
+
 CREATE INDEX IF NOT EXISTS idx_ami_namespaces_project ON ami.namespaces(project_id);
 CREATE INDEX IF NOT EXISTS idx_ami_relations_source_target ON ami.project_relations(source_project_id, target_project_id);
 CREATE INDEX IF NOT EXISTS idx_ami_documents_project_namespace ON ami.code_documents(project_id, namespace_id);

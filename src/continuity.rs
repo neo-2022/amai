@@ -95,6 +95,12 @@ struct ContinuityEvalProbe {
     details: Value,
 }
 
+async fn connect_bootstrapped_admin(cfg: &AppConfig) -> Result<Client> {
+    let db = postgres::connect_admin(cfg).await?;
+    postgres::bootstrap_schema(&db, cfg).await?;
+    Ok(db)
+}
+
 pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<()> {
     let mut db = postgres::connect_admin(cfg).await?;
     let s3_client = s3::connect(cfg).await?;
@@ -476,7 +482,7 @@ async fn import_thread_index_snapshots(
 }
 
 pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<()> {
-    let db = postgres::connect_admin(cfg).await?;
+    let db = connect_bootstrapped_admin(cfg).await?;
     let context = load_startup_context(&db, args).await?;
     if args.json {
         let payload = startup_payload_with_context(&db, &context, args).await?;
@@ -599,7 +605,7 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
 }
 
 pub async fn startup_payload(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<Value> {
-    let db = postgres::connect_admin(cfg).await?;
+    let db = connect_bootstrapped_admin(cfg).await?;
     let context = load_startup_context(&db, args).await?;
     startup_payload_with_context(&db, &context, args).await
 }
@@ -630,7 +636,7 @@ async fn startup_payload_with_context(
 }
 
 pub async fn print_restore(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<()> {
-    let db = postgres::connect_admin(cfg).await?;
+    let db = connect_bootstrapped_admin(cfg).await?;
     let context = load_startup_context(&db, args).await?;
     let restore = context.restore.ok_or_else(|| {
         anyhow!(
@@ -940,7 +946,7 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
 }
 
 pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Result<()> {
-    let db = postgres::connect_admin(cfg).await?;
+    let db = connect_bootstrapped_admin(cfg).await?;
     let project = resolve_project(&db, &args.startup).await?;
     let namespace =
         postgres::find_namespace_by_code(&db, project.project_id, &args.startup.namespace)
@@ -1103,7 +1109,7 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
 }
 
 pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> Result<()> {
-    let mut db = postgres::connect_admin(cfg).await?;
+    let mut db = connect_bootstrapped_admin(cfg).await?;
     let project = postgres::get_project_by_code(&db, &args.project).await?;
     let namespace = postgres::find_namespace_by_code(&db, project.project_id, &args.namespace)
         .await?
@@ -2255,6 +2261,13 @@ fn build_chat_start_restore(
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .or_else(|| summarize_startup_next_action(&startup_next_action));
+    let execctl_active_lease = restore_node
+        .filter(|value| value["execctl_active_lease"].is_object())
+        .map(|value| value["execctl_active_lease"].clone());
+    let execctl_active_lease_summary = restore_node
+        .and_then(|value| value["execctl_active_lease_summary"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let project_task_tree_summary = restore_node
         .and_then(|value| value["project_task_tree_summary"].as_str())
         .filter(|value| !value.is_empty())
@@ -2332,6 +2345,8 @@ fn build_chat_start_restore(
             "execctl_resume_obligation": execctl_resume_obligation,
             "startup_next_action": startup_next_action,
             "startup_next_action_summary": startup_next_action_summary,
+            "execctl_active_lease": execctl_active_lease,
+            "execctl_active_lease_summary": execctl_active_lease_summary,
             "project_task_tree_summary": project_task_tree_summary,
             "project_task_ledger_summary": project_task_ledger_summary,
             "execctl_resume_state": execctl_resume_state,
@@ -2497,6 +2512,10 @@ fn render_chat_start_prompt(
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .or_else(|| summarize_startup_next_action(&startup_next_action));
+    let execctl_active_lease_summary = restore_node
+        .and_then(|value| value["execctl_active_lease_summary"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let project_task_tree_summary = restore_node
         .and_then(|value| value["project_task_tree_summary"].as_str())
         .filter(|value| !value.is_empty())
@@ -2555,6 +2574,9 @@ fn render_chat_start_prompt(
         lines.push(format!(
             "Первое обязательное действие после startup: {value}"
         ));
+    }
+    if let Some(value) = execctl_active_lease_summary {
+        lines.push(format!("Активный lease ExecCtl: {value}"));
     }
     if let Some(value) = included_reasons_summary {
         lines.push(format!("Почему вошёл последний контекст: {value}"));
@@ -2638,6 +2660,12 @@ fn print_chat_start_restore_human(value: &Value) {
         .filter(|value| !value.is_empty())
     {
         println!("- Первое обязательное действие после startup: {value}");
+    }
+    if let Some(value) = node["execctl_active_lease_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Активный lease ExecCtl: {value}");
     }
     if let Some(value) = node["included_reasons_summary"]
         .as_str()
@@ -4265,6 +4293,13 @@ mod tests {
                     "next_step": "Materialize live assistant generation source."
                 },
                 "startup_next_action_summary": "resume_required_return_task: Same-meter spend control -> Materialize live assistant generation source.",
+                "execctl_active_lease": {
+                    "lease_owner_state": "previous_session_owner",
+                    "headline": "Amai upstream thread-index enrich materialized",
+                    "next_step": "Сделать auto-injection restore pack прямо в chat-start prompt.",
+                    "storage_lane": "ami.execctl_task_leases"
+                },
+                "execctl_active_lease_summary": "previous_session_owner: Amai upstream thread-index enrich materialized -> Сделать auto-injection restore pack прямо в chat-start prompt.",
                 "project_task_tree_summary": "active: Amai upstream thread-index enrich materialized; pending_return(1): Same-meter spend control -> Materialize live assistant generation source.",
                 "materialized_notes": [
                     "Enriched temporal summaries теперь пишутся upstream."
@@ -4307,6 +4342,9 @@ mod tests {
         assert!(prompt.contains(
             "Первое обязательное действие после startup: resume_required_return_task: Same-meter spend control -> Materialize live assistant generation source."
         ));
+        assert!(prompt.contains(
+            "Активный lease ExecCtl: previous_session_owner: Amai upstream thread-index enrich materialized -> Сделать auto-injection restore pack прямо в chat-start prompt."
+        ));
         assert!(prompt.contains("ExecCtl: есть незавершённые линии к возврату"));
         assert_eq!(node["thread_count"], json!(16));
         assert_eq!(
@@ -4328,6 +4366,10 @@ mod tests {
         assert_eq!(
             node["startup_next_action"]["headline"],
             json!("Same-meter spend control")
+        );
+        assert_eq!(
+            node["execctl_active_lease"]["storage_lane"],
+            json!("ami.execctl_task_leases")
         );
     }
 

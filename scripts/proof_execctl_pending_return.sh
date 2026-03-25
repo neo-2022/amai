@@ -28,6 +28,8 @@ psql "${dsn}" -v ON_ERROR_STOP=1 -f "${repo_root}/sql/000_bootstrap.sql" >/dev/n
   --code continuity \
   --display-name Continuity >/dev/null
 
+psql "${dsn}" -v ON_ERROR_STOP=1 -c "DROP TABLE IF EXISTS ami.execctl_task_leases" >/dev/null
+
 ./target/release/amai continuity handoff \
   --project "${project_code}" \
   --headline "Same-meter spend control" \
@@ -53,6 +55,9 @@ jq -e '.working_state_restore.pending_return_summary | contains("Same-meter spen
 jq -e '.working_state_restore.startup_next_action.action_kind == "resume_required_return_task"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.startup_next_action.headline == "Same-meter spend control"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.startup_next_action_summary | contains("resume_required_return_task")' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.execctl_active_lease.headline == "Project relocation contour"' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.execctl_active_lease.storage_lane == "ami.execctl_task_leases"' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.execctl_active_lease_summary | contains("Project relocation contour")' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_tree.tree_version == "project-task-tree-v1"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_tree.open_tasks_count == 2' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_tree.nodes[0].task_role == "active"' "${restore_output}" >/dev/null
@@ -65,6 +70,20 @@ jq -e '.working_state_restore.project_task_ledger.storage_lane == "ami.execctl_t
 jq -e '.working_state_restore.project_task_ledger.entries[0].task_role == "active"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_ledger.entries[0].ledger_entry_id | length > 0' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_ledger_summary | contains("historical_handoffs(0)")' "${restore_output}" >/dev/null
+
+lease_count="$(psql "${dsn}" -Atqc \
+  "SELECT COUNT(*)
+     FROM ami.execctl_task_leases e
+     JOIN ami.projects p ON p.project_id = e.project_id
+    WHERE p.code = '${project_code}'")"
+[ "${lease_count}" = "1" ]
+
+lease_headline="$(psql "${dsn}" -Atqc \
+  "SELECT headline
+     FROM ami.execctl_task_leases e
+     JOIN ami.projects p ON p.project_id = e.project_id
+    WHERE p.code = '${project_code}'")"
+[ "${lease_headline}" = "Project relocation contour" ]
 
 ledger_count="$(psql "${dsn}" -Atqc \
   "SELECT COUNT(*)

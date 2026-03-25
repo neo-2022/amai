@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 23:34 MSK
-Ручная сверка guide/docs: 2026-03-25 23:34 MSK
+modified_at: 2026-03-26 00:16 MSK
+Ручная сверка guide/docs: 2026-03-26 00:16 MSK
 
 # Architecture
 
@@ -234,6 +234,9 @@ Code structure plane:
 - `project_task_ledger`
 - `project_task_ledger_summary`
 - `ami.execctl_task_ledger_entries`
+- `execctl_active_lease`
+- `execctl_active_lease_summary`
+- `ami.execctl_task_leases`
 
 Truthful статус теперь такой:
 - `working_state` всё ещё собирает restore-side append-only ledger как fallback/shadow lane;
@@ -245,6 +248,15 @@ Truthful статус теперь такой:
 тихой потери project-bound task inventory после compaction, relocation или client switch.
 Новый слой `execctl_resume_contract` нужен именно затем, чтобы pending worklines поднимались не
 как свободный human hint, а как machine-readable `required_return_task`.
+Отдельный active-lease слой нужен затем, чтобы startup видел не только дерево задач и обязательство
+к возврату, но и живого владельца текущей линии.
+
+Архитектурное следствие для runtime:
+- `continuity startup`, `restore`, `answer` и `handoff` теперь сами выполняют schema-sync перед
+  чтением/записью `ExecCtl` durable lanes;
+- partial-upgrade не должен рвать новый startup contour только потому, что старая БД ещё не
+  материализовала `ami.execctl_task_leases`.
+
 Архитектурный закон здесь такой:
 - continuity не равна “последний headline победил”;
 - project-bound task memory должна помнить и active line, и обязательные линии к возврату,
