@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 18:42 MSK
-Ручная сверка guide/docs: 2026-03-25 18:42 MSK
+modified_at: 2026-03-25 19:02 MSK
+Ручная сверка guide/docs: 2026-03-25 19:02 MSK
 
 # Operations
 
@@ -785,6 +785,15 @@ cargo run -- mcp config --client vscode --cwd /path/to/art-memory-agent-index
 Подробный user-facing walkthrough:
 - [MCP_INTEGRATION.md](/home/art/agent-memory-index/docs/MCP_INTEGRATION.md)
 
+Операционно это нужно читать так:
+- `mcp config` / onboarding — это разовая настройка клиента;
+- это не команда, которую пользователь должен повторять перед каждым новым чатом;
+- после такой настройки новый чат в этом клиенте должен сам вызывать `Amai continuity startup`
+  для текущего проекта;
+- просто открыть папку проекта недостаточно, если сам клиент ещё не подключён к `Amai`;
+- первое сообщение пользователя должно быть обычным рабочим сообщением, а не специальной
+  фразой для восстановления continuity.
+
 ## Onboarding
 
 Если нужен один более простой вход, без ручной склейки шагов:
@@ -800,6 +809,8 @@ cargo run -- mcp config --client vscode --cwd /path/to/art-memory-agent-index
 - работает внутри текущего repo root;
 - пишет config в target path из `config/client_targets.toml`;
 - для user-scope клиентов умеет создавать backup перед изменением файла.
+- после успешного onboarding именно клиент обязан уметь автоматически поднимать continuity
+  для уже зарегистрированного проекта в новом чате, без ручного restore-step со стороны пользователя.
 - launcher platform тоже может быть указан явно:
   - `auto`
   - `linux`
