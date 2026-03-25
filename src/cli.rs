@@ -171,6 +171,7 @@ pub enum ObserveCommand {
     TokenAdjustmentRegistry(ObserveTokenAdjustmentRegistryArgs),
     TokenAdjustmentAdd(ObserveTokenAdjustmentAddArgs),
     TokenWholeCycleAttach(ObserveTokenWholeCycleAttachArgs),
+    TokenWholeCycleTurnAttach(ObserveTokenWholeCycleTurnAttachArgs),
     TokenRolloutAssistantGeneration(ObserveTokenRolloutAssistantGenerationArgs),
     CleanupSnapshots(ObserveCleanupSnapshotsArgs),
     CleanupArtifacts(ObserveCleanupArtifactsArgs),
@@ -800,6 +801,18 @@ pub struct ObserveTokenWholeCycleAttachArgs {
     pub tool_overhead_tokens: Option<u64>,
     #[arg(long)]
     pub continuity_restore_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveTokenWholeCycleTurnAttachArgs {
+    #[arg(long)]
+    pub thread_id: String,
+    #[arg(long)]
+    pub turn_id: String,
+    #[arg(long = "context-pack-id", required = true)]
+    pub context_pack_ids: Vec<String>,
+    #[arg(long)]
+    pub assistant_generation_tokens: u64,
 }
 
 #[derive(Debug, Clone, Args)]

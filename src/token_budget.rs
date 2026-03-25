@@ -2,7 +2,7 @@ use crate::cli::{
     ContextPackArgs, ObserveTokenAdjustmentAddArgs, ObserveTokenAdjustmentRegistryArgs,
     ObserveTokenContractualSourcesArgs, ObserveTokenEvidencePackArgs, ObserveTokenReportArgs,
     ObserveTokenRolloutAssistantGenerationArgs, ObserveTokenStatementExportArgs,
-    ObserveTokenWholeCycleAttachArgs,
+    ObserveTokenWholeCycleAttachArgs, ObserveTokenWholeCycleTurnAttachArgs,
 };
 use crate::codex_threads;
 use crate::config::{self, AppConfig};
@@ -25,6 +25,8 @@ use uuid::Uuid;
 const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
 const AGENT_CYCLE_TIMELINE_MAX_POINTS: usize = 256;
 const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
+const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str =
+    "assistant_generation_turn_observed";
 
 #[derive(Debug, Clone, Deserialize)]
 struct TokenBudgetConfigFile {
@@ -425,12 +427,24 @@ struct AssistantGenerationScopeObservation {
     unmatched_context_pack_ids: BTreeSet<String>,
     matched_turn_ids: BTreeSet<String>,
     available_turns: u64,
+    available_direct_turns: u64,
+    available_rollout_turns: u64,
+    matched_direct_turn_ids: BTreeSet<String>,
+    matched_rollout_turn_ids: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
 struct WorkingStateContextPackMeta {
     thread_id: String,
     captured_at_epoch_ms: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AssistantGenerationTurnObservedSnapshot {
+    thread_id: String,
+    turn_id: String,
+    assistant_generation_tokens: u64,
+    context_pack_ids: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -524,11 +538,11 @@ fn default_metering_freshness_model_version() -> String {
 }
 
 fn default_agent_cycle_model_version() -> String {
-    "agent-cycle-lower-bound-v3".to_string()
+    "agent-cycle-lower-bound-v4".to_string()
 }
 
 fn default_client_limit_meter_alignment_version() -> String {
-    "client-limit-meter-alignment-v5".to_string()
+    "client-limit-meter-alignment-v6".to_string()
 }
 
 fn default_excluded_taxonomy_version() -> String {
@@ -6991,6 +7005,194 @@ async fn latest_working_state_context_pack_metadata(
     Ok(metadata)
 }
 
+async fn assistant_generation_turn_observed_snapshots_for_context_packs(
+    db: &Client,
+    context_pack_ids: &BTreeSet<String>,
+) -> Result<Vec<AssistantGenerationTurnObservedSnapshot>> {
+    if context_pack_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = postgres::list_observability_snapshots_by_kinds(
+        db,
+        &[ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND],
+        Some(4096),
+    )
+    .await?;
+    let mut latest = BTreeMap::<String, AssistantGenerationTurnObservedSnapshot>::new();
+    for row in rows {
+        let node = &row.payload["assistant_generation_turn_observed"];
+        let thread_id = node["thread_id"].as_str().unwrap_or_default().trim().to_string();
+        let turn_id = node["turn_id"].as_str().unwrap_or_default().trim().to_string();
+        let assistant_generation_tokens = node["assistant_generation_tokens"]
+            .as_u64()
+            .unwrap_or_default();
+        let observed_context_pack_ids = node["context_pack_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|value| context_pack_ids.contains(*value))
+            .map(ToOwned::to_owned)
+            .collect::<BTreeSet<_>>();
+        if thread_id.is_empty()
+            || turn_id.is_empty()
+            || assistant_generation_tokens == 0
+            || observed_context_pack_ids.is_empty()
+        {
+            continue;
+        }
+        let key = format!("{thread_id}:{turn_id}");
+        let observation = AssistantGenerationTurnObservedSnapshot {
+            thread_id,
+            turn_id,
+            assistant_generation_tokens,
+            context_pack_ids: observed_context_pack_ids,
+        };
+        latest.entry(key).or_insert(observation);
+    }
+    Ok(latest.into_values().collect())
+}
+
+async fn attach_whole_cycle_observed_to_turn_group(
+    db: &Client,
+    thread_id: &str,
+    turn_id: &str,
+    context_pack_ids: &BTreeSet<String>,
+    assistant_generation_tokens: u64,
+) -> Result<Value> {
+    let thread_id = thread_id.trim();
+    let turn_id = turn_id.trim();
+    if thread_id.is_empty() {
+        bail!("thread_id must not be empty");
+    }
+    if turn_id.is_empty() {
+        bail!("turn_id must not be empty");
+    }
+    if assistant_generation_tokens == 0 {
+        bail!("assistant_generation_tokens must be greater than zero");
+    }
+    if context_pack_ids.is_empty() {
+        bail!("context_pack_ids must not be empty");
+    }
+    let rows = latest_token_budget_snapshots_for_context_packs(db, context_pack_ids).await?;
+    let mut missing_context_pack_ids = context_pack_ids
+        .difference(&rows.keys().cloned().collect::<BTreeSet<_>>())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !missing_context_pack_ids.is_empty() {
+        let sample = missing_context_pack_ids
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("token_budget_event not found for context_pack_ids={sample}");
+    }
+    let row_sample = rows
+        .values()
+        .next()
+        .ok_or_else(|| anyhow!("token_budget_event not found for requested turn group"))?;
+    let project_code = row_sample.payload["token_budget_event"]["project_code"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let namespace_code = row_sample.payload["token_budget_event"]["namespace_code"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let invalid_context_pack_ids = rows
+        .iter()
+        .filter_map(|(context_pack_id, row)| {
+            let node = &row.payload["token_budget_event"];
+            let valid = node["traffic_class"].as_str() == Some("live")
+                && node["measurement_scope"].as_str() == Some("retrieval_lower_bound");
+            if valid {
+                None
+            } else {
+                Some(context_pack_id.clone())
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    if !invalid_context_pack_ids.is_empty() {
+        let sample = invalid_context_pack_ids
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("turn-group attach requires live retrieval_lower_bound events; invalid context_pack_ids={sample}");
+    }
+    let payload = json!({
+        "_observability": {
+            "source_event_id": format!("assistant_generation_turn:{thread_id}:{turn_id}"),
+            "source_kind": "live_assistant_generation_turn_observed",
+            "scope_project_code": project_code,
+            "scope_namespace_code": namespace_code,
+            "captured_at_epoch_ms": current_epoch_ms()?,
+        },
+        "project": {
+            "code": project_code,
+        },
+        "namespace": {
+            "code": namespace_code,
+        },
+        "assistant_generation_turn_observed": {
+            "schema_version": "assistant-generation-turn-observed-v1",
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "assistant_generation_tokens": assistant_generation_tokens,
+            "context_pack_ids": context_pack_ids.iter().cloned().collect::<Vec<_>>(),
+            "observation_source": "client_turn_attach_v1",
+            "note": "Turn-scoped assistant_generation is counted once per matched turn-group and must not be duplicated across every context_pack event."
+        }
+    });
+    let snapshot_id = postgres::insert_observability_snapshot(
+        db,
+        ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND,
+        &payload,
+    )
+    .await?;
+    let result = json!({
+        "assistant_generation_turn_observed_attach": {
+            "snapshot_id": snapshot_id,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "assistant_generation_tokens": assistant_generation_tokens,
+            "context_pack_ids": context_pack_ids.iter().cloned().collect::<Vec<_>>(),
+            "attached": true,
+            "observation_source": "client_turn_attach_v1",
+            "note": "Turn-scoped attach is replay-protected by thread_id + turn_id and keeps assistant_generation at group scope instead of duplicating it into every token_budget_event."
+        }
+    });
+    missing_context_pack_ids.clear();
+    Ok(result)
+}
+
+pub async fn attach_whole_cycle_observed_for_turn_group(
+    db: &Client,
+    args: &ObserveTokenWholeCycleTurnAttachArgs,
+) -> Result<()> {
+    let context_pack_ids = args
+        .context_pack_ids
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    let payload = attach_whole_cycle_observed_to_turn_group(
+        db,
+        &args.thread_id,
+        &args.turn_id,
+        &context_pack_ids,
+        args.assistant_generation_tokens,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
 async fn derive_rollout_assistant_generation_scope(
     db: &Client,
     events: &[TokenBudgetEvent],
@@ -7000,17 +7202,46 @@ async fn derive_rollout_assistant_generation_scope(
         return Ok(AssistantGenerationScopeObservation::default());
     }
 
+    let direct_turns =
+        assistant_generation_turn_observed_snapshots_for_context_packs(db, &target_context_pack_ids)
+            .await?;
     let metadata = latest_working_state_context_pack_metadata(db, &target_context_pack_ids).await?;
     let mut matched_context_pack_ids = BTreeSet::new();
     let mut matched_turn_ids = BTreeSet::new();
+    let mut matched_direct_turn_ids = BTreeSet::new();
+    let mut matched_rollout_turn_ids = BTreeSet::new();
     let mut observed_tokens = 0_u64;
     let mut observed_group_count = 0_u64;
+    let mut target_group_keys = BTreeSet::new();
     let mut grouped_context_pack_ids = BTreeMap::<(String, String), BTreeSet<String>>::new();
     let mut turns_by_thread =
         BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
+    let mut direct_turns_by_key = BTreeMap::<String, AssistantGenerationTurnObservedSnapshot>::new();
+
+    for turn in &direct_turns {
+        let matched_ids = turn
+            .context_pack_ids
+            .intersection(&target_context_pack_ids)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if matched_ids.is_empty() {
+            continue;
+        }
+        let turn_key = format!("{}:{}", turn.thread_id, turn.turn_id);
+        target_group_keys.insert(turn_key.clone());
+        matched_turn_ids.insert(turn_key.clone());
+        matched_direct_turn_ids.insert(turn_key.clone());
+        direct_turns_by_key.insert(turn_key, turn.clone());
+        matched_context_pack_ids.extend(matched_ids);
+        observed_group_count = observed_group_count.saturating_add(1);
+        observed_tokens = observed_tokens.saturating_add(turn.assistant_generation_tokens);
+    }
 
     let mut by_thread = BTreeMap::<String, Vec<(String, WorkingStateContextPackMeta)>>::new();
     for context_pack_id in &target_context_pack_ids {
+        if matched_context_pack_ids.contains(context_pack_id) {
+            continue;
+        }
         if let Some(meta) = metadata.get(context_pack_id) {
             by_thread
                 .entry(meta.thread_id.clone())
@@ -7038,6 +7269,11 @@ async fn derive_rollout_assistant_generation_scope(
             let Some(turn) = matched_turn else {
                 continue;
             };
+            let turn_key = format!("{thread_id}:{}", turn.turn_id);
+            if direct_turns_by_key.contains_key(&turn_key) {
+                matched_context_pack_ids.insert(context_pack_id);
+                continue;
+            }
             grouped_context_pack_ids
                 .entry((thread_id.clone(), turn.turn_id.clone()))
                 .or_default()
@@ -7046,7 +7282,7 @@ async fn derive_rollout_assistant_generation_scope(
         turns_by_thread.insert(thread_id, turns);
     }
 
-    let available_turns = turns_by_thread
+    let available_turns: u64 = turns_by_thread
         .values()
         .map(|turns| turns.len() as u64)
         .sum();
@@ -7061,7 +7297,10 @@ async fn derive_rollout_assistant_generation_scope(
         if context_pack_ids.is_empty() {
             continue;
         }
-        matched_turn_ids.insert(format!("{thread_id}:{turn_id}"));
+        let turn_key = format!("{thread_id}:{turn_id}");
+        target_group_keys.insert(turn_key.clone());
+        matched_turn_ids.insert(turn_key.clone());
+        matched_rollout_turn_ids.insert(turn_key);
         matched_context_pack_ids.extend(context_pack_ids.iter().cloned());
         observed_group_count = observed_group_count.saturating_add(1);
         observed_tokens = observed_tokens.saturating_add(turn.assistant_generation_tokens);
@@ -7071,17 +7310,23 @@ async fn derive_rollout_assistant_generation_scope(
         .difference(&matched_context_pack_ids)
         .cloned()
         .collect::<BTreeSet<_>>();
+    for context_pack_id in &unmatched_context_pack_ids {
+        target_group_keys.insert(format!("context_pack:{context_pack_id}"));
+    }
 
     Ok(AssistantGenerationScopeObservation {
-        target_group_count: grouped_context_pack_ids.len() as u64
-            + unmatched_context_pack_ids.len() as u64,
+        target_group_count: target_group_keys.len() as u64,
         observed_group_count,
         observed_tokens,
         target_context_pack_ids,
         matched_context_pack_ids,
         unmatched_context_pack_ids,
         matched_turn_ids,
-        available_turns,
+        available_turns: available_turns.saturating_add(direct_turns.len() as u64),
+        available_direct_turns: direct_turns.len() as u64,
+        available_rollout_turns: available_turns,
+        matched_direct_turn_ids,
+        matched_rollout_turn_ids,
     })
 }
 
@@ -7244,6 +7489,7 @@ async fn collect_report(
     } else {
         None
     };
+    let lifetime_assistant_scope = derive_rollout_assistant_generation_scope(db, &events).await?;
 
     let latest_event = events
         .last()
@@ -7294,7 +7540,7 @@ async fn collect_report(
         &rollout_observations,
         &current_session_assistant_scope,
         rolling_window_assistant_scope.as_ref(),
-        None,
+        Some(&lifetime_assistant_scope),
     );
     let current_session_metering_freshness = build_metering_freshness_summary(
         &config.contract,
@@ -7383,7 +7629,7 @@ async fn collect_report(
         &reconciliation_contract,
         &lifetime_metering_freshness,
         &rollout_observations,
-        None,
+        Some(&lifetime_assistant_scope),
     );
     let current_session_reconciliation_preview = build_reconciliation_preview(
         "current_session",
@@ -9797,28 +10043,41 @@ fn assistant_generation_observation_source_status(
 ) -> Value {
     let target_ids = assistant_generation_missing_scope_context_pack_ids(events);
     if let Some(scope) = assistant_scope {
+        let source_kind = match (
+            scope.available_direct_turns > 0,
+            scope.available_rollout_turns > 0,
+        ) {
+            (true, true) => "direct_turn_attach_plus_rollout_turn_timeline_v1",
+            (true, false) => "direct_turn_attach_v1",
+            (false, true) => "codex_rollout_turn_timeline_v1",
+            (false, false) => "assistant_generation_source_unavailable_v1",
+        };
         let state = if scope.target_context_pack_ids.is_empty() {
             "no_missing_live_retrieval_events"
         } else if scope.available_turns == 0 {
-            "rollout_source_unavailable"
+            "assistant_generation_source_unavailable"
         } else if scope.matched_context_pack_ids.is_empty() {
-            "rollout_source_no_scope_overlap"
+            "assistant_generation_source_no_scope_overlap"
         } else if !scope.unmatched_context_pack_ids.is_empty() {
-            "rollout_source_partial_scope_overlap"
+            "assistant_generation_source_partial_scope_overlap"
         } else {
-            "rollout_source_covers_missing_scope"
+            "assistant_generation_source_covers_missing_scope"
         };
         return json!({
-            "source_kind": "codex_rollout_turn_timeline_v1",
+            "source_kind": source_kind,
             "state": state,
-            "usable_rollout_turns": scope.available_turns,
+            "usable_turns": scope.available_turns,
+            "usable_direct_turns": scope.available_direct_turns,
+            "usable_rollout_turns": scope.available_rollout_turns,
             "matched_turn_ids": scope.matched_turn_ids.len(),
+            "matched_direct_turn_ids": scope.matched_direct_turn_ids.len(),
+            "matched_rollout_turn_ids": scope.matched_rollout_turn_ids.len(),
             "target_missing_context_pack_ids": scope.target_context_pack_ids.len(),
             "matched_context_pack_ids": scope.matched_context_pack_ids.len(),
             "unmatched_context_pack_ids": scope.unmatched_context_pack_ids.len(),
             "matched_context_pack_id_sample": scope.matched_context_pack_ids.iter().take(8).cloned().collect::<Vec<_>>(),
             "unmatched_context_pack_id_sample": scope.unmatched_context_pack_ids.iter().take(8).cloned().collect::<Vec<_>>(),
-            "note": "Этот слой показывает, покрывают ли rollout turn-timelines именно текущий live retrieval scope и можно ли честно привязать assistant_generation к turn-группам без дублирования токенов по каждому context pack."
+            "note": "Этот слой показывает, покрывают ли direct turn attach и rollout turn-timelines именно текущий live retrieval scope и можно ли честно привязать assistant_generation к turn-группам без дублирования токенов по каждому context pack."
         });
     }
     let available_ids = rollout_observations
@@ -9837,13 +10096,13 @@ fn assistant_generation_observation_source_status(
     let state = if target_ids.is_empty() {
         "no_missing_live_retrieval_events"
     } else if available_ids.is_empty() {
-        "rollout_source_unavailable"
+        "assistant_generation_source_unavailable"
     } else if matched_ids.is_empty() {
-        "rollout_source_no_scope_overlap"
+        "assistant_generation_source_no_scope_overlap"
     } else if matched_ids.len() < target_ids.len() {
-        "rollout_source_partial_scope_overlap"
+        "assistant_generation_source_partial_scope_overlap"
     } else {
-        "rollout_source_covers_missing_scope"
+        "assistant_generation_source_covers_missing_scope"
     };
     json!({
         "source_kind": "codex_rollout_last_token_usage_sum_v1",
@@ -9854,7 +10113,7 @@ fn assistant_generation_observation_source_status(
         "unmatched_context_pack_ids": unmatched_ids.len(),
         "matched_context_pack_id_sample": matched_ids.into_iter().take(8).collect::<Vec<_>>(),
         "unmatched_context_pack_id_sample": unmatched_ids.into_iter().take(8).collect::<Vec<_>>(),
-        "note": "Этот слой показывает не общий факт missing assistant_generation, а покрывает ли доступный rollout source именно текущий live retrieval scope."
+        "note": "Этот слой показывает не общий факт missing assistant_generation, а покрывает ли доступный source именно текущий live retrieval scope."
     })
 }
 
@@ -9905,15 +10164,15 @@ fn build_client_limit_meter_alignment(
     let mut blocking_reasons =
         client_limit_meter_alignment_blocking_reasons(summary, events, assistant_scope);
     match assistant_generation_observation_source["state"].as_str().unwrap_or_default() {
-        "rollout_source_unavailable" => {
-            blocking_reasons.push("assistant_generation_rollout_source_unavailable".to_string());
+        "assistant_generation_source_unavailable" => {
+            blocking_reasons.push("assistant_generation_source_unavailable".to_string());
         }
-        "rollout_source_no_scope_overlap" => {
-            blocking_reasons.push("assistant_generation_rollout_source_no_scope_overlap".to_string());
+        "assistant_generation_source_no_scope_overlap" => {
+            blocking_reasons.push("assistant_generation_source_no_scope_overlap".to_string());
         }
-        "rollout_source_partial_scope_overlap" => {
+        "assistant_generation_source_partial_scope_overlap" => {
             blocking_reasons
-                .push("assistant_generation_rollout_source_partial_scope_overlap".to_string());
+                .push("assistant_generation_source_partial_scope_overlap".to_string());
         }
         _ => {}
     }
@@ -12735,7 +12994,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_meter_alignment_version"],
-            "client-limit-meter-alignment-v5"
+            "client-limit-meter-alignment-v6"
         );
         assert_eq!(
             token_event["whole_cycle_observed"]["client_prompt_tokens"],
@@ -13332,7 +13591,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v5"
+            "client-limit-meter-alignment-v6"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -15836,7 +16095,7 @@ effective_to_epoch_ms = 2000
             None,
         );
 
-        assert_eq!(economics["model_version"], "agent-cycle-lower-bound-v3");
+        assert_eq!(economics["model_version"], "agent-cycle-lower-bound-v4");
         assert_eq!(economics["status"], "partial_lower_bound");
         assert_eq!(
             economics["current_session"]["without_amai_measured_tokens"],
@@ -15873,7 +16132,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v5"
+            "client-limit-meter-alignment-v6"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["surface_kind"],
@@ -15952,6 +16211,38 @@ effective_to_epoch_ms = 2000
                         .any(|reason| reason == "client_prompt_partially_measured")
                 })
         );
+    }
+
+    #[test]
+    fn assistant_generation_source_status_reports_direct_turn_attach_scope() {
+        let status = super::assistant_generation_observation_source_status(
+            None,
+            None,
+            Some(&super::AssistantGenerationScopeObservation {
+                target_group_count: 2,
+                observed_group_count: 1,
+                observed_tokens: 123,
+                target_context_pack_ids: ["cp-1".to_string(), "cp-2".to_string()]
+                    .into_iter()
+                    .collect(),
+                matched_context_pack_ids: ["cp-1".to_string()].into_iter().collect(),
+                unmatched_context_pack_ids: ["cp-2".to_string()].into_iter().collect(),
+                matched_turn_ids: ["thread-1:turn-1".to_string()].into_iter().collect(),
+                available_turns: 1,
+                available_direct_turns: 1,
+                available_rollout_turns: 0,
+                matched_direct_turn_ids: ["thread-1:turn-1".to_string()].into_iter().collect(),
+                matched_rollout_turn_ids: std::collections::BTreeSet::new(),
+            }),
+        );
+
+        assert_eq!(status["source_kind"], "direct_turn_attach_v1");
+        assert_eq!(
+            status["state"],
+            "assistant_generation_source_partial_scope_overlap"
+        );
+        assert_eq!(status["usable_direct_turns"], 1);
+        assert_eq!(status["usable_rollout_turns"], 0);
     }
 
     #[test]

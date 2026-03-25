@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 16:57 MSK
-Ручная сверка guide/docs: 2026-03-25 16:57 MSK
+modified_at: 2026-03-25 17:15 MSK
+Ручная сверка guide/docs: 2026-03-25 17:15 MSK
 
 # Operations
 
@@ -2042,8 +2042,15 @@ report path теперь умеет auto-sync их из stored `ami.context_pack
   это не баг surface, а truthful source-gap.
 - этот source-gap теперь обязан быть виден machine-readable в
   `client_limit_meter_alignment.assistant_generation_observation_source`, чтобы operator
-  мог увидеть состояния `rollout_source_unavailable / no_scope_overlap /
-  partial_scope_overlap / covers_missing_scope`, а не только общую blocker-строку.
+  мог увидеть состояния `assistant_generation_source_unavailable /
+  assistant_generation_source_no_scope_overlap /
+  assistant_generation_source_partial_scope_overlap /
+  assistant_generation_source_covers_missing_scope`, а не только общую blocker-строку.
+- тот же contour теперь умеет и прямой turn-scoped attach:
+  `observe token-whole-cycle-turn-attach --thread-id ... --turn-id ...
+  --context-pack-id ... --assistant-generation-tokens ...`
+  и обязан считать такие токены один раз на `thread_id + turn_id`, а не
+  дублировать их по каждому retrieval event.
 
 `client_limit_meter_alignment` теперь нельзя читать как flat denominator по всем live events.
 Operator contour обязан учитывать:

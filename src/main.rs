@@ -422,6 +422,12 @@ async fn main() -> Result<()> {
                 let db = postgres::connect_admin(&cfg).await?;
                 token_budget::attach_whole_cycle_observed_for_context_pack(&db, &args).await?;
             }
+            ObserveCommand::TokenWholeCycleTurnAttach(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                let db = postgres::connect_admin(&cfg).await?;
+                token_budget::attach_whole_cycle_observed_for_turn_group(&db, &args).await?;
+            }
             ObserveCommand::TokenRolloutAssistantGeneration(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

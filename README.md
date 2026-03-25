@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 16:57 MSK
-Ручная сверка guide/docs: 2026-03-25 16:57 MSK
+modified_at: 2026-03-25 17:15 MSK
+Ручная сверка guide/docs: 2026-03-25 17:15 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1484,25 +1484,36 @@ preview, а не только raw count.
     - `future settlement activation governance`
     - `future adjustment activation governance`
   - operational metering contract теперь ещё несёт:
-  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v5`
+  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v6`
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
-  - начиная с `v5` слой ещё и честно поднимает `client_prompt` как observed component
+  - начиная с `v6` слой ещё и честно поднимает `client_prompt` как observed component
     из уже записанных `query + tokenizer`, даже если старое событие не несло
     отдельный `whole_cycle_observed.client_prompt_tokens`.
-  - тот же `v5` теперь ещё публикует
+  - тот же `v6` теперь ещё публикует
     `assistant_generation_observation_source`, чтобы `current_session /
     rolling_window` можно было объяснить не только общей missing-меткой, но и
     machine-readable source-gap причиной:
-    `rollout_source_unavailable / rollout_source_no_scope_overlap /
-    rollout_source_partial_scope_overlap / rollout_source_covers_missing_scope`.
-  - и тот же `v5` больше не делит все whole-cycle компоненты на один и тот же
+    `assistant_generation_source_unavailable /
+    assistant_generation_source_no_scope_overlap /
+    assistant_generation_source_partial_scope_overlap /
+    assistant_generation_source_covers_missing_scope`.
+  - этот же `v6` уже различает не только rollout path, но и direct turn attach:
+    `source_kind` теперь может честно быть
+    `direct_turn_attach_v1 / codex_rollout_turn_timeline_v1 /
+    direct_turn_attach_plus_rollout_turn_timeline_v1`.
+  - и тот же `v6` больше не делит все whole-cycle компоненты на один и тот же
     denominator:
     `client_prompt`, `assistant_generation`, `tool_overhead_outside_retrieval` и
     `continuity_restore_outside_retrieval` теперь публикуются с
     `target_live_events_count`, `target_scope_kind` и
     `not_applicable_components`, чтобы `continuity_restore` не считался missing
     там, где в scope вообще не было restore-event.
+  - runtime same-meter path теперь умеет и прямой turn-scoped attach:
+    `observe token-whole-cycle-turn-attach --thread-id ... --turn-id ...
+    --context-pack-id ... --assistant-generation-tokens ...`.
+    Этот путь считает `assistant_generation` один раз на turn-group и не
+    дублирует токены по каждому retrieval event.
   - statement/reconciliation path теперь тоже перестал быть retrieval-only:
     внутренний meter lower bound для provider drift/cost preview поднимается от
     `delivered + recovery` к `observed whole-cycle lower bound`, как только такие
