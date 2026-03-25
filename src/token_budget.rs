@@ -25,8 +25,7 @@ use uuid::Uuid;
 const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
 const AGENT_CYCLE_TIMELINE_MAX_POINTS: usize = 256;
 const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
-const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str =
-    "assistant_generation_turn_observed";
+const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_generation_turn_observed";
 
 #[derive(Debug, Clone, Deserialize)]
 struct TokenBudgetConfigFile {
@@ -510,7 +509,7 @@ fn default_usage_event_schema_version() -> String {
 }
 
 fn default_settlement_statement_version() -> String {
-    "settlement-preview-v5".to_string()
+    "settlement-preview-v6".to_string()
 }
 
 fn default_metering_event_schema_version() -> String {
@@ -650,15 +649,15 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v18".to_string()
+    "contractual-evidence-pack-v19".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v18".to_string()
+    "contractual-statement-export-v19".to_string()
 }
 
 fn default_settlement_report_preview_version() -> String {
-    "settlement-report-preview-v9".to_string()
+    "settlement-report-preview-v10".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -5253,8 +5252,7 @@ fn build_statement_preview(
     let internal_delivered_tokens = summary["delivered_tokens"].as_u64().unwrap_or(0);
     let internal_recovery_tokens = summary["recovery_tokens"].as_u64().unwrap_or(0);
     let internal_observed_whole_cycle_lower_bound_tokens =
-        summary["observed_whole_cycle_with_amai_tokens"]
-            .as_u64()
+        observed_whole_cycle_with_assistant_scope_tokens(summary, assistant_scope)
             .unwrap_or(internal_delivered_tokens.saturating_add(internal_recovery_tokens));
     let verified_internal_observed_whole_cycle_lower_bound_tokens =
         summary["verified_observed_whole_cycle_with_amai_tokens"]
@@ -5345,6 +5343,25 @@ fn build_statement_preview(
             "Это preview measured lower bound для scope, а не закрытый statement и не сумма к оплате."
         }
     })
+}
+
+fn observed_whole_cycle_with_assistant_scope_tokens(
+    summary: &Value,
+    assistant_scope: Option<&AssistantGenerationScopeObservation>,
+) -> Option<u64> {
+    let observed_whole_cycle_with_amai_tokens =
+        summary["observed_whole_cycle_with_amai_tokens"].as_u64()?;
+    let observed_assistant_generation_tokens = summary["observed_assistant_generation_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    Some(
+        observed_whole_cycle_with_amai_tokens.saturating_add(
+            assistant_scope
+                .map(|scope| scope.observed_tokens)
+                .unwrap_or(observed_assistant_generation_tokens)
+                .saturating_sub(observed_assistant_generation_tokens),
+        ),
+    )
 }
 
 fn contractual_line_item_json(event: &TokenBudgetEvent) -> Value {
@@ -6861,7 +6878,8 @@ async fn sync_rollout_assistant_generation_for_events(
     if observations.is_empty() {
         return Ok(false);
     }
-    let latest_rows = latest_token_budget_snapshots_for_context_packs(db, &target_context_pack_ids).await?;
+    let latest_rows =
+        latest_token_budget_snapshots_for_context_packs(db, &target_context_pack_ids).await?;
     let mut changed = false;
     for observation in observations {
         if !target_context_pack_ids.contains(&observation.context_pack_id) {
@@ -6919,14 +6937,16 @@ async fn sync_context_pack_tool_overhead_for_events(
         return Ok(false);
     }
     let config = load_config(repo_root)?;
-    let latest_rows = latest_token_budget_snapshots_for_context_packs(db, &target_context_pack_ids).await?;
+    let latest_rows =
+        latest_token_budget_snapshots_for_context_packs(db, &target_context_pack_ids).await?;
     let mut changed = false;
     for context_pack_id in target_context_pack_ids {
         let Some(row) = latest_rows.get(&context_pack_id) else {
             continue;
         };
-        let existing = row.payload["token_budget_event"]["whole_cycle_observed"]["tool_overhead_tokens"]
-            .as_u64();
+        let existing =
+            row.payload["token_budget_event"]["whole_cycle_observed"]["tool_overhead_tokens"]
+                .as_u64();
         if existing.is_some() {
             continue;
         }
@@ -7021,8 +7041,16 @@ async fn assistant_generation_turn_observed_snapshots_for_context_packs(
     let mut latest = BTreeMap::<String, AssistantGenerationTurnObservedSnapshot>::new();
     for row in rows {
         let node = &row.payload["assistant_generation_turn_observed"];
-        let thread_id = node["thread_id"].as_str().unwrap_or_default().trim().to_string();
-        let turn_id = node["turn_id"].as_str().unwrap_or_default().trim().to_string();
+        let thread_id = node["thread_id"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let turn_id = node["turn_id"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         let assistant_generation_tokens = node["assistant_generation_tokens"]
             .as_u64()
             .unwrap_or_default();
@@ -7102,8 +7130,15 @@ async fn attach_whole_cycle_observed_to_turn_group(
     } else if thread_ids.len() == 1 {
         thread_ids.iter().next().cloned().unwrap_or_default()
     } else {
-        let sample = thread_ids.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
-        bail!("thread_id inference is ambiguous for requested context_pack_ids; candidates={sample}");
+        let sample = thread_ids
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "thread_id inference is ambiguous for requested context_pack_ids; candidates={sample}"
+        );
     };
     let rows = latest_token_budget_snapshots_for_context_packs(db, context_pack_ids).await?;
     let mut missing_context_pack_ids = context_pack_ids
@@ -7152,7 +7187,9 @@ async fn attach_whole_cycle_observed_to_turn_group(
             .cloned()
             .collect::<Vec<_>>()
             .join(", ");
-        bail!("turn-group attach requires retrieval or whole_cycle_observed events; invalid context_pack_ids={sample}");
+        bail!(
+            "turn-group attach requires retrieval or whole_cycle_observed events; invalid context_pack_ids={sample}"
+        );
     }
     let payload = json!({
         "_observability": {
@@ -7250,9 +7287,11 @@ async fn derive_rollout_assistant_generation_scope(
         return Ok(AssistantGenerationScopeObservation::default());
     }
 
-    let direct_turns =
-        assistant_generation_turn_observed_snapshots_for_context_packs(db, &target_context_pack_ids)
-            .await?;
+    let direct_turns = assistant_generation_turn_observed_snapshots_for_context_packs(
+        db,
+        &target_context_pack_ids,
+    )
+    .await?;
     let metadata = latest_working_state_context_pack_metadata(db, &target_context_pack_ids).await?;
     let mut matched_context_pack_ids = BTreeSet::new();
     let mut matched_turn_ids = BTreeSet::new();
@@ -7264,7 +7303,8 @@ async fn derive_rollout_assistant_generation_scope(
     let mut grouped_context_pack_ids = BTreeMap::<(String, String), BTreeSet<String>>::new();
     let mut turns_by_thread =
         BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
-    let mut direct_turns_by_key = BTreeMap::<String, AssistantGenerationTurnObservedSnapshot>::new();
+    let mut direct_turns_by_key =
+        BTreeMap::<String, AssistantGenerationTurnObservedSnapshot>::new();
 
     for turn in &direct_turns {
         let matched_ids = turn
@@ -9915,7 +9955,8 @@ fn client_limit_component_target_live_events(
             .unwrap_or_else(|| {
                 events
                     .map(|items| {
-                        items.iter()
+                        items
+                            .iter()
                             .filter(|event| is_client_limit_component_target_event(code, event))
                             .count() as u64
                     })
@@ -9924,7 +9965,8 @@ fn client_limit_component_target_live_events(
     }
     events
         .map(|items| {
-            items.iter()
+            items
+                .iter()
                 .filter(|event| is_client_limit_component_target_event(code, event))
                 .count() as u64
         })
@@ -9940,13 +9982,12 @@ fn client_limit_component_event_coverage(
     client_limit_component_stats(summary, assistant_scope)
         .into_iter()
         .map(|(code, observed_live_events, observed_tokens)| {
-            let target_live_events_count =
-                client_limit_component_target_live_events(
-                    code,
-                    events,
-                    live_events_count,
-                    assistant_scope,
-                );
+            let target_live_events_count = client_limit_component_target_live_events(
+                code,
+                events,
+                live_events_count,
+                assistant_scope,
+            );
             json!({
                 "code": code,
                 "observed_live_events": observed_live_events,
@@ -10001,8 +10042,9 @@ fn client_limit_meter_alignment_blocking_reasons(
             reasons.push("no_confirmed_live_usage_in_scope".to_string());
         }
         if live_events_count > 0
-            && client_limit_component_stats(summary, assistant_scope).into_iter().all(
-                |(code, observed_live_events, _observed_tokens)| {
+            && client_limit_component_stats(summary, assistant_scope)
+                .into_iter()
+                .all(|(code, observed_live_events, _observed_tokens)| {
                     let target_live_events = client_limit_component_target_live_events(
                         code,
                         events,
@@ -10010,8 +10052,7 @@ fn client_limit_meter_alignment_blocking_reasons(
                         assistant_scope,
                     );
                     target_live_events == 0 || observed_live_events == target_live_events
-                },
-            )
+                })
         {
             reasons.push("same_meter_baseline_unmeasured".to_string());
         }
@@ -10027,16 +10068,17 @@ fn client_limit_meter_alignment_state(
     let (events_total, live_events_count, _non_live_events_count, counted_events) =
         client_limit_meter_alignment_counts(summary, events);
     let component_stats = client_limit_component_stats(summary, assistant_scope);
-    let any_component_applicable = component_stats.iter().any(
-        |(code, _observed_live_events, _observed_tokens)| {
-            client_limit_component_target_live_events(
-                code,
-                events,
-                live_events_count,
-                assistant_scope,
-            ) > 0
-        },
-    );
+    let any_component_applicable =
+        component_stats
+            .iter()
+            .any(|(code, _observed_live_events, _observed_tokens)| {
+                client_limit_component_target_live_events(
+                    code,
+                    events,
+                    live_events_count,
+                    assistant_scope,
+                ) > 0
+            });
     let all_components_observed = live_events_count > 0
         && component_stats
             .iter()
@@ -10175,12 +10217,8 @@ fn build_client_limit_meter_alignment(
 ) -> Value {
     let (events_total, live_events_count, non_live_events_count, counted_events) =
         client_limit_meter_alignment_counts(summary, events);
-    let component_coverage = client_limit_component_event_coverage(
-        summary,
-        events,
-        live_events_count,
-        assistant_scope,
-    );
+    let component_coverage =
+        client_limit_component_event_coverage(summary, events, live_events_count, assistant_scope);
     let component_stats = client_limit_component_stats(summary, assistant_scope);
     let mut measured_components = vec![
         "retrieval_payload".to_string(),
@@ -10207,11 +10245,17 @@ fn build_client_limit_meter_alignment(
             }
         }
     }
-    let assistant_generation_observation_source =
-        assistant_generation_observation_source_status(events, rollout_observations, assistant_scope);
+    let assistant_generation_observation_source = assistant_generation_observation_source_status(
+        events,
+        rollout_observations,
+        assistant_scope,
+    );
     let mut blocking_reasons =
         client_limit_meter_alignment_blocking_reasons(summary, events, assistant_scope);
-    match assistant_generation_observation_source["state"].as_str().unwrap_or_default() {
+    match assistant_generation_observation_source["state"]
+        .as_str()
+        .unwrap_or_default()
+    {
         "assistant_generation_source_unavailable" => {
             blocking_reasons.push("assistant_generation_source_unavailable".to_string());
         }
@@ -10219,8 +10263,7 @@ fn build_client_limit_meter_alignment(
             blocking_reasons.push("assistant_generation_source_no_scope_overlap".to_string());
         }
         "assistant_generation_source_partial_scope_overlap" => {
-            blocking_reasons
-                .push("assistant_generation_source_partial_scope_overlap".to_string());
+            blocking_reasons.push("assistant_generation_source_partial_scope_overlap".to_string());
         }
         _ => {}
     }
@@ -10421,9 +10464,9 @@ fn build_agent_cycle_scope(
         .as_u64()
         .unwrap_or(0)
         .saturating_add(summary["verified_recovery_tokens"].as_u64().unwrap_or(0));
-    let observed_whole_cycle_with_amai_tokens = summary["observed_whole_cycle_with_amai_tokens"]
-        .as_u64()
-        .unwrap_or(with_amai_measured_tokens);
+    let observed_whole_cycle_with_amai_tokens =
+        observed_whole_cycle_with_assistant_scope_tokens(&summary, assistant_scope)
+            .unwrap_or(with_amai_measured_tokens);
     let verified_observed_whole_cycle_with_amai_tokens =
         summary["verified_observed_whole_cycle_with_amai_tokens"]
             .as_u64()
@@ -10460,12 +10503,7 @@ fn build_agent_cycle_scope(
         "verified_share_pct": verified_share_pct,
         "without_amai_measured_tokens": summary["total_naive_tokens"].as_u64().unwrap_or(0),
         "with_amai_measured_tokens": with_amai_measured_tokens,
-        "observed_whole_cycle_with_amai_tokens": observed_whole_cycle_with_amai_tokens.saturating_add(
-            assistant_scope
-                .map(|scope| scope.observed_tokens)
-                .unwrap_or(0)
-                .saturating_sub(summary["observed_assistant_generation_tokens"].as_u64().unwrap_or(0))
-        ),
+        "observed_whole_cycle_with_amai_tokens": observed_whole_cycle_with_amai_tokens,
         "measured_saved_tokens": summary["total_effective_saved_tokens"].as_i64().unwrap_or(0),
         "measured_saved_pct": summary["effective_savings_pct"].as_f64().unwrap_or(0.0),
         "verified_without_amai_measured_tokens": summary["verified_baseline_tokens"].as_u64().unwrap_or(0),
@@ -11386,7 +11424,8 @@ async fn attach_context_pack_whole_cycle_observed(
     {
         bail!("whole-cycle attach requires at least one observed token field");
     }
-    let Some(row) = latest_token_budget_snapshot_for_context_pack(db, context_pack_id).await? else {
+    let Some(row) = latest_token_budget_snapshot_for_context_pack(db, context_pack_id).await?
+    else {
         return Ok(None);
     };
     attach_whole_cycle_observed_to_snapshot(
@@ -13075,7 +13114,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v18"
+            "contractual-evidence-pack-v19"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -13549,7 +13588,7 @@ effective_to_epoch_ms = 2000
 
         assert_eq!(
             settlement_contract["statement_version"],
-            "settlement-preview-v5"
+            "settlement-preview-v6"
         );
         assert_eq!(
             settlement_contract["settlement_lifecycle_model_version"],
@@ -13819,6 +13858,79 @@ effective_to_epoch_ms = 2000
             230
         );
         assert_eq!(preview["internal_provider_billed_tokens"], 260);
+    }
+
+    #[test]
+    fn statement_preview_adds_turn_attached_assistant_generation_to_internal_meter() {
+        let contract = contract_fixture();
+        let profile = profile_fixture();
+        let adjustment_registry = adjustment_registry_fixture(&contract);
+        let rate_card = rate_card_fixture(&contract);
+        let reconciliation_contract = build_reconciliation_contract_json(
+            &contract,
+            &build_external_truth_sources_json(Path::new("/tmp/amai-no-sources")),
+            &provider_usage_binding_fixture(&rate_card),
+            &provider_invoice_binding_fixture(),
+            &rate_card,
+        );
+        let summary = json!({
+            "coverage": {
+                "completeness_state": "partially_confirmed"
+            },
+            "verified_effective_saved_tokens": 777,
+            "delivered_tokens": 200,
+            "recovery_tokens": 10,
+            "observed_assistant_generation_tokens": 0,
+            "observed_whole_cycle_with_amai_tokens": 260,
+            "verified_observed_whole_cycle_with_amai_tokens": 230
+        });
+        let events = vec![token_event! {
+            occurred_at_epoch_ms: 1_000,
+            naive_tokens: 1037,
+            context_tokens: 200,
+            recovery_tokens: 10,
+            effective_saved_tokens: 827,
+        }];
+        let freshness =
+            build_metering_freshness_summary(&contract, &measurement_fixture(), 2_000, &events);
+        let preview = build_statement_preview(
+            "current_session",
+            "текущая сессия",
+            2_000,
+            &events,
+            &profile,
+            &summary,
+            &contract,
+            &adjustment_registry,
+            &rate_card,
+            &reconciliation_contract,
+            &freshness,
+            &[],
+            Some(&super::AssistantGenerationScopeObservation {
+                target_group_count: 1,
+                observed_group_count: 1,
+                observed_tokens: 45,
+                target_context_pack_ids: ["cp-1".to_string()].into_iter().collect(),
+                matched_context_pack_ids: ["cp-1".to_string()].into_iter().collect(),
+                unmatched_context_pack_ids: std::collections::BTreeSet::new(),
+                matched_turn_ids: ["thread-1:turn-1".to_string()].into_iter().collect(),
+                available_turns: 1,
+                available_direct_turns: 1,
+                available_rollout_turns: 0,
+                matched_direct_turn_ids: ["thread-1:turn-1".to_string()].into_iter().collect(),
+                matched_rollout_turn_ids: std::collections::BTreeSet::new(),
+            }),
+        );
+
+        assert_eq!(
+            preview["internal_observed_whole_cycle_lower_bound_tokens"],
+            305
+        );
+        assert_eq!(
+            preview["verified_internal_observed_whole_cycle_lower_bound_tokens"],
+            230
+        );
+        assert_eq!(preview["internal_provider_billed_tokens"], 305);
     }
 
     #[test]
@@ -15269,7 +15381,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v18");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v19");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -15449,7 +15561,7 @@ effective_to_epoch_ms = 2000
         assert_eq!(preview["evidence_pack_available"], true);
         assert_eq!(
             preview["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v9"
+            "settlement-report-preview-v10"
         );
         assert_eq!(
             preview["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],
@@ -15587,7 +15699,7 @@ effective_to_epoch_ms = 2000
                 "statement_export_previews": {
                     "lifetime": {
                         "settlement_report_preview": {
-                            "model_version": "settlement-report-preview-v9",
+                            "model_version": "settlement-report-preview-v10",
                             "settlement_report_id": "preview-hash"
                         },
                         "customer_contractual_boundary": {
@@ -15687,7 +15799,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v18");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v19");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -15833,7 +15945,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             payload["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v9"
+            "settlement-report-preview-v10"
         );
         assert_eq!(
             payload["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],

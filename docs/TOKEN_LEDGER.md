@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 17:35 MSK
-Ручная сверка guide/docs: 2026-03-25 17:35 MSK
+modified_at: 2026-03-25 17:53 MSK
+Ручная сверка guide/docs: 2026-03-25 17:53 MSK
 
 # Token Ledger
 
@@ -684,7 +684,7 @@ whole-cycle компонент на одинаковое число всех liv
 - закрыт ли уже реальный денежный workflow или это всё ещё report-only preview.
 
 Текущий truthful status:
-- `statement_version = settlement-preview-v5`
+- `statement_version = settlement-preview-v6`
 - `settlement_lifecycle_model_version = settlement-lifecycle-v4`
 - `statement_period_governance_version = statement-period-governance-v2`
 - `adjustment_preview_model_version = adjustment-preview-v1`
@@ -708,6 +708,8 @@ whole-cycle компонент на одинаковое число всех liv
 - close barriers;
 - period window;
 - adjustment preview;
+- internal observed whole-cycle lower bound без дублирования turn-scoped `assistant_generation`
+  по каждому retrieval event, если output materialized только на уровне `thread_id + turn_id`;
 - и при этом не подсовывать пользователю фальшивую сумму к оплате.
 
 Именно поэтому в текущем runtime:
@@ -1249,9 +1251,9 @@ Hashes по line items нужны затем, чтобы:
 - и только потом, в будущем, settlement/dispute workflow.
 
 Текущие surface versions для этого слоя:
-- `contractual-statement-export-v18`
-- `settlement-report-preview-v9`
-- `contractual-evidence-pack-v18`
+- `contractual-statement-export-v19`
+- `settlement-report-preview-v10`
+- `contractual-evidence-pack-v19`
 - `client-limit-meter-alignment-v6`
 - `adjustment-activation-governance-v1`
 

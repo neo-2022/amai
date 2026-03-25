@@ -14,7 +14,7 @@ late_arrival_grace_minutes = 60
 
 [contract]
 usage_event_schema_version = "billing-usage-event-v2"
-settlement_statement_version = "settlement-preview-v5"
+settlement_statement_version = "settlement-preview-v6"
 metering_event_schema_version = "token-budget-event-v3"
 usage_lifecycle_model_version = "usage-lifecycle-v1"
 baseline_method_version = "retrieval-baseline-v1"
@@ -52,9 +52,9 @@ rate_card_binding_model_version = "rate-card-binding-v3"
 rate_card_version = "unpriced-v1"
 currency_profile = "unpriced"
 settlement_status = "unsettled_report_only"
-contractual_statement_export_version = "contractual-statement-export-v18"
-settlement_report_preview_version = "settlement-report-preview-v9"
-contractual_evidence_pack_version = "contractual-evidence-pack-v18"
+contractual_statement_export_version = "contractual-statement-export-v19"
+settlement_report_preview_version = "settlement-report-preview-v10"
+contractual_evidence_pack_version = "contractual-evidence-pack-v19"
 
 [profiles.local_default]
 display_name = "Обычная рабочая машина"

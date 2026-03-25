@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 17:35 MSK
-Ручная сверка guide/docs: 2026-03-25 17:35 MSK
+modified_at: 2026-03-25 17:53 MSK
+Ручная сверка guide/docs: 2026-03-25 17:53 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1474,15 +1474,19 @@ preview, а не только raw count.
   - это уже customer-facing review surface с hashes и contract states, но всё ещё строго
     `report_only`, а не invoice.
   - export/evidence surface versions теперь подняты до:
-    - `contractual-statement-export-v18`
-    - `settlement-report-preview-v9`
-    - `contractual-evidence-pack-v18`
+    - `contractual-statement-export-v19`
+    - `settlement-report-preview-v10`
+    - `contractual-evidence-pack-v19`
   потому что customer-facing payload теперь уже явно различает:
     - `customer review ready`
     - `internal money arithmetic ready`
     - `contractual settlement ready`
     - `future settlement activation governance`
     - `future adjustment activation governance`
+  - начиная с этого шага `statement_preview` и все customer-facing export/evidence surface-ы
+    тоже поднимают turn-scoped `assistant_generation`, если оно materialized через
+    direct turn attach или rollout turn timeline и не может быть честно разложено
+    по каждому retrieval event без дублирования токенов.
   - operational metering contract теперь ещё несёт:
   - `client_limit_meter_alignment_version = client-limit-meter-alignment-v6`
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured

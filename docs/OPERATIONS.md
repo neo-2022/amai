@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 17:35 MSK
-Ручная сверка guide/docs: 2026-03-25 17:35 MSK
+modified_at: 2026-03-25 17:53 MSK
+Ручная сверка guide/docs: 2026-03-25 17:53 MSK
 
 # Operations
 
@@ -2058,6 +2058,10 @@ report path теперь умеет auto-sync их из stored `ami.context_pack
   --context-pack-id ... --assistant-generation-tokens ...`
   и обязан считать такие токены один раз на `thread_id + turn_id`, а не
   дублировать их по каждому retrieval event.
+- report/export path теперь тоже обязан поднимать этот turn-scoped observed output в
+  `statement_preview.internal_observed_whole_cycle_lower_bound_tokens`, чтобы customer-facing
+  preview и evidence pack не занижали same-meter lower bound только потому, что event-level
+  attach для `assistant_generation` был бы нечестным.
 - verify/MCP contour теперь тоже обязан это проверять:
   `verify mcp` вызывает `amai_observe_whole_cycle_turn` и ожидает
   `assistant_generation_turn_observed_attach`, а не ограничивается single-event attach.
