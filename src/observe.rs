@@ -1514,41 +1514,45 @@ async fn dashboard_page_handler(State(state): State<ObserveState>) -> impl IntoR
 }
 
 async fn grafana_password_help_handler() -> impl IntoResponse {
-    let html = r#"<!doctype html>
+    let repo_root =
+        discover_repo_root(None).unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let env_path = repo_root.join(".env");
+    let html = format!(
+        r#"<!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Где менять пароль Grafana</title>
   <style>
-    body {
+    body {{
       margin: 0;
       padding: 32px 24px 48px;
       background: #0f171b;
       color: #edf3f5;
       font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
       line-height: 1.55;
-    }
-    main {
+    }}
+    main {{
       max-width: 860px;
       margin: 0 auto;
       background: rgba(255, 255, 255, 0.04);
       border-radius: 18px;
       padding: 28px 28px 32px;
       box-shadow: 0 18px 42px rgba(0, 0, 0, 0.24);
-    }
-    h1 { margin: 0 0 18px; font-size: 30px; }
-    p { margin: 0 0 14px; }
-    code {
+    }}
+    h1 {{ margin: 0 0 18px; font-size: 30px; }}
+    p {{ margin: 0 0 14px; }}
+    code {{
       background: rgba(255, 255, 255, 0.08);
       padding: 2px 6px;
       border-radius: 6px;
       font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
       font-size: 0.95em;
-    }
-    ol { margin: 0; padding-left: 22px; }
-    li { margin: 0 0 10px; }
-    a { color: #8de4da; }
+    }}
+    ol {{ margin: 0; padding-left: 22px; }}
+    li {{ margin: 0 0 10px; }}
+    a {{ color: #8de4da; }}
   </style>
 </head>
 <body>
@@ -1556,7 +1560,7 @@ async fn grafana_password_help_handler() -> impl IntoResponse {
     <h1>Где менять пароль Grafana</h1>
     <p>Пароль Grafana задаётся не в самой карточке dashboard, а в локальном файле окружения проекта.</p>
     <ol>
-      <li>Откройте файл <code>/home/art/agent-memory-index/.env</code>.</li>
+      <li>Откройте файл <code>{}</code>.</li>
       <li>Найдите строку <code>AMI_GRAFANA_ADMIN_PASSWORD=...</code>.</li>
       <li>Поставьте новый пароль.</li>
       <li>Примените изменение: <code>./scripts/monitoring_up.sh</code>.</li>
@@ -1565,7 +1569,9 @@ async fn grafana_password_help_handler() -> impl IntoResponse {
     <p><a href="/dashboard">Вернуться в Amai dashboard</a></p>
   </main>
 </body>
-</html>"#;
+</html>"#,
+        env_path.display()
+    );
     Html(html).into_response()
 }
 
