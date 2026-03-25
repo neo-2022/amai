@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 18:17 MSK
-Ручная сверка guide/docs: 2026-03-25 18:17 MSK
+modified_at: 2026-03-25 18:42 MSK
+Ручная сверка guide/docs: 2026-03-25 18:42 MSK
 
 # Operations
 
@@ -566,8 +566,20 @@ cargo run -- project register \
   не превращался в почти абсолютный path с `..`;
 - если тот же физический корень уже зарегистрирован под другим `project code`, команда обязана завершиться ошибкой;
 - использовать alias-path вроде `../Art` вместо уже зарегистрированного `/home/art/Art` запрещено: это не новый проект, а конфликт регистрации.
+- повторный `project register` с тем же `project code`, но с новым physical root, считается relocation:
+  - `ami.projects.repo_root` переключается на новый root;
+  - старый root сохраняется в registry как `relocated_from`;
+  - path-based resolve в bridge/startup продолжает узнавать тот же проект и на старом, и на новом root.
+- reuse старого relocation-root другим проектом должен fail-closed блокироваться, пока оператор явно не
+  пересмотрит binding; молчаливый “path steal” здесь запрещён.
 - для filename-запроса без расширения exact document lookup теперь может честно вернуть тот же basename
   с реальным расширением, но только внутри того же `project + namespace` scope.
+
+Проверочный contour для relocation:
+
+```bash
+./scripts/proof_project_relocation_contour.sh
+```
 
 ## Ensure a workspace inside the project
 

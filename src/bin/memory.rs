@@ -460,6 +460,22 @@ async fn resolve_project(
     })
 }
 
+fn match_project_code_by_repo_roots<'a, I>(working_dir: &Path, candidates: I) -> Option<String>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    candidates
+        .into_iter()
+        .filter_map(|(code, repo_root)| {
+            let candidate = Path::new(repo_root);
+            working_dir
+                .starts_with(candidate)
+                .then(|| (candidate.as_os_str().len(), code.to_string()))
+        })
+        .max_by_key(|(length, _)| *length)
+        .map(|(_, code)| code)
+}
+
 async fn lookup_project_code(paths: &BridgePaths, working_dir: &Path) -> Result<String> {
     dotenvy::from_path_override(paths.amai_root.join(".env")).ok();
     let dsn = env::var("AMI_POSTGRES_DSN").context("missing AMI_POSTGRES_DSN")?;
@@ -494,18 +510,27 @@ async fn lookup_project_code(paths: &BridgePaths, working_dir: &Path) -> Result<
     };
     let rows = client
         .query(
-            "SELECT code, repo_root FROM ami.projects ORDER BY length(repo_root) DESC, code ASC",
+            r#"
+            SELECT p.code, r.repo_root
+            FROM ami.project_repo_roots r
+            INNER JOIN ami.projects p ON p.project_id = r.project_id
+            ORDER BY length(r.repo_root) DESC, p.code ASC
+            "#,
             &[],
         )
         .await
         .context("failed to list Amai projects")?;
-    for row in rows {
-        let code: String = row.get(0);
-        let repo_root: String = row.get(1);
-        let candidate = PathBuf::from(repo_root);
-        if working_dir.starts_with(&candidate) {
-            return Ok(code);
-        }
+    let candidates: Vec<(String, String)> = rows
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    if let Some(project_code) = match_project_code_by_repo_roots(
+        working_dir,
+        candidates
+            .iter()
+            .map(|(code, repo_root)| (code.as_str(), repo_root.as_str())),
+    ) {
+        return Ok(project_code);
     }
     bail!(
         "failed to resolve project from {}; pass --project <code> explicitly",
@@ -895,7 +920,8 @@ fn now_epoch_ms() -> u128 {
 mod tests {
     use super::{
         BridgePaths, Cli, append_whole_cycle_observed_args, build_search_hits,
-        decision_trace_summary, is_amai_root, render_save_details,
+        decision_trace_summary, is_amai_root, match_project_code_by_repo_roots,
+        render_save_details,
     };
     use clap::Parser;
     use serde_json::json;
@@ -1025,6 +1051,25 @@ mod tests {
         let command = paths.amai_command().expect("release command");
         assert_eq!(command.get_program(), release_binary.as_os_str());
         let _ = fs::remove_dir_all(&amai_root);
+    }
+
+    #[test]
+    fn match_project_code_by_repo_roots_prefers_longest_matching_root() {
+        let working_dir = Path::new("/tmp/amai/project-a/nested/worktree");
+        let candidates = [
+            ("project_parent", "/tmp/amai"),
+            ("project_a", "/tmp/amai/project-a"),
+            ("project_a_nested", "/tmp/amai/project-a/nested"),
+        ];
+        let resolved = match_project_code_by_repo_roots(working_dir, candidates);
+        assert_eq!(resolved.as_deref(), Some("project_a_nested"));
+    }
+
+    #[test]
+    fn match_project_code_by_repo_roots_returns_none_when_path_is_unbound() {
+        let working_dir = Path::new("/tmp/amai/foreign-project");
+        let candidates = [("project_a", "/tmp/amai/project-a")];
+        assert!(match_project_code_by_repo_roots(working_dir, candidates).is_none());
     }
 
     #[test]

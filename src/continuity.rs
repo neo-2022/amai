@@ -2888,7 +2888,32 @@ fn chunk_record(
 
 async fn resolve_project(db: &Client, args: &ContinuityStartupArgs) -> Result<ProjectRecord> {
     if let Some(project) = &args.project {
-        return postgres::get_project_by_code(db, project).await;
+        let mut record = postgres::get_project_by_code(db, project).await?;
+        if let Some(repo_root) = args.repo_root.as_ref() {
+            let repo_root = canonical_string(repo_root)?;
+            if repo_root != record.repo_root {
+                let is_bound = postgres::project_has_repo_root(db, record.project_id, &repo_root)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to verify whether repo_root {} belongs to project {}",
+                            repo_root, project
+                        )
+                    })?;
+                if !is_bound {
+                    return Err(anyhow!(
+                        "repo_root {} is not bound to project {}; run `amai project register --code {} --display-name '{}' --repo-root {}` first or pass the already bound project root",
+                        repo_root,
+                        project,
+                        project,
+                        record.display_name,
+                        shell_quote(&repo_root)
+                    ));
+                }
+                record.repo_root = repo_root;
+            }
+        }
+        return Ok(record);
     }
     let repo_root = args
         .repo_root

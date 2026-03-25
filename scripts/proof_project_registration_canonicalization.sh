@@ -14,6 +14,8 @@ trap cleanup EXIT
 
 cd "${repo_root}"
 
+psql "${dsn}" -v ON_ERROR_STOP=1 -f "${repo_root}/sql/000_bootstrap.sql" >/dev/null
+
 if ./target/release/amai project register \
   --code "${alias_code}" \
   --display-name "Art alias probe" \
@@ -24,6 +26,6 @@ fi
 
 grep -q "already registered as project art" "${alias_output}"
 
-test "$(psql "${dsn}" -Atqc "SELECT COUNT(*) FROM ami.projects WHERE code IN ('art_local','amai_local','agent_regart_local');")" = "0"
+test "$(psql "${dsn}" -Atqc "SELECT COUNT(*) FROM ami.projects WHERE code = '${alias_code}';")" = "0"
 
 printf 'proof_project_registration_canonicalization: ok\n'

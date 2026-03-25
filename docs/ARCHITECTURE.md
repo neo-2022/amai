@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 11:55 MSK
-Ручная сверка guide/docs: 2026-03-25 11:55 MSK
+modified_at: 2026-03-25 18:42 MSK
+Ручная сверка guide/docs: 2026-03-25 18:42 MSK
 
 # Architecture
 
@@ -180,6 +180,28 @@ Code structure plane:
 - `source_kind`
 - `trust_level`
 
+## Project identity vs runtime bindings
+
+`Amai` не имеет права считать, что логический проект равен одному-единственному `repo_root`.
+
+Иначе continuity ломается при любом из сценариев:
+- project relocation;
+- новый чат в другом окне;
+- другой агентный клиент;
+- смена IDE;
+- временный старый worktree рядом с новым.
+
+Поэтому архитектурный law теперь такой:
+- source of truth для project identity — это `project_code`;
+- текущий primary path хранится в `ami.projects.repo_root`;
+- дополнительные path bindings живут в отдельном `project root alias / relocation contour`;
+- path-based resolvers обязаны читать этот contour, а не только primary root;
+- cross-project path steal обязан fail-closed останавливаться.
+
+Это даёт два инварианта сразу:
+- continuity переживает перенос проекта в новый path;
+- чужой проект не может молча присвоить старый root через повторную регистрацию.
+
 ## Compatibility contour
 
 Чтобы стек не ломался молча при частичном обновлении компонентов, в `Amai` есть отдельный compatibility contour.
@@ -214,6 +236,8 @@ Code structure plane:
   - регистрирует project root и default namespace;
   - перед записью canonicalize-ит `repo_root` до абсолютного физического пути;
   - блокирует alias-регистрацию, если тот же canonical root уже принадлежит другому `project code`.
+  - если тот же `project code` регистрируется на новом root, materialize-ит relocation contour:
+    новый root становится primary, а старый сохраняется как `relocated_from`.
 - `namespace ensure`
   - создаёт namespace внутри уже зарегистрированного проекта.
 - `relation add`

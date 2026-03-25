@@ -14,6 +14,50 @@ CREATE TABLE IF NOT EXISTS ami.projects (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS ami.project_repo_roots (
+    repo_root_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES ami.projects(project_id) ON DELETE CASCADE,
+    repo_root TEXT NOT NULL UNIQUE,
+    root_kind TEXT NOT NULL CHECK (
+        root_kind IN ('primary', 'relocated_from', 'workspace_alias')
+    ),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_repo_roots_primary_per_project
+    ON ami.project_repo_roots(project_id)
+    WHERE root_kind = 'primary';
+
+CREATE INDEX IF NOT EXISTS idx_project_repo_roots_project_id
+    ON ami.project_repo_roots(project_id);
+
+UPDATE ami.project_repo_roots r
+SET root_kind = 'relocated_from',
+    updated_at = now()
+FROM ami.projects p
+WHERE r.project_id = p.project_id
+  AND r.repo_root <> p.repo_root
+  AND r.root_kind = 'primary';
+
+UPDATE ami.project_repo_roots r
+SET root_kind = 'primary',
+    updated_at = now()
+FROM ami.projects p
+WHERE r.project_id = p.project_id
+  AND r.repo_root = p.repo_root
+  AND r.root_kind <> 'primary';
+
+INSERT INTO ami.project_repo_roots(project_id, repo_root, root_kind)
+SELECT p.project_id, p.repo_root, 'primary'
+FROM ami.projects p
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM ami.project_repo_roots r
+    WHERE r.repo_root = p.repo_root
+);
+
 CREATE TABLE IF NOT EXISTS ami.namespaces (
     namespace_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id UUID NOT NULL REFERENCES ami.projects(project_id) ON DELETE CASCADE,

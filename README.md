@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 18:17 MSK
-Ручная сверка guide/docs: 2026-03-25 18:17 MSK
+modified_at: 2026-03-25 18:42 MSK
+Ручная сверка guide/docs: 2026-03-25 18:42 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -86,6 +86,16 @@ modified_at: 2026-03-25 18:17 MSK
 - confidence recovery.
 
 То есть новый чат теперь должен видеть не только summary “о чём проект”, а уже компактный готовый стартовый контекст для продолжения работы.
+
+Важно: continuity должна переживать не только новый чат, но и смену окна, IDE и локализации проекта.
+Для этого `Amai` держит project identity не только через один текущий `repo_root`, а через
+`project_code` и registry привязанных project roots.
+Практически это означает:
+- если тот же проект переехал в другой path, его continuity не должна обнуляться;
+- если агент подключился к тому же проекту из другого клиента, continuity не должна зависеть от того,
+  был это `VS Code`, `CLI` или другой MCP-клиент;
+- если новый path ещё не привязан к проекту, `Amai` должен fail-closed остановиться и потребовать
+  явную relocation/register операцию, а не подмешивать проект “по похожести”.
 
 ## Пошаговый старт для обычного пользователя
 
@@ -1960,6 +1970,12 @@ cargo run -- context pack --project project_alpha --namespace review --query "ho
 - `project register` хранит `repo_root` только в canonical absolute form;
 - строки вроде `../Art`, `/srv/amai/.` и `/repo/subdir/..` не считаются разными проектами, если они указывают на один и тот же физический корень;
 - если такой корень уже занят другим `project code`, `Amai` честно остановит регистрацию с ошибкой, а не создаст скрытый alias.
+- если тот же `project code` регистрируется на новом physical root, это трактуется как relocation:
+  - новый root становится primary;
+  - старый root сохраняется как machine-readable alias этого же проекта;
+  - continuity и path-based resolve продолжают видеть тот же логический проект.
+- старый root после relocation нельзя тихо украсть другим проектом: для reuse такого path нужен
+  явный operator-controlled contour, а не неявная новая регистрация.
 - тот же canonical physical root потом используется и во время `index project`, чтобы exact-path retrieval
   оставался действительно relative к repo root, а не к случайной форме входного пути.
 

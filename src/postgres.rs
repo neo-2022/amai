@@ -307,6 +307,102 @@ pub async fn bootstrap_schema(client: &Client, cfg: &AppConfig) -> Result<()> {
     Ok(())
 }
 
+fn project_record_from_row(row: &Row) -> ProjectRecord {
+    ProjectRecord {
+        project_id: row.get(0),
+        code: row.get(1),
+        display_name: row.get(2),
+        repo_root: row.get(3),
+        updated_at: row.get(4),
+    }
+}
+
+async fn get_bound_project_for_repo_root(
+    client: &Client,
+    canonical_repo_root: &str,
+) -> Result<Option<ProjectRecord>> {
+    let row = client
+        .query_opt(
+            r#"
+            SELECT
+                p.project_id,
+                p.code,
+                p.display_name,
+                r.repo_root,
+                to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+            FROM ami.project_repo_roots r
+            INNER JOIN ami.projects p ON p.project_id = r.project_id
+            WHERE r.repo_root = $1
+            "#,
+            &[&canonical_repo_root],
+        )
+        .await?;
+    Ok(row.as_ref().map(project_record_from_row))
+}
+
+async fn ensure_project_repo_root_binding(
+    client: &Client,
+    project: &ProjectRecord,
+    repo_root: &str,
+    root_kind: &str,
+) -> Result<()> {
+    if let Some(existing) = get_bound_project_for_repo_root(client, repo_root).await? {
+        if existing.project_id != project.project_id {
+            return Err(anyhow!(
+                "canonical repo_root {} is already bound to project {} (display_name: {}); project {} cannot claim it",
+                repo_root,
+                existing.code,
+                existing.display_name,
+                project.code
+            ));
+        }
+    }
+
+    client
+        .execute(
+            r#"
+            INSERT INTO ami.project_repo_roots(project_id, repo_root, root_kind)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (repo_root) DO UPDATE SET
+                root_kind = EXCLUDED.root_kind,
+                updated_at = now()
+            "#,
+            &[&project.project_id, &repo_root, &root_kind],
+        )
+        .await
+        .context("failed to bind project repo_root alias")?;
+    Ok(())
+}
+
+async fn sync_project_repo_roots(
+    client: &Client,
+    project: &ProjectRecord,
+    previous_repo_root: Option<&str>,
+) -> Result<()> {
+    client
+        .execute(
+            r#"
+            UPDATE ami.project_repo_roots
+            SET root_kind = 'relocated_from',
+                updated_at = now()
+            WHERE project_id = $1
+              AND repo_root <> $2
+              AND root_kind = 'primary'
+            "#,
+            &[&project.project_id, &project.repo_root],
+        )
+        .await
+        .context("failed to demote previous primary repo_root aliases")?;
+    ensure_project_repo_root_binding(client, project, &project.repo_root, "primary").await?;
+    if let Some(previous_repo_root) = previous_repo_root {
+        if previous_repo_root != project.repo_root {
+            ensure_project_repo_root_binding(client, project, previous_repo_root, "relocated_from")
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 async fn ensure_app_role(client: &Client, cfg: &AppConfig) -> Result<()> {
     let user = sql_ident(&cfg.app_db_user)?;
     let db = sql_ident(&cfg.pg_db)?;
@@ -348,29 +444,7 @@ pub async fn upsert_project(
     default_mode: &str,
 ) -> Result<ProjectRecord> {
     let canonical_repo_root = canonical_repo_root_string(repo_root)?;
-    if let Some(existing) = client
-        .query_opt(
-            r#"
-            SELECT
-                project_id,
-                code,
-                display_name,
-                repo_root,
-                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
-            FROM ami.projects
-            WHERE repo_root = $1
-            "#,
-            &[&canonical_repo_root],
-        )
-        .await?
-        .map(|row| ProjectRecord {
-            project_id: row.get(0),
-            code: row.get(1),
-            display_name: row.get(2),
-            repo_root: row.get(3),
-            updated_at: row.get(4),
-        })
-    {
+    if let Some(existing) = get_bound_project_for_repo_root(client, &canonical_repo_root).await? {
         if existing.code != code {
             return Err(anyhow!(
                 "canonical repo_root {} is already registered as project {} (display_name: {}); alias code {} is blocked",
@@ -381,6 +455,24 @@ pub async fn upsert_project(
             ));
         }
     }
+
+    let previous_project = client
+        .query_opt(
+            r#"
+            SELECT
+                project_id,
+                code,
+                display_name,
+                repo_root,
+                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+            FROM ami.projects
+            WHERE code = $1
+            "#,
+            &[&code],
+        )
+        .await?
+        .as_ref()
+        .map(project_record_from_row);
 
     let row = client
         .query_one(
@@ -404,13 +496,15 @@ pub async fn upsert_project(
         .await
         .context("failed to upsert project")?;
 
-    let project = ProjectRecord {
-        project_id: row.get(0),
-        code: row.get(1),
-        display_name: row.get(2),
-        repo_root: row.get(3),
-        updated_at: row.get(4),
-    };
+    let project = project_record_from_row(&row);
+    sync_project_repo_roots(
+        client,
+        &project,
+        previous_project
+            .as_ref()
+            .map(|item| item.repo_root.as_str()),
+    )
+    .await?;
 
     ensure_namespace(
         client,
@@ -442,13 +536,7 @@ pub async fn list_projects(client: &Client) -> Result<Vec<ProjectRecord>> {
         .await?;
     Ok(rows
         .into_iter()
-        .map(|row| ProjectRecord {
-            project_id: row.get(0),
-            code: row.get(1),
-            display_name: row.get(2),
-            repo_root: row.get(3),
-            updated_at: row.get(4),
-        })
+        .map(|row| project_record_from_row(&row))
         .collect())
 }
 
@@ -469,40 +557,37 @@ pub async fn get_project_by_code(client: &Client, code: &str) -> Result<ProjectR
         )
         .await?
         .ok_or_else(|| anyhow!("project not found: {code}"))?;
-    Ok(ProjectRecord {
-        project_id: row.get(0),
-        code: row.get(1),
-        display_name: row.get(2),
-        repo_root: row.get(3),
-        updated_at: row.get(4),
-    })
+    Ok(project_record_from_row(&row))
 }
 
 pub async fn get_project_by_repo_root(client: &Client, repo_root: &str) -> Result<ProjectRecord> {
     let canonical_repo_root = canonical_repo_root_string(repo_root)?;
-    let row = client
-        .query_opt(
-            r#"
-            SELECT
-                project_id,
-                code,
-                display_name,
-                repo_root,
-                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
-            FROM ami.projects
-            WHERE repo_root = $1
-            "#,
-            &[&canonical_repo_root],
-        )
+    get_bound_project_for_repo_root(client, &canonical_repo_root)
         .await?
-        .ok_or_else(|| anyhow!("project not found for repo_root: {canonical_repo_root}"))?;
-    Ok(ProjectRecord {
-        project_id: row.get(0),
-        code: row.get(1),
-        display_name: row.get(2),
-        repo_root: row.get(3),
-        updated_at: row.get(4),
-    })
+        .ok_or_else(|| anyhow!("project not found for repo_root: {canonical_repo_root}"))
+}
+
+pub async fn project_has_repo_root(
+    client: &Client,
+    project_id: Uuid,
+    repo_root: &str,
+) -> Result<bool> {
+    let canonical_repo_root = canonical_repo_root_string(repo_root)?;
+    let row = client
+        .query_one(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM ami.project_repo_roots
+                WHERE project_id = $1
+                  AND repo_root = $2
+            )
+            "#,
+            &[&project_id, &canonical_repo_root],
+        )
+        .await
+        .context("failed to check project repo_root binding")?;
+    Ok(row.get(0))
 }
 
 fn canonical_repo_root_string(repo_root: &str) -> Result<String> {
