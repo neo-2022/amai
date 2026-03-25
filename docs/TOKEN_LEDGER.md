@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:07 MSK
-Ручная сверка guide/docs: 2026-03-25 15:07 MSK
+modified_at: 2026-03-25 15:16 MSK
+Ручная сверка guide/docs: 2026-03-25 15:16 MSK
 
 # Token Ledger
 
@@ -478,6 +478,13 @@ Ledger обязан различать:
     materialize-иться без двойного счёта retrieval tokens;
   - тот же MCP path теперь тоже принимает `token_source_kind`, чтобы engineering traffic
     можно было отделять от live usage тем же truth guardrail;
+- отдельно materialized CLI tool-overhead path:
+  - `context pack` front door после записи usage event берёт реально сериализованный stdout
+    JSON payload и считает observed CLI output overhead для того же `context_pack_id`;
+  - proof:
+    `scripts/proof_token_cli_tool_overhead.sh`;
+  - это нужно затем, чтобы same-meter coverage не зависел только от MCP path и не терял
+    фронтовой overhead у прямого `amai context pack`;
 - отдельно materialized post-call assistant-generation path:
   - `assistant_generation_tokens` нельзя честно требовать только pre-call, потому что
     upstream client узнаёт их уже после собственного ответа;

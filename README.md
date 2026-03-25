@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:07 MSK
-Ручная сверка guide/docs: 2026-03-25 15:07 MSK
+modified_at: 2026-03-25 15:16 MSK
+Ручная сверка guide/docs: 2026-03-25 15:16 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1512,6 +1512,13 @@ preview, а не только raw count.
     компонентом и при этом не происходило двойного счёта retrieval tokens;
   - тот же MCP front door теперь принимает и `token_source_kind`, чтобы proof/verify
     вызовы можно было уводить в `proof_*` / `verify_*`, а не contaminate live lane;
+  - CLI `context pack` front door теперь тоже автоматически materialize-ит свой
+    `tool_overhead_outside_retrieval` path:
+    после записи token-budget event он берёт реально сериализованный stdout JSON payload,
+    вычисляет observed CLI output overhead и дописывает его в то же usage event по
+    `context_pack_id`;
+  - для этого path есть отдельный proof:
+    `scripts/proof_token_cli_tool_overhead.sh`;
   - отдельный post-call attach path теперь materialized и для `assistant_generation`:
     после того как upstream client уже узнал реальные output tokens своего ответа,
     он может привязать их к тому же `context_pack_id` через:

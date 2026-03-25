@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:07 MSK
-Ручная сверка guide/docs: 2026-03-25 15:07 MSK
+modified_at: 2026-03-25 15:16 MSK
+Ручная сверка guide/docs: 2026-03-25 15:16 MSK
 
 # Operations
 
@@ -1975,6 +1975,7 @@ cargo run --release -- observe token-evidence-pack --scope current_session --out
 ./scripts/proof_token_suitability.sh
 ./scripts/proof_token_meter_alignment.sh
 ./scripts/proof_token_mcp_tool_overhead.sh
+./scripts/proof_token_cli_tool_overhead.sh
 ./scripts/proof_token_mcp_assistant_generation.sh
 ./scripts/proof_token_rollout_assistant_generation.sh
 ```
@@ -1990,6 +1991,14 @@ MCP `amai_context_pack` теперь тоже участвует в same-meter p
 - для этого path есть отдельный proof `scripts/proof_token_mcp_tool_overhead.sh`;
 - engineering/proof вызовы MCP должны уводиться через `token_source_kind = proof_* /
   verify_*`, чтобы не contaminate live lane.
+
+CLI `context pack` front door теперь тоже участвует в same-meter path:
+- после записи usage event он автоматически считает observed CLI output overhead по
+  реально сериализованному stdout JSON payload;
+- для этого path есть отдельный proof:
+  `scripts/proof_token_cli_tool_overhead.sh`;
+- это нужно затем, чтобы same-meter coverage по `tool_overhead_outside_retrieval`
+  не зависел только от MCP front door.
 
 `assistant_generation` теперь тоже получил честный post-call attach path:
 - CLI:

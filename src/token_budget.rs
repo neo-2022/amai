@@ -6664,6 +6664,46 @@ pub async fn observe_context_pack_tool_overhead(
     .is_some())
 }
 
+pub async fn observe_cli_context_pack_tool_overhead(
+    db: &Client,
+    context_pack_id: &str,
+    output_json: &str,
+) -> Result<bool> {
+    let output_json = output_json.trim();
+    if output_json.is_empty() {
+        return Ok(false);
+    }
+    let repo_root = config::discover_repo_root(None)?;
+    let config = load_config(&repo_root)?;
+    let Some(row) = latest_token_budget_snapshot_for_context_pack(db, context_pack_id).await?
+    else {
+        return Ok(false);
+    };
+    let delivered_tokens = row.payload["token_budget_event"]["context_pack_render"]["tokens"]
+        .as_u64()
+        .or_else(|| row.payload["token_budget_event"]["delivered_tokens"].as_u64())
+        .unwrap_or(0);
+    let tool_overhead_tokens = count_cli_context_pack_output_overhead_tokens(
+        &config.measurement,
+        output_json,
+        delivered_tokens,
+    )?;
+    Ok(attach_context_pack_whole_cycle_observed(
+        db,
+        context_pack_id,
+        None,
+        None,
+        Some(tool_overhead_tokens),
+        None,
+    )
+    .await?
+    .is_some_and(|value| {
+        value["whole_cycle_observed_attach"]["attached"]
+            .as_bool()
+            .unwrap_or(false)
+    }))
+}
+
 pub async fn attach_whole_cycle_observed_to_context_pack(
     db: &Client,
     context_pack_id: &str,
@@ -10337,6 +10377,33 @@ fn count_tool_overhead_tokens(
     Ok(tokenizer.encode_with_special_tokens(&rendered).len() as u64)
 }
 
+fn count_cli_context_pack_output_overhead_tokens(
+    measurement: &MeasurementConfig,
+    output_json: &str,
+    delivered_tokens: u64,
+) -> Result<u64> {
+    let tokenizer = build_tokenizer(&measurement.tokenizer)?;
+    let total_output_tokens = tokenizer.encode_with_special_tokens(output_json).len() as u64;
+    Ok(total_output_tokens.saturating_sub(delivered_tokens))
+}
+
+async fn latest_token_budget_snapshot_for_context_pack(
+    db: &Client,
+    context_pack_id: &str,
+) -> Result<Option<ObservabilitySnapshotRecord>> {
+    let rows =
+        postgres::list_observability_snapshots_by_kinds(db, &["token_budget_event"], Some(2048))
+            .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| {
+            row.payload["token_budget_event"]["context_pack_id"]
+                .as_str()
+                .is_some_and(|value| value == context_pack_id)
+        })
+        .max_by_key(|row| row.created_at_epoch_ms))
+}
+
 async fn attach_context_pack_whole_cycle_observed(
     db: &Client,
     context_pack_id: &str,
@@ -10355,17 +10422,7 @@ async fn attach_context_pack_whole_cycle_observed(
     {
         bail!("whole-cycle attach requires at least one observed token field");
     }
-    let rows =
-        postgres::list_observability_snapshots_by_kinds(db, &["token_budget_event"], Some(2048))
-            .await?;
-    let Some(row) = rows
-        .into_iter()
-        .filter(|row| {
-            row.payload["token_budget_event"]["context_pack_id"]
-                .as_str()
-                .is_some_and(|value| value == context_pack_id)
-        })
-        .max_by_key(|row| row.created_at_epoch_ms)
+    let Some(row) = latest_token_budget_snapshot_for_context_pack(db, context_pack_id).await?
     else {
         return Ok(None);
     };
@@ -11542,7 +11599,8 @@ mod tests {
         build_reconciliation_preview, build_settlement_contract_json,
         build_statement_export_preview, build_statement_preview, build_telemetry_surfaces_json,
         build_usage_event_schema_json, configured_provider_rate_card_source,
-        configured_provider_usage_source, contractual_line_item_json, count_tool_overhead_tokens,
+        configured_provider_usage_source, contractual_line_item_json,
+        count_cli_context_pack_output_overhead_tokens, count_tool_overhead_tokens,
         default_adjustment_preview_model_version, default_adjustment_registry_version,
         default_adjustment_request_schema_version, default_backfill_policy_version,
         default_baseline_method_version, default_billing_mode, default_billing_policy_version,
@@ -16022,6 +16080,15 @@ effective_to_epoch_ms = 2000
             }),
         )
         .expect("token count");
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn cli_context_pack_output_overhead_counter_uses_total_output_minus_delivered_tokens() {
+        let measurement = measurement_fixture();
+        let output_json = r#"{"context_pack_id":"ctx-pack-1","retrieval":{"lexical_chunks":[{"text":"hello world"}]}}"#;
+        let tokens = count_cli_context_pack_output_overhead_tokens(&measurement, output_json, 3)
+            .expect("token count");
         assert!(tokens > 0);
     }
 

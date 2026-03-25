@@ -149,6 +149,12 @@ pub async fn build_context_pack(
     ensure_context_pack_persisted(cfg, db, args, &mut prepared).await?;
     cache_context_pack_entry(cfg, args, &prepared, true)?;
     record_context_pack_token_budget_event(db, prepared.payload.as_ref(), args).await?;
+    let _ = token_budget::observe_cli_context_pack_tool_overhead(
+        db,
+        &prepared.context_pack_id.to_string(),
+        prepared.payload_json.as_ref(),
+    )
+    .await?;
     if prepared.cache_hit {
         eprintln!(
             "context pack cache hit: {} :: scope={}",
