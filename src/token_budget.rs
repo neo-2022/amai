@@ -509,7 +509,7 @@ fn default_agent_cycle_model_version() -> String {
 }
 
 fn default_client_limit_meter_alignment_version() -> String {
-    "client-limit-meter-alignment-v4".to_string()
+    "client-limit-meter-alignment-v5".to_string()
 }
 
 fn default_excluded_taxonomy_version() -> String {
@@ -9298,15 +9298,65 @@ fn client_limit_component_stats(summary: &Value) -> [(&'static str, u64, u64); 4
     ]
 }
 
-fn client_limit_component_event_coverage(summary: &Value, live_events_count: u64) -> Vec<Value> {
+fn client_limit_component_target_scope_kind(code: &str) -> &'static str {
+    match code {
+        "client_prompt" => "all_live_scope",
+        "assistant_generation" | "tool_overhead_outside_retrieval" => "retrieval_live_scope",
+        "continuity_restore_outside_retrieval" => "continuity_restore_live_scope",
+        _ => "all_live_scope",
+    }
+}
+
+fn is_client_limit_component_target_event(code: &str, event: &TokenBudgetEvent) -> bool {
+    if event.traffic_class != "live" {
+        return false;
+    }
+    match code {
+        "client_prompt" => true,
+        "assistant_generation" | "tool_overhead_outside_retrieval" => {
+            event.measurement_scope == "retrieval_lower_bound"
+        }
+        "continuity_restore_outside_retrieval" => {
+            event.measurement_scope == "whole_cycle_observed_lower_bound"
+                && (event.query_type == "continuity_restore"
+                    || event.target_kind == "continuity_restore")
+        }
+        _ => false,
+    }
+}
+
+fn client_limit_component_target_live_events(
+    code: &str,
+    events: Option<&[TokenBudgetEvent]>,
+    live_events_count: u64,
+) -> u64 {
+    events
+        .map(|items| {
+            items.iter()
+                .filter(|event| is_client_limit_component_target_event(code, event))
+                .count() as u64
+        })
+        .unwrap_or(live_events_count)
+}
+
+fn client_limit_component_event_coverage(
+    summary: &Value,
+    events: Option<&[TokenBudgetEvent]>,
+    live_events_count: u64,
+) -> Vec<Value> {
     client_limit_component_stats(summary)
         .into_iter()
         .map(|(code, observed_live_events, observed_tokens)| {
+            let target_live_events_count =
+                client_limit_component_target_live_events(code, events, live_events_count);
             json!({
                 "code": code,
                 "observed_live_events": observed_live_events,
                 "live_events_count": live_events_count,
-                "event_coverage_pct": percent_share(observed_live_events, live_events_count),
+                "target_live_events_count": target_live_events_count,
+                "target_scope_kind": client_limit_component_target_scope_kind(code),
+                "target_scope_applicable": target_live_events_count > 0,
+                "event_coverage_pct": percent_share(observed_live_events, target_live_events_count),
                 "observed_tokens": observed_tokens,
             })
         })
@@ -9321,9 +9371,13 @@ fn client_limit_meter_alignment_blocking_reasons(
     let (events_total, live_events_count, non_live_events_count, counted_events) =
         client_limit_meter_alignment_counts(summary, events);
     for (code, observed_live_events, _observed_tokens) in client_limit_component_stats(summary) {
-        if live_events_count == 0 || observed_live_events == 0 {
+        let target_live_events = client_limit_component_target_live_events(code, events, live_events_count);
+        if target_live_events == 0 {
+            continue;
+        }
+        if observed_live_events == 0 {
             reasons.push(format!("{code}_unmeasured"));
-        } else if observed_live_events < live_events_count {
+        } else if observed_live_events < target_live_events {
             reasons.push(format!("{code}_partially_measured"));
         }
     }
@@ -9342,8 +9396,10 @@ fn client_limit_meter_alignment_blocking_reasons(
         }
         if live_events_count > 0
             && client_limit_component_stats(summary).into_iter().all(
-                |(_code, observed_live_events, _observed_tokens)| {
-                    observed_live_events == live_events_count
+                |(code, observed_live_events, _observed_tokens)| {
+                    let target_live_events =
+                        client_limit_component_target_live_events(code, events, live_events_count);
+                    target_live_events == 0 || observed_live_events == target_live_events
                 },
             )
         {
@@ -9360,11 +9416,16 @@ fn client_limit_meter_alignment_state(
     let (events_total, live_events_count, _non_live_events_count, counted_events) =
         client_limit_meter_alignment_counts(summary, events);
     let component_stats = client_limit_component_stats(summary);
+    let any_component_applicable = component_stats.iter().any(|(code, _observed_live_events, _observed_tokens)| {
+        client_limit_component_target_live_events(code, events, live_events_count) > 0
+    });
     let all_components_observed = live_events_count > 0
         && component_stats
             .iter()
-            .all(|(_code, observed_live_events, _observed_tokens)| {
-                *observed_live_events == live_events_count
+            .all(|(code, observed_live_events, _observed_tokens)| {
+                let target_live_events =
+                    client_limit_component_target_live_events(code, events, live_events_count);
+                target_live_events == 0 || *observed_live_events == target_live_events
             });
     let any_component_observed = component_stats
         .iter()
@@ -9376,7 +9437,7 @@ fn client_limit_meter_alignment_state(
         "only_non_live_scope_activity"
     } else if counted_events == 0 {
         "live_usage_unconfirmed_not_meter_equivalent"
-    } else if all_components_observed {
+    } else if any_component_applicable && all_components_observed {
         "whole_cycle_observed_baseline_partial"
     } else if any_component_observed {
         "whole_cycle_partially_observed_not_meter_equivalent"
@@ -9452,16 +9513,20 @@ fn build_client_limit_meter_alignment(
 ) -> Value {
     let (events_total, live_events_count, non_live_events_count, counted_events) =
         client_limit_meter_alignment_counts(summary, events);
-    let component_coverage = client_limit_component_event_coverage(summary, live_events_count);
+    let component_coverage = client_limit_component_event_coverage(summary, events, live_events_count);
     let component_stats = client_limit_component_stats(summary);
     let mut measured_components = vec![
         "retrieval_payload".to_string(),
         "followup_recovery".to_string(),
     ];
+    let mut not_applicable_components = Vec::new();
     let mut partially_measured_components = Vec::new();
     let mut missing_components = Vec::new();
     for (code, observed_live_events, _observed_tokens) in component_stats {
-        if live_events_count > 0 && observed_live_events == live_events_count {
+        let target_live_events = client_limit_component_target_live_events(code, events, live_events_count);
+        if target_live_events == 0 {
+            not_applicable_components.push(code.to_string());
+        } else if observed_live_events == target_live_events {
             measured_components.push(code.to_string());
         } else {
             missing_components.push(code.to_string());
@@ -9496,6 +9561,7 @@ fn build_client_limit_meter_alignment(
         "non_live_events_count": non_live_events_count,
         "counted_live_events": counted_events,
         "measured_components": measured_components,
+        "not_applicable_components": not_applicable_components,
         "partially_measured_components": partially_measured_components,
         "missing_components": missing_components,
         "component_event_coverage": component_coverage,
@@ -12220,7 +12286,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_meter_alignment_version"],
-            "client-limit-meter-alignment-v4"
+            "client-limit-meter-alignment-v5"
         );
         assert_eq!(
             token_event["whole_cycle_observed"]["client_prompt_tokens"],
@@ -12816,7 +12882,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v4"
+            "client-limit-meter-alignment-v5"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -15346,7 +15412,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v4"
+            "client-limit-meter-alignment-v5"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["surface_kind"],

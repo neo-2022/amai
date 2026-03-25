@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:42 MSK
-Ручная сверка guide/docs: 2026-03-25 15:42 MSK
+modified_at: 2026-03-25 15:52 MSK
+Ручная сверка guide/docs: 2026-03-25 15:52 MSK
 
 # Token Ledger
 
@@ -439,7 +439,7 @@ Ledger обязан различать:
 - частично наблюдаемые whole-cycle компоненты;
 - whole-cycle observed компоненты при всё ещё partial baseline.
 
-Начиная с `client-limit-meter-alignment-v4` `client_prompt` считается observed component
+Начиная с `client-limit-meter-alignment-v5` `client_prompt` считается observed component
 не только если он явно пришёл в `whole_cycle_observed`, но и как derived fallback из
 уже записанных `query + tokenizer`. Это нужно затем, чтобы progress к client-limit meter
 был виден честно даже на исторических live events, где старый payload ещё не нёс
@@ -447,6 +447,7 @@ Ledger обязан различать:
 
 Именно поэтому `client_limit_meter_alignment` теперь должен публиковать ещё и:
 - `partially_measured_components`;
+- `not_applicable_components`;
 - `component_event_coverage`;
 - state `whole_cycle_partially_observed_not_meter_equivalent`;
 - state `whole_cycle_observed_baseline_partial`.
@@ -454,6 +455,20 @@ Ledger обязан различать:
 
 Это нужно затем, чтобы progress к реальному client-limit meter был виден честно, без
 ложного переключения `same_meter_as_client_limit=true` раньше времени.
+
+`component_event_coverage` теперь обязан быть `target-aware`, а не делить каждый
+whole-cycle компонент на одинаковое число всех live events.
+Для каждого компонента публикуются:
+- `target_live_events_count`
+- `target_scope_kind`
+- `target_scope_applicable`
+
+Это нужно затем, чтобы:
+- `client_prompt` считался на своём real live scope;
+- `assistant_generation` и `tool_overhead_outside_retrieval` считались только по
+  `retrieval_lower_bound` live events;
+- `continuity_restore_outside_retrieval` не считался missing там, где в scope не было
+  `continuity_restore` event вообще.
 
 `assistant_generation_observation_source` обязан показывать не просто общий blocker
 `assistant_generation_unmeasured`, а конкретный source-gap:
@@ -1201,7 +1216,7 @@ Hashes по line items нужны затем, чтобы:
 - `contractual-statement-export-v18`
 - `settlement-report-preview-v9`
 - `contractual-evidence-pack-v18`
-- `client-limit-meter-alignment-v4`
+- `client-limit-meter-alignment-v5`
 - `adjustment-activation-governance-v1`
 
 Теперь те же customer-facing surface-ы ещё несут `adjustment_activation_governance`.

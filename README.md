@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:42 MSK
-Ручная сверка guide/docs: 2026-03-25 15:42 MSK
+modified_at: 2026-03-25 15:52 MSK
+Ручная сверка guide/docs: 2026-03-25 15:52 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1484,18 +1484,25 @@ preview, а не только raw count.
     - `future settlement activation governance`
     - `future adjustment activation governance`
   - operational metering contract теперь ещё несёт:
-  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v4`
+  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v5`
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
-  - начиная с `v4` слой ещё и честно поднимает `client_prompt` как observed component
+  - начиная с `v5` слой ещё и честно поднимает `client_prompt` как observed component
     из уже записанных `query + tokenizer`, даже если старое событие не несло
     отдельный `whole_cycle_observed.client_prompt_tokens`.
-  - тот же `v4` теперь ещё публикует
+  - тот же `v5` теперь ещё публикует
     `assistant_generation_observation_source`, чтобы `current_session /
     rolling_window` можно было объяснить не только общей missing-меткой, но и
     machine-readable source-gap причиной:
     `rollout_source_unavailable / rollout_source_no_scope_overlap /
     rollout_source_partial_scope_overlap / rollout_source_covers_missing_scope`.
+  - и тот же `v5` больше не делит все whole-cycle компоненты на один и тот же
+    denominator:
+    `client_prompt`, `assistant_generation`, `tool_overhead_outside_retrieval` и
+    `continuity_restore_outside_retrieval` теперь публикуются с
+    `target_live_events_count`, `target_scope_kind` и
+    `not_applicable_components`, чтобы `continuity_restore` не считался missing
+    там, где в scope вообще не было restore-event.
   - statement/reconciliation path теперь тоже перестал быть retrieval-only:
     внутренний meter lower bound для provider drift/cost preview поднимается от
     `delivered + recovery` к `observed whole-cycle lower bound`, как только такие

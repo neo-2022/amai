@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:42 MSK
-Ручная сверка guide/docs: 2026-03-25 15:42 MSK
+modified_at: 2026-03-25 15:52 MSK
+Ручная сверка guide/docs: 2026-03-25 15:52 MSK
 
 # Operations
 
@@ -2030,6 +2030,16 @@ CLI `context pack` front door теперь тоже участвует в same-m
   `client_limit_meter_alignment.assistant_generation_observation_source`, чтобы operator
   мог увидеть состояния `rollout_source_unavailable / no_scope_overlap /
   partial_scope_overlap / covers_missing_scope`, а не только общую blocker-строку.
+
+`client_limit_meter_alignment` теперь нельзя читать как flat denominator по всем live events.
+Operator contour обязан учитывать:
+- `component_event_coverage[].target_live_events_count`
+- `component_event_coverage[].target_scope_kind`
+- `not_applicable_components`
+
+Именно это позволяет не считать `continuity_restore_outside_retrieval` missing в scope,
+где вообще не было live restore-event, и не завышать remaining gap искусственным
+denominator drift.
 
 Customer-facing contractual export surface теперь тоже обязан поднимать
 `adjustment_activation_governance`, чтобы future adjustment path был виден отдельно от

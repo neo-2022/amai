@@ -16,9 +16,9 @@ root = json.loads(Path("/tmp/amai-proof-token-meter-alignment.json").read_text()
 contract = root["contract"]
 agent_cycle = root["agent_cycle_economics"]
 
-assert contract["client_limit_meter_alignment_version"] == "client-limit-meter-alignment-v4", contract
+assert contract["client_limit_meter_alignment_version"] == "client-limit-meter-alignment-v5", contract
 assert agent_cycle["model_version"] == "agent-cycle-lower-bound-v3", agent_cycle
-assert agent_cycle["contract"]["client_limit_meter_alignment"]["model_version"] == "client-limit-meter-alignment-v4", agent_cycle
+assert agent_cycle["contract"]["client_limit_meter_alignment"]["model_version"] == "client-limit-meter-alignment-v5", agent_cycle
 assert agent_cycle["contract"]["client_limit_meter_alignment"]["same_meter_as_client_limit"] is False, agent_cycle
 assert "client_prompt_unmeasured" in agent_cycle["contract"]["client_limit_meter_alignment"]["blocking_reasons"], agent_cycle
 assert "observable_components" in agent_cycle["contract"]["client_limit_meter_alignment"], agent_cycle
@@ -28,8 +28,9 @@ for scope in ("current_session", "rolling_window", "lifetime"):
     if preview is None:
         continue
     alignment = preview["client_limit_meter_alignment"]
-    assert alignment["model_version"] == "client-limit-meter-alignment-v4", preview
+    assert alignment["model_version"] == "client-limit-meter-alignment-v5", preview
     assert "assistant_generation_observation_source" in alignment, alignment
+    assert "not_applicable_components" in alignment, alignment
     assert alignment["surface_kind"] == "statement_preview", preview
     assert alignment["same_meter_as_client_limit"] is False, preview
     assert "assistant_generation" in alignment["missing_components"], preview
@@ -42,8 +43,9 @@ for scope in ("current_session", "rolling_window", "lifetime"):
     if scope_payload is None:
         continue
     alignment = scope_payload["client_limit_meter_alignment"]
-    assert alignment["model_version"] == "client-limit-meter-alignment-v4", scope_payload
+    assert alignment["model_version"] == "client-limit-meter-alignment-v5", scope_payload
     assert "assistant_generation_observation_source" in alignment, alignment
+    assert "not_applicable_components" in alignment, alignment
     assert alignment["surface_kind"] == "agent_cycle_scope", scope_payload
     assert alignment["same_meter_as_client_limit"] is False, scope_payload
     assert "component_event_coverage" in alignment, scope_payload
