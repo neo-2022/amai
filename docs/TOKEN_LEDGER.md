@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 18:17 MSK
-Ручная сверка guide/docs: 2026-03-25 18:17 MSK
+modified_at: 2026-03-25 22:29 MSK
+Ручная сверка guide/docs: 2026-03-25 22:29 MSK
 
 # Token Ledger
 
@@ -81,6 +81,12 @@ Ledger не имеет права смешивать:
 
 Это важно не как косметика, а как truth guardrail:
 - новый proof-run больше не должен сам по себе загрязнять live tokenonomics;
+- `verify *` CLI и MCP proof-session теперь должны сами переписывать забытый default
+  `live_context_pack` в non-live engineering source kind, чтобы proof contamination не ломал
+  operational live cards из-за пропущенного аргумента;
+- `verify memory-matrix` теперь тоже обязан маркировать свои archival context-pack события как
+  `verify_memory_matrix_context_pack`, иначе matrix/eval-трафик будет ошибочно портить live
+  карточки текущей сессии и рабочего окна;
 - если старая текущая сессия уже успела нахватать `live_context_pack` ещё до этого разделения,
   она честно остаётся загрязнённой до нового session window или явного repair/reverify path;
 - тихо переписывать такую историю задним числом запрещено.

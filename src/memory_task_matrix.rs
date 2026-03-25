@@ -992,6 +992,8 @@ async fn run_context_pack_json(project: &str, namespace: &str, question: &str) -
         .arg(question)
         .arg("--retrieval-mode")
         .arg("local_strict")
+        .arg("--token-source-kind")
+        .arg("verify_memory_matrix_context_pack")
         .arg("--disable-cache")
         .output()
         .await

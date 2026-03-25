@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 21:49 MSK
-Ручная сверка guide/docs: 2026-03-25 21:49 MSK
+modified_at: 2026-03-25 22:29 MSK
+Ручная сверка guide/docs: 2026-03-25 22:29 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -73,6 +73,17 @@ modified_at: 2026-03-25 21:49 MSK
 
 Если агент один, обычно это уже работает без ручной настройки.
 Если агентов несколько, каждому нужно задавать свой `AMAI_AGENT_SCOPE`.
+
+Для tokenonomics есть ещё одно жёсткое правило:
+- инженерные `proof/verify/benchmark` прогоны не должны по умолчанию попадать в тот же `live`
+  telemetry lane, из которого строятся карточки `Экономия токенов за текущую сессию` и
+  `Экономия токенов за рабочее окно`;
+- если proof-runtime идёт через `verify *` CLI или через MCP proof-session и caller не передал
+  `token_source_kind`, `Amai` теперь обязан сам подставлять non-live engineering source kind,
+  а не молча писать `live_context_pack`.
+- это правило относится и к `verify memory-matrix`: archival context-pack вызовы внутри matrix
+  теперь тоже обязаны идти с `verify_memory_matrix_context_pack`, а не с CLI default
+  `live_context_pack`.
 
 Поверх этого `Amai` теперь автоматически собирает ещё и `chat-start restore pack`.
 

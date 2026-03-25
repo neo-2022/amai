@@ -318,6 +318,13 @@ pub fn remove_client_config(
 
 pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()> {
     compatibility::assert_supported(cfg).await?;
+    let proof_context_source_kind = if args.context.token_source_kind.trim().is_empty()
+        || args.context.token_source_kind == "live_context_pack"
+    {
+        "proof_mcp_context_pack".to_string()
+    } else {
+        args.context.token_source_kind.clone()
+    };
 
     for client in [
         "generic",
@@ -586,7 +593,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
                 "limit_symbols": args.context.limit_symbols,
                 "limit_chunks": args.context.limit_chunks,
                 "limit_semantic_chunks": args.context.limit_semantic_chunks,
-                "token_source_kind": args.context.token_source_kind,
+                "token_source_kind": proof_context_source_kind,
                 "persist": true,
             }),
         )
@@ -658,7 +665,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
                 "limit_symbols": args.context.limit_symbols,
                 "limit_chunks": args.context.limit_chunks,
                 "limit_semantic_chunks": args.context.limit_semantic_chunks,
-                "token_source_kind": args.context.token_source_kind,
+                "token_source_kind": proof_context_source_kind,
                 "tokenizer": args.tokenizer,
                 "naive_limit_files": args.naive_limit_files,
                 "naive_max_bytes_per_file": args.naive_max_bytes_per_file,
@@ -797,6 +804,27 @@ pub(crate) struct McpProofSession {
     protocol_manifest: Value,
 }
 
+fn inject_proof_tool_arguments(name: &str, arguments: Value) -> Value {
+    let mut object = match arguments {
+        Value::Object(map) => map,
+        other => return other,
+    };
+    match name {
+        "amai_context_pack" | "amai_token_benchmark" => {
+            object
+                .entry("token_source_kind".to_string())
+                .or_insert_with(|| Value::String("proof_mcp_context_pack".to_string()));
+        }
+        "amai_continuity_startup" => {
+            object
+                .entry("token_source_kind".to_string())
+                .or_insert_with(|| Value::String("proof_mcp_continuity_startup".to_string()));
+        }
+        _ => {}
+    }
+    Value::Object(object)
+}
+
 impl McpProofSession {
     pub(crate) async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
@@ -851,7 +879,9 @@ impl McpProofSession {
     }
 
     pub(crate) async fn tool_call(&mut self, name: &str, arguments: Value) -> Result<Value> {
-        let result = self.tool_call_raw(name, arguments).await?;
+        let result = self
+            .tool_call_raw(name, inject_proof_tool_arguments(name, arguments))
+            .await?;
         if result["isError"].as_bool().unwrap_or(false) {
             return Err(anyhow!(
                 "MCP tool {} returned isError=true: {}",
@@ -1882,11 +1912,11 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
             .as_str()
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
-        execctl_resume_contract_summary: payload["chat_start_restore"]
-            ["execctl_resume_contract_summary"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
+        execctl_resume_contract_summary:
+            payload["chat_start_restore"]["execctl_resume_contract_summary"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
         execctl_resume_obligation: if payload["chat_start_restore"]["execctl_resume_obligation"]
             .is_object()
         {
@@ -3780,11 +3810,12 @@ mod tests {
     use super::{
         ContextPackToolArgs, ContinuityStartupToolArgs, McpConfigArgs, McpError,
         benchmark_coverage_summary, context_pack_input_schema, context_pack_summary,
-        continuity_startup_input_schema, continuity_startup_summary, mcp_tool_error_result,
-        memory_matrix_summary, observe_snapshot_summary, observe_whole_cycle_input_schema,
-        observe_whole_cycle_turn_input_schema, prompt_result, protocol_manifest,
-        render_client_config, stack_preflight_summary, summarize_codes, summarize_namespace_modes,
-        token_benchmark_summary, token_report_summary, warm_cache_summary,
+        continuity_startup_input_schema, continuity_startup_summary, inject_proof_tool_arguments,
+        mcp_tool_error_result, memory_matrix_summary, observe_snapshot_summary,
+        observe_whole_cycle_input_schema, observe_whole_cycle_turn_input_schema, prompt_result,
+        protocol_manifest, render_client_config, stack_preflight_summary, summarize_codes,
+        summarize_namespace_modes, token_benchmark_summary, token_report_summary,
+        warm_cache_summary,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -3951,6 +3982,54 @@ mod tests {
         assert_eq!(cli.namespace, "continuity");
         assert!(cli.json);
         assert_eq!(cli.token_source_kind, "proof_mcp_continuity_startup");
+    }
+
+    #[test]
+    fn proof_tool_call_injects_non_live_defaults_for_context_pack() {
+        let injected = inject_proof_tool_arguments(
+            "amai_context_pack",
+            json!({
+                "project": "art",
+                "namespace": "continuity",
+                "query": "token drift"
+            }),
+        );
+        assert_eq!(
+            injected["token_source_kind"].as_str(),
+            Some("proof_mcp_context_pack")
+        );
+    }
+
+    #[test]
+    fn proof_tool_call_preserves_explicit_token_source_kind() {
+        let injected = inject_proof_tool_arguments(
+            "amai_context_pack",
+            json!({
+                "project": "art",
+                "namespace": "continuity",
+                "query": "token drift",
+                "token_source_kind": "verify_context_pack"
+            }),
+        );
+        assert_eq!(
+            injected["token_source_kind"].as_str(),
+            Some("verify_context_pack")
+        );
+    }
+
+    #[test]
+    fn proof_tool_call_injects_non_live_defaults_for_continuity_startup() {
+        let injected = inject_proof_tool_arguments(
+            "amai_continuity_startup",
+            json!({
+                "project": "art",
+                "namespace": "continuity"
+            }),
+        );
+        assert_eq!(
+            injected["token_source_kind"].as_str(),
+            Some("proof_mcp_continuity_startup")
+        );
     }
 
     #[test]

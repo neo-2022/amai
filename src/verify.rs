@@ -65,17 +65,31 @@ struct AccuracyEvalProbe {
     details: Value,
 }
 
+fn normalize_engineering_context(
+    context: &ContextPackArgs,
+    engineering_default_source_kind: &str,
+) -> ContextPackArgs {
+    let mut normalized = context.clone();
+    if normalized.token_source_kind.trim().is_empty()
+        || normalized.token_source_kind == "live_context_pack"
+    {
+        normalized.token_source_kind = engineering_default_source_kind.to_string();
+    }
+    normalized
+}
+
 pub async fn run_benchmark(
     cfg: &AppConfig,
     db: &mut Client,
     args: &VerifyBenchmarkArgs,
 ) -> Result<()> {
+    let context = normalize_engineering_context(&args.context, "benchmark_context_pack");
     if args.iterations == 0 {
         return Err(anyhow!("benchmark iterations must be greater than zero"));
     }
 
     for _ in 0..args.warmup {
-        retrieval::execute_context_pack_with_options(cfg, db, &args.context, args.persist, false)
+        retrieval::execute_context_pack_with_options(cfg, db, &context, args.persist, false)
             .await?;
     }
 
@@ -93,14 +107,9 @@ pub async fn run_benchmark(
     let mut last_stats = None;
     for _ in 0..args.iterations {
         let started = Instant::now();
-        let stats = retrieval::execute_context_pack_with_options(
-            cfg,
-            db,
-            &args.context,
-            args.persist,
-            false,
-        )
-        .await?;
+        let stats =
+            retrieval::execute_context_pack_with_options(cfg, db, &context, args.persist, false)
+                .await?;
         samples_ns.push(started.elapsed().as_nanos());
         resolve_scope_samples.push(stats.timings.resolve_scope_ms);
         cache_lookup_samples.push(stats.timings.cache_lookup_ms);
@@ -151,7 +160,7 @@ pub async fn run_benchmark(
         .as_millis() as u64;
 
     enforce_benchmark_thresholds(args, mean_ms, p95_ms, p99_ms, max_ms)?;
-    let suite_key = if args.context.disable_cache {
+    let suite_key = if context.disable_cache {
         "retrieval_benchmark_cold"
     } else {
         "retrieval_benchmark_hot"
@@ -161,16 +170,16 @@ pub async fn run_benchmark(
         "_observability": {
             "source_event_id": benchmark_run_id,
             "source_kind": "benchmark_run",
-            "scope_project_code": args.context.project,
-            "scope_namespace_code": args.context.namespace,
+            "scope_project_code": context.project,
+            "scope_namespace_code": context.namespace,
             "captured_at_epoch_ms": captured_at_epoch_ms
         },
         "benchmark": {
-            "project": args.context.project,
-            "namespace": args.context.namespace,
-            "query": args.context.query,
-            "retrieval_mode": args.context.retrieval_mode,
-            "disable_cache": args.context.disable_cache,
+            "project": context.project,
+            "namespace": context.namespace,
+            "query": context.query,
+            "retrieval_mode": context.retrieval_mode,
+            "disable_cache": context.disable_cache,
             "persist": args.persist,
             "warmup": args.warmup,
             "iterations": args.iterations,
@@ -228,7 +237,7 @@ pub async fn run_benchmark(
         "context_pack_id": last_stats.context_pack_id,
     });
 
-    let snapshot_kind = if args.context.disable_cache {
+    let snapshot_kind = if context.disable_cache {
         "retrieval_benchmark_cold"
     } else {
         "retrieval_benchmark_hot"
@@ -726,6 +735,14 @@ pub async fn run_degradation(
 }
 
 pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
+    let context = normalize_engineering_context(
+        &args.context,
+        if args.record_live_context {
+            "verify_context_pack"
+        } else {
+            "benchmark_context_pack"
+        },
+    );
     if args.workers == 0 || args.iterations_per_worker == 0 {
         return Err(anyhow!(
             "load verification requires workers > 0 and iterations_per_worker > 0"
@@ -737,14 +754,14 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
         retrieval::execute_context_pack_with_options(
             cfg,
             &mut warmup_db,
-            &args.context,
+            &context,
             args.persist,
             false,
         )
         .await?;
     }
 
-    let fast_probe = retrieval::prepare_fast_context_pack_probe(cfg, &args.context, args.persist)?;
+    let fast_probe = retrieval::prepare_fast_context_pack_probe(cfg, &context, args.persist)?;
     let hot_cache_only = fast_probe.is_some();
     let record_live_context = args.record_live_context;
     let publish_benchmark_snapshot = !record_live_context;
@@ -753,7 +770,7 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
     let mut handles = Vec::with_capacity(args.workers);
     for worker_index in 0..args.workers {
         let cfg = cfg.clone();
-        let context = args.context.clone();
+        let context = context.clone();
         let iterations = args.iterations_per_worker;
         let persist = args.persist;
         let fast_probe = fast_probe.clone();
@@ -968,7 +985,7 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
     };
 
     enforce_load_thresholds(args, p95_ms, qps, error_rate)?;
-    let suite_key = if args.context.disable_cache {
+    let suite_key = if context.disable_cache {
         "retrieval_load_cold"
     } else {
         "retrieval_load_hot"
@@ -985,18 +1002,18 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
         "_observability": {
             "source_event_id": load_run_id,
             "source_kind": "load_verification_run",
-            "scope_project_code": args.context.project,
-            "scope_namespace_code": args.context.namespace,
+            "scope_project_code": context.project,
+            "scope_namespace_code": context.namespace,
             "captured_at_epoch_ms": captured_at_epoch_ms
         },
         "load_verification": {
             "load_run_id": load_run_id,
             "captured_at_epoch_ms": captured_at_epoch_ms,
-            "project": args.context.project,
-            "namespace": args.context.namespace,
-            "query": args.context.query,
-            "retrieval_mode": args.context.retrieval_mode,
-            "disable_cache": args.context.disable_cache,
+            "project": context.project,
+            "namespace": context.namespace,
+            "query": context.query,
+            "retrieval_mode": context.retrieval_mode,
+            "disable_cache": context.disable_cache,
             "persist": args.persist,
             "workers": args.workers,
             "iterations_per_worker": args.iterations_per_worker,
@@ -1047,7 +1064,7 @@ pub async fn run_load(cfg: &AppConfig, args: &VerifyLoadArgs) -> Result<()> {
         "degradation_policy": retrieval_science::degradation_policy_json()?
     });
     if publish_benchmark_snapshot {
-        let snapshot_kind = if args.context.disable_cache {
+        let snapshot_kind = if context.disable_cache {
             "retrieval_load_cold"
         } else {
             "retrieval_load_hot"
@@ -1064,7 +1081,9 @@ pub async fn run_token_benchmark(
     db: &mut Client,
     args: &VerifyTokenBenchmarkArgs,
 ) -> Result<()> {
-    let payload = collect_token_benchmark(cfg, db, args).await?;
+    let mut normalized = args.clone();
+    normalized.context = normalize_engineering_context(&args.context, "verify_context_pack");
+    let payload = collect_token_benchmark(cfg, db, &normalized).await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
@@ -2652,10 +2671,11 @@ mod tests {
         AccuracyEvalProbe, StrategyOutcome, TextCompareCase, build_accuracy_canonical_eval,
         build_text_compare_canonical_eval, collect_visible_namespaces, count_foreign_hits,
         count_foreign_namespace_hits, item_belongs_to_namespace, item_belongs_to_project,
-        item_matches_text_compare_case, payload_contains_text_hit, percentile_sample,
-        precision_ratio, render_context_pack_prompt, render_filtered_context_prompt,
-        safe_lossy_prefix, text_compare_eval_probe,
+        item_matches_text_compare_case, normalize_engineering_context, payload_contains_text_hit,
+        percentile_sample, precision_ratio, render_context_pack_prompt,
+        render_filtered_context_prompt, safe_lossy_prefix, text_compare_eval_probe,
     };
+    use crate::cli::ContextPackArgs;
     use proptest::prelude::*;
     use serde_json::json;
 
@@ -2669,6 +2689,50 @@ mod tests {
     #[test]
     fn percentile_handles_empty_input() {
         assert_eq!(percentile_sample(&[], 95), 0);
+    }
+
+    #[test]
+    fn normalize_engineering_context_rewrites_live_default() {
+        let context = ContextPackArgs {
+            project: "art".to_string(),
+            namespace: "default".to_string(),
+            query: "token drift".to_string(),
+            retrieval_mode: None,
+            disable_cache: false,
+            limit_documents: 5,
+            limit_symbols: 8,
+            limit_chunks: 8,
+            limit_semantic_chunks: 8,
+            token_source_kind: "live_context_pack".to_string(),
+            client_prompt_tokens: None,
+            assistant_generation_tokens: None,
+            tool_overhead_tokens: None,
+            continuity_restore_tokens: None,
+        };
+        let normalized = normalize_engineering_context(&context, "benchmark_context_pack");
+        assert_eq!(normalized.token_source_kind, "benchmark_context_pack");
+    }
+
+    #[test]
+    fn normalize_engineering_context_preserves_explicit_non_live_source_kind() {
+        let context = ContextPackArgs {
+            project: "art".to_string(),
+            namespace: "default".to_string(),
+            query: "token drift".to_string(),
+            retrieval_mode: None,
+            disable_cache: false,
+            limit_documents: 5,
+            limit_symbols: 8,
+            limit_chunks: 8,
+            limit_semantic_chunks: 8,
+            token_source_kind: "verify_context_pack".to_string(),
+            client_prompt_tokens: None,
+            assistant_generation_tokens: None,
+            tool_overhead_tokens: None,
+            continuity_restore_tokens: None,
+        };
+        let normalized = normalize_engineering_context(&context, "benchmark_context_pack");
+        assert_eq!(normalized.token_source_kind, "verify_context_pack");
     }
 
     #[test]
