@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 01:18 MSK
-Ручная сверка guide/docs: 2026-03-26 01:18 MSK
+modified_at: 2026-03-26 01:33 MSK
+Ручная сверка guide/docs: 2026-03-26 01:33 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1189,8 +1189,11 @@ preview, а не только raw count.
 - читать `resume_enforcement` из startup contract:
   - `execctl_resume_contract_summary` является каноническим полем resume-obligation;
   - `execctl_resume_obligation` даёт тот же контур уже как machine-readable object;
+  - `required_return_task` поднимает сам return target отдельным object-слоем;
   - `startup_next_action` теперь даёт первое обязательное действие после startup;
   - `execctl_active_lease` даёт не только summary, но и machine-readable owner-state текущей линии;
+  - `project_task_tree` и `project_task_ledger` теперь тоже поднимаются как objects, а не только
+    как summary-строки;
   - если `startup_next_action.action_kind = resume_required_return_task`, клиент обязан
     выполнить именно этот return path до unrelated work;
   - если `execctl_active_lease.lease_owner_state = previous_session_owner`, клиент не имеет права

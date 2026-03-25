@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 01:18 MSK
-Ручная сверка guide/docs: 2026-03-26 01:18 MSK
+modified_at: 2026-03-26 01:33 MSK
+Ручная сверка guide/docs: 2026-03-26 01:33 MSK
 
 # Operations
 
@@ -809,6 +809,8 @@ cargo run -- mcp serve
 - рядом с human summary теперь materialized и machine-readable
   `execctl_resume_obligation`, чтобы client runtime видел
   `resume_state / pending_return_count / required_return_*` без строкового парсинга.
+- `required_return_task` теперь surfaced и отдельным object-слоем:
+  client runtime больше не должен собирать return target из двух строковых полей.
 - в тот же `resume_enforcement` теперь отдельно surfaced ещё и active-lease contour:
   - `active_lease_field = execctl_active_lease`
   - `active_lease_owner_state_field = lease_owner_state`
@@ -818,7 +820,9 @@ cargo run -- mcp serve
   summary: если lease owner пришёл как `previous_session_owner`, client обязан follow
   `startup_next_action` first и не имеет права silently seize the workline.
 - тот же startup summary теперь обязан нести и два project-bound `ExecCtl` слоя:
+  - `project_task_tree`
   - `project_task_tree_summary`
+  - `project_task_ledger`
   - `project_task_ledger_summary`
   чтобы клиент видел не только open-task tree, но и append-only handoff ledger.
 - тот же `amai_protocol_manifest` теперь несёт `error_contracts`, а `tools/call`

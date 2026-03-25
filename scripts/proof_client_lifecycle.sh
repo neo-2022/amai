@@ -23,6 +23,8 @@ grep -q 'lease_owner_state' AGENTS.md
 grep -q 'previous_session_owner' AGENTS.md
 grep -q 'resume_required_return_task' AGENTS.md
 grep -q 'required_return_task' AGENTS.md
+grep -q 'project_task_tree' AGENTS.md
+grep -q 'project_task_ledger' AGENTS.md
 
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client codex
 if [[ -f "${temp_home}/.codex/config.toml" ]] && grep -q '\[mcp_servers.amai\]' "${temp_home}/.codex/config.toml"; then
@@ -47,6 +49,8 @@ grep -q 'lease_owner_state' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'previous_session_owner' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'resume_required_return_task' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'required_return_task' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'project_task_tree' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'project_task_ledger' .cursor/rules/amai-continuity-startup.mdc
 
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client cursor
 if [[ -f "${temp_home}/.cursor/mcp.json" ]] && grep -q '"amai"' "${temp_home}/.cursor/mcp.json"; then
@@ -72,6 +76,8 @@ grep -q 'lease_owner_state' CLAUDE.md
 grep -q 'previous_session_owner' CLAUDE.md
 grep -q 'resume_required_return_task' CLAUDE.md
 grep -q 'required_return_task' CLAUDE.md
+grep -q 'project_task_tree' CLAUDE.md
+grep -q 'project_task_ledger' CLAUDE.md
 
 ./scripts/disconnect_local.sh --client claude-code
 if [[ -f .mcp.json ]] && grep -q '"amai"' .mcp.json; then

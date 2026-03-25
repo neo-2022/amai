@@ -26,10 +26,11 @@ grep -q 'execctl_active_lease_summary' "${startup_output}"
 grep -q 'previous_session_owner' "${startup_output}"
 grep -q 'resume_required_return_task' "${startup_output}"
 grep -q 'required_return_task' "${startup_output}"
+grep -q 'project_task_tree' "${startup_output}"
+grep -q 'project_task_ledger' "${startup_output}"
 grep -q 'Auto-start readiness: instruction-backed' "${human_output}"
-if ! grep -q 'Почему последний собранный контекст что-то включил:' "${human_output}"; then
-  grep -q 'Почему часть слоёв ничего не добавила:' "${human_output}"
-fi
+grep -q 'Почему такой режим:' "${human_output}"
+grep -q 'Что машина реально показала после установки:' "${human_output}"
 
 cargo run --quiet -- status >/dev/null
 

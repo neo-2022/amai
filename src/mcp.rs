@@ -600,6 +600,11 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP continuity startup did not surface project_task_tree_summary"
         ));
     }
+    if !continuity_startup["continuity_startup_summary"]["project_task_tree"].is_object() {
+        return Err(anyhow!(
+            "MCP continuity startup did not surface project_task_tree"
+        ));
+    }
     if continuity_startup["continuity_startup_summary"]["project_task_ledger_summary"]
         .as_str()
         .is_none()
@@ -608,9 +613,22 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP continuity startup did not surface project_task_ledger_summary"
         ));
     }
+    if !continuity_startup["continuity_startup_summary"]["project_task_ledger"].is_object() {
+        return Err(anyhow!(
+            "MCP continuity startup did not surface project_task_ledger"
+        ));
+    }
     if !continuity_startup["continuity_startup_summary"]["startup_next_action"].is_object() {
         return Err(anyhow!(
             "MCP continuity startup did not surface startup_next_action"
+        ));
+    }
+    if continuity_startup["continuity_startup_summary"]
+        .get("required_return_task")
+        .is_none()
+    {
+        return Err(anyhow!(
+            "MCP continuity startup did not surface required_return_task"
         ));
     }
     if continuity_startup["continuity_startup_summary"]["execctl_active_lease_summary"]
@@ -1376,7 +1394,10 @@ async fn tool_continuity_startup(
                 "startup_next_action_summary": summary.startup_next_action_summary,
                 "execctl_active_lease": summary.execctl_active_lease,
                 "execctl_active_lease_summary": summary.execctl_active_lease_summary,
+                "required_return_task": summary.required_return_task,
+                "project_task_tree": summary.project_task_tree,
                 "project_task_tree_summary": summary.project_task_tree_summary,
+                "project_task_ledger": summary.project_task_ledger,
                 "project_task_ledger_summary": summary.project_task_ledger_summary,
                 "included_reasons_summary": summary.included_reasons_summary,
                 "excluded_reasons_summary": summary.excluded_reasons_summary,
@@ -1949,7 +1970,10 @@ struct ContinuityStartupSummary {
     startup_next_action_summary: Option<String>,
     execctl_active_lease: Value,
     execctl_active_lease_summary: Option<String>,
+    required_return_task: Value,
+    project_task_tree: Value,
     project_task_tree_summary: Option<String>,
+    project_task_ledger: Value,
     project_task_ledger_summary: Option<String>,
     included_reasons_summary: Option<String>,
     excluded_reasons_summary: Option<String>,
@@ -2041,10 +2065,25 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
             .as_str()
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
+        required_return_task: if payload["chat_start_restore"]["required_return_task"].is_object() {
+            payload["chat_start_restore"]["required_return_task"].clone()
+        } else {
+            Value::Null
+        },
+        project_task_tree: if payload["chat_start_restore"]["project_task_tree"].is_object() {
+            payload["chat_start_restore"]["project_task_tree"].clone()
+        } else {
+            Value::Null
+        },
         project_task_tree_summary: payload["chat_start_restore"]["project_task_tree_summary"]
             .as_str()
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
+        project_task_ledger: if payload["chat_start_restore"]["project_task_ledger"].is_object() {
+            payload["chat_start_restore"]["project_task_ledger"].clone()
+        } else {
+            Value::Null
+        },
         project_task_ledger_summary: payload["chat_start_restore"]["project_task_ledger_summary"]
             .as_str()
             .filter(|value| !value.is_empty())
@@ -2468,7 +2507,10 @@ fn protocol_manifest() -> Value {
                     "startup_next_action_summary",
                     "execctl_active_lease",
                     "execctl_active_lease_summary",
+                    "required_return_task",
+                    "project_task_tree",
                     "project_task_tree_summary",
+                    "project_task_ledger",
                     "project_task_ledger_summary"
                 ],
                 "restored_obligations": [
@@ -2480,7 +2522,10 @@ fn protocol_manifest() -> Value {
                     "execctl_resume_obligation",
                     "startup_next_action",
                     "execctl_active_lease_summary",
+                    "required_return_task",
+                    "project_task_tree",
                     "project_task_tree_summary",
+                    "project_task_ledger",
                     "project_task_ledger_summary"
                 ],
                 "resume_enforcement": {
@@ -4584,7 +4629,22 @@ mod tests {
         assert!(
             startup_required_fields
                 .iter()
+                .any(|field| field.as_str() == Some("required_return_task"))
+        );
+        assert!(
+            startup_required_fields
+                .iter()
+                .any(|field| field.as_str() == Some("project_task_tree"))
+        );
+        assert!(
+            startup_required_fields
+                .iter()
                 .any(|field| field.as_str() == Some("project_task_tree_summary"))
+        );
+        assert!(
+            startup_required_fields
+                .iter()
+                .any(|field| field.as_str() == Some("project_task_ledger"))
         );
         assert!(
             startup_required_fields
@@ -4762,7 +4822,25 @@ mod tests {
                     "storage_lane": "ami.execctl_task_leases"
                 },
                 "execctl_active_lease_summary": "previous_session_owner: Continue runtime auto-start guarantees. -> Re-enter the active workline.",
+                "required_return_task": {
+                    "headline": "Same-meter spend control",
+                    "next_step": "Materialize live assistant generation source."
+                },
+                "project_task_tree": {
+                    "open_tasks_count": 2,
+                    "nodes": [
+                        {"task_role": "active", "headline": "Continue runtime auto-start guarantees."},
+                        {"task_role": "pending_return", "headline": "Same-meter spend control"}
+                    ]
+                },
                 "project_task_tree_summary": "active: Continue runtime auto-start guarantees.; pending_return(1): Same-meter spend control -> Materialize live assistant generation source.",
+                "project_task_ledger": {
+                    "open_tasks_count": 2,
+                    "historical_handoffs_count": 3,
+                    "entries": [
+                        {"task_role": "active", "headline": "Continue runtime auto-start guarantees."}
+                    ]
+                },
                 "project_task_ledger_summary": "active: Continue runtime auto-start guarantees.; pending_return(1); historical_handoffs(3)",
                 "included_reasons_summary": "exact_documents (1) — Exact layer matched.",
                 "excluded_reasons_summary": "semantic_chunks — Semantic layer abstained."
@@ -4814,11 +4892,23 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.contains("previous_session_owner"))
         );
+        assert_eq!(
+            summary.required_return_task["headline"],
+            json!("Same-meter spend control")
+        );
+        assert_eq!(
+            summary.project_task_tree["open_tasks_count"],
+            json!(2)
+        );
         assert!(
             summary
                 .project_task_tree_summary
                 .as_deref()
                 .is_some_and(|value| value.contains("pending_return(1)"))
+        );
+        assert_eq!(
+            summary.project_task_ledger["historical_handoffs_count"],
+            json!(3)
         );
         assert!(
             summary

@@ -1983,6 +1983,8 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("previous_session_owner"));
         assert!(text.contains("resume_required_return_task"));
         assert!(text.contains("required_return_task"));
+        assert!(text.contains("project_task_tree"));
+        assert!(text.contains("project_task_ledger"));
         assert!(text.contains("previous_session_owner_must_follow_startup_next_action = true"));
         assert!(text.contains("no_silent_drop = true"));
     }

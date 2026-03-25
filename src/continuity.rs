@@ -2272,10 +2272,28 @@ fn build_chat_start_restore(
         .and_then(|value| value["project_task_tree_summary"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let project_task_tree = restore_node
+        .filter(|value| value["project_task_tree"].is_object())
+        .map(|value| value["project_task_tree"].clone());
     let project_task_ledger_summary = restore_node
         .and_then(|value| value["project_task_ledger_summary"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let project_task_ledger = restore_node
+        .filter(|value| value["project_task_ledger"].is_object())
+        .map(|value| value["project_task_ledger"].clone());
+    let required_return_task = restore_node
+        .filter(|value| value["execctl_resume_contract"]["required_return_task"].is_object())
+        .map(|value| value["execctl_resume_contract"]["required_return_task"].clone())
+        .or_else(|| {
+            let headline = execctl_resume_obligation["required_return_headline"]
+                .as_str()
+                .filter(|value| !value.is_empty())?;
+            Some(json!({
+                "headline": headline,
+                "next_step": execctl_resume_obligation["required_return_next_step"]
+            }))
+        });
     let execctl_resume_state = restore_node
         .and_then(|value| value["execctl_resume_state"].as_str())
         .unwrap_or("clear")
@@ -2347,7 +2365,10 @@ fn build_chat_start_restore(
             "startup_next_action_summary": startup_next_action_summary,
             "execctl_active_lease": execctl_active_lease,
             "execctl_active_lease_summary": execctl_active_lease_summary,
+            "required_return_task": required_return_task,
+            "project_task_tree": project_task_tree,
             "project_task_tree_summary": project_task_tree_summary,
+            "project_task_ledger": project_task_ledger,
             "project_task_ledger_summary": project_task_ledger_summary,
             "execctl_resume_state": execctl_resume_state,
             "included_reasons_summary": included_reasons_summary,
@@ -4300,7 +4321,21 @@ mod tests {
                     "storage_lane": "ami.execctl_task_leases"
                 },
                 "execctl_active_lease_summary": "previous_session_owner: Amai upstream thread-index enrich materialized -> Сделать auto-injection restore pack прямо в chat-start prompt.",
+                "project_task_tree": {
+                    "open_tasks_count": 2,
+                    "nodes": [
+                        {"task_role": "active", "headline": "Amai upstream thread-index enrich materialized"},
+                        {"task_role": "pending_return", "headline": "Same-meter spend control"}
+                    ]
+                },
                 "project_task_tree_summary": "active: Amai upstream thread-index enrich materialized; pending_return(1): Same-meter spend control -> Materialize live assistant generation source.",
+                "project_task_ledger": {
+                    "open_tasks_count": 2,
+                    "historical_handoffs_count": 3,
+                    "entries": [
+                        {"task_role": "active", "headline": "Amai upstream thread-index enrich materialized"}
+                    ]
+                },
                 "materialized_notes": [
                     "Enriched temporal summaries теперь пишутся upstream."
                 ],
@@ -4366,6 +4401,18 @@ mod tests {
         assert_eq!(
             node["startup_next_action"]["headline"],
             json!("Same-meter spend control")
+        );
+        assert_eq!(
+            node["required_return_task"]["headline"],
+            json!("Same-meter spend control")
+        );
+        assert_eq!(
+            node["project_task_tree"]["open_tasks_count"],
+            json!(2)
+        );
+        assert_eq!(
+            node["project_task_ledger"]["historical_handoffs_count"],
+            json!(3)
         );
         assert_eq!(
             node["execctl_active_lease"]["storage_lane"],
