@@ -1696,7 +1696,10 @@ fn collect_rollout_turn_observations(text: &str) -> Result<Vec<RolloutTurnObserv
                 if let Some(turn) = current.as_mut() {
                     turn.ended_at_epoch_ms = timestamp_epoch_ms;
                     if !call_id.is_empty()
-                        && approved_context_pack_calls.get(call_id).copied().unwrap_or(false)
+                        && approved_context_pack_calls
+                            .get(call_id)
+                            .copied()
+                            .unwrap_or(false)
                     {
                         turn.approved_context_pack_calls += 1;
                     }
@@ -1707,7 +1710,10 @@ fn collect_rollout_turn_observations(text: &str) -> Result<Vec<RolloutTurnObserv
                     turn.ended_at_epoch_ms = timestamp_epoch_ms;
                     let call_id = payload["call_id"].as_str().unwrap_or_default();
                     if call_id.is_empty()
-                        || !approved_context_pack_calls.get(call_id).copied().unwrap_or(false)
+                        || !approved_context_pack_calls
+                            .get(call_id)
+                            .copied()
+                            .unwrap_or(false)
                     {
                         continue;
                     }
@@ -1737,10 +1743,119 @@ fn rollout_function_call_is_context_pack(name: &str, arguments: &str) -> bool {
     if name != "exec_command" {
         return false;
     }
-    let normalized = arguments.to_ascii_lowercase();
-    (normalized.contains("context pack")
-        && (normalized.contains("cargo run") || normalized.contains("target/release/amai")))
-        || normalized.contains("memory search")
+    exec_command_invokes_context_pack(arguments)
+}
+
+fn exec_command_invokes_context_pack(arguments: &str) -> bool {
+    let shell = extract_exec_command_shell(arguments);
+    let shell = strip_shell_heredoc_bodies(&shell);
+    shell
+        .split(['\n', ';'])
+        .flat_map(|line| line.split("&&"))
+        .flat_map(|line| line.split("||"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .any(shell_segment_invokes_context_pack)
+}
+
+fn extract_exec_command_shell(arguments: &str) -> String {
+    serde_json::from_str::<Value>(arguments)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("cmd")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| arguments.to_string())
+}
+
+fn strip_shell_heredoc_bodies(shell: &str) -> String {
+    let mut cleaned = Vec::new();
+    let mut active_delimiter = None::<String>;
+    for line in shell.lines() {
+        if let Some(delimiter) = active_delimiter.as_ref() {
+            if line.trim() == delimiter {
+                active_delimiter = None;
+            }
+            continue;
+        }
+        if let Some(delimiter) = shell_heredoc_delimiter(line) {
+            active_delimiter = Some(delimiter);
+        }
+        cleaned.push(line);
+    }
+    cleaned.join("\n")
+}
+
+fn shell_heredoc_delimiter(line: &str) -> Option<String> {
+    let marker = line.find("<<")?;
+    let token = line[marker + 2..].split_whitespace().next()?;
+    let delimiter = token.trim_matches(|c| matches!(c, '\'' | '"' | '-'));
+    (!delimiter.is_empty()).then_some(delimiter.to_string())
+}
+
+fn shell_segment_invokes_context_pack(segment: &str) -> bool {
+    let words = segment
+        .split_whitespace()
+        .map(shell_token_normalized)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        return false;
+    }
+    shell_words_contain_context_pack_invocation(&words)
+        || shell_words_contain_memory_search_invocation(&words)
+}
+
+fn shell_words_contain_context_pack_invocation(words: &[String]) -> bool {
+    for (index, word) in words.iter().enumerate() {
+        if word == "cargo" {
+            if words[index + 1..].contains(&"run".to_string())
+                && shell_words_have_context_pack_subcommand(&words[index + 1..])
+            {
+                return true;
+            }
+            continue;
+        }
+        if is_amai_command_token(word)
+            && shell_words_have_context_pack_subcommand(&words[index + 1..])
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn shell_words_have_context_pack_subcommand(words: &[String]) -> bool {
+    words
+        .windows(2)
+        .any(|pair| pair[0] == "context" && pair[1] == "pack" || pair[0] == "context-pack")
+}
+
+fn shell_words_contain_memory_search_invocation(words: &[String]) -> bool {
+    words
+        .windows(2)
+        .any(|pair| (pair[0] == "memory" || pair[0].ends_with("/memory")) && pair[1] == "search")
+}
+
+fn is_amai_command_token(word: &str) -> bool {
+    word == "amai"
+        || word == "$amai"
+        || word == "${amai}"
+        || word.ends_with("/amai")
+        || word.ends_with("/target/release/amai")
+}
+
+fn shell_token_normalized(token: &str) -> String {
+    token
+        .trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | '`'
+            )
+        })
+        .to_ascii_lowercase()
 }
 
 fn collect_context_pack_ids_from_rollout_output(value: &Value, target: &mut BTreeSet<String>) {
@@ -2818,10 +2933,8 @@ mod tests {
 
     #[test]
     fn rollout_assistant_generation_turn_observations_require_approved_context_pack_calls() {
-        let rollout_path = std::env::temp_dir().join(format!(
-            "amai-rollout-turns-{}.jsonl",
-            Uuid::new_v4()
-        ));
+        let rollout_path =
+            std::env::temp_dir().join(format!("amai-rollout-turns-{}.jsonl", Uuid::new_v4()));
         fs::write(
             &rollout_path,
             r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
@@ -2839,7 +2952,9 @@ mod tests {
         .expect("write rollout");
 
         let direct = super::parse_rollout_assistant_generation_turn_observations(
-            rollout_thread_id_from_path(&rollout_path).as_deref().unwrap_or(""),
+            rollout_thread_id_from_path(&rollout_path)
+                .as_deref()
+                .unwrap_or(""),
             &rollout_path,
         )
         .expect("direct parse");
@@ -2848,6 +2963,43 @@ mod tests {
         assert_eq!(direct[0].turn_id, "turn-1");
         assert_eq!(direct[0].approved_context_pack_calls, 1);
         assert_eq!(direct[0].assistant_generation_tokens, 17);
+    }
+
+    #[test]
+    fn rollout_assistant_generation_turn_observations_ignore_heredoc_mentions() {
+        let rollout_path = std::env::temp_dir().join(format!(
+            "amai-rollout-turns-heredoc-{}.jsonl",
+            Uuid::new_v4()
+        ));
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-noise"}}
+{"timestamp":"2026-03-25T10:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-noise","arguments":"{\"cmd\":\"cat >/tmp/handoff.txt <<'EOF'\n./target/release/amai context pack --project amai --namespace default --query 'noise'\nThese context packs belong to one thread only in this note.\nEOF\"}"}}
+{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-noise","output":"{\"context_pack_id\":\"ctx-pack-noise\"}"}}
+{"timestamp":"2026-03-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":19}}}}
+{"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-noise"}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-real"}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-real","arguments":"{\"cmd\":\"AMAI=/home/art/agent-memory-index/target/release/amai\n$AMAI context pack --project amai --namespace default --query 'real'\"}"}}
+{"timestamp":"2026-03-25T10:00:05Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-real","output":"{\"context_pack_id\":\"ctx-pack-real\"}"}}
+{"timestamp":"2026-03-25T10:00:06Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":23}}}}
+{"timestamp":"2026-03-25T10:00:07Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-real"}}
+"#,
+        )
+        .expect("write rollout");
+
+        let direct = super::parse_rollout_assistant_generation_turn_observations(
+            rollout_thread_id_from_path(&rollout_path)
+                .as_deref()
+                .unwrap_or(""),
+            &rollout_path,
+        )
+        .expect("direct parse");
+        let _ = fs::remove_file(&rollout_path);
+
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].turn_id, "turn-real");
+        assert_eq!(direct[0].approved_context_pack_calls, 1);
+        assert_eq!(direct[0].assistant_generation_tokens, 23);
     }
 
     #[test]

@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 17:53 MSK
-Ручная сверка guide/docs: 2026-03-25 17:53 MSK
+modified_at: 2026-03-25 18:17 MSK
+Ручная сверка guide/docs: 2026-03-25 18:17 MSK
 
 # Token Ledger
 
@@ -575,6 +575,10 @@ whole-cycle компонент на одинаковое число всех liv
     по `working_state_event` он берёт `thread_id + captured_at_epoch_ms`, ищет подходящий
     rollout turn по времени и materialize-ит `assistant_generation` один раз на matched
     turn-group, если несколько `context_pack_id` попали в тот же самый ответ клиента;
+  - shell heredoc/handoff/debug text с простым mention `context pack` теперь больше не
+    имеет права делать turn `approved`: rollout source разрешён только для реального
+    invocation path (`mcp__amai__amai_context_pack`, `cargo run ... context pack`,
+    `./target/release/amai context pack`, `$AMAI context pack`, `memory search`);
   - это не даёт silently размножать одни и те же output tokens по каждому retrieval event,
     но и не теряет truthful partial coverage там, где один assistant turn обслужил сразу
     несколько retrieval context packs;

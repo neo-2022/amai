@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 17:53 MSK
-Ручная сверка guide/docs: 2026-03-25 17:53 MSK
+modified_at: 2026-03-25 18:17 MSK
+Ручная сверка guide/docs: 2026-03-25 18:17 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1506,6 +1506,11 @@ preview, а не только raw count.
     `source_kind` теперь может честно быть
     `direct_turn_attach_v1 / codex_rollout_turn_timeline_v1 /
     direct_turn_attach_plus_rollout_turn_timeline_v1`.
+  - rollout matcher теперь ещё и жёстче режет ложные overlap:
+    mention `context pack` внутри heredoc, handoff note или другого shell-text больше
+    не считается approved context-pack call сам по себе; учитываются только реальные
+    command invocation path (`mcp__amai__amai_context_pack`, `cargo run ... context pack`,
+    `./target/release/amai context pack`, `$AMAI context pack`, `memory search`).
   - и тот же `v6` больше не делит все whole-cycle компоненты на один и тот же
     denominator:
     `client_prompt`, `assistant_generation`, `tool_overhead_outside_retrieval` и

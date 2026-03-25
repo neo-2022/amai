@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 17:53 MSK
-Ручная сверка guide/docs: 2026-03-25 17:53 MSK
+modified_at: 2026-03-25 18:17 MSK
+Ручная сверка guide/docs: 2026-03-25 18:17 MSK
 
 # Operations
 
@@ -2053,6 +2053,12 @@ report path теперь умеет auto-sync их из stored `ami.context_pack
   assistant_generation_source_no_scope_overlap /
   assistant_generation_source_partial_scope_overlap /
   assistant_generation_source_covers_missing_scope`, а не только общую blocker-строку.
+- rollout parser теперь обязан игнорировать shell heredoc/document text, где просто
+  упоминаются `context pack` или `context packs`; approved source можно считать только
+  по реальному command invocation path (`mcp__amai__amai_context_pack`,
+  `cargo run ... context pack`, `./target/release/amai context pack`, `$AMAI context pack`,
+  `memory search`), иначе same-meter contour начинает ловить ложные overlap из handoff/debug
+  команд.
 - тот же contour теперь умеет и прямой turn-scoped attach:
   `observe token-whole-cycle-turn-attach --thread-id ... --turn-id ...
   --context-pack-id ... --assistant-generation-tokens ...`
