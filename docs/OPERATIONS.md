@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 21:25 MSK
-Ручная сверка guide/docs: 2026-03-25 21:25 MSK
+modified_at: 2026-03-25 22:10 MSK
+Ручная сверка guide/docs: 2026-03-25 22:10 MSK
 
 # Operations
 
@@ -753,6 +753,10 @@ cargo run -- mcp serve
   `amai_continuity_startup` обязателен до retrieval и любой новой работы,
   а client runtime должен поднимать не только headline, но и
   `execctl_resume_state` вместе с pending-return obligations.
+- тот же startup summary теперь обязан нести и два project-bound `ExecCtl` слоя:
+  - `project_task_tree_summary`
+  - `project_task_ledger_summary`
+  чтобы клиент видел не только open-task tree, но и append-only handoff ledger.
 - тот же `amai_protocol_manifest` теперь несёт `error_contracts`, а `tools/call`
   и JSON-RPC errors отдают machine-readable taxonomy вместо голого текста:
   `invalid_json_rpc_payload`, `invalid_request`, `method_not_found`,

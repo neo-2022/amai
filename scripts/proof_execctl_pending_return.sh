@@ -55,5 +55,9 @@ jq -e '.working_state_restore.project_task_tree.open_tasks_count == 2' "${restor
 jq -e '.working_state_restore.project_task_tree.nodes[0].task_role == "active"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_tree.nodes[1].task_role == "pending_return"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.project_task_tree_summary | contains("pending_return(1)")' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_ledger.ledger_version == "project-task-ledger-v1"' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_ledger.open_tasks_count == 2' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_ledger.entries[0].task_role == "active"' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_ledger_summary | contains("historical_handoffs(0)")' "${restore_output}" >/dev/null
 
 printf 'proof_execctl_pending_return: PASS\n'

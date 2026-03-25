@@ -2241,6 +2241,10 @@ fn build_chat_start_restore(
         .and_then(|value| value["project_task_tree_summary"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let project_task_ledger_summary = restore_node
+        .and_then(|value| value["project_task_ledger_summary"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let execctl_resume_state = restore_node
         .and_then(|value| value["execctl_resume_state"].as_str())
         .unwrap_or("clear")
@@ -2307,6 +2311,7 @@ fn build_chat_start_restore(
             "workspace_graph_summary": workspace_graph_summary,
             "pending_return_summary": pending_return_summary,
             "project_task_tree_summary": project_task_tree_summary,
+            "project_task_ledger_summary": project_task_ledger_summary,
             "execctl_resume_state": execctl_resume_state,
             "included_reasons_summary": included_reasons_summary,
             "excluded_reasons_summary": excluded_reasons_summary,
@@ -2359,6 +2364,10 @@ fn render_chat_start_prompt(
         .and_then(|value| value["project_task_tree_summary"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let project_task_ledger_summary = restore_node
+        .and_then(|value| value["project_task_ledger_summary"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let execctl_resume_state = restore_node
         .and_then(|value| value["execctl_resume_state"].as_str())
         .unwrap_or("clear");
@@ -2395,6 +2404,9 @@ fn render_chat_start_prompt(
     }
     if let Some(value) = project_task_tree_summary {
         lines.push(format!("Дерево задач проекта: {value}"));
+    }
+    if let Some(value) = project_task_ledger_summary {
+        lines.push(format!("Журнал задач проекта: {value}"));
     }
     if let Some(value) = pending_return_summary {
         lines.push(format!("Незавершённые линии к возврату: {value}"));

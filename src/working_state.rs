@@ -22,6 +22,7 @@ const MAX_MATERIALIZED_NOTES: usize = 6;
 const MAX_RECENT_DECISION_TRACES: usize = 3;
 const MAX_PENDING_RETURN_QUEUE: usize = 6;
 const PROJECT_TASK_TREE_VERSION: &str = "project-task-tree-v1";
+const PROJECT_TASK_LEDGER_VERSION: &str = "project-task-ledger-v1";
 
 pub async fn record_handoff_event(
     db: &Client,
@@ -552,6 +553,14 @@ fn compose_restore_bundle(
         &pending_return_queue,
     );
     let project_task_tree_summary = summarize_project_task_tree(&project_task_tree);
+    let project_task_ledger = build_project_task_ledger(
+        project,
+        namespace,
+        events,
+        &authoritative_event_id,
+        &pending_return_queue,
+    );
+    let project_task_ledger_summary = summarize_project_task_ledger(&project_task_ledger);
 
     json!({
         "working_state_restore": {
@@ -579,6 +588,8 @@ fn compose_restore_bundle(
             "execctl_resume_state": execctl_resume_state,
             "project_task_tree": project_task_tree,
             "project_task_tree_summary": project_task_tree_summary,
+            "project_task_ledger": project_task_ledger,
+            "project_task_ledger_summary": project_task_ledger_summary,
             "last_command": last_command,
             "last_results_summary": last_results_summary,
             "latest_decision_trace": latest_decision_trace,
@@ -1572,6 +1583,163 @@ fn summarize_project_task_tree(value: &Value) -> Option<String> {
     ))
 }
 
+fn build_project_task_ledger(
+    project: &Value,
+    namespace: &Value,
+    events: &[ObservabilitySnapshotRecord],
+    authoritative_event_id: &str,
+    pending_return_queue: &Value,
+) -> Value {
+    let project_code = project["code"].as_str().unwrap_or_default();
+    let namespace_code = namespace["code"].as_str().unwrap_or_default();
+    let pending_event_ids = pending_return_queue
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["authoritative_event_id"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    let mut seen_event_ids = Vec::<String>::new();
+
+    for snapshot in events {
+        let event = &snapshot.payload["working_state_event"];
+        if event["event_kind"].as_str() != Some("continuity_handoff")
+            || is_meta_continuity_event(event)
+        {
+            continue;
+        }
+        let event_id = event["event_id"].as_str().unwrap_or_default();
+        if !event_id.is_empty() {
+            if seen_event_ids.iter().any(|value| value == event_id) {
+                continue;
+            }
+            seen_event_ids.push(event_id.to_string());
+        }
+        let task_role = if !authoritative_event_id.is_empty() && event_id == authoritative_event_id
+        {
+            "active"
+        } else if pending_event_ids.iter().any(|value| value == event_id) {
+            "pending_return"
+        } else {
+            "historical_handoff"
+        };
+        let task_state = match task_role {
+            "active" => "active",
+            "pending_return" => "suspended",
+            _ => "superseded",
+        };
+        let resume_state = match task_role {
+            "active" => "active",
+            "pending_return" => "pending_return",
+            _ => "historical_only",
+        };
+        let task_id = if event_id.is_empty() {
+            format!(
+                "task::{project_code}::{namespace_code}::historical-{}",
+                entries.len() + 1
+            )
+        } else {
+            format!("task::{event_id}")
+        };
+        entries.push(json!({
+            "task_id": task_id,
+            "headline": event["headline"].as_str().unwrap_or_default(),
+            "next_step": event["next_step_hint"].as_str().unwrap_or_default(),
+            "task_role": task_role,
+            "task_state": task_state,
+            "resume_state": resume_state,
+            "authoritative_event_id": event_id,
+            "recorded_at_epoch_ms": event["recorded_at_epoch_ms"].as_u64(),
+            "source_kind": event["source_kind"].as_str().unwrap_or("continuity_handoff"),
+            "local_path": event["local_path"].as_str().unwrap_or_default(),
+        }));
+    }
+
+    if let Some(items) = pending_return_queue.as_array() {
+        for (index, item) in items.iter().enumerate() {
+            let pending_event_id = item["authoritative_event_id"].as_str().unwrap_or_default();
+            if !pending_event_id.is_empty()
+                && entries
+                    .iter()
+                    .any(|entry| entry["authoritative_event_id"].as_str() == Some(pending_event_id))
+            {
+                continue;
+            }
+            let task_id = if pending_event_id.is_empty() {
+                format!(
+                    "task::{project_code}::{namespace_code}::pending-return-history-{}",
+                    index + 1
+                )
+            } else {
+                format!("task::{pending_event_id}")
+            };
+            entries.push(json!({
+                "task_id": task_id,
+                "headline": item["headline"].as_str().unwrap_or_default(),
+                "next_step": item["next_step"].as_str().unwrap_or_default(),
+                "task_role": "pending_return",
+                "task_state": "suspended",
+                "resume_state": item["resume_state"].as_str().unwrap_or("pending_return"),
+                "authoritative_event_id": pending_event_id,
+                "recorded_at_epoch_ms": item["queued_at_epoch_ms"].as_u64(),
+                "source_kind": "pending_return_queue",
+                "queued_reason": item["queued_reason"].as_str().unwrap_or("interrupted_by_new_handoff"),
+            }));
+        }
+    }
+
+    let open_tasks_count = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry["task_role"].as_str().unwrap_or_default(),
+                "active" | "pending_return"
+            )
+        })
+        .count();
+    let historical_handoffs_count = entries
+        .iter()
+        .filter(|entry| entry["task_role"].as_str() == Some("historical_handoff"))
+        .count();
+
+    json!({
+        "ledger_version": PROJECT_TASK_LEDGER_VERSION,
+        "project_code": project_code,
+        "namespace_code": namespace_code,
+        "entries_count": entries.len(),
+        "open_tasks_count": open_tasks_count,
+        "historical_handoffs_count": historical_handoffs_count,
+        "entries": entries,
+    })
+}
+
+fn summarize_project_task_ledger(value: &Value) -> Option<String> {
+    let entries = value["entries"].as_array()?;
+    if entries.is_empty() {
+        return None;
+    }
+    let active = entries
+        .iter()
+        .find(|item| item["task_role"].as_str() == Some("active"));
+    let active_headline = active
+        .and_then(|item| item["headline"].as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("ещё нет данных");
+    let pending = entries
+        .iter()
+        .filter(|item| item["task_role"].as_str() == Some("pending_return"))
+        .count();
+    let historical = entries
+        .iter()
+        .filter(|item| item["task_role"].as_str() == Some("historical_handoff"))
+        .count();
+    Some(format!(
+        "active: {active_headline}; pending_return({pending}); historical_handoffs({historical})"
+    ))
+}
+
 fn normalize_next_step_hint(value: &str) -> String {
     let mut normalized = value.trim().to_string();
     for _ in 0..3 {
@@ -2310,6 +2478,24 @@ mod tests {
             restore["project_task_tree_summary"]
                 .as_str()
                 .is_some_and(|value| value.contains("pending_return(1)"))
+        );
+        assert_eq!(
+            restore["project_task_ledger"]["ledger_version"],
+            json!("project-task-ledger-v1")
+        );
+        assert_eq!(restore["project_task_ledger"]["open_tasks_count"], json!(2));
+        assert_eq!(
+            restore["project_task_ledger"]["historical_handoffs_count"],
+            json!(0)
+        );
+        assert_eq!(
+            restore["project_task_ledger"]["entries"][0]["task_role"],
+            json!("active")
+        );
+        assert!(
+            restore["project_task_ledger_summary"]
+                .as_str()
+                .is_some_and(|value| value.contains("historical_handoffs(0)"))
         );
     }
 

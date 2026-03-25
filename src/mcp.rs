@@ -540,6 +540,14 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP continuity startup did not surface project_task_tree_summary"
         ));
     }
+    if continuity_startup["continuity_startup_summary"]["project_task_ledger_summary"]
+        .as_str()
+        .is_none()
+    {
+        return Err(anyhow!(
+            "MCP continuity startup did not surface project_task_ledger_summary"
+        ));
+    }
 
     let preflight = session
         .tool_call("amai_stack_preflight", json!({ "profile": "default" }))
@@ -1259,6 +1267,7 @@ async fn tool_continuity_startup(
                 "execctl_resume_state": summary.execctl_resume_state,
                 "pending_return_summary": summary.pending_return_summary,
                 "project_task_tree_summary": summary.project_task_tree_summary,
+                "project_task_ledger_summary": summary.project_task_ledger_summary,
                 "included_reasons_summary": summary.included_reasons_summary,
                 "excluded_reasons_summary": summary.excluded_reasons_summary,
             }
@@ -1825,6 +1834,7 @@ struct ContinuityStartupSummary {
     execctl_resume_state: String,
     pending_return_summary: Option<String>,
     project_task_tree_summary: Option<String>,
+    project_task_ledger_summary: Option<String>,
     included_reasons_summary: Option<String>,
     excluded_reasons_summary: Option<String>,
 }
@@ -1866,6 +1876,10 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
         project_task_tree_summary: payload["chat_start_restore"]["project_task_tree_summary"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        project_task_ledger_summary: payload["chat_start_restore"]["project_task_ledger_summary"]
             .as_str()
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
@@ -2282,14 +2296,16 @@ fn protocol_manifest() -> Value {
                     "thread_count",
                     "prompt_text_present",
                     "execctl_resume_state",
-                    "project_task_tree_summary"
+                    "project_task_tree_summary",
+                    "project_task_ledger_summary"
                 ],
                 "restored_obligations": [
                     "active_workline",
                     "chat_start_restore_prompt_text",
                     "execctl_resume_state",
                     "pending_return_summary",
-                    "project_task_tree_summary"
+                    "project_task_tree_summary",
+                    "project_task_ledger_summary"
                 ],
                 "fail_closed_conditions": [
                     "project_unregistered",
@@ -4306,6 +4322,11 @@ mod tests {
                 .iter()
                 .any(|field| field.as_str() == Some("project_task_tree_summary"))
         );
+        assert!(
+            startup_required_fields
+                .iter()
+                .any(|field| field.as_str() == Some("project_task_ledger_summary"))
+        );
         assert_eq!(
             manifest["tool_contracts"]["amai_continuity_startup"]["summary_field"].as_str(),
             Some("continuity_startup_summary")
@@ -4393,6 +4414,7 @@ mod tests {
                 "execctl_resume_state": "pending_return_queue_present",
                 "pending_return_summary": "Same-meter spend control -> Materialize live assistant generation source.",
                 "project_task_tree_summary": "active: Continue runtime auto-start guarantees.; pending_return(1): Same-meter spend control -> Materialize live assistant generation source.",
+                "project_task_ledger_summary": "active: Continue runtime auto-start guarantees.; pending_return(1); historical_handoffs(3)",
                 "included_reasons_summary": "exact_documents (1) — Exact layer matched.",
                 "excluded_reasons_summary": "semantic_chunks — Semantic layer abstained."
             }
@@ -4414,6 +4436,12 @@ mod tests {
                 .project_task_tree_summary
                 .as_deref()
                 .is_some_and(|value| value.contains("pending_return(1)"))
+        );
+        assert!(
+            summary
+                .project_task_ledger_summary
+                .as_deref()
+                .is_some_and(|value| value.contains("historical_handoffs(3)"))
         );
     }
 
