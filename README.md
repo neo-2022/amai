@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 20:14 MSK
-Ручная сверка guide/docs: 2026-03-25 20:14 MSK
+modified_at: 2026-03-25 21:25 MSK
+Ручная сверка guide/docs: 2026-03-25 21:25 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1122,6 +1122,21 @@ preview, а не только raw count.
   `continuity_startup_summary`;
 - поднимать вместе с этим `execctl_resume_state` и `pending_return` obligations,
   а не только headline/next step.
+
+Следующий practical contour теперь тоже materialized не только в docs, но и в onboarding:
+- `VS Code` получает managed workspace startup instructions
+  `.github/instructions/amai-continuity-startup.instructions.md`;
+- `Cursor` получает managed project rule
+  `.cursor/rules/amai-continuity-startup.mdc`;
+- `Codex`, `Claude Code`, `Claude Desktop` и `Generic` пока получают только
+  manual startup snippets, потому что `Amai` не должен самовольно перетирать
+  `AGENTS.md`, `CLAUDE.md` и другие пользовательские rule files.
+
+Это важно читать строго:
+- `startup contract` уже общий и machine-readable;
+- но `auto-start readiness` у клиентов пока разная;
+- truthful onboarding теперь явно печатает, где контур уже instruction-backed,
+  а где ещё нужен manual follow-up.
 
 Тот же manifest теперь фиксирует и `error_contracts`. Это даёт внешнему клиенту
 стабильные machine-readable failure classes:

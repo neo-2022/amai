@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 20:04 MSK
-Ручная сверка guide/docs: 2026-03-25 20:04 MSK
+modified_at: 2026-03-25 21:25 MSK
+Ручная сверка guide/docs: 2026-03-25 21:25 MSK
 
 # MCP Integration
 
@@ -115,10 +115,14 @@ scripts\install_amai.cmd
 Для других клиентов логика теперь тоже стала проще:
 - `Cursor`
   - onboarding по умолчанию пишет config в user-scope path;
+  - и отдельно materialize-ит project rule file `.cursor/rules/amai-continuity-startup.mdc`;
 - `Codex`
   - onboarding по умолчанию пишет config в user-scope path;
+  - но `Amai` не имеет права молча переписывать project `AGENTS.md`, поэтому для startup
+    пока генерируется manual snippet в `tmp/onboarding`;
 - `Claude Code`
   - onboarding пишет workspace-local `.mcp.json`;
+  - для startup сейчас тоже получает manual snippet, а не автоперезапись project rules;
 - `Claude Desktop`
   - пока получает generated file для ручного импорта.
 
@@ -130,8 +134,19 @@ scripts\install_amai.cmd
 - MCP contour теперь materialize-ит не только retrieval tools, но и отдельный startup tool
   `amai_continuity_startup`;
 - для него есть парный prompt `amai-continuity-startup`;
-- это означает, что новый чат в подключённом клиенте должен поднимать continuity через реальный
-  machine-readable contract, а не через неявную prompt-договорённость.
+- onboarding теперь ещё и честно различает:
+  - где startup уже instruction-backed;
+  - где пока есть только manual snippet;
+  - где автоматический runtime contour ещё не materialized.
+
+То есть truthful правило теперь такое:
+- `VS Code` получает managed workspace instruction file
+  `.github/instructions/amai-continuity-startup.instructions.md`;
+- `Cursor` получает managed project rule file
+  `.cursor/rules/amai-continuity-startup.mdc`;
+- `Codex`, `Claude Code`, `Claude Desktop` и `Generic` пока получают только
+  сгенерированный snippet, потому что `Amai` не должен самовольно перетирать
+  `AGENTS.md` / `CLAUDE.md` / другие пользовательские rules-файлы.
 
 ## Минимальные шаги
 
@@ -189,6 +204,11 @@ cargo build --release
 - сначала вызвать `amai_continuity_startup` для текущего проекта;
 - только потом, если нужен дополнительный retrieval, вызывать `amai_context_pack`;
 - не перескакивать сразу к retrieval, если continuity ещё не поднята.
+
+Если onboarding пишет managed startup artifact, это теперь видно прямо в финальном выводе:
+- статус `Startup contract для клиента`;
+- путь до startup artifact;
+- truthful признак `Auto-start readiness`.
 
 ## Как отключить клиента обратно
 

@@ -29,6 +29,10 @@ struct InstallState {
     memory_bridge_path: Option<String>,
     #[serde(default)]
     memory_bridge_backup_path: Option<String>,
+    #[serde(default)]
+    startup_instruction_path: Option<String>,
+    #[serde(default)]
+    startup_instruction_status: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +163,8 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     }
     let backup = maybe_backup_user_global(&output, &target.install_scope)?;
     mcp::write_client_config(&config_args)?;
+    let startup_instructions_summary =
+        install_startup_instructions(&repo_root, &client_resolution)?;
     let install_status = build_install_status(
         install_state_before.as_ref(),
         config_existed_before,
@@ -183,6 +189,12 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
                 .as_ref()
                 .and_then(|summary| summary.backup_path.as_ref())
                 .map(|path| path.display().to_string()),
+            startup_instruction_path: startup_instructions_summary
+                .as_ref()
+                .map(|summary| summary.output_path.display().to_string()),
+            startup_instruction_status: startup_instructions_summary
+                .as_ref()
+                .map(|summary| summary.status.clone()),
         },
     )?;
 
@@ -233,6 +245,28 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         "Где установлен config: {}",
         install_scope_status(&target.install_scope)
     );
+    if let Some(summary) = &startup_instructions_summary {
+        println!("Startup contract для клиента: {}", summary.status);
+        println!(
+            "Где лежит startup artifact: {}",
+            summary.output_path.display()
+        );
+        println!(
+            "Где лежит startup artifact по scope: {}",
+            install_scope_status(&summary.install_scope)
+        );
+        println!(
+            "Auto-start readiness: {}",
+            if summary.auto_start_ready {
+                "instruction-backed"
+            } else {
+                "manual_follow_up_required"
+            }
+        );
+        println!("Почему такой режим: {}", summary.reason);
+    } else {
+        println!("Startup contract для клиента: отдельный artifact не materialized");
+    }
     if let Some(summary) = &local_memory_bridge_summary {
         println!("Внешний memory bridge: {}", summary.status);
         println!("Файл bridge: {}", summary.bridge_path.display());
@@ -934,6 +968,8 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
     let target = client_resolution.target.clone();
     let output = resolve_output_path(&repo_root, &target, args.output.as_ref())?;
     let backup = maybe_backup_user_global(&output, &target.install_scope)?;
+    let startup_instructions_removed =
+        remove_startup_instructions(&repo_root, &target).unwrap_or(None);
 
     let result = mcp::remove_client_config(
         &McpConfigArgs {
@@ -964,6 +1000,16 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
     println!("client_config: {}", output.display());
     println!("server_removed: {}", result.removed);
     println!("file_purged: {}", result.purged_file);
+    if let Some(summary) = startup_instructions_removed {
+        println!("startup_instruction_removed: true");
+        println!(
+            "startup_instruction_path: {}",
+            summary.output_path.display()
+        );
+        println!("startup_instruction_status: {}", summary.status);
+    } else {
+        println!("startup_instruction_removed: false");
+    }
     if let Some(state) = &install_state_before {
         if let Some(memory_bridge_path) = &state.memory_bridge_path {
             println!("memory_bridge: {}", memory_bridge_path);
@@ -1164,6 +1210,25 @@ struct ClientTarget {
     detect_env_vars: Vec<String>,
     detect_workspace_markers: Vec<String>,
     detect_home_markers: Vec<String>,
+    #[serde(default)]
+    startup_instructions: Option<ClientStartupInstructions>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ClientStartupInstructions {
+    mode: String,
+    default_output: String,
+    install_scope: String,
+    format: String,
+}
+
+#[derive(Debug, Clone)]
+struct StartupInstructionsInstallSummary {
+    status: String,
+    output_path: PathBuf,
+    install_scope: String,
+    auto_start_ready: bool,
+    reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1333,6 +1398,188 @@ fn expand_target_template(template: &str, repo_root: &Path, home: &Path) -> Path
     )
 }
 
+const STARTUP_INSTRUCTIONS_MARKER: &str = "<!-- AMAI MANAGED STARTUP INSTRUCTIONS v1 -->";
+
+fn install_startup_instructions(
+    repo_root: &Path,
+    client_resolution: &ClientResolution,
+) -> Result<Option<StartupInstructionsInstallSummary>> {
+    let Some(startup) = &client_resolution.target.startup_instructions else {
+        return Ok(None);
+    };
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("failed to resolve user home directory"))?;
+    let output_path = expand_target_template(&startup.default_output, repo_root, &home);
+    let content = render_startup_instructions(
+        repo_root,
+        &client_resolution.target.display_name,
+        &client_resolution.client_key,
+        &startup.format,
+    )?;
+
+    match startup.mode.as_str() {
+        "managed_workspace_file" => {
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            if output_path.is_file() {
+                let existing = fs::read_to_string(&output_path)
+                    .with_context(|| format!("failed to read {}", output_path.display()))?;
+                if !existing.contains(STARTUP_INSTRUCTIONS_MARKER)
+                    && existing.trim() != content.trim()
+                {
+                    let fallback = repo_root.join("tmp/onboarding").join(format!(
+                        "{}-amai-startup-manual.md",
+                        client_resolution.client_key
+                    ));
+                    if let Some(parent) = fallback.parent() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("failed to create {}", parent.display()))?;
+                    }
+                    fs::write(&fallback, content.as_bytes())
+                        .with_context(|| format!("failed to write {}", fallback.display()))?;
+                    return Ok(Some(StartupInstructionsInstallSummary {
+                        status: "managed_target_conflict_manual_snippet_generated".to_string(),
+                        output_path: fallback,
+                        install_scope: "manual_generated".to_string(),
+                        auto_start_ready: false,
+                        reason: format!(
+                            "existing unmanaged startup instruction file left in place: {}",
+                            output_path.display()
+                        ),
+                    }));
+                }
+            }
+            fs::write(&output_path, content.as_bytes())
+                .with_context(|| format!("failed to write {}", output_path.display()))?;
+            Ok(Some(StartupInstructionsInstallSummary {
+                status: "managed_workspace_instruction_installed".to_string(),
+                output_path,
+                install_scope: startup.install_scope.clone(),
+                auto_start_ready: true,
+                reason: "client-native startup instructions are now installed alongside MCP config"
+                    .to_string(),
+            }))
+        }
+        "manual_snippet_only" => {
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::write(&output_path, content.as_bytes())
+                .with_context(|| format!("failed to write {}", output_path.display()))?;
+            Ok(Some(StartupInstructionsInstallSummary {
+                status: "manual_startup_snippet_generated".to_string(),
+                output_path,
+                install_scope: startup.install_scope.clone(),
+                auto_start_ready: false,
+                reason:
+                    "this client still needs an explicit project instruction/rule integration path"
+                        .to_string(),
+            }))
+        }
+        other => Err(anyhow!(
+            "unsupported startup_instructions.mode in config/client_targets.toml: {other}"
+        )),
+    }
+}
+
+fn remove_startup_instructions(
+    repo_root: &Path,
+    target: &ClientTarget,
+) -> Result<Option<StartupInstructionsInstallSummary>> {
+    let Some(startup) = &target.startup_instructions else {
+        return Ok(None);
+    };
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("failed to resolve user home directory"))?;
+    let output_path = expand_target_template(&startup.default_output, repo_root, &home);
+    if !output_path.is_file() {
+        return Ok(None);
+    }
+
+    let existing = fs::read_to_string(&output_path)
+        .with_context(|| format!("failed to read {}", output_path.display()))?;
+    let removable =
+        startup.mode == "manual_snippet_only" || existing.contains(STARTUP_INSTRUCTIONS_MARKER);
+    if !removable {
+        return Ok(None);
+    }
+
+    fs::remove_file(&output_path)
+        .with_context(|| format!("failed to remove {}", output_path.display()))?;
+    Ok(Some(StartupInstructionsInstallSummary {
+        status: "startup_instructions_removed".to_string(),
+        output_path,
+        install_scope: startup.install_scope.clone(),
+        auto_start_ready: false,
+        reason: "Amai-managed startup instructions removed".to_string(),
+    }))
+}
+
+fn render_startup_instructions(
+    repo_root: &Path,
+    client_display_name: &str,
+    client_key: &str,
+    format: &str,
+) -> Result<String> {
+    let body = render_startup_instruction_body(repo_root)?;
+    match format {
+        "vscode_instructions_md" => Ok(format!(
+            "{STARTUP_INSTRUCTIONS_MARKER}\n---\napplyTo: \"**\"\ndescription: \"Amai continuity startup for this workspace\"\n---\n\n# Amai continuity startup ({client_display_name})\n\n{body}\n"
+        )),
+        "cursor_rules_mdc" => Ok(format!(
+            "{STARTUP_INSTRUCTIONS_MARKER}\n---\ndescription: Amai continuity startup for this workspace\nglobs: [\"**/*\"]\nalwaysApply: true\n---\n\n# Amai continuity startup ({client_display_name})\n\n{body}\n"
+        )),
+        "codex_agents_snippet" => Ok(format!(
+            "{STARTUP_INSTRUCTIONS_MARKER}\n# Amai continuity startup for Codex\n\nДобавьте этот блок в project `AGENTS.md`, а не в global config.\n\n{body}\n"
+        )),
+        "generic_markdown" => Ok(format!(
+            "{STARTUP_INSTRUCTIONS_MARKER}\n# Amai continuity startup ({client_display_name})\n\n{body}\n"
+        )),
+        other => Err(anyhow!(
+            "unsupported startup instructions format for client {client_key}: {other}"
+        )),
+    }
+}
+
+fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
+    let contract = mcp::project_chat_startup_contract();
+    let tool = contract["tool"]
+        .as_str()
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing tool"))?;
+    let namespace = contract["default_namespace"]
+        .as_str()
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing default_namespace"))?;
+    let fail_closed = contract["fail_closed_conditions"]
+        .as_array()
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing fail_closed_conditions"))?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let required_summary_fields = contract["required_summary_fields"]
+        .as_array()
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing required_summary_fields"))?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let restored_obligations = contract["restored_obligations"]
+        .as_array()
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing restored_obligations"))?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Ok(format!(
+        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала вызови MCP tool `{tool}`.\n3. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n4. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n5. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n6. После restore обязательно подними поля: {required_summary_fields}.\n7. Верни в активную рабочую линию obligations: {restored_obligations}.\n8. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
+        repo_root.display(),
+        repo_root.display(),
+        "amai_context_pack"
+    ))
+}
+
 fn install_scope_status(scope: &str) -> &'static str {
     match scope {
         "workspace_local" => "внутри текущего репозитория",
@@ -1423,7 +1670,8 @@ fn maybe_backup_user_global(path: &Path, install_scope: &str) -> Result<Option<P
 mod tests {
     use super::{
         detection_score, env_keys, expand_target_template, install_scope_status,
-        resolve_client_target, resolve_output_path, working_state_reason_summary,
+        render_startup_instructions, resolve_client_target, resolve_output_path,
+        working_state_reason_summary,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -1451,6 +1699,11 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             .target;
         assert_eq!(target.install_scope, "workspace_local");
         assert_eq!(target.display_name, "VS Code");
+        let startup = target
+            .startup_instructions
+            .expect("vscode startup instructions must be configured");
+        assert_eq!(startup.mode, "managed_workspace_file");
+        assert_eq!(startup.format, "vscode_instructions_md");
     }
 
     #[test]
@@ -1513,10 +1766,22 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             detect_env_vars: Vec::new(),
             detect_workspace_markers: vec!["missing-marker".to_string()],
             detect_home_markers: Vec::new(),
+            startup_instructions: None,
         };
         let repo = PathBuf::from("/tmp/amai-nonexistent");
         let home = PathBuf::from("/tmp/amai-home-nonexistent");
         assert!(detection_score(&repo, &home, &target).is_none());
+    }
+
+    #[test]
+    fn renders_vscode_startup_instructions_with_repo_root() {
+        let repo = Path::new("/tmp/amai");
+        let text = render_startup_instructions(repo, "VS Code", "vscode", "vscode_instructions_md")
+            .expect("startup instructions must render");
+        assert!(text.contains("AMAI MANAGED STARTUP INSTRUCTIONS v1"));
+        assert!(text.contains("amai_continuity_startup"));
+        assert!(text.contains("/tmp/amai"));
+        assert!(text.contains("continuity_startup_summary"));
     }
 
     #[test]

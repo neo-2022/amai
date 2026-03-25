@@ -10,6 +10,12 @@ detect_env_vars = ["VSCODE_IPC_HOOK_CLI"]
 detect_workspace_markers = [".vscode"]
 detect_home_markers = [".config/Code", ".config/Code/User"]
 
+[clients.vscode.startup_instructions]
+mode = "managed_workspace_file"
+default_output = "${repo_root}/.github/instructions/amai-continuity-startup.instructions.md"
+install_scope = "workspace_local"
+format = "vscode_instructions_md"
+
 [clients.cursor]
 display_name = "Cursor"
 default_output = "${home}/.cursor/mcp.json"
@@ -18,6 +24,12 @@ priority = 90
 detect_env_vars = ["CURSOR_TRACE_ID"]
 detect_workspace_markers = [".cursor"]
 detect_home_markers = [".cursor"]
+
+[clients.cursor.startup_instructions]
+mode = "managed_workspace_file"
+default_output = "${repo_root}/.cursor/rules/amai-continuity-startup.mdc"
+install_scope = "workspace_local"
+format = "cursor_rules_mdc"
 
 [clients.claude-code]
 display_name = "Claude Code"
@@ -28,6 +40,12 @@ detect_env_vars = ["CLAUDECODE"]
 detect_workspace_markers = [".mcp.json"]
 detect_home_markers = []
 
+[clients.claude-code.startup_instructions]
+mode = "manual_snippet_only"
+default_output = "${repo_root}/tmp/onboarding/claude-code-amai-startup.md"
+install_scope = "manual_generated"
+format = "generic_markdown"
+
 [clients.codex]
 display_name = "Codex"
 default_output = "${home}/.codex/config.toml"
@@ -36,6 +54,12 @@ priority = 80
 detect_env_vars = ["CODEX_HOME"]
 detect_workspace_markers = []
 detect_home_markers = [".codex", ".codex/config.toml"]
+
+[clients.codex.startup_instructions]
+mode = "manual_snippet_only"
+default_output = "${repo_root}/tmp/onboarding/codex-amai-startup-AGENTS.snippet.md"
+install_scope = "manual_generated"
+format = "codex_agents_snippet"
 
 [clients.claude-desktop]
 display_name = "Claude Desktop"
@@ -46,6 +70,12 @@ detect_env_vars = []
 detect_workspace_markers = []
 detect_home_markers = []
 
+[clients.claude-desktop.startup_instructions]
+mode = "manual_snippet_only"
+default_output = "${repo_root}/tmp/onboarding/claude-desktop-amai-startup.md"
+install_scope = "manual_generated"
+format = "generic_markdown"
+
 [clients.generic]
 display_name = "Generic"
 default_output = "${repo_root}/tmp/onboarding/generic-mcp.json"
@@ -54,3 +84,9 @@ priority = 10
 detect_env_vars = []
 detect_workspace_markers = []
 detect_home_markers = []
+
+[clients.generic.startup_instructions]
+mode = "manual_snippet_only"
+default_output = "${repo_root}/tmp/onboarding/generic-amai-startup.md"
+install_scope = "manual_generated"
+format = "generic_markdown"

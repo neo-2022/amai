@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 20:14 MSK
-Ручная сверка guide/docs: 2026-03-25 20:14 MSK
+modified_at: 2026-03-25 21:25 MSK
+Ручная сверка guide/docs: 2026-03-25 21:25 MSK
 
 # Operations
 
@@ -802,13 +802,29 @@ cargo run -- mcp config --client vscode --cwd /path/to/art-memory-agent-index
 Операционно это нужно читать так:
 - `mcp config` / onboarding — это разовая настройка клиента;
 - это не команда, которую пользователь должен повторять перед каждым новым чатом;
-- после такой настройки новый чат в этом клиенте должен сам вызывать `Amai continuity startup`
-  для текущего проекта;
+- после такой настройки новый чат может честно рассчитывать на auto-start только если
+  для этого клиента materialized startup artifact или у проекта уже есть свой rule file;
 - для MCP-клиентов этот startup path теперь должен идти через tool `amai_continuity_startup`,
   а не через свободную prompt-реконструкцию;
 - просто открыть папку проекта недостаточно, если сам клиент ещё не подключён к `Amai`;
 - первое сообщение пользователя должно быть обычным рабочим сообщением, а не специальной
   фразой для восстановления continuity.
+
+Текущий truthful runtime contour по клиентам теперь такой:
+- `VS Code`
+  - onboarding пишет managed workspace instruction file
+    `.github/instructions/amai-continuity-startup.instructions.md`;
+  - это instruction-backed auto-start contour;
+- `Cursor`
+  - onboarding пишет managed project rule file
+    `.cursor/rules/amai-continuity-startup.mdc`;
+  - это instruction-backed auto-start contour;
+- `Codex`
+  - onboarding пишет MCP config;
+  - startup пока materialize-ится как manual snippet для project `AGENTS.md`, потому что
+    `Amai` не должен молча переписывать корневой rule file пользователя;
+- `Claude Code`, `Claude Desktop`, `Generic`
+  - пока получают manual startup snippets и не должны считаться auto-start guaranteed.
 
 ## Onboarding
 

@@ -2244,6 +2244,10 @@ fn server_instructions() -> String {
     .join(" ")
 }
 
+pub fn project_chat_startup_contract() -> Value {
+    protocol_manifest()["startup_contracts"]["project_chat_startup"].clone()
+}
+
 fn protocol_manifest() -> Value {
     json!({
         "version": "mcp-contract-v2",
