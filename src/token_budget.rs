@@ -6640,6 +6640,40 @@ pub async fn record_context_pack_event(
     Ok(())
 }
 
+pub async fn record_continuity_restore_observed_event(
+    db: &Client,
+    project_code: &str,
+    namespace_code: &str,
+    prompt_text: &str,
+    source_kind: &str,
+) -> Result<()> {
+    let prompt_text = prompt_text.trim();
+    if prompt_text.is_empty() {
+        return Ok(());
+    }
+
+    let repo_root = config::discover_repo_root(None)?;
+    let config = load_config(&repo_root)?;
+    let tokenizer = build_tokenizer(&config.measurement.tokenizer)?;
+    let continuity_restore_tokens = tokenizer.encode_with_special_tokens(prompt_text).len() as u64;
+    let traffic_class = derive_traffic_class(source_kind);
+    let mut event = build_continuity_restore_observed_event(
+        project_code,
+        namespace_code,
+        source_kind,
+        &config.measurement,
+        &config.contract,
+        prompt_text,
+        continuity_restore_tokens,
+    )?;
+    if traffic_class == "live" {
+        let profile = resolve_profile(&config, None, &repo_root)?;
+        enrich_live_event_payload(db, &mut event, &profile).await?;
+    }
+    let _ = postgres::insert_observability_snapshot(db, "token_budget_event", &event).await?;
+    Ok(())
+}
+
 pub async fn record_verify_context_pack_event(db: &Client, payload: &Value) -> Result<()> {
     record_context_pack_event(db, payload, "verify_context_pack").await
 }
@@ -10167,6 +10201,108 @@ fn build_event_payload(
     }))
 }
 
+fn build_continuity_restore_observed_event(
+    project_code: &str,
+    namespace_code: &str,
+    source_kind: &str,
+    measurement: &MeasurementConfig,
+    contract: &TokenBudgetContractConfig,
+    prompt_text: &str,
+    continuity_restore_tokens: u64,
+) -> Result<Value> {
+    let timestamp_utc = current_epoch_ms()?;
+    let event_id = Uuid::new_v4().to_string();
+    let traffic_class = derive_traffic_class(source_kind);
+    Ok(json!({
+        "token_budget_event": {
+            "event_id": event_id,
+            "correlation_id": event_id,
+            "context_pack_id": Value::Null,
+            "timestamp_utc": timestamp_utc,
+            "occurred_at_epoch_ms": timestamp_utc,
+            "ingested_at_epoch_ms": timestamp_utc,
+            "source_kind": source_kind,
+            "traffic_class": traffic_class,
+            "measurement_scope": "whole_cycle_observed_lower_bound",
+            "payload_origin": "continuity_startup_observed_lower_bound",
+            "contract": token_contract_metadata_json(contract),
+            "project": project_code,
+            "project_code": project_code,
+            "namespace": namespace_code,
+            "namespace_code": namespace_code,
+            "query": "CHAT_START_RESTORE",
+            "query_hash": hex_sha256(prompt_text.as_bytes()),
+            "query_type": "continuity_restore",
+            "target_kind": "continuity_restore",
+            "baseline_hit_target": false,
+            "amai_hit_target": true,
+            "cold_warm_state": "observed_only",
+            "baseline_strategy": "observed_only",
+            "retrieval_mode": Value::Null,
+            "tokenizer": measurement.tokenizer,
+            "latency_ms": 0,
+            "baseline_tokens": 0,
+            "delivered_tokens": 0,
+            "gross_savings_pct": 0.0,
+            "naive_limit_files": measurement.naive_limit_files,
+            "naive_max_bytes_per_file": measurement.naive_max_bytes_per_file,
+            "visible_projects": [project_code],
+            "naive_scope": {
+                "files_considered": 0,
+                "files": [],
+                "rendered_bytes": 0,
+                "tokens": 0,
+            },
+            "context_pack_render": {
+                "rendered_bytes": 0,
+                "tokens": 0,
+            },
+            "whole_cycle_observed": {
+                "client_prompt_tokens": Value::Null,
+                "assistant_generation_tokens": Value::Null,
+                "tool_overhead_tokens": Value::Null,
+                "continuity_restore_tokens": continuity_restore_tokens,
+            },
+            "recovery": {
+                "recovery_tokens": 0,
+                "fallback_triggered": false,
+                "fallback_count": 0,
+            },
+            "quality": {
+                "quality_ok": true,
+                "quality_score": 1.0,
+                "quality_method": "continuity_restore_observed",
+                "quality_tier": "observed_only",
+                "head_hit_target": true,
+            },
+            "followup": {
+                "needed_followup": false,
+                "followup_count": 0,
+                "followup_of_event_id": Value::Null,
+                "resolved_by_event_id": Value::Null,
+            },
+            "shape": {
+                "document_hits": 0,
+                "symbol_hits": 0,
+                "file_hits": 0,
+                "sources_count": 0,
+                "chunks_count": 0,
+                "pack_token_count": 0,
+                "deduped_token_count": 0,
+            },
+            "savings": {
+                "saved_tokens": 0,
+                "effective_saved_tokens": 0,
+                "savings_factor": 0.0,
+                "savings_percent": 0.0,
+                "effective_savings_percent": 0.0,
+            },
+            "continuity_restore_prompt_length_chars": prompt_text.len(),
+            "continuity_restore_prompt_sha256": hex_sha256(prompt_text.as_bytes()),
+        }
+    }))
+}
+
 fn derive_traffic_class(source_kind: &str) -> String {
     if source_kind.starts_with("live_") {
         "live".to_string()
@@ -11113,7 +11249,8 @@ mod tests {
         apply_reverification_metadata, baseline_strategy_breakdown,
         bind_infra_cost_profile_json_from_source, bind_rate_card_json_from_source,
         build_adjustment_registry_json, build_adjustment_request_schema_json,
-        build_baseline_contract_json, build_billing_policy_json, build_contractual_evidence_pack,
+        build_baseline_contract_json, build_billing_policy_json,
+        build_continuity_restore_observed_event, build_contractual_evidence_pack,
         build_contractual_statement_summary, build_event_payload,
         build_external_truth_sources_json, build_margin_contract_json, build_margin_scope,
         build_metering_freshness_contract_json, build_metering_freshness_summary,
@@ -11137,7 +11274,7 @@ mod tests {
         default_settlement_status, default_statement_period_governance_version,
         default_suitability_model_version, default_telemetry_surface_split_version,
         derive_baseline_strategy, derive_quality_verdict, derive_query_type, derive_traffic_class,
-        event_to_json, followup_queries_related, include_traffic_class_in_report,
+        event_to_json, followup_queries_related, hex_sha256, include_traffic_class_in_report,
         latency_slice_breakdown, load_adjustment_registry_from_source,
         load_provider_invoice_binding_from_source, load_provider_usage_binding_from_source,
         needs_live_reverification, parse_infra_cost_profile_file, parse_rate_card_file,
@@ -15548,6 +15685,39 @@ effective_to_epoch_ms = 2000
                 target_kind: "symbol",
             },
         ));
+    }
+
+    #[test]
+    fn continuity_restore_observed_event_carries_prompt_meter() {
+        let measurement = measurement_fixture();
+        let contract = contract_fixture();
+        let prompt_text = "CHAT_START_RESTORE\nProject: Art\n";
+        let payload = build_continuity_restore_observed_event(
+            "art",
+            "continuity",
+            "proof_continuity_startup",
+            &measurement,
+            &contract,
+            prompt_text,
+            37,
+        )
+        .expect("payload");
+        let event = &payload["token_budget_event"];
+
+        assert_eq!(
+            event["measurement_scope"],
+            "whole_cycle_observed_lower_bound"
+        );
+        assert_eq!(event["source_kind"], "proof_continuity_startup");
+        assert_eq!(event["query_type"], "continuity_restore");
+        assert_eq!(
+            event["whole_cycle_observed"]["continuity_restore_tokens"],
+            37
+        );
+        assert_eq!(event["baseline_tokens"], 0);
+        assert_eq!(event["delivered_tokens"], 0);
+        assert_eq!(event["quality"]["quality_ok"], true);
+        assert_eq!(event["query_hash"], hex_sha256(prompt_text.as_bytes()));
     }
 
     fn unique_test_repo_root(name: &str) -> PathBuf {

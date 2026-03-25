@@ -265,6 +265,12 @@ pub struct ContinuityStartupArgs {
     pub namespace: String,
     #[arg(long, default_value_t = false)]
     pub json: bool,
+    #[arg(
+        long,
+        default_value = "live_continuity_startup",
+        help = "Token ledger source kind for continuity-startup observed whole-cycle events. Use proof_/verify_ prefixes for engineering runs."
+    )]
+    pub token_source_kind: String,
 }
 
 #[derive(Debug, Clone, Args)]

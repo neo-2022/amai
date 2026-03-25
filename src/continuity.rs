@@ -9,6 +9,7 @@ use crate::eval_verdict::{self, EvalPattern, EvalSignals};
 use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, ProjectRecord};
 use crate::retrieval_science;
 use crate::s3;
+use crate::token_budget;
 use crate::working_state;
 use crate::workspace_graph;
 use anyhow::{Context, Result, anyhow, bail};
@@ -484,6 +485,16 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
         &context.handoff_summary,
         context.restore.as_ref(),
     );
+    token_budget::record_continuity_restore_observed_event(
+        &db,
+        &context.project.code,
+        &context.namespace.code,
+        chat_start_restore["chat_start_restore"]["prompt_text"]
+            .as_str()
+            .unwrap_or_default(),
+        &args.token_source_kind,
+    )
+    .await?;
     if args.json {
         let payload = build_continuity_startup_payload(&context, &chat_start_restore)?;
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -747,6 +758,7 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
         repo_root: args.repo_root.clone(),
         namespace: args.namespace.clone(),
         json: false,
+        token_source_kind: "verify_continuity_startup".to_string(),
     };
     let context = load_startup_context(&db, &startup_args).await?;
     let direct_handoff_summary =

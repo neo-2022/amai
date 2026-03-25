@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:22 MSK
-Ручная сверка guide/docs: 2026-03-25 14:22 MSK
+modified_at: 2026-03-25 14:29 MSK
+Ручная сверка guide/docs: 2026-03-25 14:29 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1503,6 +1503,10 @@ preview, а не только raw count.
     `continuity_restore_tokens`,
     чтобы upstream client мог передавать whole-cycle evidence прямо в ledger, а не через
     задний repair path.
+  - `continuity startup` тоже начал материализовать self-observed component:
+    он может записывать `continuity_restore_tokens` от собственного `CHAT_START_RESTORE`
+    prompt-text, а engineering/proof вызовы обязаны уводить это в `proof_/verify_`
+    source kind через `--token-source-kind`.
 - metering freshness теперь тоже first-class:
   - `metering_freshness.current_session / rolling_window / lifetime`
   - она отдельно показывает:

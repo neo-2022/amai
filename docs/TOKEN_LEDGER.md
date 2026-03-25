@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:22 MSK
-Ручная сверка guide/docs: 2026-03-25 14:22 MSK
+modified_at: 2026-03-25 14:29 MSK
+Ручная сверка guide/docs: 2026-03-25 14:29 MSK
 
 # Token Ledger
 
@@ -464,6 +464,11 @@ Ledger обязан различать:
   - MCP `amai_context_pack`
   - MCP `amai_token_benchmark`
   - compatibility `memory search`
+- отдельно materialized self-observed path:
+  - `continuity startup` может сам записывать `continuity_restore_tokens` по длине
+    собственного `CHAT_START_RESTORE` prompt-text;
+  - для proof/verify запусков source kind обязан переводиться через
+    `--token-source-kind proof_* / verify_*`, чтобы не contaminate live lane;
 - это означает, что live caller может materialize-ить same-meter evidence не только через
   прямой бинарь `amai`, но и через MCP/bridge path;
 - retrieval path не притворяется, что знает их сам;
