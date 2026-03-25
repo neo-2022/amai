@@ -6794,6 +6794,65 @@ pub async fn observe_rollout_assistant_generation(
     Ok(())
 }
 
+async fn sync_rollout_assistant_generation_for_events(
+    db: &Client,
+    repo_root: &Path,
+    events: &[TokenBudgetEvent],
+) -> Result<bool> {
+    let Some(repo_root_str) = repo_root.to_str() else {
+        return Ok(false);
+    };
+    let target_context_pack_ids = events
+        .iter()
+        .filter(|event| {
+            event.traffic_class == "live"
+                && event.measurement_scope == "retrieval_lower_bound"
+                && event.assistant_generation_tokens.is_none()
+        })
+        .map(|event| event.correlation_id.clone())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>();
+    if target_context_pack_ids.is_empty() {
+        return Ok(false);
+    }
+    let observations =
+        codex_threads::rollout_assistant_generation_observations(repo_root_str, None)?;
+    if observations.is_empty() {
+        return Ok(false);
+    }
+    let mut changed = false;
+    for observation in observations {
+        if !target_context_pack_ids.contains(&observation.context_pack_id) {
+            continue;
+        }
+        let Some(row) =
+            latest_token_budget_snapshot_for_context_pack(db, &observation.context_pack_id).await?
+        else {
+            continue;
+        };
+        let existing = row.payload["token_budget_event"]["whole_cycle_observed"]
+            ["assistant_generation_tokens"]
+            .as_u64();
+        match existing {
+            Some(tokens) if tokens == observation.assistant_generation_tokens => {}
+            Some(_) => {}
+            None => {
+                let _attached = attach_whole_cycle_observed_to_context_pack(
+                    db,
+                    &observation.context_pack_id,
+                    None,
+                    Some(observation.assistant_generation_tokens),
+                    None,
+                    None,
+                )
+                .await?;
+                changed = true;
+            }
+        }
+    }
+    Ok(changed)
+}
+
 pub async fn record_continuity_restore_observed_event(
     db: &Client,
     project_code: &str,
@@ -6900,7 +6959,14 @@ async fn collect_report(
     let profile = resolve_profile(&config, requested_profile, repo_root)?;
     let mut events = load_events(db, include_verify_events, limit).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
-    let events = reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
+    let mut events =
+        reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
+    if sync_rollout_assistant_generation_for_events(db, repo_root, &events).await? {
+        let mut refreshed = load_events(db, include_verify_events, limit).await?;
+        refreshed.sort_by_key(|event| event.created_at_epoch_ms);
+        events =
+            reconcile_followup_recovery(&refreshed, profile.session_gap_minutes as i64 * 60_000);
+    }
 
     let now_epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)

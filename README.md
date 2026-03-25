@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:16 MSK
-Ручная сверка guide/docs: 2026-03-25 15:16 MSK
+modified_at: 2026-03-25 15:33 MSK
+Ручная сверка guide/docs: 2026-03-25 15:33 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1539,6 +1539,17 @@ preview, а не только raw count.
     candidate принимается только если в выбранном turn есть ровно один
     `context_pack_id` и ненулевой `assistant_generation_tokens`;
     ambiguous rollout не имеет права silently guess-ить attribution;
+  - поверх ручного `--apply` report path теперь сам пытается сделать scoped auto-sync:
+    он берёт не один arbitrary latest candidate, а все unambiguous rollout observations,
+    фильтрует их по тем live retrieval events, где `assistant_generation` ещё отсутствует,
+    и только потом дописывает observed value в ledger;
+  - это важно затем, чтобы same-meter path не зависел только от ручного attach и не
+    поднимал lifetime-only evidence, когда для текущего report scope есть более точное
+    совпадение;
+  - truthful ограничение остаётся жёстким:
+    если usable rollout `context_pack_id` не пересекаются с `current_session /
+    rolling_window` correlation set, `assistant_generation` в этих scope честно остаётся
+    unmeasured, даже если lifetime уже начал получать rollout-backed observed values;
   - `continuity startup` тоже начал материализовать self-observed component:
     он может записывать `continuity_restore_tokens` от собственного `CHAT_START_RESTORE`
     prompt-text, а engineering/proof вызовы обязаны уводить это в `proof_/verify_`

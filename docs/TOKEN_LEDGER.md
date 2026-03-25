@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:16 MSK
-Ручная сверка guide/docs: 2026-03-25 15:16 MSK
+modified_at: 2026-03-25 15:33 MSK
+Ручная сверка guide/docs: 2026-03-25 15:33 MSK
 
 # Token Ledger
 
@@ -509,6 +509,15 @@ Ledger обязан различать:
     а observed output tokens должны быть ненулевыми;
   - ambiguous rollout не имеет права silently привязывать assistant-generation к
     произвольному usage event;
+  - report path теперь использует этот source не только вручную:
+    при построении `token-report` он собирает все unambiguous rollout observations,
+    затем пересекает их с live retrieval events, у которых `assistant_generation` ещё
+    отсутствует, и только потом делает attach;
+  - это уменьшает шанс, что report случайно поднимет only-lifetime evidence из старого
+    turn вместо действительно missing current-scope events;
+  - но same-meter claim всё равно запрещён, если usable rollout observations вообще не
+    пересекаются с correlation set текущего `current_session / rolling_window` scope:
+    в таком случае `assistant_generation` там обязан честно остаться `unmeasured`;
 - это означает, что live caller может materialize-ить same-meter evidence не только через
   прямой бинарь `amai`, но и через MCP/bridge path;
 - retrieval path не притворяется, что знает их сам;

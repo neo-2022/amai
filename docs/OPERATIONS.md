@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 15:16 MSK
-Ручная сверка guide/docs: 2026-03-25 15:16 MSK
+modified_at: 2026-03-25 15:33 MSK
+Ручная сверка guide/docs: 2026-03-25 15:33 MSK
 
 # Operations
 
@@ -2019,6 +2019,13 @@ CLI `context pack` front door теперь тоже участвует в same-m
 - этот path тоже fail-closed:
   attach выполняется только если rollout даёт unambiguous candidate с ровно одним
   `context_pack_id` внутри turn и ненулевым observed output token count.
+- report path теперь поверх этого делает scoped auto-sync:
+  при построении `token-report` он собирает все unambiguous rollout observations и
+  пытается attach-ить только те `context_pack_id`, которые реально входят в current
+  live retrieval scope и ещё не имеют `assistant_generation`.
+- если пересечение между usable rollout IDs и текущим session/window correlation set равно
+  нулю, `assistant_generation` в этом scope должен честно остаться `unmeasured`;
+  это не баг surface, а truthful source-gap.
 
 Customer-facing contractual export surface теперь тоже обязан поднимать
 `adjustment_activation_governance`, чтобы future adjustment path был виден отдельно от
