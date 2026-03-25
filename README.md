@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 13:27 MSK
-Ручная сверка guide/docs: 2026-03-25 13:27 MSK
+modified_at: 2026-03-25 13:40 MSK
+Ручная сверка guide/docs: 2026-03-25 13:40 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1479,9 +1479,12 @@ preview, а не только raw count.
     - `future settlement activation governance`
     - `future adjustment activation governance`
 - operational metering contract теперь ещё несёт:
-  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v2`
+  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v3`
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
+  - начиная с `v3` слой ещё и честно поднимает `client_prompt` как observed component
+    из уже записанных `query + tokenizer`, даже если старое событие не несло
+    отдельный `whole_cycle_observed.client_prompt_tokens`.
 - metering freshness теперь тоже first-class:
   - `metering_freshness.current_session / rolling_window / lifetime`
   - она отдельно показывает:

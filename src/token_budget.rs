@@ -12,7 +12,7 @@ use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -503,11 +503,11 @@ fn default_metering_freshness_model_version() -> String {
 }
 
 fn default_agent_cycle_model_version() -> String {
-    "agent-cycle-lower-bound-v2".to_string()
+    "agent-cycle-lower-bound-v3".to_string()
 }
 
 fn default_client_limit_meter_alignment_version() -> String {
-    "client-limit-meter-alignment-v2".to_string()
+    "client-limit-meter-alignment-v3".to_string()
 }
 
 fn default_excluded_taxonomy_version() -> String {
@@ -8330,6 +8330,28 @@ fn normalized_query(query: &str) -> String {
     extract_query_terms(query).join(" ")
 }
 
+fn derived_client_prompt_tokens(
+    event: &TokenBudgetEvent,
+    tokenizer_cache: &mut HashMap<String, Option<CoreBPE>>,
+) -> Option<u64> {
+    if let Some(tokens) = event.client_prompt_tokens {
+        return Some(tokens);
+    }
+    if event.query.is_empty() {
+        return None;
+    }
+    if !tokenizer_cache.contains_key(&event.tokenizer) {
+        tokenizer_cache.insert(
+            event.tokenizer.clone(),
+            build_tokenizer(&event.tokenizer).ok(),
+        );
+    }
+    tokenizer_cache
+        .get(&event.tokenizer)
+        .and_then(|tokenizer| tokenizer.as_ref())
+        .map(|tokenizer| tokenizer.encode_with_special_tokens(&event.query).len() as u64)
+}
+
 fn summarize_events(
     events: &[TokenBudgetEvent],
     now_epoch_ms: i64,
@@ -8391,6 +8413,7 @@ fn summarize_events(
         });
     }
 
+    let mut tokenizer_cache = HashMap::<String, Option<CoreBPE>>::new();
     let total_saved_tokens = events.iter().map(|event| event.saved_tokens).sum::<u64>();
     let total_naive_tokens = events.iter().map(|event| event.naive_tokens).sum::<u64>();
     let total_context_tokens = events.iter().map(|event| event.context_tokens).sum::<u64>();
@@ -8400,7 +8423,7 @@ fn summarize_events(
         .sum::<u64>();
     let observed_client_prompt_tokens = events
         .iter()
-        .filter_map(|event| event.client_prompt_tokens)
+        .filter_map(|event| derived_client_prompt_tokens(event, &mut tokenizer_cache))
         .sum::<u64>();
     let observed_assistant_generation_tokens = events
         .iter()
@@ -8445,7 +8468,7 @@ fn summarize_events(
         .sum::<u64>();
     let verified_observed_client_prompt_tokens = verified_events
         .iter()
-        .filter_map(|event| event.client_prompt_tokens)
+        .filter_map(|event| derived_client_prompt_tokens(event, &mut tokenizer_cache))
         .sum::<u64>();
     let verified_observed_assistant_generation_tokens = verified_events
         .iter()
@@ -8461,7 +8484,10 @@ fn summarize_events(
         .sum::<u64>();
     let observed_client_prompt_live_events = events
         .iter()
-        .filter(|event| event.traffic_class == "live" && event.client_prompt_tokens.is_some())
+        .filter(|event| {
+            event.traffic_class == "live"
+                && derived_client_prompt_tokens(event, &mut tokenizer_cache).is_some()
+        })
         .count() as u64;
     let observed_assistant_generation_live_events = events
         .iter()
@@ -10006,7 +10032,15 @@ fn build_event_payload(
     let correlation_id = context_pack_id.clone().unwrap_or_else(|| event_id.clone());
     let latency_ms = total_latency_ms(payload);
     let whole_cycle_observed = &payload["whole_cycle_observed"];
-    let client_prompt_tokens = whole_cycle_observed["client_prompt_tokens"].as_u64();
+    let client_prompt_tokens = whole_cycle_observed["client_prompt_tokens"]
+        .as_u64()
+        .or_else(|| {
+            if query.is_empty() {
+                None
+            } else {
+                Some(tokenizer.encode_with_special_tokens(query).len() as u64)
+            }
+        });
     let assistant_generation_tokens = whole_cycle_observed["assistant_generation_tokens"].as_u64();
     let tool_overhead_tokens = whole_cycle_observed["tool_overhead_tokens"].as_u64();
     let continuity_restore_tokens = whole_cycle_observed["continuity_restore_tokens"].as_u64();
@@ -11518,7 +11552,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_meter_alignment_version"],
-            "client-limit-meter-alignment-v2"
+            "client-limit-meter-alignment-v3"
         );
         assert_eq!(
             token_event["whole_cycle_observed"]["client_prompt_tokens"],
@@ -12113,7 +12147,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v2"
+            "client-limit-meter-alignment-v3"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -14528,7 +14562,7 @@ effective_to_epoch_ms = 2000
             "Обычная рабочая машина",
         );
 
-        assert_eq!(economics["model_version"], "agent-cycle-lower-bound-v2");
+        assert_eq!(economics["model_version"], "agent-cycle-lower-bound-v3");
         assert_eq!(economics["status"], "partial_lower_bound");
         assert_eq!(
             economics["current_session"]["without_amai_measured_tokens"],
@@ -14565,7 +14599,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v2"
+            "client-limit-meter-alignment-v3"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["surface_kind"],
@@ -14641,6 +14675,45 @@ effective_to_epoch_ms = 2000
                         .iter()
                         .any(|reason| reason == "client_prompt_partially_measured")
                 })
+        );
+    }
+
+    #[test]
+    fn summarize_events_derives_client_prompt_tokens_from_query_when_field_missing() {
+        let measurement = measurement_fixture();
+        let contract = contract_fixture();
+        let events = vec![token_event! {
+            event_id: "event-derived-client-prompt".to_string(),
+            query: "token report".to_string(),
+            tokenizer: "o200k_base".to_string(),
+            naive_tokens: 100,
+            context_tokens: 40,
+            recovery_tokens: 0,
+            effective_saved_tokens: 60,
+            client_prompt_tokens: None,
+            assistant_generation_tokens: None,
+            tool_overhead_tokens: None,
+            continuity_restore_tokens: None,
+        }];
+
+        let summary = summarize_events(&events, 1_000, &measurement, &contract);
+        assert!(
+            summary["observed_client_prompt_tokens"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+        assert_eq!(summary["observed_client_prompt_live_events"], 1);
+
+        let alignment = super::build_client_limit_meter_alignment(
+            &contract,
+            "statement_preview",
+            &summary,
+            Some(&events),
+        );
+        assert_eq!(
+            alignment["alignment_state"],
+            "whole_cycle_partially_observed_not_meter_equivalent"
         );
     }
 

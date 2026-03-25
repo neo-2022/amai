@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 13:27 MSK
-Ручная сверка guide/docs: 2026-03-25 13:27 MSK
+modified_at: 2026-03-25 13:40 MSK
+Ручная сверка guide/docs: 2026-03-25 13:40 MSK
 
 # Token Ledger
 
@@ -438,6 +438,12 @@ Ledger обязан различать:
 - полностью не наблюдаемые компоненты;
 - частично наблюдаемые whole-cycle компоненты;
 - whole-cycle observed компоненты при всё ещё partial baseline.
+
+Начиная с `client-limit-meter-alignment-v3` `client_prompt` считается observed component
+не только если он явно пришёл в `whole_cycle_observed`, но и как derived fallback из
+уже записанных `query + tokenizer`. Это нужно затем, чтобы progress к client-limit meter
+был виден честно даже на исторических live events, где старый payload ещё не нёс
+отдельное поле `client_prompt_tokens`.
 
 Именно поэтому `client_limit_meter_alignment` теперь должен публиковать ещё и:
 - `partially_measured_components`;
@@ -1107,7 +1113,7 @@ Hashes по line items нужны затем, чтобы:
 - `contractual-statement-export-v17`
 - `settlement-report-preview-v8`
 - `contractual-evidence-pack-v17`
-- `client-limit-meter-alignment-v2`
+- `client-limit-meter-alignment-v3`
 - `adjustment-activation-governance-v1`
 
 Теперь те же customer-facing surface-ы ещё несут `adjustment_activation_governance`.
