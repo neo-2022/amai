@@ -361,6 +361,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         "amai_list_projects".to_string(),
         "amai_list_namespaces".to_string(),
         "amai_observe_whole_cycle".to_string(),
+        "amai_observe_whole_cycle_turn".to_string(),
         "amai_stack_preflight".to_string(),
         "amai_context_pack".to_string(),
         "amai_token_benchmark".to_string(),
@@ -505,6 +506,25 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     let context_pack_id = context_pack["stats"]["context_pack_id"]
         .as_str()
         .ok_or_else(|| anyhow!("MCP context pack returned invalid stats.context_pack_id"))?;
+    let turn_attach = session
+        .tool_call(
+            "amai_observe_whole_cycle_turn",
+            json!({
+                "turn_id": "proof-mcp-turn-attach",
+                "context_pack_ids": [context_pack_id],
+                "assistant_generation_tokens": 41,
+            }),
+        )
+        .await
+        .context("MCP amai_observe_whole_cycle_turn failed")?;
+    if turn_attach["assistant_generation_turn_observed_attach"]["assistant_generation_tokens"]
+        .as_u64()
+        != Some(41)
+    {
+        return Err(anyhow!(
+            "MCP whole-cycle turn observe did not attach assistant_generation_tokens=41"
+        ));
+    }
     let whole_cycle_attach = session
         .tool_call(
             "amai_observe_whole_cycle",
@@ -921,6 +941,12 @@ async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> McpToolR
                 .await
                 .map_err(McpError::tool_runtime)
         }
+        "amai_observe_whole_cycle_turn" => {
+            let args: ObserveWholeCycleTurnToolArgs = parse_arguments(request.arguments)?;
+            tool_observe_whole_cycle_turn(cfg, args)
+                .await
+                .map_err(McpError::tool_runtime)
+        }
         "amai_token_benchmark" => {
             let args: TokenBenchmarkToolArgs = parse_arguments(request.arguments)?;
             tool_token_benchmark(cfg, args)
@@ -1256,6 +1282,39 @@ async fn tool_observe_whole_cycle(
         format!(
             "whole-cycle observed attached for {} :: updated={} retained={}",
             args.context_pack_id, updated, retained
+        ),
+        structured,
+    ))
+}
+
+async fn tool_observe_whole_cycle_turn(
+    cfg: &AppConfig,
+    args: ObserveWholeCycleTurnToolArgs,
+) -> Result<Value> {
+    compatibility::assert_supported(cfg).await?;
+    let db = postgres::connect_admin(cfg).await?;
+    let context_pack_ids = args
+        .context_pack_ids
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    let structured = token_budget::attach_whole_cycle_observed_to_turn_group_with_thread_hint(
+        &db,
+        args.thread_id.as_deref(),
+        &args.turn_id,
+        &context_pack_ids,
+        args.assistant_generation_tokens,
+    )
+    .await?;
+    let attach = &structured["assistant_generation_turn_observed_attach"];
+    Ok(tool_result(
+        format!(
+            "turn-scoped assistant generation attached for {} :: context_packs={} inferred_thread={}",
+            attach["turn_id"].as_str().unwrap_or("unknown"),
+            attach["context_pack_ids"].as_array().map_or(0, |items| items.len()),
+            attach["thread_id_inferred"].as_bool().unwrap_or(false)
         ),
         structured,
     ))
@@ -1959,6 +2018,7 @@ fn server_instructions() -> String {
         "Use amai_stack_preflight when you need to know what this machine can honestly support.",
         "Use amai_context_pack for retrieval instead of asking for whole repositories.",
         "Use amai_observe_whole_cycle when the client only learns assistant output tokens after the context-pack tool call and needs to attach real whole-cycle evidence back to the same event.",
+        "Use amai_observe_whole_cycle_turn when the client learns assistant-generation tokens for one logical turn across multiple context packs and needs a turn-scoped attach without per-event duplication.",
         "Use amai_token_benchmark when you need a measured token-economy comparison.",
         "Use amai_token_report when you need cumulative token savings for the current session, budget window, or lifetime.",
         "Use amai_benchmark_coverage when you need the external benchmark and eval coverage map for Amai.",
@@ -1997,6 +2057,10 @@ fn protocol_manifest() -> Value {
             "amai_observe_whole_cycle": {
                 "summary_field": "whole_cycle_observed_attach",
                 "short_summary_contract": "post-call attachment result for whole-cycle observed tokens on an existing context-pack event",
+            },
+            "amai_observe_whole_cycle_turn": {
+                "summary_field": "assistant_generation_turn_observed_attach",
+                "short_summary_contract": "turn-scoped attachment result for assistant-generation tokens that belong to one logical reply across multiple context-pack events",
             },
             "amai_token_benchmark": {
                 "summary_field": "token_benchmark_summary",
@@ -2159,6 +2223,18 @@ fn tool_definitions() -> Vec<Value> {
             "inputSchema": observe_whole_cycle_input_schema(),
             "annotations": {
                 "title": "Attach Whole-Cycle Observed Tokens",
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+            }
+        }),
+        json!({
+            "name": "amai_observe_whole_cycle_turn",
+            "description": "Attach assistant-generation tokens once for a whole turn-group that spans one or more context-pack events.",
+            "inputSchema": observe_whole_cycle_turn_input_schema(),
+            "annotations": {
+                "title": "Attach Turn-Scoped Assistant Generation",
                 "readOnlyHint": false,
                 "destructiveHint": false,
                 "idempotentHint": false,
@@ -2564,6 +2640,37 @@ fn observe_whole_cycle_input_schema() -> Value {
             }
         },
         "required": ["context_pack_id"],
+        "additionalProperties": false
+    })
+}
+
+fn observe_whole_cycle_turn_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "thread_id": {
+                "type": ["string", "null"],
+                "description": "Optional thread id for the turn-group. If omitted, Amai infers it from working_state metadata for the provided context packs and fails closed on ambiguity."
+            },
+            "turn_id": {
+                "type": "string",
+                "description": "Logical turn id whose assistant-generation tokens should be counted once for the whole turn-group."
+            },
+            "context_pack_ids": {
+                "type": "array",
+                "description": "One or more context-pack ids that belong to the same logical turn-group.",
+                "items": {
+                    "type": "string"
+                },
+                "minItems": 1
+            },
+            "assistant_generation_tokens": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Observed assistant-generation tokens for the whole turn-group. These tokens are counted once, not once per context pack."
+            }
+        },
+        "required": ["turn_id", "context_pack_ids", "assistant_generation_tokens"],
         "additionalProperties": false
     })
 }
@@ -3063,6 +3170,18 @@ struct ObserveWholeCycleToolArgs {
     continuity_restore_tokens: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ObserveWholeCycleTurnToolArgs {
+    #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
+    turn_id: String,
+    #[serde(default)]
+    context_pack_ids: Vec<String>,
+    #[serde(default)]
+    assistant_generation_tokens: u64,
+}
+
 impl ContextPackToolArgs {
     fn to_context_args(&self) -> ContextPackArgs {
         ContextPackArgs {
@@ -3229,9 +3348,9 @@ mod tests {
         ContextPackToolArgs, McpConfigArgs, McpError, benchmark_coverage_summary,
         context_pack_input_schema, context_pack_summary, mcp_tool_error_result,
         memory_matrix_summary, observe_snapshot_summary, observe_whole_cycle_input_schema,
-        protocol_manifest, render_client_config, stack_preflight_summary, summarize_codes,
-        summarize_namespace_modes, token_benchmark_summary, token_report_summary,
-        warm_cache_summary,
+        observe_whole_cycle_turn_input_schema, protocol_manifest, render_client_config,
+        stack_preflight_summary, summarize_codes, summarize_namespace_modes,
+        token_benchmark_summary, token_report_summary, warm_cache_summary,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -3376,6 +3495,22 @@ mod tests {
         assert!(properties.contains_key("context_pack_id"));
         assert!(properties.contains_key("assistant_generation_tokens"));
         assert_eq!(schema["required"], json!(["context_pack_id"]));
+    }
+
+    #[test]
+    fn observe_whole_cycle_turn_schema_requires_turn_group_fields() {
+        let schema = observe_whole_cycle_turn_input_schema();
+        let properties = schema["properties"]
+            .as_object()
+            .expect("properties must be object");
+        assert!(properties.contains_key("thread_id"));
+        assert!(properties.contains_key("turn_id"));
+        assert!(properties.contains_key("context_pack_ids"));
+        assert!(properties.contains_key("assistant_generation_tokens"));
+        assert_eq!(
+            schema["required"],
+            json!(["turn_id", "context_pack_ids", "assistant_generation_tokens"])
+        );
     }
 
     #[test]
@@ -3741,6 +3876,10 @@ mod tests {
         assert_eq!(
             manifest["tool_contracts"]["amai_observe_whole_cycle"]["summary_field"].as_str(),
             Some("whole_cycle_observed_attach")
+        );
+        assert_eq!(
+            manifest["tool_contracts"]["amai_observe_whole_cycle_turn"]["summary_field"].as_str(),
+            Some("assistant_generation_turn_observed_attach")
         );
         assert_eq!(
             manifest["tool_contracts"]["amai_warm_cache"]["summary_field"].as_str(),

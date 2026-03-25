@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 17:15 MSK
-Ручная сверка guide/docs: 2026-03-25 17:15 MSK
+modified_at: 2026-03-25 17:35 MSK
+Ручная сверка guide/docs: 2026-03-25 17:35 MSK
 
 # Token Ledger
 
@@ -542,6 +542,13 @@ whole-cycle компонент на одинаковое число всех liv
   - поэтому для того же `context_pack_id` теперь есть attach path:
     - CLI `observe token-whole-cycle-attach`
     - MCP tool `amai_observe_whole_cycle`
+  - отдельно materialized и turn-group attach path:
+    - CLI `observe token-whole-cycle-turn-attach --thread-id ... --turn-id ...`
+    - MCP `amai_observe_whole_cycle_turn`
+  - turn-group path считает `assistant_generation` один раз на весь `thread_id + turn_id`,
+    а не размножает те же токены по каждому retrieval event;
+  - в MCP `thread_id` можно не передавать только если `working_state` для всех
+    `context_pack_ids` даёт ровно один thread; при неоднозначности inference fail-closed;
   - attach разрешён только fail-closed:
     первый attach допустим,
     повтор того же самого значения допустим,

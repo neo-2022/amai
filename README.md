@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 17:15 MSK
-Ручная сверка guide/docs: 2026-03-25 17:15 MSK
+modified_at: 2026-03-25 17:35 MSK
+Ручная сверка guide/docs: 2026-03-25 17:35 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1514,6 +1514,10 @@ preview, а не только raw count.
     --context-pack-id ... --assistant-generation-tokens ...`.
     Этот путь считает `assistant_generation` один раз на turn-group и не
     дублирует токены по каждому retrieval event.
+  - тот же contour теперь открыт и через MCP:
+    `amai_observe_whole_cycle_turn`.
+    Там `thread_id` можно не передавать, если все `context_pack_ids` принадлежат
+    одному thread в `working_state`; при неоднозначности inference fail-closed.
   - statement/reconciliation path теперь тоже перестал быть retrieval-only:
     внутренний meter lower bound для provider drift/cost preview поднимается от
     `delivered + recovery` к `observed whole-cycle lower bound`, как только такие
@@ -1570,6 +1574,9 @@ preview, а не только raw count.
     candidate принимается только если в выбранном turn есть ровно один
     `context_pack_id` и ненулевой `assistant_generation_tokens`;
     ambiguous rollout не имеет права silently guess-ить attribution;
+  - verify/MCP contour теперь отдельно прогоняет и turn-scoped front door:
+    `verify mcp` обязан уметь вызвать `amai_observe_whole_cycle_turn` и получить
+    `assistant_generation_turn_observed_attach`, а не проверять только single-event attach.
   - поверх ручного `--apply` report path теперь сам пытается сделать scoped auto-sync:
     он берёт не один arbitrary latest candidate, а все unambiguous rollout observations,
     фильтрует их по тем live retrieval events, где `assistant_generation` ещё отсутствует,

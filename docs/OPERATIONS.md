@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 17:15 MSK
-Ручная сверка guide/docs: 2026-03-25 17:15 MSK
+modified_at: 2026-03-25 17:35 MSK
+Ручная сверка guide/docs: 2026-03-25 17:35 MSK
 
 # Operations
 
@@ -2015,6 +2015,13 @@ report path теперь умеет auto-sync их из stored `ami.context_pack
   `cargo run --release -- observe token-whole-cycle-attach --context-pack-id ... --assistant-generation-tokens ...`
 - MCP:
   `amai_observe_whole_cycle`
+- turn-group path:
+  - CLI:
+    `cargo run --release -- observe token-whole-cycle-turn-attach --thread-id ... --turn-id ... --context-pack-id ... --assistant-generation-tokens ...`
+  - MCP:
+    `amai_observe_whole_cycle_turn`
+  - в MCP `thread_id` разрешено опустить только если `working_state` для всех
+    `context_pack_ids` даёт ровно один thread; иначе attach должен fail-closed.
 - для front-door proof есть отдельный сценарий:
   `scripts/proof_token_mcp_assistant_generation.sh`
 - conflicting overwrite запрещён:
@@ -2051,6 +2058,9 @@ report path теперь умеет auto-sync их из stored `ami.context_pack
   --context-pack-id ... --assistant-generation-tokens ...`
   и обязан считать такие токены один раз на `thread_id + turn_id`, а не
   дублировать их по каждому retrieval event.
+- verify/MCP contour теперь тоже обязан это проверять:
+  `verify mcp` вызывает `amai_observe_whole_cycle_turn` и ожидает
+  `assistant_generation_turn_observed_attach`, а не ограничивается single-event attach.
 
 `client_limit_meter_alignment` теперь нельзя читать как flat denominator по всем live events.
 Operator contour обязан учитывать:

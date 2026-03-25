@@ -25,7 +25,7 @@ JOIN (
   FROM ami.observability_snapshots
   WHERE snapshot_kind = 'token_budget_event'
     AND payload->'token_budget_event'->>'traffic_class' = 'live'
-    AND payload->'token_budget_event'->>'measurement_scope' = 'retrieval_lower_bound'
+    AND payload->'token_budget_event'->>'measurement_scope' IN ('retrieval_lower_bound', 'whole_cycle_observed_lower_bound')
     AND (payload->'token_budget_event'->>'assistant_generation_tokens') IS NULL
     AND (payload->'token_budget_event'->'whole_cycle_observed'->>'assistant_generation_tokens') IS NULL
   ORDER BY payload->'token_budget_event'->>'context_pack_id', captured_at_epoch_ms DESC

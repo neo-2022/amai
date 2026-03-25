@@ -7057,16 +7057,16 @@ async fn assistant_generation_turn_observed_snapshots_for_context_packs(
 
 async fn attach_whole_cycle_observed_to_turn_group(
     db: &Client,
-    thread_id: &str,
+    thread_id_hint: Option<&str>,
     turn_id: &str,
     context_pack_ids: &BTreeSet<String>,
     assistant_generation_tokens: u64,
 ) -> Result<Value> {
-    let thread_id = thread_id.trim();
+    let thread_id_hint = thread_id_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let turn_id = turn_id.trim();
-    if thread_id.is_empty() {
-        bail!("thread_id must not be empty");
-    }
     if turn_id.is_empty() {
         bail!("turn_id must not be empty");
     }
@@ -7076,6 +7076,35 @@ async fn attach_whole_cycle_observed_to_turn_group(
     if context_pack_ids.is_empty() {
         bail!("context_pack_ids must not be empty");
     }
+    let metadata = latest_working_state_context_pack_metadata(db, context_pack_ids).await?;
+    let missing_context_pack_thread_ids = context_pack_ids
+        .difference(&metadata.keys().cloned().collect::<BTreeSet<_>>())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !missing_context_pack_thread_ids.is_empty() {
+        let sample = missing_context_pack_thread_ids
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("working_state_event thread_id not found for context_pack_ids={sample}");
+    }
+    let thread_ids = metadata
+        .values()
+        .map(|item| item.thread_id.clone())
+        .collect::<BTreeSet<_>>();
+    let resolved_thread_id = if let Some(thread_id) = thread_id_hint.as_ref() {
+        if !thread_ids.contains(thread_id) {
+            bail!("thread_id does not match working_state scope for requested context_pack_ids");
+        }
+        thread_id.clone()
+    } else if thread_ids.len() == 1 {
+        thread_ids.iter().next().cloned().unwrap_or_default()
+    } else {
+        let sample = thread_ids.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
+        bail!("thread_id inference is ambiguous for requested context_pack_ids; candidates={sample}");
+    };
     let rows = latest_token_budget_snapshots_for_context_packs(db, context_pack_ids).await?;
     let mut missing_context_pack_ids = context_pack_ids
         .difference(&rows.keys().cloned().collect::<BTreeSet<_>>())
@@ -7106,8 +7135,9 @@ async fn attach_whole_cycle_observed_to_turn_group(
         .iter()
         .filter_map(|(context_pack_id, row)| {
             let node = &row.payload["token_budget_event"];
-            let valid = node["traffic_class"].as_str() == Some("live")
-                && node["measurement_scope"].as_str() == Some("retrieval_lower_bound");
+            let measurement_scope = node["measurement_scope"].as_str().unwrap_or_default();
+            let valid = measurement_scope == "retrieval_lower_bound"
+                || measurement_scope == "whole_cycle_observed_lower_bound";
             if valid {
                 None
             } else {
@@ -7122,11 +7152,11 @@ async fn attach_whole_cycle_observed_to_turn_group(
             .cloned()
             .collect::<Vec<_>>()
             .join(", ");
-        bail!("turn-group attach requires live retrieval_lower_bound events; invalid context_pack_ids={sample}");
+        bail!("turn-group attach requires retrieval or whole_cycle_observed events; invalid context_pack_ids={sample}");
     }
     let payload = json!({
         "_observability": {
-            "source_event_id": format!("assistant_generation_turn:{thread_id}:{turn_id}"),
+            "source_event_id": format!("assistant_generation_turn:{resolved_thread_id}:{turn_id}"),
             "source_kind": "live_assistant_generation_turn_observed",
             "scope_project_code": project_code,
             "scope_namespace_code": namespace_code,
@@ -7140,7 +7170,7 @@ async fn attach_whole_cycle_observed_to_turn_group(
         },
         "assistant_generation_turn_observed": {
             "schema_version": "assistant-generation-turn-observed-v1",
-            "thread_id": thread_id,
+            "thread_id": resolved_thread_id,
             "turn_id": turn_id,
             "assistant_generation_tokens": assistant_generation_tokens,
             "context_pack_ids": context_pack_ids.iter().cloned().collect::<Vec<_>>(),
@@ -7157,11 +7187,12 @@ async fn attach_whole_cycle_observed_to_turn_group(
     let result = json!({
         "assistant_generation_turn_observed_attach": {
             "snapshot_id": snapshot_id,
-            "thread_id": thread_id,
+            "thread_id": resolved_thread_id,
             "turn_id": turn_id,
             "assistant_generation_tokens": assistant_generation_tokens,
             "context_pack_ids": context_pack_ids.iter().cloned().collect::<Vec<_>>(),
             "attached": true,
+            "thread_id_inferred": thread_id_hint.is_none(),
             "observation_source": "client_turn_attach_v1",
             "note": "Turn-scoped attach is replay-protected by thread_id + turn_id and keeps assistant_generation at group scope instead of duplicating it into every token_budget_event."
         }
@@ -7183,7 +7214,7 @@ pub async fn attach_whole_cycle_observed_for_turn_group(
         .collect::<BTreeSet<_>>();
     let payload = attach_whole_cycle_observed_to_turn_group(
         db,
-        &args.thread_id,
+        Some(&args.thread_id),
         &args.turn_id,
         &context_pack_ids,
         args.assistant_generation_tokens,
@@ -7191,6 +7222,23 @@ pub async fn attach_whole_cycle_observed_for_turn_group(
     .await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
+}
+
+pub async fn attach_whole_cycle_observed_to_turn_group_with_thread_hint(
+    db: &Client,
+    thread_id_hint: Option<&str>,
+    turn_id: &str,
+    context_pack_ids: &BTreeSet<String>,
+    assistant_generation_tokens: u64,
+) -> Result<Value> {
+    attach_whole_cycle_observed_to_turn_group(
+        db,
+        thread_id_hint,
+        turn_id,
+        context_pack_ids,
+        assistant_generation_tokens,
+    )
+    .await
 }
 
 async fn derive_rollout_assistant_generation_scope(

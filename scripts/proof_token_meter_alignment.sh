@@ -33,12 +33,18 @@ for scope in ("current_session", "rolling_window", "lifetime"):
     assert "not_applicable_components" in alignment, alignment
     assert alignment["surface_kind"] == "statement_preview", preview
     assert alignment["same_meter_as_client_limit"] is False, preview
-    assert "assistant_generation" in alignment["missing_components"], preview
     assert "component_event_coverage" in alignment, preview
     assert alignment["events_total"] >= alignment["live_events_count"], preview
     assert alignment["events_total"] >= alignment["non_live_events_count"], preview
     assistant = next(item for item in alignment["component_event_coverage"] if item["code"] == "assistant_generation")
     assert assistant["target_scope_kind"] == "assistant_generation_turn_scope", alignment
+    if assistant["target_scope_applicable"]:
+        assert (
+            "assistant_generation" in alignment["missing_components"]
+            or assistant["observed_live_events"] == assistant["target_live_events_count"]
+        ), preview
+    else:
+        assert "assistant_generation" in alignment["not_applicable_components"], preview
 
 for scope in ("current_session", "rolling_window", "lifetime"):
     scope_payload = agent_cycle.get(scope)
