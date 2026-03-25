@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 22:29 MSK
-Ручная сверка guide/docs: 2026-03-25 22:29 MSK
+modified_at: 2026-03-25 22:49 MSK
+Ручная сверка guide/docs: 2026-03-25 22:49 MSK
 
 # Token Ledger
 
@@ -1413,3 +1413,10 @@ Ledger считается trustworthy только если одновремен
 - это не “лучшая цифра в лаборатории”;
 - это не “сырые savings без штрафов”;
 - это живая проверенная экономия токенов на реальной работе.
+`current_session` теперь обязан использовать этот session grouping буквально:
+- сначала берётся latest `session_id`;
+- все события с тем же `session_id` считаются текущей logical session;
+- если у latest события `session_id` пустой, только тогда разрешён fallback к old time-gap heuristic;
+- `live_continuity_startup` теперь считается канонической boundary для новой logical session.
+- runtime proof:
+  `scripts/proof_token_session_boundary.sh`

@@ -8061,10 +8061,20 @@ async fn enrich_live_event_payload(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let current_source_kind = node
+        .get("source_kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let session_gap_ms = profile.session_gap_minutes as i64 * 60_000;
     let mut events = load_events(db, false, Some(64)).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
-    let session_id = resolve_session_id(&events, timestamp_utc, session_gap_ms);
+    let session_id = resolve_session_id(
+        &events,
+        timestamp_utc,
+        session_gap_ms,
+        &current_source_kind,
+    );
     node.insert("session_id".to_string(), Value::String(session_id));
     node.insert(
         "rolling_window_profile".to_string(),
@@ -9034,6 +9044,16 @@ fn current_session_events(
     let Some(latest) = events.last() else {
         return Vec::new();
     };
+    if !latest.session_id.trim().is_empty() {
+        let session = events
+            .iter()
+            .filter(|event| event.session_id == latest.session_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !session.is_empty() {
+            return session;
+        }
+    }
     let mut session = vec![latest.clone()];
     let mut newer_ts = latest.created_at_epoch_ms;
     for event in events.iter().rev().skip(1) {
@@ -9045,6 +9065,10 @@ fn current_session_events(
     }
     session.reverse();
     session
+}
+
+fn source_kind_starts_new_session(source_kind: &str) -> bool {
+    source_kind.ends_with("continuity_startup")
 }
 
 fn active_same_meter_scope_events(
@@ -9061,7 +9085,15 @@ fn active_same_meter_scope_events(
     scoped
 }
 
-fn resolve_session_id(events: &[TokenBudgetEvent], current_ts: i64, session_gap_ms: i64) -> String {
+fn resolve_session_id(
+    events: &[TokenBudgetEvent],
+    current_ts: i64,
+    session_gap_ms: i64,
+    current_source_kind: &str,
+) -> String {
+    if source_kind_starts_new_session(current_source_kind) {
+        return Uuid::new_v4().to_string();
+    }
     events
         .iter()
         .rev()
@@ -12641,8 +12673,8 @@ mod tests {
         load_provider_invoice_binding_from_source, load_provider_usage_binding_from_source,
         needs_live_reverification, parse_infra_cost_profile_file, parse_rate_card_file,
         parse_snapshot_event, provider_rate_card_default_path, provider_usage_default_path,
-        reconcile_followup_recovery, repair_legacy_token_event_payload, report_contract_json,
-        summarize_events,
+        current_session_events, reconcile_followup_recovery, repair_legacy_token_event_payload,
+        report_contract_json, resolve_session_id, summarize_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -16469,6 +16501,103 @@ effective_to_epoch_ms = 2000
         assert_eq!(event["quality"]["quality_method"], "legacy_unverified");
         assert_eq!(event["savings"]["effective_saved_tokens"], 800);
         assert_eq!(event["savings"]["effective_savings_percent"], 80.0);
+    }
+
+    #[test]
+    fn current_session_events_prefers_latest_session_id_over_time_gap_chain() {
+        let events = vec![
+            token_event! {
+                created_at_epoch_ms: 10,
+                event_id: "event-1".to_string(),
+                session_id: "session-1".to_string(),
+                timestamp_utc: 10,
+            },
+            token_event! {
+                created_at_epoch_ms: 20,
+                event_id: "event-2".to_string(),
+                session_id: "session-1".to_string(),
+                timestamp_utc: 20,
+            },
+            token_event! {
+                created_at_epoch_ms: 30,
+                event_id: "event-3".to_string(),
+                session_id: "session-2".to_string(),
+                timestamp_utc: 30,
+            },
+            token_event! {
+                created_at_epoch_ms: 40,
+                event_id: "event-4".to_string(),
+                session_id: "session-2".to_string(),
+                timestamp_utc: 40,
+            },
+        ];
+
+        let session = current_session_events(&events, 60_000);
+        let ids = session
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["event-3", "event-4"]);
+    }
+
+    #[test]
+    fn current_session_events_falls_back_to_gap_for_legacy_empty_session_id() {
+        let events = vec![
+            token_event! {
+                created_at_epoch_ms: 10,
+                event_id: "event-1".to_string(),
+                session_id: "".to_string(),
+                timestamp_utc: 10,
+            },
+            token_event! {
+                created_at_epoch_ms: 20,
+                event_id: "event-2".to_string(),
+                session_id: "".to_string(),
+                timestamp_utc: 20,
+            },
+            token_event! {
+                created_at_epoch_ms: 90_100,
+                event_id: "event-3".to_string(),
+                session_id: "".to_string(),
+                timestamp_utc: 90_100,
+            },
+        ];
+
+        let session = current_session_events(&events, 60_000);
+        let ids = session
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["event-3"]);
+    }
+
+    #[test]
+    fn continuity_startup_source_kind_starts_new_session_id() {
+        let events = vec![token_event! {
+            created_at_epoch_ms: 10,
+            event_id: "event-1".to_string(),
+            session_id: "session-1".to_string(),
+            timestamp_utc: 10,
+            source_kind: "live_context_pack".to_string(),
+        }];
+
+        let session_id = resolve_session_id(&events, 20, 60_000, "live_continuity_startup");
+        assert_ne!(session_id, "session-1");
+        assert!(!session_id.is_empty());
+    }
+
+    #[test]
+    fn non_startup_source_kind_reuses_recent_live_session_id() {
+        let events = vec![token_event! {
+            created_at_epoch_ms: 10,
+            event_id: "event-1".to_string(),
+            session_id: "session-1".to_string(),
+            timestamp_utc: 10,
+            source_kind: "live_context_pack".to_string(),
+        }];
+
+        let session_id = resolve_session_id(&events, 20, 60_000, "live_context_pack");
+        assert_eq!(session_id, "session-1");
     }
 
     #[test]

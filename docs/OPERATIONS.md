@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 22:29 MSK
-Ручная сверка guide/docs: 2026-03-25 22:29 MSK
+modified_at: 2026-03-25 22:49 MSK
+Ручная сверка guide/docs: 2026-03-25 22:49 MSK
 
 # Operations
 
@@ -41,6 +41,12 @@ proof/verify события.
 - если инженерный сценарий идёт через `verify memory-matrix`, archival retrieval внутри matrix тоже
   обязан явно передавать `verify_memory_matrix_context_pack`, а не наследовать CLI default
   `live_context_pack`;
+- `current_session` теперь должен резаться сначала по latest `session_id`, а не только по тайм-gap;
+  time-gap остаётся только как legacy fallback для старых событий без session grouping;
+- `live_continuity_startup` теперь считается явной boundary для нового logical session, чтобы новый
+  chat/window мог стартовать clean-session even if old live traffic был совсем недавно;
+- для runtime-доказательства этого контура есть отдельный сценарий:
+  `./scripts/proof_token_session_boundary.sh`;
 - если contamination уже попал в текущую live session до этого guardrail, repair выполняется только
   честным reverify/new window path, а не тихим задним переписыванием истории.
 

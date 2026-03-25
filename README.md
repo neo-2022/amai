@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 22:29 MSK
-Ручная сверка guide/docs: 2026-03-25 22:29 MSK
+modified_at: 2026-03-25 22:49 MSK
+Ручная сверка guide/docs: 2026-03-25 22:49 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -84,6 +84,11 @@ modified_at: 2026-03-25 22:29 MSK
 - это правило относится и к `verify memory-matrix`: archival context-pack вызовы внутри matrix
   теперь тоже обязаны идти с `verify_memory_matrix_context_pack`, а не с CLI default
   `live_context_pack`.
+- `current_session` теперь режется по latest `session_id`, а `live_continuity_startup`
+  запускает новую logical session boundary; это нужно затем, чтобы новый chat/window не тащил
+  старый live хвост только потому, что между ними не было большого time-gap.
+- для этого слоя есть отдельный runtime proof:
+  `scripts/proof_token_session_boundary.sh`
 
 Поверх этого `Amai` теперь автоматически собирает ещё и `chat-start restore pack`.
 
