@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 12:54 MSK
-Ручная сверка guide/docs: 2026-03-25 12:54 MSK
+modified_at: 2026-03-25 13:12 MSK
+Ручная сверка guide/docs: 2026-03-25 13:12 MSK
 
 # Token Ledger
 
@@ -1086,10 +1086,17 @@ Hashes по line items нужны затем, чтобы:
 - и только потом, в будущем, settlement/dispute workflow.
 
 Текущие surface versions для этого слоя:
-- `contractual-statement-export-v16`
-- `settlement-report-preview-v7`
-- `contractual-evidence-pack-v16`
+- `contractual-statement-export-v17`
+- `settlement-report-preview-v8`
+- `contractual-evidence-pack-v17`
 - `client-limit-meter-alignment-v1`
+- `adjustment-activation-governance-v1`
+
+Теперь те же customer-facing surface-ы ещё несут `adjustment_activation_governance`.
+Это отдельный report-only governance слой, который показывает:
+- готов ли future adjustment path;
+- чем он заблокирован;
+- и какие correction/credit/dispute semantics уже materialized в preview.
 
 ## Preliminary vs stable
 

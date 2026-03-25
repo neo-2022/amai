@@ -118,6 +118,8 @@ struct TokenBudgetContractConfig {
     customer_contractual_boundary_version: String,
     #[serde(default = "default_settlement_activation_governance_version")]
     settlement_activation_governance_version: String,
+    #[serde(default = "default_adjustment_activation_governance_version")]
+    adjustment_activation_governance_version: String,
     #[serde(default = "default_billing_mode")]
     billing_mode: String,
     #[serde(default = "default_reconciliation_contract_version")]
@@ -175,6 +177,8 @@ impl Default for TokenBudgetContractConfig {
             customer_contractual_boundary_version: default_customer_contractual_boundary_version(),
             settlement_activation_governance_version:
                 default_settlement_activation_governance_version(),
+            adjustment_activation_governance_version:
+                default_adjustment_activation_governance_version(),
             billing_mode: default_billing_mode(),
             reconciliation_contract_version: default_reconciliation_contract_version(),
             margin_model_version: default_margin_model_version(),
@@ -586,6 +590,10 @@ fn default_settlement_activation_governance_version() -> String {
     "settlement-activation-governance-v1".to_string()
 }
 
+fn default_adjustment_activation_governance_version() -> String {
+    "adjustment-activation-governance-v1".to_string()
+}
+
 fn default_billing_mode() -> String {
     "report_only".to_string()
 }
@@ -603,15 +611,15 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v16".to_string()
+    "contractual-evidence-pack-v17".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v16".to_string()
+    "contractual-statement-export-v17".to_string()
 }
 
 fn default_settlement_report_preview_version() -> String {
-    "settlement-report-preview-v7".to_string()
+    "settlement-report-preview-v8".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -661,6 +669,9 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "settlement_activation_governance_version": contract
             .settlement_activation_governance_version
             .clone(),
+        "adjustment_activation_governance_version": contract
+            .adjustment_activation_governance_version
+            .clone(),
         "billing_mode": contract.billing_mode.clone(),
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "margin_model_version": contract.margin_model_version.clone(),
@@ -709,6 +720,9 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "customer_contractual_boundary_version": contract.customer_contractual_boundary_version.clone(),
         "settlement_activation_governance_version": contract
             .settlement_activation_governance_version
+            .clone(),
+        "adjustment_activation_governance_version": contract
+            .adjustment_activation_governance_version
             .clone(),
         "billing_mode": contract.billing_mode.clone(),
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
@@ -4384,6 +4398,110 @@ fn build_settlement_activation_governance_from_export(
     })
 }
 
+fn adjustment_activation_governance_state(statement_export_preview: &Value) -> &'static str {
+    let statement_preview = &statement_export_preview["line_item_surfaces"]["statement_preview"];
+    let adjustment_preview = &statement_preview["adjustment_preview"];
+    let adjustment_status = adjustment_preview["status"].as_str().unwrap_or("unknown");
+
+    if matches!(adjustment_status, "not_configured" | "default_path_missing") {
+        "registry_not_configured_report_only"
+    } else if adjustment_preview["disputed_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "dispute_hold_open_report_only"
+    } else if adjustment_preview["pending_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "pending_adjustment_review_report_only"
+    } else if adjustment_preview["applied_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "adjusted_report_only"
+    } else {
+        "future_adjustment_ready_reserved"
+    }
+}
+
+fn future_adjustment_activation_state(statement_export_preview: &Value) -> &'static str {
+    let statement_preview = &statement_export_preview["line_item_surfaces"]["statement_preview"];
+    let adjustment_preview = &statement_preview["adjustment_preview"];
+    let adjustment_status = adjustment_preview["status"].as_str().unwrap_or("unknown");
+
+    if matches!(adjustment_status, "not_configured" | "default_path_missing") {
+        "future_adjustment_registry_not_bound"
+    } else if adjustment_preview["disputed_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "future_adjustment_blocked_by_dispute"
+    } else if adjustment_preview["pending_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "future_adjustment_blocked_by_review"
+    } else if adjustment_preview["applied_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "future_adjustment_materialized_report_only"
+    } else {
+        "future_adjustment_ready_reserved"
+    }
+}
+
+fn future_adjustment_activation_blocking_reasons(statement_export_preview: &Value) -> Vec<String> {
+    match future_adjustment_activation_state(statement_export_preview) {
+        "future_adjustment_registry_not_bound" => vec!["adjustment_registry_not_bound".to_string()],
+        "future_adjustment_blocked_by_dispute" => vec!["dispute_hold_open".to_string()],
+        "future_adjustment_blocked_by_review" => vec!["pending_adjustment_review".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn build_adjustment_activation_governance_from_export(
+    contract: &TokenBudgetContractConfig,
+    statement_export_preview: &Value,
+) -> Value {
+    let statement_preview = &statement_export_preview["line_item_surfaces"]["statement_preview"];
+    let adjustment_preview = &statement_preview["adjustment_preview"];
+    let registry_status = adjustment_preview["registry_status"]
+        .as_str()
+        .or_else(|| adjustment_preview["status"].as_str())
+        .unwrap_or("unknown");
+    let adjustment_status = adjustment_preview["status"]
+        .as_str()
+        .or_else(|| adjustment_preview["registry_status"].as_str())
+        .unwrap_or("unknown");
+
+    json!({
+        "model_version": contract.adjustment_activation_governance_version.clone(),
+        "governance_state": adjustment_activation_governance_state(statement_export_preview),
+        "future_adjustment_activation_state": future_adjustment_activation_state(statement_export_preview),
+        "future_adjustment_activation_blocking_reasons": future_adjustment_activation_blocking_reasons(statement_export_preview),
+        "registry_status": registry_status,
+        "adjustment_status": adjustment_status,
+        "request_schema_version": adjustment_preview["request_schema_version"].clone(),
+        "registry_version": adjustment_preview["registry_version"].clone(),
+        "correction_action_state": adjustment_preview["correction_action_state"].clone(),
+        "credit_action_state": statement_export_preview["credit_action_state"].clone(),
+        "dispute_action_state": statement_export_preview["dispute_action_state"].clone(),
+        "pending_entries_count": adjustment_preview["pending_entries_count"].as_u64().unwrap_or(0),
+        "applied_entries_count": adjustment_preview["applied_entries_count"].as_u64().unwrap_or(0),
+        "disputed_entries_count": adjustment_preview["disputed_entries_count"].as_u64().unwrap_or(0),
+        "allowed_future_actions": adjustment_preview["allowed_future_actions"].clone(),
+        "note": "Этот governance-слой отдельно объясняет, готов ли future adjustment path, чем он сейчас заблокирован и где report-only layer уже materialized pending/applied/disputed semantics."
+    })
+}
+
 fn settlement_report_preview_from_export(
     contract: &TokenBudgetContractConfig,
     statement_export_preview: &Value,
@@ -4397,6 +4515,10 @@ fn settlement_report_preview_from_export(
                 "customer_settlement_report_preview_report_only",
                 statement_export_preview,
             );
+    }
+    if settlement_report_preview["adjustment_activation_governance"].is_null() {
+        settlement_report_preview["adjustment_activation_governance"] =
+            build_adjustment_activation_governance_from_export(contract, statement_export_preview);
     }
     settlement_report_preview
 }
@@ -5693,6 +5815,8 @@ fn build_statement_export_preview(
     );
     preview["settlement_activation_governance"] =
         build_settlement_activation_governance_from_export(contract, &preview);
+    preview["adjustment_activation_governance"] =
+        build_adjustment_activation_governance_from_export(contract, &preview);
     preview["settlement_report_preview"] = build_settlement_report_preview(contract, &preview);
     Ok(preview)
 }
@@ -5777,6 +5901,7 @@ fn build_contractual_evidence_pack(
         "settlement_report_preview": settlement_report_preview,
         "customer_contractual_boundary": customer_contractual_boundary,
         "settlement_activation_governance": statement_export_preview["settlement_activation_governance"].clone(),
+        "adjustment_activation_governance": statement_export_preview["adjustment_activation_governance"].clone(),
         "export_semantics": {
             "surface_kind": "customer_evidence_pack_report_only",
             "self_serve_state": "self_serve_ready_report_only",
@@ -6087,6 +6212,7 @@ fn build_contractual_sources_value(
         "statement_export_preview": statement_export_preview,
         "settlement_report_preview": report["token_budget_report"]["settlement_report_previews"][scope_code].clone(),
         "settlement_activation_governance": report["token_budget_report"]["statement_export_previews"][scope_code]["settlement_activation_governance"].clone(),
+        "adjustment_activation_governance": report["token_budget_report"]["statement_export_previews"][scope_code]["adjustment_activation_governance"].clone(),
         "transactional_statuses": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["transactional_statuses"].clone(),
         "customer_contractual_boundary": customer_contractual_boundary,
         "suggested_repo_local_paths": {
@@ -6234,7 +6360,7 @@ pub async fn print_statement_export_bundle(
         settlement_report_preview_from_export(&config.contract, &statement_export_preview);
     let bundle = json!({
         "token_statement_export_bundle": {
-            "bundle_version": "token-statement-export-bundle-v2",
+            "bundle_version": "token-statement-export-bundle-v3",
             "generated_at_epoch_ms": now_epoch_ms,
             "scope_code": scope_code,
             "scope_label": scope_label,
@@ -6253,6 +6379,7 @@ pub async fn print_statement_export_bundle(
         "token_contractual_sources": contractual_sources,
         "customer_contractual_boundary": customer_contractual_boundary.clone(),
         "settlement_activation_governance": statement_export_preview["settlement_activation_governance"].clone(),
+        "adjustment_activation_governance": statement_export_preview["adjustment_activation_governance"].clone(),
         "surface_kind": "customer_review_bundle_report_only",
         "self_serve_state": "self_serve_ready_report_only",
         "invoice_grade": false,
@@ -6277,6 +6404,7 @@ pub async fn print_statement_export_bundle(
             "operational_telemetry_included": root["operational_telemetry_included"].clone(),
             "customer_contractual_boundary": root["customer_contractual_boundary"].clone(),
             "settlement_activation_governance": root["settlement_activation_governance"].clone(),
+            "adjustment_activation_governance": root["adjustment_activation_governance"].clone(),
             "redaction_policy": root["redaction_policy"].clone(),
             "statement_preview_id": root["statement_preview_id"].clone(),
             "files": root["files"].clone(),
@@ -11141,6 +11269,10 @@ mod tests {
             token_event["contract"]["settlement_activation_governance_version"],
             "settlement-activation-governance-v1"
         );
+        assert_eq!(
+            token_event["contract"]["adjustment_activation_governance_version"],
+            "adjustment-activation-governance-v1"
+        );
         assert_eq!(token_event["contract"]["billing_mode"], "report_only");
         assert_eq!(
             token_event["contract"]["reconciliation_contract_version"],
@@ -11156,7 +11288,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v16"
+            "contractual-evidence-pack-v17"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -13263,7 +13395,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v16");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v17");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -13385,6 +13517,30 @@ effective_to_epoch_ms = 2000
             0
         );
         assert_eq!(
+            preview["adjustment_activation_governance"]["model_version"],
+            "adjustment-activation-governance-v1"
+        );
+        assert_eq!(
+            preview["adjustment_activation_governance"]["governance_state"],
+            "registry_not_configured_report_only"
+        );
+        assert_eq!(
+            preview["adjustment_activation_governance"]["future_adjustment_activation_state"],
+            "future_adjustment_registry_not_bound"
+        );
+        assert_eq!(
+            preview["adjustment_activation_governance"]["future_adjustment_activation_blocking_reasons"],
+            json!(["adjustment_registry_not_bound"])
+        );
+        assert_eq!(
+            preview["adjustment_activation_governance"]["credit_action_state"],
+            "registry_not_configured"
+        );
+        assert_eq!(
+            preview["adjustment_activation_governance"]["dispute_action_state"],
+            "no_open_disputes"
+        );
+        assert_eq!(
             preview["internal_money_arithmetic_readiness_state"],
             "awaiting_pricing_truth"
         );
@@ -13419,7 +13575,7 @@ effective_to_epoch_ms = 2000
         assert_eq!(preview["evidence_pack_available"], true);
         assert_eq!(
             preview["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v7"
+            "settlement-report-preview-v8"
         );
         assert_eq!(
             preview["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],
@@ -13557,7 +13713,7 @@ effective_to_epoch_ms = 2000
                 "statement_export_previews": {
                     "lifetime": {
                         "settlement_report_preview": {
-                            "model_version": "settlement-report-preview-v7",
+                            "model_version": "settlement-report-preview-v8",
                             "settlement_report_id": "preview-hash"
                         },
                         "customer_contractual_boundary": {
@@ -13582,6 +13738,24 @@ effective_to_epoch_ms = 2000
                             "close_barriers": ["coverage_not_final", "billing_mode_report_only"],
                             "registry_status": "not_configured",
                             "adjustment_status": "not_configured",
+                            "correction_action_state": "registry_not_configured",
+                            "credit_action_state": "registry_not_configured",
+                            "dispute_action_state": "no_open_disputes",
+                            "pending_entries_count": 0,
+                            "applied_entries_count": 0,
+                            "disputed_entries_count": 0,
+                            "allowed_future_actions": [],
+                            "note": "test"
+                        },
+                        "adjustment_activation_governance": {
+                            "model_version": "adjustment-activation-governance-v1",
+                            "governance_state": "registry_not_configured_report_only",
+                            "future_adjustment_activation_state": "future_adjustment_registry_not_bound",
+                            "future_adjustment_activation_blocking_reasons": ["adjustment_registry_not_bound"],
+                            "registry_status": "not_configured",
+                            "adjustment_status": "not_configured",
+                            "request_schema_version": "adjustment-request-v1",
+                            "registry_version": "adjustment-registry-v2",
                             "correction_action_state": "registry_not_configured",
                             "credit_action_state": "registry_not_configured",
                             "dispute_action_state": "no_open_disputes",
@@ -13639,7 +13813,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v16");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v17");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -13714,6 +13888,22 @@ effective_to_epoch_ms = 2000
             "no_open_disputes"
         );
         assert_eq!(
+            payload["adjustment_activation_governance"]["model_version"],
+            "adjustment-activation-governance-v1"
+        );
+        assert_eq!(
+            payload["adjustment_activation_governance"]["governance_state"],
+            "registry_not_configured_report_only"
+        );
+        assert_eq!(
+            payload["adjustment_activation_governance"]["future_adjustment_activation_state"],
+            "future_adjustment_registry_not_bound"
+        );
+        assert_eq!(
+            payload["adjustment_activation_governance"]["future_adjustment_activation_blocking_reasons"],
+            json!(["adjustment_registry_not_bound"])
+        );
+        assert_eq!(
             payload["internal_money_arithmetic_readiness_state"],
             "awaiting_pricing_truth"
         );
@@ -13769,7 +13959,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             payload["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v7"
+            "settlement-report-preview-v8"
         );
         assert_eq!(
             payload["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],

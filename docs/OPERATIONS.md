@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 12:54 MSK
-Ручная сверка guide/docs: 2026-03-25 12:54 MSK
+modified_at: 2026-03-25 13:12 MSK
+Ручная сверка guide/docs: 2026-03-25 13:12 MSK
 
 # Operations
 
@@ -1980,6 +1980,10 @@ Dashboard hero-cards теперь тоже обязаны поднимать `cl
 Это нужно затем, чтобы оператор видел distinction между:
 - lower-bound savings inside Amai;
 - и тем самым внешним meter, которым клиент реально сжигает свой live `5h` лимит.
+
+Customer-facing contractual export surface теперь тоже обязан поднимать
+`adjustment_activation_governance`, чтобы future adjustment path был виден отдельно от
+`settlement_activation_governance` и raw `adjustment_preview`.
 
 Если нужен отдельный operator-safe inspect-layer по provider bindings, reconciliation и margin:
 

@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 12:54 MSK
-Ручная сверка guide/docs: 2026-03-25 12:54 MSK
+modified_at: 2026-03-25 13:12 MSK
+Ручная сверка guide/docs: 2026-03-25 13:12 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1270,6 +1270,13 @@ preview, а не только raw count.
     - `credit_action_state / dispute_action_state`
   Это нужно затем, чтобы future settlement activation не выглядел как одна абстрактная
   blocked-ready метка, а показывал конкретные governance-барьеры и adjustment semantics.
+  - те же surface-ы теперь ещё несут отдельный `adjustment_activation_governance`;
+  - в нём отдельно фиксируются:
+    - `future_adjustment_activation_state / blocking_reasons`
+    - `request_schema_version / registry_version`
+    - `correction_action_state / credit_action_state / dispute_action_state`
+  Это нужно затем, чтобы future adjustment path не прятался внутри raw adjustment preview,
+  а показывал отдельный report-only governance слой.
 - `settlement_report_previews`
   - по каждому scope теперь есть отдельный review-grade settlement object;
   - он собирает в одном месте:
@@ -1455,14 +1462,15 @@ preview, а не только raw count.
   - это уже customer-facing review surface с hashes и contract states, но всё ещё строго
     `report_only`, а не invoice.
   - export/evidence surface versions теперь подняты до:
-    - `contractual-statement-export-v16`
-    - `settlement-report-preview-v7`
-    - `contractual-evidence-pack-v16`
+    - `contractual-statement-export-v17`
+    - `settlement-report-preview-v8`
+    - `contractual-evidence-pack-v17`
   потому что customer-facing payload теперь уже явно различает:
     - `customer review ready`
     - `internal money arithmetic ready`
     - `contractual settlement ready`
     - `future settlement activation governance`
+    - `future adjustment activation governance`
 - operational metering contract теперь ещё несёт:
   - `client_limit_meter_alignment_version = client-limit-meter-alignment-v1`
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
