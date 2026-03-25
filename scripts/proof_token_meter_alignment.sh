@@ -37,6 +37,8 @@ for scope in ("current_session", "rolling_window", "lifetime"):
     assert "component_event_coverage" in alignment, preview
     assert alignment["events_total"] >= alignment["live_events_count"], preview
     assert alignment["events_total"] >= alignment["non_live_events_count"], preview
+    assistant = next(item for item in alignment["component_event_coverage"] if item["code"] == "assistant_generation")
+    assert assistant["target_scope_kind"] == "assistant_generation_turn_scope", alignment
 
 for scope in ("current_session", "rolling_window", "lifetime"):
     scope_payload = agent_cycle.get(scope)
@@ -51,6 +53,8 @@ for scope in ("current_session", "rolling_window", "lifetime"):
     assert "component_event_coverage" in alignment, scope_payload
     assert "partially_measured_components" in alignment, scope_payload
     client_prompt = next(item for item in alignment["component_event_coverage"] if item["code"] == "client_prompt")
+    assistant = next(item for item in alignment["component_event_coverage"] if item["code"] == "assistant_generation")
+    assert assistant["target_scope_kind"] == "assistant_generation_turn_scope", alignment
     if alignment["live_events_count"] > 0:
         assert client_prompt["observed_live_events"] > 0, scope_payload
 PY

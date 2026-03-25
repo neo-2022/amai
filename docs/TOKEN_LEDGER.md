@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 16:32 MSK
-Ручная сверка guide/docs: 2026-03-25 16:32 MSK
+modified_at: 2026-03-25 16:57 MSK
+Ручная сверка guide/docs: 2026-03-25 16:57 MSK
 
 # Token Ledger
 
@@ -555,6 +555,13 @@ whole-cycle компонент на одинаковое число всех liv
     при построении `token-report` он собирает все unambiguous rollout observations,
     затем пересекает их с live retrieval events, у которых `assistant_generation` ещё
     отсутствует, и только потом делает attach;
+  - кроме этого same-meter layer теперь умеет честно поднимать turn-scoped coverage:
+    по `working_state_event` он берёт `thread_id + captured_at_epoch_ms`, ищет подходящий
+    rollout turn по времени и materialize-ит `assistant_generation` один раз на matched
+    turn-group, если несколько `context_pack_id` попали в тот же самый ответ клиента;
+  - это не даёт silently размножать одни и те же output tokens по каждому retrieval event,
+    но и не теряет truthful partial coverage там, где один assistant turn обслужил сразу
+    несколько retrieval context packs;
   - это уменьшает шанс, что report случайно поднимет only-lifetime evidence из старого
     turn вместо действительно missing current-scope events;
   - но same-meter claim всё равно запрещён, если usable rollout observations вообще не

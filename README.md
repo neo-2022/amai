@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 16:32 MSK
-Ручная сверка guide/docs: 2026-03-25 16:32 MSK
+modified_at: 2026-03-25 16:57 MSK
+Ручная сверка guide/docs: 2026-03-25 16:57 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1563,6 +1563,14 @@ preview, а не только raw count.
     он берёт не один arbitrary latest candidate, а все unambiguous rollout observations,
     фильтрует их по тем live retrieval events, где `assistant_generation` ещё отсутствует,
     и только потом дописывает observed value в ledger;
+  - дополнительно same-meter path теперь умеет materialize-ить и turn-scoped observation:
+    он берёт `working_state_event` для live `retrieval_context_pack`, поднимает оттуда
+    `thread_id + captured_at_epoch_ms`, затем ищет rollout turn-timeline, в который этот
+    retrieval попадает по времени, и считает `assistant_generation` один раз на весь
+    matched turn-group, а не дублирует одни и те же output tokens на каждый `context_pack_id`;
+  - это нужно затем, чтобы длинный один ответ клиента, внутри которого было несколько
+    retrieval context packs, перестал выглядеть как полный source-gap только потому, что
+    turn уже не был unambiguous по одному `context_pack_id`;
   - это важно затем, чтобы same-meter path не зависел только от ручного attach и не
     поднимал lifetime-only evidence, когда для текущего report scope есть более точное
     совпадение;

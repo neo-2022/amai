@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 16:32 MSK
-Ручная сверка guide/docs: 2026-03-25 16:32 MSK
+modified_at: 2026-03-25 16:57 MSK
+Ручная сверка guide/docs: 2026-03-25 16:57 MSK
 
 # Operations
 
@@ -2033,6 +2033,10 @@ report path теперь умеет auto-sync их из stored `ami.context_pack
   при построении `token-report` он собирает все unambiguous rollout observations и
   пытается attach-ить только те `context_pack_id`, которые реально входят в current
   live retrieval scope и ещё не имеют `assistant_generation`.
+- same-meter contour теперь дополнительно умеет делать turn-scoped matching:
+  он поднимает `working_state_event` для live `retrieval_context_pack`, берёт
+  `thread_id + captured_at_epoch_ms`, затем ищет rollout turn-timeline с тем же ответом
+  клиента и считает `assistant_generation` один раз на matched turn-group.
 - если пересечение между usable rollout IDs и текущим session/window correlation set равно
   нулю, `assistant_generation` в этом scope должен честно остаться `unmeasured`;
   это не баг surface, а truthful source-gap.

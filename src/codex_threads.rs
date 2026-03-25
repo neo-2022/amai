@@ -85,6 +85,9 @@ struct RolloutTurnObservation {
     context_pack_ids: BTreeSet<String>,
     assistant_generation_tokens: u64,
     token_count_events: usize,
+    started_at_epoch_ms: i64,
+    ended_at_epoch_ms: i64,
+    approved_context_pack_calls: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -119,6 +122,19 @@ pub struct RolloutAssistantGenerationObservation {
     pub context_pack_id: String,
     pub assistant_generation_tokens: u64,
     pub token_count_events: usize,
+    pub observation_source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RolloutAssistantGenerationTurnObservation {
+    pub thread_id: String,
+    pub rollout_path: String,
+    pub turn_id: String,
+    pub started_at_epoch_ms: i64,
+    pub ended_at_epoch_ms: i64,
+    pub assistant_generation_tokens: u64,
+    pub token_count_events: usize,
+    pub approved_context_pack_calls: usize,
     pub observation_source: String,
 }
 
@@ -972,6 +988,22 @@ pub fn rollout_assistant_generation_observations(
     parse_rollout_assistant_generation_observations(&thread_id, &rollout_path)
 }
 
+pub fn rollout_assistant_generation_turn_observations_for_thread(
+    thread_id: &str,
+) -> Result<Vec<RolloutAssistantGenerationTurnObservation>> {
+    let Some(record) = thread_record_by_id(thread_id)? else {
+        return Ok(Vec::new());
+    };
+    if record.rollout_path.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rollout_path = PathBuf::from(record.rollout_path);
+    if !rollout_path.exists() {
+        return Ok(Vec::new());
+    }
+    parse_rollout_assistant_generation_turn_observations(thread_id, &rollout_path)
+}
+
 fn rollout_thread_id_from_path(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     let candidate = stem.chars().rev().take(36).collect::<String>();
@@ -1581,14 +1613,43 @@ fn parse_rollout_assistant_generation_observations(
         .collect())
 }
 
+fn parse_rollout_assistant_generation_turn_observations(
+    thread_id: &str,
+    rollout_path: &Path,
+) -> Result<Vec<RolloutAssistantGenerationTurnObservation>> {
+    let text = fs::read_to_string(rollout_path)
+        .with_context(|| format!("failed to read {}", rollout_path.display()))?;
+    Ok(collect_rollout_turn_observations(&text)?
+        .into_iter()
+        .filter(|turn| turn.assistant_generation_tokens > 0 && turn.approved_context_pack_calls > 0)
+        .map(|turn| RolloutAssistantGenerationTurnObservation {
+            thread_id: thread_id.to_string(),
+            rollout_path: rollout_path.display().to_string(),
+            turn_id: turn.turn_id,
+            started_at_epoch_ms: turn.started_at_epoch_ms,
+            ended_at_epoch_ms: turn.ended_at_epoch_ms,
+            assistant_generation_tokens: turn.assistant_generation_tokens,
+            token_count_events: turn.token_count_events,
+            approved_context_pack_calls: turn.approved_context_pack_calls,
+            observation_source: "codex_rollout_turn_timeline_v1".to_string(),
+        })
+        .collect())
+}
+
 fn collect_rollout_turn_observations(text: &str) -> Result<Vec<RolloutTurnObservation>> {
     let mut observations = Vec::new();
     let mut current = None::<RolloutTurnObservation>;
+    let mut approved_context_pack_calls = std::collections::HashMap::<String, bool>::new();
     for line in text.lines() {
         let row: Value =
             serde_json::from_str(line).context("failed to parse rollout jsonl line")?;
         let row_type = row["type"].as_str().unwrap_or_default();
         let payload = &row["payload"];
+        let timestamp_epoch_ms = row["timestamp"]
+            .as_str()
+            .and_then(|value| parse_rfc3339_epoch_s(value).ok())
+            .map(|value| value.saturating_mul(1000))
+            .unwrap_or_default();
         match (row_type, payload["type"].as_str().unwrap_or_default()) {
             ("event_msg", "task_started") => {
                 if let Some(turn) = current.take() {
@@ -1596,16 +1657,20 @@ fn collect_rollout_turn_observations(text: &str) -> Result<Vec<RolloutTurnObserv
                 }
                 current = Some(RolloutTurnObservation {
                     turn_id: payload["turn_id"].as_str().unwrap_or_default().to_string(),
+                    started_at_epoch_ms: timestamp_epoch_ms,
+                    ended_at_epoch_ms: timestamp_epoch_ms,
                     ..RolloutTurnObservation::default()
                 });
             }
             ("event_msg", "task_complete") => {
-                if let Some(turn) = current.take() {
+                if let Some(mut turn) = current.take() {
+                    turn.ended_at_epoch_ms = timestamp_epoch_ms;
                     observations.push(turn);
                 }
             }
             ("event_msg", "token_count") => {
                 if let Some(turn) = current.as_mut() {
+                    turn.ended_at_epoch_ms = timestamp_epoch_ms;
                     let output_tokens = payload["info"]["last_token_usage"]["output_tokens"]
                         .as_u64()
                         .unwrap_or_default();
@@ -1617,21 +1682,65 @@ fn collect_rollout_turn_observations(text: &str) -> Result<Vec<RolloutTurnObserv
                     }
                 }
             }
+            ("response_item", "function_call") => {
+                let call_id = payload["call_id"].as_str().unwrap_or_default();
+                if !call_id.is_empty() {
+                    approved_context_pack_calls.insert(
+                        call_id.to_string(),
+                        rollout_function_call_is_context_pack(
+                            payload["name"].as_str().unwrap_or_default(),
+                            payload["arguments"].as_str().unwrap_or_default(),
+                        ),
+                    );
+                }
+                if let Some(turn) = current.as_mut() {
+                    turn.ended_at_epoch_ms = timestamp_epoch_ms;
+                    if !call_id.is_empty()
+                        && approved_context_pack_calls.get(call_id).copied().unwrap_or(false)
+                    {
+                        turn.approved_context_pack_calls += 1;
+                    }
+                }
+            }
             ("response_item", "function_call_output") => {
                 if let Some(turn) = current.as_mut() {
+                    turn.ended_at_epoch_ms = timestamp_epoch_ms;
+                    let call_id = payload["call_id"].as_str().unwrap_or_default();
+                    if call_id.is_empty()
+                        || !approved_context_pack_calls.get(call_id).copied().unwrap_or(false)
+                    {
+                        continue;
+                    }
                     collect_context_pack_ids_from_rollout_output(
                         &payload["output"],
                         &mut turn.context_pack_ids,
                     );
                 }
             }
-            _ => {}
+            _ => {
+                if let Some(turn) = current.as_mut() {
+                    turn.ended_at_epoch_ms = timestamp_epoch_ms;
+                }
+            }
         }
     }
     if let Some(turn) = current.take() {
         observations.push(turn);
     }
     Ok(observations)
+}
+
+fn rollout_function_call_is_context_pack(name: &str, arguments: &str) -> bool {
+    if name == "mcp__amai__amai_context_pack" || name == "mcp__echovault__amai_context_pack" {
+        return true;
+    }
+    if name != "exec_command" {
+        return false;
+    }
+    let normalized = arguments.to_ascii_lowercase();
+    (normalized.contains("context pack")
+        && (normalized.contains("cargo run") || normalized.contains("target/release/amai")))
+        || normalized.contains("memory search")
 }
 
 fn collect_context_pack_ids_from_rollout_output(value: &Value, target: &mut BTreeSet<String>) {
@@ -2615,7 +2724,8 @@ mod tests {
         fs::write(
             &rollout_path,
             r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
-{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","output":"{\"context_pack_id\":\"ctx-pack-1\"}"}}
+{"timestamp":"2026-03-25T10:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-1","arguments":"{\"cmd\":\"cargo run --quiet -- context pack --project amai --namespace default --query 'x'\"}"}}
+{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"{\"context_pack_id\":\"ctx-pack-1\"}"}}
 {"timestamp":"2026-03-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":17}}}}
 {"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":23}}}}
 {"timestamp":"2026-03-25T10:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
@@ -2653,8 +2763,9 @@ mod tests {
         fs::write(
             &rollout_path,
             r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
-{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","output":"{\"context_pack_id\":\"ctx-pack-1\"}"}}
-{"timestamp":"2026-03-25T10:00:02Z","type":"response_item","payload":{"type":"function_call_output","output":"{\"context_pack_id\":\"ctx-pack-2\"}"}}
+{"timestamp":"2026-03-25T10:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-1","arguments":"{\"cmd\":\"cargo run --quiet -- context pack --project amai --namespace default --query 'x'\"}"}}
+{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"{\"context_pack_id\":\"ctx-pack-1\"}"}}
+{"timestamp":"2026-03-25T10:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"{\"context_pack_id\":\"ctx-pack-2\"}"}}
 {"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":17}}}}
 {"timestamp":"2026-03-25T10:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
 "#,
@@ -2678,11 +2789,13 @@ mod tests {
         fs::write(
             &rollout_path,
             r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
-{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","output":"{\"context_pack_id\":\"ctx-pack-1\"}"}}
+{"timestamp":"2026-03-25T10:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-1","arguments":"{\"cmd\":\"cargo run --quiet -- context pack --project amai --namespace default --query 'x'\"}"}}
+{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"{\"context_pack_id\":\"ctx-pack-1\"}"}}
 {"timestamp":"2026-03-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":17}}}}
 {"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
 {"timestamp":"2026-03-25T10:00:04Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}
-{"timestamp":"2026-03-25T10:00:05Z","type":"response_item","payload":{"type":"function_call_output","output":"{\"context_pack_id\":\"ctx-pack-2\"}"}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-2","arguments":"{\"cmd\":\"cargo run --quiet -- context pack --project amai --namespace default --query 'y'\"}"}}
+{"timestamp":"2026-03-25T10:00:05Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-2","output":"{\"context_pack_id\":\"ctx-pack-2\"}"}}
 {"timestamp":"2026-03-25T10:00:06Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":23}}}}
 {"timestamp":"2026-03-25T10:00:07Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2"}}
 "#,
@@ -2701,6 +2814,40 @@ mod tests {
         assert_eq!(observations[1].turn_id, "turn-2");
         assert_eq!(observations[1].context_pack_id, "ctx-pack-2");
         assert_eq!(observations[1].assistant_generation_tokens, 23);
+    }
+
+    #[test]
+    fn rollout_assistant_generation_turn_observations_require_approved_context_pack_calls() {
+        let rollout_path = std::env::temp_dir().join(format!(
+            "amai-rollout-turns-{}.jsonl",
+            Uuid::new_v4()
+        ));
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-03-25T10:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-1","arguments":"{\"cmd\":\"cargo run --quiet -- context pack --project amai --namespace default --query 'x'\"}"}}
+{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"{\"context_pack_id\":\"ctx-pack-1\"}"}}
+{"timestamp":"2026-03-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":17}}}}
+{"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-2","arguments":"{\"cmd\":\"./target/release/amai observe token-report\"}"}}
+{"timestamp":"2026-03-25T10:00:05Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-2","output":"{\"context_pack_id\":\"ctx-pack-noise\"}"}}
+{"timestamp":"2026-03-25T10:00:06Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":23}}}}
+{"timestamp":"2026-03-25T10:00:07Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2"}}
+"#,
+        )
+        .expect("write rollout");
+
+        let direct = super::parse_rollout_assistant_generation_turn_observations(
+            rollout_thread_id_from_path(&rollout_path).as_deref().unwrap_or(""),
+            &rollout_path,
+        )
+        .expect("direct parse");
+        let _ = fs::remove_file(&rollout_path);
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].turn_id, "turn-1");
+        assert_eq!(direct[0].approved_context_pack_calls, 1);
+        assert_eq!(direct[0].assistant_generation_tokens, 17);
     }
 
     #[test]
