@@ -1708,8 +1708,30 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
                 "project_chat_startup contract is missing resume_enforcement.startup_next_action_field"
             )
         })?;
+    let active_lease_field = resume_enforcement["active_lease_field"]
+        .as_str()
+        .ok_or_else(|| {
+            anyhow!(
+                "project_chat_startup contract is missing resume_enforcement.active_lease_field"
+            )
+        })?;
+    let active_lease_owner_state_field =
+        resume_enforcement["active_lease_owner_state_field"]
+            .as_str()
+            .ok_or_else(|| {
+                anyhow!(
+                    "project_chat_startup contract is missing resume_enforcement.active_lease_owner_state_field"
+                )
+            })?;
+    let previous_session_owner_value = resume_enforcement["previous_session_owner_value"]
+        .as_str()
+        .unwrap_or("previous_session_owner");
     let must_resume_before_unrelated =
         resume_enforcement["must_resume_required_return_task_before_unrelated_work"]
+            .as_bool()
+            .unwrap_or(false);
+    let previous_session_owner_must_follow_startup_next_action =
+        resume_enforcement["previous_session_owner_must_follow_startup_next_action"]
             .as_bool()
             .unwrap_or(false);
     let required_action_kind = resume_enforcement["required_action_kind_when_resume_required"]
@@ -1720,7 +1742,7 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
         .unwrap_or(false);
 
     Ok(format!(
-        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала вызови MCP tool `{tool}`.\n3. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n4. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n5. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n6. После restore обязательно подними поля: {required_summary_fields}.\n7. Верни в активную рабочую линию obligations: {restored_obligations}.\n8. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}` и `{startup_next_action_field}`.\n9. `{startup_next_action_field}` считается первым обязательным действием после startup.\n10. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n11. Silent drop запрещён: {}.\n12. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
+        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала вызови MCP tool `{tool}`.\n3. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n4. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n5. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n6. После restore обязательно подними поля: {required_summary_fields}.\n7. Верни в активную рабочую линию obligations: {restored_obligations}.\n8. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n9. `{startup_next_action_field}` считается первым обязательным действием после startup.\n10. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n11. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n12. Silent drop запрещён: {}.\n13. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
         repo_root.display(),
         repo_root.display(),
         "amai_context_pack",
@@ -1728,6 +1750,11 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
             "must_resume_required_return_task_before_unrelated_work = true"
         } else {
             "must_resume_required_return_task_before_unrelated_work = false"
+        },
+        if previous_session_owner_must_follow_startup_next_action {
+            "previous_session_owner_must_follow_startup_next_action = true"
+        } else {
+            "previous_session_owner_must_follow_startup_next_action = false"
         },
         if no_silent_drop {
             "no_silent_drop = true"
@@ -1951,8 +1978,12 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("execctl_resume_contract_summary"));
         assert!(text.contains("execctl_resume_obligation"));
         assert!(text.contains("startup_next_action"));
+        assert!(text.contains("execctl_active_lease"));
+        assert!(text.contains("lease_owner_state"));
+        assert!(text.contains("previous_session_owner"));
         assert!(text.contains("resume_required_return_task"));
         assert!(text.contains("required_return_task"));
+        assert!(text.contains("previous_session_owner_must_follow_startup_next_action = true"));
         assert!(text.contains("no_silent_drop = true"));
     }
 

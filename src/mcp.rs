@@ -400,6 +400,35 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract is missing execctl_active_lease_summary from required summary fields"
         ));
     }
+    if startup_contract["resume_enforcement"]["active_lease_field"].as_str()
+        != Some("execctl_active_lease")
+    {
+        return Err(anyhow!(
+            "MCP startup contract resume_enforcement lost execctl_active_lease field"
+        ));
+    }
+    if startup_contract["resume_enforcement"]["active_lease_owner_state_field"].as_str()
+        != Some("lease_owner_state")
+    {
+        return Err(anyhow!(
+            "MCP startup contract resume_enforcement lost lease_owner_state field"
+        ));
+    }
+    if startup_contract["resume_enforcement"]["previous_session_owner_value"].as_str()
+        != Some("previous_session_owner")
+    {
+        return Err(anyhow!(
+            "MCP startup contract resume_enforcement lost previous_session_owner value"
+        ));
+    }
+    if startup_contract["resume_enforcement"]["previous_session_owner_must_follow_startup_next_action"]
+        .as_bool()
+        != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract resume_enforcement does not require previous_session_owner to follow startup_next_action"
+        ));
+    }
 
     let tools = session.request("tools/list", json!({})).await?;
     let tool_names = tools["tools"]
@@ -582,6 +611,11 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     {
         return Err(anyhow!(
             "MCP continuity startup did not surface execctl_active_lease_summary"
+        ));
+    }
+    if !continuity_startup["continuity_startup_summary"]["execctl_active_lease"].is_object() {
+        return Err(anyhow!(
+            "MCP continuity startup did not surface execctl_active_lease"
         ));
     }
 
@@ -2445,7 +2479,11 @@ fn protocol_manifest() -> Value {
                     "resume_state_field": "execctl_resume_state",
                     "obligation_field": "execctl_resume_obligation",
                     "startup_next_action_field": "startup_next_action",
+                    "active_lease_field": "execctl_active_lease",
+                    "active_lease_owner_state_field": "lease_owner_state",
+                    "previous_session_owner_value": "previous_session_owner",
                     "must_resume_required_return_task_before_unrelated_work": true,
+                    "previous_session_owner_must_follow_startup_next_action": true,
                     "required_action_kind_when_resume_required": "resume_required_return_task",
                     "default_action_kind_when_clear": "continue_active_workline",
                     "no_silent_drop": true
@@ -2875,7 +2913,7 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
                     "content": {
                         "type": "text",
                         "text": format!(
-                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_next_action, and execctl_active_lease_summary. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away."
+                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
                         )
                     }
                 }]
@@ -4553,7 +4591,31 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
+                ["active_lease_field"]
+                .as_str(),
+            Some("execctl_active_lease")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
+                ["active_lease_owner_state_field"]
+                .as_str(),
+            Some("lease_owner_state")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
+                ["previous_session_owner_value"]
+                .as_str(),
+            Some("previous_session_owner")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
                 ["must_resume_required_return_task_before_unrelated_work"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
+                ["previous_session_owner_must_follow_startup_next_action"]
                 .as_bool(),
             Some(true)
         );
@@ -4641,7 +4703,10 @@ mod tests {
         assert!(text.contains("execctl_resume_contract_summary"));
         assert!(text.contains("execctl_resume_obligation"));
         assert!(text.contains("startup_next_action"));
+        assert!(text.contains("execctl_active_lease"));
         assert!(text.contains("execctl_active_lease_summary"));
+        assert!(text.contains("lease_owner_state"));
+        assert!(text.contains("previous_session_owner"));
         assert!(text.contains("resume_required_return_task"));
     }
 

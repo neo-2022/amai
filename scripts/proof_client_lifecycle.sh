@@ -18,6 +18,9 @@ grep -q 'project `AGENTS.md`' AGENTS.md
 grep -q 'execctl_resume_contract_summary' AGENTS.md
 grep -q 'execctl_resume_obligation' AGENTS.md
 grep -q 'startup_next_action' AGENTS.md
+grep -q 'execctl_active_lease' AGENTS.md
+grep -q 'lease_owner_state' AGENTS.md
+grep -q 'previous_session_owner' AGENTS.md
 grep -q 'resume_required_return_task' AGENTS.md
 grep -q 'required_return_task' AGENTS.md
 
@@ -39,6 +42,9 @@ grep -q 'amai_continuity_startup' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'execctl_resume_contract_summary' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'execctl_resume_obligation' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'startup_next_action' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'execctl_active_lease' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'lease_owner_state' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'previous_session_owner' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'resume_required_return_task' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'required_return_task' .cursor/rules/amai-continuity-startup.mdc
 
@@ -61,6 +67,9 @@ grep -q 'amai_continuity_startup' CLAUDE.md
 grep -q 'execctl_resume_contract_summary' CLAUDE.md
 grep -q 'execctl_resume_obligation' CLAUDE.md
 grep -q 'startup_next_action' CLAUDE.md
+grep -q 'execctl_active_lease' CLAUDE.md
+grep -q 'lease_owner_state' CLAUDE.md
+grep -q 'previous_session_owner' CLAUDE.md
 grep -q 'resume_required_return_task' CLAUDE.md
 grep -q 'required_return_task' CLAUDE.md
 

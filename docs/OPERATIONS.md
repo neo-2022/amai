@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 00:16 MSK
-Ручная сверка guide/docs: 2026-03-26 00:16 MSK
+modified_at: 2026-03-26 00:26 MSK
+Ручная сверка guide/docs: 2026-03-26 00:26 MSK
 
 # Operations
 
@@ -807,6 +807,14 @@ cargo run -- mcp serve
 - рядом с human summary теперь materialized и machine-readable
   `execctl_resume_obligation`, чтобы client runtime видел
   `resume_state / pending_return_count / required_return_*` без строкового парсинга.
+- в тот же `resume_enforcement` теперь отдельно surfaced ещё и active-lease contour:
+  - `active_lease_field = execctl_active_lease`
+  - `active_lease_owner_state_field = lease_owner_state`
+  - `previous_session_owner_value = previous_session_owner`
+  - `previous_session_owner_must_follow_startup_next_action = true`
+- это нужно затем, чтобы client runtime не пытался сам выводить ownership active line из human
+  summary: если lease owner пришёл как `previous_session_owner`, client обязан follow
+  `startup_next_action` first и не имеет права silently seize the workline.
 - тот же startup summary теперь обязан нести и два project-bound `ExecCtl` слоя:
   - `project_task_tree_summary`
   - `project_task_ledger_summary`
