@@ -128,13 +128,16 @@ assert payload["statement_export_preview"]["rate_card_status"] == "priced_bound"
 assert payload["statement_export_preview"]["provider_cost_truth_completeness_state"] == "provider_cost_bound", payload
 assert payload["statement_export_preview"]["invoice_evidence_completeness_state"] == "provider_invoice_bound", payload
 assert payload["statement_export_preview"]["contractual_readiness_model_version"] == "contractual-readiness-v1", payload
+assert payload["statement_export_preview"]["customer_contractual_boundary"]["model_version"] == "customer-contractual-boundary-v1", payload
+assert payload["statement_export_preview"]["customer_contractual_boundary"]["surface_kind"] == "customer_review_report_only", payload
 assert payload["statement_export_preview"]["internal_money_arithmetic_readiness_state"] == "money_arithmetic_preview_ready_report_only", payload
 assert payload["statement_export_preview"]["internal_money_arithmetic_blocking_reasons"] == [], payload
 assert payload["statement_export_preview"]["contractual_settlement_readiness_state"] == "review_not_yet_ready_report_only", payload
 assert "billing_mode_report_only" in payload["statement_export_preview"]["contractual_settlement_blocking_reasons"], payload
 assert "money_arithmetic_not_ready" not in payload["statement_export_preview"]["contractual_settlement_blocking_reasons"], payload
-assert payload["settlement_report_preview"]["model_version"] == "settlement-report-preview-v5", payload
+assert payload["settlement_report_preview"]["model_version"] == "settlement-report-preview-v6", payload
 assert payload["settlement_report_preview"]["contractual_readiness_model_version"] == "contractual-readiness-v1", payload
+assert payload["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"] == "customer_settlement_report_preview_report_only", payload
 assert payload["settlement_report_preview"]["settlement_report_id"], payload
 assert payload["reconciliation_contract"]["source_requirements"]["required_sources_for_usage_truth"] == ["provider_usage_export"], payload
 assert payload["reconciliation_contract"]["source_requirements"]["required_sources_for_cost_truth"] == ["provider_rate_card", "provider_usage_export"], payload
@@ -173,6 +176,7 @@ assert payload["margin_scope"]["temporal_truth_state"] == "scope_period_aligned"
 assert payload["margin_scope"]["required_sources_for_margin_truth"] == ["infra_cost_profile", "provider_rate_card", "provider_usage_export"], payload
 assert payload["margin_scope"]["unready_required_sources_for_margin_truth"] == [], payload
 assert payload["statement_export_preview"]["scope_code"] == "lifetime", payload
+assert payload["customer_contractual_boundary"]["surface_kind"] == "customer_contractual_sources_report_only", payload
 PY
 
 printf 'proof_token_contractual_sources: PASS\n'

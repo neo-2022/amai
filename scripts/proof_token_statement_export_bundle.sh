@@ -32,12 +32,15 @@ assert settlement_report["scope_code"] == "lifetime", settlement_report
 assert statement_export["scope_code"] == "lifetime", statement_export
 assert evidence_pack["scope_code"] == "lifetime", evidence_pack
 assert contractual_sources["scope_code"] == "lifetime", contractual_sources
-assert statement_export["model_version"] == "contractual-statement-export-v14", statement_export
-assert settlement_report["model_version"] == "settlement-report-preview-v5", settlement_report
-assert evidence_pack["pack_version"] == "contractual-evidence-pack-v14", evidence_pack
+assert statement_export["model_version"] == "contractual-statement-export-v15", statement_export
+assert settlement_report["model_version"] == "settlement-report-preview-v6", settlement_report
+assert evidence_pack["pack_version"] == "contractual-evidence-pack-v15", evidence_pack
 assert statement_export["contractual_readiness_model_version"] == "contractual-readiness-v1", statement_export
 assert settlement_report["contractual_readiness_model_version"] == "contractual-readiness-v1", settlement_report
 assert evidence_pack["contractual_readiness_model_version"] == "contractual-readiness-v1", evidence_pack
+assert statement_export["customer_contractual_boundary"]["model_version"] == "customer-contractual-boundary-v1", statement_export
+assert settlement_report["customer_contractual_boundary"]["model_version"] == "customer-contractual-boundary-v1", settlement_report
+assert evidence_pack["customer_contractual_boundary"]["model_version"] == "customer-contractual-boundary-v1", evidence_pack
 assert statement_export["internal_money_arithmetic_readiness_state"] is not None, statement_export
 assert settlement_report["internal_money_arithmetic_readiness_state"] is not None, settlement_report
 assert evidence_pack["internal_money_arithmetic_readiness_state"] is not None, evidence_pack
@@ -76,8 +79,13 @@ assert evidence_pack["transactional_statuses"]["measured"]["boundary"] in {"not_
 assert contractual_sources["transactional_statuses"] == evidence_pack["transactional_statuses"], contractual_sources
 assert statement_export["export_semantics"]["surface_kind"] == "customer_review_report_only", statement_export
 assert evidence_pack["export_semantics"]["surface_kind"] == "customer_evidence_pack_report_only", evidence_pack
+assert statement_export["customer_contractual_boundary"]["surface_kind"] == "customer_review_report_only", statement_export
+assert settlement_report["customer_contractual_boundary"]["surface_kind"] == "customer_settlement_report_preview_report_only", settlement_report
+assert evidence_pack["customer_contractual_boundary"]["surface_kind"] == "customer_evidence_pack_report_only", evidence_pack
+assert contractual_sources["customer_contractual_boundary"]["surface_kind"] == "customer_contractual_sources_report_only", contractual_sources
 assert contractual_sources["customer_contractual_boundary"]["operational_telemetry_included"] is False, contractual_sources
 assert manifest["surface_kind"] == "customer_review_bundle_report_only", manifest
+assert manifest["customer_contractual_boundary"]["surface_kind"] == "customer_review_bundle_report_only", manifest
 assert manifest["statement_preview_id"] == statement_export["statement_preview_id"], manifest
 assert manifest["files"]["settlement_report_preview"] == "settlement_report_preview.json", manifest
 assert evidence_pack["included_events_hash"] == statement_export["included_events_hash"], evidence_pack

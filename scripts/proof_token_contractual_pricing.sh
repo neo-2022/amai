@@ -222,12 +222,15 @@ assert statement_export["customer_savings_money_truth_completeness_state"] == "c
 assert statement_export["amai_cost_truth_completeness_state"] == "amai_cost_preview_ready_report_only", statement_export
 assert statement_export["margin_truth_completeness_state"] == "margin_preview_amounts_ready_report_only", statement_export
 assert statement_export["contractual_readiness_model_version"] == "contractual-readiness-v1", statement_export
+assert statement_export["customer_contractual_boundary"]["model_version"] == "customer-contractual-boundary-v1", statement_export
+assert statement_export["customer_contractual_boundary"]["surface_kind"] == "customer_review_report_only", statement_export
 assert statement_export["internal_money_arithmetic_readiness_state"] == "money_arithmetic_preview_ready_report_only", statement_export
 assert statement_export["internal_money_arithmetic_blocking_reasons"] == [], statement_export
 assert statement_export["contractual_settlement_readiness_state"] == "review_not_yet_ready_report_only", statement_export
 assert "billing_mode_report_only" in statement_export["contractual_settlement_blocking_reasons"], statement_export
 assert "money_arithmetic_not_ready" not in statement_export["contractual_settlement_blocking_reasons"], statement_export
-assert statement_export["settlement_report_preview"]["model_version"] == "settlement-report-preview-v5", statement_export
+assert statement_export["settlement_report_preview"]["model_version"] == "settlement-report-preview-v6", statement_export
+assert statement_export["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"] == "customer_settlement_report_preview_report_only", statement_export
 assert statement_export["required_sources_for_usage_truth"] == ["provider_usage_export"], statement_export
 assert statement_export["required_sources_for_margin_truth"] == ["infra_cost_profile", "provider_rate_card", "provider_usage_export"], statement_export
 assert statement_export["settlement_report_preview"]["settlement_report_id"], statement_export

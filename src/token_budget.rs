@@ -112,6 +112,8 @@ struct TokenBudgetContractConfig {
     suitability_model_version: String,
     #[serde(default = "default_contractual_readiness_model_version")]
     contractual_readiness_model_version: String,
+    #[serde(default = "default_customer_contractual_boundary_version")]
+    customer_contractual_boundary_version: String,
     #[serde(default = "default_billing_mode")]
     billing_mode: String,
     #[serde(default = "default_reconciliation_contract_version")]
@@ -165,6 +167,7 @@ impl Default for TokenBudgetContractConfig {
             billing_policy_version: default_billing_policy_version(),
             suitability_model_version: default_suitability_model_version(),
             contractual_readiness_model_version: default_contractual_readiness_model_version(),
+            customer_contractual_boundary_version: default_customer_contractual_boundary_version(),
             billing_mode: default_billing_mode(),
             reconciliation_contract_version: default_reconciliation_contract_version(),
             margin_model_version: default_margin_model_version(),
@@ -564,6 +567,10 @@ fn default_contractual_readiness_model_version() -> String {
     "contractual-readiness-v1".to_string()
 }
 
+fn default_customer_contractual_boundary_version() -> String {
+    "customer-contractual-boundary-v1".to_string()
+}
+
 fn default_billing_mode() -> String {
     "report_only".to_string()
 }
@@ -581,15 +588,15 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v14".to_string()
+    "contractual-evidence-pack-v15".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v14".to_string()
+    "contractual-statement-export-v15".to_string()
 }
 
 fn default_settlement_report_preview_version() -> String {
-    "settlement-report-preview-v5".to_string()
+    "settlement-report-preview-v6".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -634,6 +641,7 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "billing_policy_version": contract.billing_policy_version.clone(),
         "suitability_model_version": contract.suitability_model_version.clone(),
         "contractual_readiness_model_version": contract.contractual_readiness_model_version.clone(),
+        "customer_contractual_boundary_version": contract.customer_contractual_boundary_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "margin_model_version": contract.margin_model_version.clone(),
@@ -677,6 +685,7 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "billing_policy_version": contract.billing_policy_version.clone(),
         "suitability_model_version": contract.suitability_model_version.clone(),
         "contractual_readiness_model_version": contract.contractual_readiness_model_version.clone(),
+        "customer_contractual_boundary_version": contract.customer_contractual_boundary_version.clone(),
         "billing_mode": contract.billing_mode.clone(),
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "margin_model_version": contract.margin_model_version.clone(),
@@ -4205,6 +4214,96 @@ fn contractual_settlement_readiness(
     }
 }
 
+fn review_surface_state(statement_export_preview: &Value) -> (&'static str, Vec<String>) {
+    let statement_preview = &statement_export_preview["line_item_surfaces"]["statement_preview"];
+    let measured_events = statement_preview["coverage"]["measured_events"]
+        .as_u64()
+        .or_else(|| statement_export_preview["included_events_count"].as_u64())
+        .unwrap_or(0);
+    let settlement_stage = statement_preview["settlement_stage"]
+        .as_str()
+        .unwrap_or("unknown");
+    let mut blockers =
+        merged_reason_strings(&[&statement_preview["next_settlement_stage_blockers"]]);
+
+    if measured_events == 0 {
+        push_unique_reason(&mut blockers, "no_measured_usage_events");
+        return ("empty_report_only", blockers);
+    }
+
+    if settlement_stage == "measured_review_ready_report_only" {
+        return ("customer_review_ready_report_only", blockers);
+    }
+
+    if statement_preview["provisional_close_candidate"].as_bool() == Some(true) {
+        ("provisionally_stable_report_only", blockers)
+    } else {
+        ("provisional_report_only", blockers)
+    }
+}
+
+fn future_settlement_activation_state(contractual_settlement_state: &str) -> &'static str {
+    match contractual_settlement_state {
+        "settlement_ready_reserved" => "future_settlement_ready_reserved",
+        "customer_review_ready_settlement_activation_blocked_report_only" => {
+            "future_settlement_activation_blocked_report_only"
+        }
+        "review_not_yet_ready_report_only" => "review_not_yet_ready_for_future_settlement",
+        "empty" => "empty_scope_report_only",
+        _ => "future_settlement_state_unknown",
+    }
+}
+
+fn build_customer_contractual_boundary_from_export(
+    contract: &TokenBudgetContractConfig,
+    surface_kind: &str,
+    statement_export_preview: &Value,
+) -> Value {
+    let statement_preview = &statement_export_preview["line_item_surfaces"]["statement_preview"];
+    let (review_surface_state, review_surface_blocking_reasons) =
+        review_surface_state(statement_export_preview);
+    let contractual_settlement_state = statement_export_preview
+        .get("contractual_settlement_readiness_state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+
+    json!({
+        "model_version": contract.customer_contractual_boundary_version.clone(),
+        "surface_kind": surface_kind,
+        "report_only": true,
+        "self_serve_state": "self_serve_ready_report_only",
+        "invoice_grade": false,
+        "operational_telemetry_included": false,
+        "review_surface_state": review_surface_state,
+        "review_surface_blocking_reasons": review_surface_blocking_reasons,
+        "future_settlement_activation_state": future_settlement_activation_state(contractual_settlement_state),
+        "future_settlement_activation_blocking_reasons": statement_export_preview["contractual_settlement_blocking_reasons"].clone(),
+        "settlement_stage": statement_preview["settlement_stage"].clone(),
+        "settlement_stage_family": statement_preview["settlement_stage_family"].clone(),
+        "next_settlement_stage_candidate": statement_preview["next_settlement_stage_candidate"].clone(),
+        "contractual_readiness_model_version": statement_export_preview["contractual_readiness_model_version"].clone(),
+        "contractual_settlement_readiness_state": statement_export_preview["contractual_settlement_readiness_state"].clone(),
+        "note": "Этот boundary отделяет текущую review-ready report-only поверхность от более строгой будущей settlement activation semantics."
+    })
+}
+
+fn settlement_report_preview_from_export(
+    contract: &TokenBudgetContractConfig,
+    statement_export_preview: &Value,
+) -> Value {
+    let mut settlement_report_preview =
+        statement_export_preview["settlement_report_preview"].clone();
+    if settlement_report_preview["customer_contractual_boundary"].is_null() {
+        settlement_report_preview["customer_contractual_boundary"] =
+            build_customer_contractual_boundary_from_export(
+                contract,
+                "customer_settlement_report_preview_report_only",
+                statement_export_preview,
+            );
+    }
+    settlement_report_preview
+}
+
 fn build_scope_suitability(
     contract: &TokenBudgetContractConfig,
     statement_preview: &Value,
@@ -5024,16 +5123,6 @@ fn build_settlement_report_preview(
             .as_str()
             .unwrap_or("missing-truth-manifest"),
     );
-    let review_grade_state = if statement_export_preview["settlement_stage"].as_str()
-        == Some("measured_review_ready_report_only")
-    {
-        "review_ready_report_only"
-    } else if statement_export_preview["provisional_close_candidate"].as_bool() == Some(true) {
-        "provisionally_stable_report_only"
-    } else {
-        "provisional_report_only"
-    };
-
     json!({
         "model_version": contract.settlement_report_preview_version.clone(),
         "settlement_report_id": hex_sha256(settlement_report_identity.as_bytes()),
@@ -5087,6 +5176,11 @@ fn build_settlement_report_preview(
         "final_amount": statement_preview["final_amount"].clone(),
         "currency_profile": statement_export_preview["currency_profile"].clone(),
         "external_truth_manifest_hash": external_truth_manifest["manifest_hash"].clone(),
+        "customer_contractual_boundary": build_customer_contractual_boundary_from_export(
+            contract,
+            "customer_settlement_report_preview_report_only",
+            statement_export_preview,
+        ),
         "adjustment_summary": {
             "registry_status": adjustment_preview["registry_status"].clone(),
             "correction_action_state": adjustment_preview["correction_action_state"].clone(),
@@ -5114,7 +5208,6 @@ fn build_settlement_report_preview(
             "infra_cost_binding_model_version": contract.infra_cost_binding_model_version.clone(),
             "contractual_readiness_model_version": contract.contractual_readiness_model_version.clone(),
         },
-        "review_grade_state": review_grade_state,
         "report_only": true,
         "invoice_grade": false,
         "blocking_reasons": statement_export_preview["blocking_reasons"].clone(),
@@ -5489,6 +5582,11 @@ fn build_statement_export_preview(
         ),
     );
     let mut preview = Value::Object(preview);
+    preview["customer_contractual_boundary"] = build_customer_contractual_boundary_from_export(
+        contract,
+        "customer_review_report_only",
+        &preview,
+    );
     preview["settlement_report_preview"] = build_settlement_report_preview(contract, &preview);
     Ok(preview)
 }
@@ -5511,6 +5609,11 @@ fn build_contractual_evidence_pack(
     let margin_scope = report["token_budget_report"]["margin_view"][scope_code].clone();
     let statement_export_preview =
         report["token_budget_report"]["statement_export_previews"][scope_code].clone();
+    let mut customer_contractual_boundary =
+        statement_export_preview["customer_contractual_boundary"].clone();
+    customer_contractual_boundary["surface_kind"] = json!("customer_evidence_pack_report_only");
+    let settlement_report_preview =
+        settlement_report_preview_from_export(contract, &statement_export_preview);
 
     Ok(json!({
         "contractual_evidence_pack": {
@@ -5565,7 +5668,8 @@ fn build_contractual_evidence_pack(
         "unready_required_sources_for_margin_truth": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["unready_required_sources_for_margin_truth"].clone(),
         "margin_readiness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["margin_readiness_state"].clone(),
         "external_truth_manifest": report["token_budget_report"]["external_truth_manifest"].clone(),
-        "settlement_report_preview": statement_export_preview["settlement_report_preview"].clone(),
+        "settlement_report_preview": settlement_report_preview,
+        "customer_contractual_boundary": customer_contractual_boundary,
         "export_semantics": {
             "surface_kind": "customer_evidence_pack_report_only",
             "self_serve_state": "self_serve_ready_report_only",
@@ -5854,6 +5958,12 @@ fn build_contractual_sources_value(
     } else {
         report["token_budget_report"]["external_truth_sources"].clone()
     };
+    let statement_export_preview =
+        report["token_budget_report"]["statement_export_previews"][scope_code].clone();
+    let mut customer_contractual_boundary =
+        statement_export_preview["customer_contractual_boundary"].clone();
+    customer_contractual_boundary["surface_kind"] =
+        json!("customer_contractual_sources_report_only");
     json!({
         "scope_code": scope_code,
         "scope_label": scope_label,
@@ -5867,15 +5977,10 @@ fn build_contractual_sources_value(
         "statement_preview": report["token_budget_report"]["statement_previews"][scope_code].clone(),
         "reconciliation_preview": report["token_budget_report"]["reconciliation_previews"][scope_code].clone(),
         "margin_scope": report["token_budget_report"]["margin_view"][scope_code].clone(),
-        "statement_export_preview": report["token_budget_report"]["statement_export_previews"][scope_code].clone(),
+        "statement_export_preview": statement_export_preview,
         "settlement_report_preview": report["token_budget_report"]["settlement_report_previews"][scope_code].clone(),
         "transactional_statuses": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["transactional_statuses"].clone(),
-        "customer_contractual_boundary": {
-            "surface_kind": "customer_contractual_sources_report_only",
-            "self_serve_state": "self_serve_ready_report_only",
-            "invoice_grade": false,
-            "operational_telemetry_included": false
-        },
+        "customer_contractual_boundary": customer_contractual_boundary,
         "suggested_repo_local_paths": {
             "provider_usage_export": provider_usage_default_path(repo_root).display().to_string(),
             "provider_invoice_export": provider_invoice_default_path(repo_root).display().to_string(),
@@ -6014,6 +6119,11 @@ pub async fn print_statement_export_bundle(
     if statement_export_preview.is_null() {
         bail!("unknown or unavailable scope for token statement export: {scope_code}");
     }
+    let mut customer_contractual_boundary =
+        statement_export_preview["customer_contractual_boundary"].clone();
+    customer_contractual_boundary["surface_kind"] = json!("customer_review_bundle_report_only");
+    let settlement_report_preview =
+        settlement_report_preview_from_export(&config.contract, &statement_export_preview);
     let bundle = json!({
         "token_statement_export_bundle": {
             "bundle_version": "token-statement-export-bundle-v2",
@@ -6029,10 +6139,11 @@ pub async fn print_statement_export_bundle(
                 "contractual_evidence_pack": "contractual_evidence_pack.json",
                 "token_contractual_sources": "token_contractual_sources.json",
             },
-        "settlement_report_preview": statement_export_preview["settlement_report_preview"].clone(),
+        "settlement_report_preview": settlement_report_preview,
         "statement_export_preview": statement_export_preview.clone(),
         "contractual_evidence_pack": evidence_pack["contractual_evidence_pack"].clone(),
         "token_contractual_sources": contractual_sources,
+        "customer_contractual_boundary": customer_contractual_boundary.clone(),
         "surface_kind": "customer_review_bundle_report_only",
         "self_serve_state": "self_serve_ready_report_only",
         "invoice_grade": false,
@@ -6055,6 +6166,7 @@ pub async fn print_statement_export_bundle(
             "self_serve_state": root["self_serve_state"].clone(),
             "invoice_grade": root["invoice_grade"].clone(),
             "operational_telemetry_included": root["operational_telemetry_included"].clone(),
+            "customer_contractual_boundary": root["customer_contractual_boundary"].clone(),
             "redaction_policy": root["redaction_policy"].clone(),
             "statement_preview_id": root["statement_preview_id"].clone(),
             "files": root["files"].clone(),
@@ -10749,6 +10861,10 @@ mod tests {
             token_event["contract"]["contractual_readiness_model_version"],
             "contractual-readiness-v1"
         );
+        assert_eq!(
+            token_event["contract"]["customer_contractual_boundary_version"],
+            "customer-contractual-boundary-v1"
+        );
         assert_eq!(token_event["contract"]["billing_mode"], "report_only");
         assert_eq!(
             token_event["contract"]["reconciliation_contract_version"],
@@ -10764,7 +10880,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v14"
+            "contractual-evidence-pack-v15"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -12847,7 +12963,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v14");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v15");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -12905,6 +13021,26 @@ effective_to_epoch_ms = 2000
             "contractual-readiness-v1"
         );
         assert_eq!(
+            preview["customer_contractual_boundary"]["model_version"],
+            "customer-contractual-boundary-v1"
+        );
+        assert_eq!(
+            preview["customer_contractual_boundary"]["surface_kind"],
+            "customer_review_report_only"
+        );
+        assert_eq!(
+            preview["customer_contractual_boundary"]["review_surface_state"],
+            "provisional_report_only"
+        );
+        assert_eq!(
+            preview["customer_contractual_boundary"]["future_settlement_activation_state"],
+            "review_not_yet_ready_for_future_settlement"
+        );
+        assert_eq!(
+            preview["customer_contractual_boundary"]["future_settlement_activation_blocking_reasons"],
+            json!(["coverage_not_final", "money_arithmetic_not_ready"])
+        );
+        assert_eq!(
             preview["internal_money_arithmetic_readiness_state"],
             "awaiting_pricing_truth"
         );
@@ -12939,7 +13075,11 @@ effective_to_epoch_ms = 2000
         assert_eq!(preview["evidence_pack_available"], true);
         assert_eq!(
             preview["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v5"
+            "settlement-report-preview-v6"
+        );
+        assert_eq!(
+            preview["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],
+            "customer_settlement_report_preview_report_only"
         );
         assert_eq!(
             preview["required_sources_for_usage_truth"],
@@ -13073,8 +13213,16 @@ effective_to_epoch_ms = 2000
                 "statement_export_previews": {
                     "lifetime": {
                         "settlement_report_preview": {
-                            "model_version": "settlement-report-preview-v5",
+                            "model_version": "settlement-report-preview-v6",
                             "settlement_report_id": "preview-hash"
+                        },
+                        "customer_contractual_boundary": {
+                            "model_version": "customer-contractual-boundary-v1",
+                            "surface_kind": "customer_review_report_only",
+                            "review_surface_state": "customer_review_ready_report_only",
+                            "review_surface_blocking_reasons": [],
+                            "future_settlement_activation_state": "future_settlement_activation_blocked_report_only",
+                            "future_settlement_activation_blocking_reasons": ["billing_mode_report_only", "money_arithmetic_not_ready"]
                         }
                     }
                 },
@@ -13124,7 +13272,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v14");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v15");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -13145,6 +13293,22 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             payload["contractual_readiness_model_version"],
             "contractual-readiness-v1"
+        );
+        assert_eq!(
+            payload["customer_contractual_boundary"]["model_version"],
+            "customer-contractual-boundary-v1"
+        );
+        assert_eq!(
+            payload["customer_contractual_boundary"]["surface_kind"],
+            "customer_evidence_pack_report_only"
+        );
+        assert_eq!(
+            payload["customer_contractual_boundary"]["review_surface_state"],
+            "customer_review_ready_report_only"
+        );
+        assert_eq!(
+            payload["customer_contractual_boundary"]["future_settlement_activation_state"],
+            "future_settlement_activation_blocked_report_only"
         );
         assert_eq!(
             payload["internal_money_arithmetic_readiness_state"],
@@ -13202,7 +13366,11 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             payload["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v5"
+            "settlement-report-preview-v6"
+        );
+        assert_eq!(
+            payload["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],
+            "customer_settlement_report_preview_report_only"
         );
         assert_eq!(
             payload["required_sources_for_usage_truth"],

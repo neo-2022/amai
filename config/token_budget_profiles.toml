@@ -1,5 +1,5 @@
-modified_at = "2026-03-25 11:08 MSK"
-"Ручная сверка guide/docs" = "2026-03-25 11:08 MSK"
+modified_at = "2026-03-25 11:28 MSK"
+"Ручная сверка guide/docs" = "2026-03-25 11:28 MSK"
 
 default_profile = "local_default"
 
@@ -40,6 +40,7 @@ event_time_policy_version = "client-visible-ingest-v1"
 billing_policy_version = "report-only-v1"
 suitability_model_version = "token-suitability-v1"
 contractual_readiness_model_version = "contractual-readiness-v1"
+customer_contractual_boundary_version = "customer-contractual-boundary-v1"
 billing_mode = "report_only"
 reconciliation_contract_version = "provider-reconciliation-v9"
 margin_model_version = "margin-view-v8"
@@ -48,9 +49,9 @@ rate_card_binding_model_version = "rate-card-binding-v3"
 rate_card_version = "unpriced-v1"
 currency_profile = "unpriced"
 settlement_status = "unsettled_report_only"
-contractual_statement_export_version = "contractual-statement-export-v14"
-settlement_report_preview_version = "settlement-report-preview-v5"
-contractual_evidence_pack_version = "contractual-evidence-pack-v14"
+contractual_statement_export_version = "contractual-statement-export-v15"
+settlement_report_preview_version = "settlement-report-preview-v6"
+contractual_evidence_pack_version = "contractual-evidence-pack-v15"
 
 [profiles.local_default]
 display_name = "Обычная рабочая машина"

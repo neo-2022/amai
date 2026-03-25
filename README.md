@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 11:08 MSK
-Ручная сверка guide/docs: 2026-03-25 11:08 MSK
+modified_at: 2026-03-25 11:28 MSK
+Ручная сверка guide/docs: 2026-03-25 11:28 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1196,6 +1196,15 @@ preview, а не только raw count.
     а не сразу с full evidence pack.
   - export preview теперь ещё несёт `suitability`, чтобы review/export и будущие
     money-facing surface-ы не путались между собой.
+  - preview, settlement report preview и evidence pack теперь ещё несут общий
+    `customer_contractual_boundary`;
+  - в нём отдельно фиксируются:
+    - `review_surface_state`
+    - `review_surface_blocking_reasons`
+    - `future_settlement_activation_state`
+    - `future_settlement_activation_blocking_reasons`
+  Это нужно затем, чтобы customer review surface не выдавал свою готовность за готовность
+  будущего settlement activation.
 - `settlement_report_previews`
   - по каждому scope теперь есть отдельный review-grade settlement object;
   - он собирает в одном месте:
@@ -1381,9 +1390,9 @@ preview, а не только raw count.
   - это уже customer-facing review surface с hashes и contract states, но всё ещё строго
     `report_only`, а не invoice.
   - export/evidence surface versions теперь подняты до:
-    - `contractual-statement-export-v14`
-    - `settlement-report-preview-v5`
-    - `contractual-evidence-pack-v14`
+    - `contractual-statement-export-v15`
+    - `settlement-report-preview-v6`
+    - `contractual-evidence-pack-v15`
     потому что customer-facing payload теперь уже явно различает:
     - `customer review ready`
     - `internal money arithmetic ready`
