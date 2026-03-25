@@ -21,6 +21,7 @@ const MAX_OPEN_QUESTIONS: usize = 6;
 const MAX_MATERIALIZED_NOTES: usize = 6;
 const MAX_RECENT_DECISION_TRACES: usize = 3;
 const MAX_PENDING_RETURN_QUEUE: usize = 6;
+const PROJECT_TASK_TREE_VERSION: &str = "project-task-tree-v1";
 
 pub async fn record_handoff_event(
     db: &Client,
@@ -542,6 +543,15 @@ fn compose_restore_bundle(
     let included_reasons_summary = decision_trace_summary(Some(&latest_decision_trace), "included");
     let excluded_reasons_summary =
         decision_trace_summary(Some(&latest_decision_trace), "not_included");
+    let project_task_tree = build_project_task_tree(
+        project,
+        namespace,
+        authoritative_event,
+        &current_goal,
+        &next_step,
+        &pending_return_queue,
+    );
+    let project_task_tree_summary = summarize_project_task_tree(&project_task_tree);
 
     json!({
         "working_state_restore": {
@@ -567,6 +577,8 @@ fn compose_restore_bundle(
             "pending_return_queue": pending_return_queue,
             "pending_return_summary": pending_return_summary,
             "execctl_resume_state": execctl_resume_state,
+            "project_task_tree": project_task_tree,
+            "project_task_tree_summary": project_task_tree_summary,
             "last_command": last_command,
             "last_results_summary": last_results_summary,
             "latest_decision_trace": latest_decision_trace,
@@ -1436,6 +1448,130 @@ fn summarize_pending_return_queue(value: &Value) -> Option<String> {
     }
 }
 
+fn build_project_task_tree(
+    project: &Value,
+    namespace: &Value,
+    authoritative_event: &Value,
+    current_goal: &str,
+    current_next_step: &str,
+    pending_return_queue: &Value,
+) -> Value {
+    let project_code = project["code"].as_str().unwrap_or_default();
+    let namespace_code = namespace["code"].as_str().unwrap_or_default();
+    let root_task_id = format!("{project_code}::{namespace_code}::open-task-root");
+    let active_event_id = authoritative_event["event_id"].as_str().unwrap_or_default();
+    let active_task_id = if active_event_id.is_empty() {
+        format!("{root_task_id}::active")
+    } else {
+        format!("task::{active_event_id}")
+    };
+    let active_recorded_at = authoritative_event["recorded_at_epoch_ms"].as_u64();
+    let active_source_kind = authoritative_event["source_kind"]
+        .as_str()
+        .unwrap_or("working_state_restore");
+    let mut nodes = vec![json!({
+        "task_id": active_task_id,
+        "parent_task_id": root_task_id,
+        "task_role": "active",
+        "task_state": "active",
+        "resume_state": "active",
+        "headline": current_goal,
+        "next_step": current_next_step,
+        "authoritative_event_id": active_event_id,
+        "recorded_at_epoch_ms": active_recorded_at,
+        "source_kind": active_source_kind,
+    })];
+    let mut edges = vec![json!({
+        "from_task_id": root_task_id,
+        "to_task_id": nodes[0]["task_id"].clone(),
+        "relation": "tracks_open_task",
+        "priority_rank": 0,
+    })];
+
+    if let Some(items) = pending_return_queue.as_array() {
+        for (index, item) in items.iter().enumerate() {
+            let pending_event_id = item["authoritative_event_id"].as_str().unwrap_or_default();
+            let task_id = if pending_event_id.is_empty() {
+                format!("{root_task_id}::pending-return-{}", index + 1)
+            } else {
+                format!("task::{pending_event_id}")
+            };
+            let priority_rank = (index + 1) as u64;
+            nodes.push(json!({
+                "task_id": task_id,
+                "parent_task_id": root_task_id,
+                "task_role": "pending_return",
+                "task_state": "suspended",
+                "resume_state": item["resume_state"].as_str().unwrap_or("pending_return"),
+                "headline": item["headline"].as_str().unwrap_or_default(),
+                "next_step": item["next_step"].as_str().unwrap_or_default(),
+                "authoritative_event_id": pending_event_id,
+                "queued_at_epoch_ms": item["queued_at_epoch_ms"].as_u64(),
+                "queued_reason": item["queued_reason"].as_str().unwrap_or("interrupted_by_new_handoff"),
+                "source_kind": "pending_return_queue",
+            }));
+            edges.push(json!({
+                "from_task_id": root_task_id,
+                "to_task_id": nodes.last().and_then(|node| node.get("task_id")).cloned().unwrap_or(Value::Null),
+                "relation": "tracks_open_task",
+                "priority_rank": priority_rank,
+            }));
+        }
+    }
+
+    json!({
+        "tree_version": PROJECT_TASK_TREE_VERSION,
+        "project_code": project_code,
+        "namespace_code": namespace_code,
+        "root_task_id": root_task_id,
+        "open_tasks_count": nodes.len(),
+        "pending_return_count": nodes.len().saturating_sub(1),
+        "nodes": nodes,
+        "edges": edges,
+    })
+}
+
+fn summarize_project_task_tree(value: &Value) -> Option<String> {
+    let nodes = value["nodes"].as_array()?;
+    if nodes.is_empty() {
+        return None;
+    }
+    let active = nodes
+        .iter()
+        .find(|item| item["task_role"].as_str() == Some("active"));
+    let active_headline = active
+        .and_then(|item| item["headline"].as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("ещё нет данных");
+    let pending = nodes
+        .iter()
+        .filter(|item| item["task_role"].as_str() == Some("pending_return"))
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Some(format!("active: {active_headline}"));
+    }
+    let pending_summary = pending
+        .iter()
+        .take(3)
+        .filter_map(|item| {
+            let headline = item["headline"].as_str().unwrap_or_default();
+            let next_step = item["next_step"].as_str().unwrap_or_default();
+            if headline.is_empty() {
+                None
+            } else if next_step.is_empty() {
+                Some(headline.to_string())
+            } else {
+                Some(format!("{headline} -> {next_step}"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" || ");
+    Some(format!(
+        "active: {active_headline}; pending_return({}): {pending_summary}",
+        pending.len()
+    ))
+}
+
 fn normalize_next_step_hint(value: &str) -> String {
     let mut normalized = value.trim().to_string();
     for _ in 0..3 {
@@ -2156,6 +2292,24 @@ mod tests {
             restore["pending_return_summary"]
                 .as_str()
                 .is_some_and(|value| value.contains("Same-meter spend control"))
+        );
+        assert_eq!(
+            restore["project_task_tree"]["tree_version"],
+            json!("project-task-tree-v1")
+        );
+        assert_eq!(restore["project_task_tree"]["open_tasks_count"], json!(2));
+        assert_eq!(
+            restore["project_task_tree"]["nodes"][0]["task_role"],
+            json!("active")
+        );
+        assert_eq!(
+            restore["project_task_tree"]["nodes"][1]["task_role"],
+            json!("pending_return")
+        );
+        assert!(
+            restore["project_task_tree_summary"]
+                .as_str()
+                .is_some_and(|value| value.contains("pending_return(1)"))
         );
     }
 

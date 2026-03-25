@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 20:04 MSK
-Ручная сверка guide/docs: 2026-03-25 20:04 MSK
+modified_at: 2026-03-25 20:14 MSK
+Ручная сверка guide/docs: 2026-03-25 20:14 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -412,6 +412,8 @@ cargo run --quiet -- verify continuity --project art --namespace continuity
     - `pending_return_queue`, `pending_return_summary` и `execctl_resume_state`, чтобы новый
       handoff не затирал предыдущую рабочую линию молча, а оставлял machine-readable след
       обязательного возврата;
+    - `project_task_tree` и `project_task_tree_summary`, чтобы active line и suspended
+      worklines уже жили как project-bound open-task tree, а не как один только headline;
     - `state_lineage` с `lineage_model_version = lineage-v2`, authoritative event, truth ranking и явным graph-слоем `nodes / edges`, чтобы было видно, какой event authoritative, какие его поддерживают и какие уже superseded.
     - `workspace_graph` с `workspace_graph_model_version = workspace-graph-v10` и `artifact_lineage_model_version = artifact-lineage-v1`, где recent retrieval теперь materialize-ится как graph `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref / call_ref`, а resolved relations `imports_file / re_exports_file / imports_symbol / re_exports_symbol / resolves_file / resolves_symbol / calls_file / calls_symbol / resolves_call_file / resolves_call_symbol` уже учитывают owner-aware Rust symbol lookup для provable случаев вроде `Type::new`, `Self::helper()`, `self.helper()`, trait-qualified forms вида `<Type as Trait>::make`, тех же trait-qualified forms через доказанный imported alias, module-alias forms вроде `trait_mod::Factory`, owner-side module alias paths вроде `type_mod::Beta::new` и combined forms вроде `<type_mod::Beta as trait_mod::Factory>::make` и `<type_mod::Beta as FactoryAlias>::make`, не переходя к небезопасному type inference; если owner или trait пришли в impl через видимый selector, graph теперь дополнительно пишет `owner_path_canonical` и `trait_name_canonical` только при единственном доказуемом target;
     - fail-closed semantics для plain-symbol и owner-aware resolution дополнительно зажаты property-based tests: неоднозначный кандидат в любом candidate-file или более одного уникального candidate-file обязаны приводить к `None`, а не к “лучшему предположению”.
@@ -427,6 +429,8 @@ cargo run --quiet -- verify continuity --project art --namespace continuity
   - отдельный proof `scripts/proof_art_continuity_startup.sh` теперь проверяет `continuity startup --json` и ожидает `3 x recovered_useful` по `startup_summary`, `chat_start_restore` и `working_state_restore`.
   - отдельный proof `scripts/proof_execctl_pending_return.sh` проверяет, что второй handoff не
     стирает предыдущую линию молча, а поднимает её в `pending_return_queue`.
+  - тот же proof теперь дополнительно проверяет, что restore уже materialize-ит
+    `project_task_tree` с active task и pending-return узлом.
   - он проверяет уже 9 отдельных probe:
     - есть ли свежий `continuity_handoff`;
     - собрался ли `working_state_restore`;

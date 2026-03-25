@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 19:22 MSK
-Ручная сверка guide/docs: 2026-03-25 19:22 MSK
+modified_at: 2026-03-25 20:14 MSK
+Ручная сверка guide/docs: 2026-03-25 20:14 MSK
 
 # Architecture
 
@@ -211,8 +211,8 @@ Code structure plane:
 
 ## First ExecCtl slice
 
-Полное дерево задач ещё не materialized, но первый enforceable `ExecCtl` contour теперь уже есть
-внутри `working_state`.
+Полный append-only task ledger ещё не materialized, но первый enforceable project-bound
+`ExecCtl` task tree contour теперь уже есть внутри `working_state`.
 
 Его задача простая:
 - новый `continuity handoff` не должен тихо стирать предыдущую рабочую линию;
@@ -225,11 +225,14 @@ Code structure plane:
 - `pending_return_queue`
 - `pending_return_summary`
 - `execctl_resume_state`
+- `project_task_tree`
+- `project_task_tree_summary`
 
-Это пока не финальный task tree, но уже fail-closed защита против silent preemption.
+Это ещё не финальный task ledger, но уже fail-closed защита против silent preemption.
 Архитектурный закон здесь такой:
 - continuity не равна “последний headline победил”;
-- project-bound task memory должна помнить и active line, и обязательные линии к возврату;
+- project-bound task memory должна помнить и active line, и обязательные линии к возврату,
+  и выводить их как открытое дерево задач проекта;
 - любой следующий `ExecCtl` layer должен расти поверх этого состояния, а не заменять его
   prompt-договорённостью.
 

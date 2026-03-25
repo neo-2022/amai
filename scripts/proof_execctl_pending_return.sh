@@ -50,5 +50,10 @@ jq -e '.working_state_restore.current_goal == "Project relocation contour"' "${r
 jq -e '.working_state_restore.execctl_resume_state == "pending_return_queue_present"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.pending_return_queue[0].headline == "Same-meter spend control"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.pending_return_summary | contains("Same-meter spend control -> Materialize live assistant generation source.")' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_tree.tree_version == "project-task-tree-v1"' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_tree.open_tasks_count == 2' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_tree.nodes[0].task_role == "active"' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_tree.nodes[1].task_role == "pending_return"' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.project_task_tree_summary | contains("pending_return(1)")' "${restore_output}" >/dev/null
 
 printf 'proof_execctl_pending_return: PASS\n'

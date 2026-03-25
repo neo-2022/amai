@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 20:04 MSK
-Ручная сверка guide/docs: 2026-03-25 20:04 MSK
+modified_at: 2026-03-25 20:14 MSK
+Ручная сверка guide/docs: 2026-03-25 20:14 MSK
 
 # Operations
 
@@ -398,6 +398,8 @@ cd /home/art/agent-memory-index
   - `recent_actions[].execution_state` разводит `attempted / succeeded / superseded / stale`;
   - `pending_return_queue`, `pending_return_summary` и `execctl_resume_state` не дают новому
     `continuity_handoff` тихо затереть прошлую рабочую линию;
+  - `project_task_tree` и `project_task_tree_summary` теперь поднимают active line и
+    pending-return obligations как project-bound open-task tree;
   - `state_lineage` хранит `lineage_model_version = lineage-v2`, authoritative event, supporting event ids, truth ranking и явный graph-слой `nodes / edges`;
   - `workspace_graph` хранит versioned structural runtime/workspace graph:
     `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref / call_ref`,
@@ -409,6 +411,7 @@ cd /home/art/agent-memory-index
   - при битом `session_id` restore-path теперь fail-closed и не смешивает несколько пустых сессий в один bundle.
   - product proof для этого minimal `ExecCtl` contour:
     `./scripts/proof_execctl_pending_return.sh`
+    и тот же proof теперь проверяет уже не только queue, но и `project_task_tree`.
 
 Если передан `--question`, helper сам должен:
 - распознать `прошлый / текущий чат`;

@@ -2237,6 +2237,10 @@ fn build_chat_start_restore(
         .and_then(|value| value["pending_return_summary"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let project_task_tree_summary = restore_node
+        .and_then(|value| value["project_task_tree_summary"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let execctl_resume_state = restore_node
         .and_then(|value| value["execctl_resume_state"].as_str())
         .unwrap_or("clear")
@@ -2302,6 +2306,7 @@ fn build_chat_start_restore(
             "open_questions_summary": open_questions_summary,
             "workspace_graph_summary": workspace_graph_summary,
             "pending_return_summary": pending_return_summary,
+            "project_task_tree_summary": project_task_tree_summary,
             "execctl_resume_state": execctl_resume_state,
             "included_reasons_summary": included_reasons_summary,
             "excluded_reasons_summary": excluded_reasons_summary,
@@ -2350,6 +2355,10 @@ fn render_chat_start_prompt(
         .and_then(|value| value["pending_return_summary"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let project_task_tree_summary = restore_node
+        .and_then(|value| value["project_task_tree_summary"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let execctl_resume_state = restore_node
         .and_then(|value| value["execctl_resume_state"].as_str())
         .unwrap_or("clear");
@@ -2383,6 +2392,9 @@ fn render_chat_start_prompt(
     }
     if let Some(value) = workspace_graph_summary {
         lines.push(format!("Структурный граф рабочей области: {value}"));
+    }
+    if let Some(value) = project_task_tree_summary {
+        lines.push(format!("Дерево задач проекта: {value}"));
     }
     if let Some(value) = pending_return_summary {
         lines.push(format!("Незавершённые линии к возврату: {value}"));
@@ -4064,6 +4076,7 @@ mod tests {
                 "restore_confidence": "high",
                 "execctl_resume_state": "pending_return_queue_present",
                 "pending_return_summary": "Same-meter spend control -> Materialize live assistant generation source.",
+                "project_task_tree_summary": "active: Amai upstream thread-index enrich materialized; pending_return(1): Same-meter spend control -> Materialize live assistant generation source.",
                 "materialized_notes": [
                     "Enriched temporal summaries теперь пишутся upstream."
                 ],
@@ -4092,6 +4105,9 @@ mod tests {
         assert!(prompt.contains("Обязательный следующий шаг: Сделать auto-injection restore pack прямо в chat-start prompt."));
         assert!(prompt.contains(
             "Недавние действия: Проверили previous chat lookup; Проверили exact-time lookup"
+        ));
+        assert!(prompt.contains(
+            "Дерево задач проекта: active: Amai upstream thread-index enrich materialized; pending_return(1): Same-meter spend control -> Materialize live assistant generation source."
         ));
         assert!(prompt.contains(
             "Незавершённые линии к возврату: Same-meter spend control -> Materialize live assistant generation source."
