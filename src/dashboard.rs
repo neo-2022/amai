@@ -3154,6 +3154,12 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let current_session = &report["current_session"];
     let lifetime = &report["lifetime"];
     let rolling_window = &report["rolling_window"];
+    let current_session_alignment =
+        &report["statement_previews"]["current_session"]["client_limit_meter_alignment"];
+    let rolling_window_alignment =
+        &report["statement_previews"]["rolling_window"]["client_limit_meter_alignment"];
+    let lifetime_alignment =
+        &report["statement_previews"]["lifetime"]["client_limit_meter_alignment"];
     let session_events_total = current_session["events_total"].as_u64().unwrap_or(0);
     let session_events = current_session["counted_events"].as_u64().unwrap_or(0);
     let session_saved = current_session["verified_effective_saved_tokens"].as_i64();
@@ -3199,44 +3205,53 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let lifetime_answer_count = lifetime["answer_like_counted_events"].as_u64().unwrap_or(0);
     let lifetime_answer_percent = lifetime["verified_answer_like_savings_pct"].as_f64();
 
+    let mut session_note = if session_events > 0 {
+        format!(
+            "Текущая сессия — это непрерывная работа без паузы дольше 30 минут. Длительность: {}. В главный итог уже вошли {} из {} живых запросов. Проверенная экономия по ним: {}. {}",
+            elapsed_since_epoch_label(session_started, session_ended),
+            format_u64(Some(session_events)),
+            format_u64(Some(session_events_total)),
+            format_percent(session_percent),
+            recovery_sentence(session_recovery)
+        ) + &format!(
+            " Уже есть {}, где Amai дошёл до более полного ответа без лишнего уточнения. Это {} от всей выборки, экономия по ним: {}.",
+            format_count_with_word(session_answer_count, "случай", "случая", "случаев"),
+            format_percent(session_answer_rate),
+            format_percent(session_answer_percent)
+        ) + " Подробные цифры по главному итогу, всему живому потоку и тому, что пока вне главного итога, вынесены в нижние строки."
+    } else if session_events_total > 0 {
+        format!(
+            "В этой сессии уже есть Amai-запросы: {}. Но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому главный итог по сессии ещё не накоплен.",
+            format_u64(Some(session_events_total)),
+        ) + &format!(
+            " {} {}",
+            raw_savings_sentence(
+                session_raw_baseline,
+                session_raw_delivered,
+                session_raw_percent
+            ),
+            client_budget_disclaimer()
+        )
+    } else {
+        "В текущей непрерывной сессии Amai ещё не накопил ни одного учтённого запроса, поэтому реальную экономию пока рано показывать.".to_string()
+    };
+    if let Some(sentence) = client_limit_alignment_note_sentence(current_session_alignment) {
+        session_note.push(' ');
+        session_note.push_str(&sentence);
+    }
+    let mut session_rows = current_session_lane_rows(current_session);
+    if let Some(row) = client_limit_alignment_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
     let mut session_card = card_with_rows(
-            "Экономия токенов за текущую сессию",
-            format_signed_count(session_saved),
-            if session_events > 0 {
-                format!(
-                    "Текущая сессия — это непрерывная работа без паузы дольше 30 минут. Длительность: {}. В главный итог уже вошли {} из {} живых запросов. Проверенная экономия по ним: {}. {}",
-                    elapsed_since_epoch_label(session_started, session_ended),
-                    format_u64(Some(session_events)),
-                    format_u64(Some(session_events_total)),
-                    format_percent(session_percent),
-                    recovery_sentence(session_recovery)
-                ) + &format!(
-                    " Уже есть {}, где Amai дошёл до более полного ответа без лишнего уточнения. Это {} от всей выборки, экономия по ним: {}.",
-                    format_count_with_word(session_answer_count, "случай", "случая", "случаев"),
-                    format_percent(session_answer_rate),
-                    format_percent(session_answer_percent)
-                ) + " Подробные цифры по главному итогу, всему живому потоку и тому, что пока вне главного итога, вынесены в нижние строки."
-            } else if session_events_total > 0 {
-                format!(
-                    "В этой сессии уже есть Amai-запросы: {}. Но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому главный итог по сессии ещё не накоплен.",
-                    format_u64(Some(session_events_total)),
-                ) + &format!(
-                    " {} {}",
-                    raw_savings_sentence(
-                        session_raw_baseline,
-                        session_raw_delivered,
-                        session_raw_percent
-                    ),
-                    client_budget_disclaimer()
-                )
-            } else {
-                "В текущей непрерывной сессии Amai ещё не накопил ни одного учтённого запроса, поэтому реальную экономию пока рано показывать.".to_string()
-            },
-            savings_status(session_saved, session_events, session_events_total),
-            None,
-            Some("Эта карточка показывает, сколько токенов Amai сэкономил в текущем непрерывном заходе работы. Новый заход начинается после паузы дольше 30 минут. В главный итог попадают только те живые запросы, которые уже подтвердились как полезные без потери качества. Нижние строки нужны, чтобы показать разницу между главным итогом и всем живым потоком.".to_string()),
-            current_session_lane_rows(current_session),
-        );
+        "Экономия токенов за текущую сессию",
+        format_signed_count(session_saved),
+        session_note,
+        savings_status(session_saved, session_events, session_events_total),
+        None,
+        Some("Эта карточка показывает, сколько токенов Amai сэкономил в текущем непрерывном заходе работы. Новый заход начинается после паузы дольше 30 минут. В главный итог попадают только те живые запросы, которые уже подтвердились как полезные без потери качества. Нижние строки нужны, чтобы показать разницу между главным итогом и всем живым потоком.".to_string()),
+        session_rows,
+    );
     if session_events_total > 0 && session_events == 0 {
         session_card = with_status_tooltip(
             session_card,
@@ -3252,37 +3267,48 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         );
     }
 
-    let mut rolling_card = card_with_tooltip(
+    let mut rolling_note = if rolling_events > 0 {
+        format!(
+            "Это текущее рабочее окно профиля {} за {}. В главный итог окна уже вошли {} из {} живых запросов. Проверенная экономия: {}. {}",
+            rolling_window_label,
+            elapsed_since_epoch_label(rolling_started, rolling_ended),
+            format_u64(Some(rolling_events)),
+            format_u64(Some(rolling_events_total)),
+            format_percent(rolling_percent),
+            recovery_sentence(rolling_recovery)
+        ) + &format!(
+            " Уже есть {}, где Amai дошёл до более полного ответа без лишнего уточнения. Это {} от окна, экономия по ним: {}.",
+            format_count_with_word(rolling_answer_count, "случай", "случая", "случаев"),
+            format_percent(rolling_answer_rate),
+            format_percent(rolling_answer_percent)
+        )
+    } else if rolling_events_total > 0 {
+        format!(
+            "В текущем рабочем окне уже есть Amai-запросы: {}. Но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому итог по окну пока рано считать устойчивым.",
+            format_u64(Some(rolling_events_total))
+        )
+    } else {
+        "В текущем рабочем окне Amai ещё не накопил учтённых запросов, поэтому здесь пока нет подтверждённой живой статистики.".to_string()
+    };
+    if let Some(sentence) = client_limit_alignment_note_sentence(rolling_window_alignment) {
+        rolling_note.push(' ');
+        rolling_note.push_str(&sentence);
+    }
+    let mut rolling_rows = Vec::new();
+    if let Some(row) = client_limit_alignment_metric_row(rolling_window_alignment) {
+        rolling_rows.push(row);
+    }
+    let mut rolling_card = card_with_rows(
         "Экономия токенов за рабочее окно",
         format_signed_count(rolling_saved),
-        if rolling_events > 0 {
-            format!(
-                "Это текущее рабочее окно профиля {} за {}. В главный итог окна уже вошли {} из {} живых запросов. Проверенная экономия: {}. {}",
-                rolling_window_label,
-                elapsed_since_epoch_label(rolling_started, rolling_ended),
-                format_u64(Some(rolling_events)),
-                format_u64(Some(rolling_events_total)),
-                format_percent(rolling_percent),
-                recovery_sentence(rolling_recovery)
-            ) + &format!(
-                " Уже есть {}, где Amai дошёл до более полного ответа без лишнего уточнения. Это {} от окна, экономия по ним: {}.",
-                format_count_with_word(rolling_answer_count, "случай", "случая", "случаев"),
-                format_percent(rolling_answer_rate),
-                format_percent(rolling_answer_percent)
-            )
-        } else if rolling_events_total > 0 {
-            format!(
-                "В текущем рабочем окне уже есть Amai-запросы: {}. Но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому итог по окну пока рано считать устойчивым.",
-                format_u64(Some(rolling_events_total))
-            )
-        } else {
-            "В текущем рабочем окне Amai ещё не накопил учтённых запросов, поэтому здесь пока нет подтверждённой живой статистики.".to_string()
-        },
+        rolling_note,
         savings_status(rolling_saved, rolling_events, rolling_events_total),
+        None,
         Some(format!(
             "Эта карточка показывает не одну сессию, а текущее скользящее рабочее окно профиля {}. Окно может захватывать несколько заходов работы подряд и нужно для недавнего тренда, а не только для последнего непрерывного сеанса. В главный итог здесь тоже попадают только те живые запросы, которые уже подтвердились как полезные без потери качества.",
             rolling_window_label
         )),
+        rolling_rows,
     );
     if rolling_events_total > 0 && rolling_events == 0 {
         rolling_card = with_status_tooltip(
@@ -3299,39 +3325,45 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         );
     }
 
-    let mut lifetime_card = card_with_tooltip(
-            "Экономия токенов за всё время записи",
-            format_signed_count(lifetime_saved),
-            if lifetime_events > 0 {
-                format!(
-                    "Это накопительный итог с первого записанного запроса Amai в этой установке за {}. В главный итог уже вошли {} из {} живых запросов. Проверенная экономия: {}. {}",
-                    elapsed_since_epoch_label(lifetime_started, lifetime_ended),
-                    format_u64(Some(lifetime_events)),
-                    format_u64(Some(lifetime_events_total)),
-                    format_percent(lifetime_percent),
-                    recovery_sentence(lifetime_recovery)
-                ) + &format!(
-                    " Уже есть {}, где Amai дошёл до более полного ответа без лишнего уточнения. Это {} от всей выборки, экономия по ним: {}.",
-                    format_count_with_word(
-                        lifetime_answer_count,
-                        "случай",
-                        "случая",
-                        "случаев"
-                    ),
-                    format_percent(lifetime_answer_rate),
-                    format_percent(lifetime_answer_percent)
-                )
-            } else if lifetime_events_total > 0 {
-                format!(
-                    "После установки уже накоплены Amai-запросы: {}. Но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому главный итог пока не считается надёжным.",
-                    format_u64(Some(lifetime_events_total)),
-                )
-            } else {
-                "После установки Amai ещё не накопил учтённых запросов, поэтому здесь пока нет итоговой живой статистики.".to_string()
-            },
-            savings_status(lifetime_saved, lifetime_events, lifetime_events_total),
-            Some("Эта карточка показывает накопительный итог с первого записанного запроса Amai в текущей установке. Это не процент от лимита чата и не вся история всех внешних клиентов навсегда. В главный итог попадают только те живые запросы, которые уже подтвердились как полезные без потери качества; проверочные прогоны и другой инженерный трафик сюда не подмешиваются.".to_string()),
-        );
+    let mut lifetime_note = if lifetime_events > 0 {
+        format!(
+            "Это накопительный итог с первого записанного запроса Amai в этой установке за {}. В главный итог уже вошли {} из {} живых запросов. Проверенная экономия: {}. {}",
+            elapsed_since_epoch_label(lifetime_started, lifetime_ended),
+            format_u64(Some(lifetime_events)),
+            format_u64(Some(lifetime_events_total)),
+            format_percent(lifetime_percent),
+            recovery_sentence(lifetime_recovery)
+        ) + &format!(
+            " Уже есть {}, где Amai дошёл до более полного ответа без лишнего уточнения. Это {} от всей выборки, экономия по ним: {}.",
+            format_count_with_word(lifetime_answer_count, "случай", "случая", "случаев"),
+            format_percent(lifetime_answer_rate),
+            format_percent(lifetime_answer_percent)
+        )
+    } else if lifetime_events_total > 0 {
+        format!(
+            "После установки уже накоплены Amai-запросы: {}. Но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому главный итог пока не считается надёжным.",
+            format_u64(Some(lifetime_events_total)),
+        )
+    } else {
+        "После установки Amai ещё не накопил учтённых запросов, поэтому здесь пока нет итоговой живой статистики.".to_string()
+    };
+    if let Some(sentence) = client_limit_alignment_note_sentence(lifetime_alignment) {
+        lifetime_note.push(' ');
+        lifetime_note.push_str(&sentence);
+    }
+    let mut lifetime_rows = Vec::new();
+    if let Some(row) = client_limit_alignment_metric_row(lifetime_alignment) {
+        lifetime_rows.push(row);
+    }
+    let mut lifetime_card = card_with_rows(
+        "Экономия токенов за всё время записи",
+        format_signed_count(lifetime_saved),
+        lifetime_note,
+        savings_status(lifetime_saved, lifetime_events, lifetime_events_total),
+        None,
+        Some("Эта карточка показывает накопительный итог с первого записанного запроса Amai в текущей установке. Это не процент от лимита чата и не вся история всех внешних клиентов навсегда. В главный итог попадают только те живые запросы, которые уже подтвердились как полезные без потери качества; проверочные прогоны и другой инженерный трафик сюда не подмешиваются.".to_string()),
+        lifetime_rows,
+    );
     if lifetime_events_total > 0 && lifetime_events == 0 {
         lifetime_card = with_status_tooltip(
             lifetime_card,
@@ -4678,16 +4710,6 @@ fn card(title: &str, value: String, note: String, status: &str) -> Value {
     card_with_rows(title, value, note, status, None, None, Vec::new())
 }
 
-fn card_with_tooltip(
-    title: &str,
-    value: String,
-    note: String,
-    status: &str,
-    title_tooltip: Option<String>,
-) -> Value {
-    card_with_rows(title, value, note, status, None, title_tooltip, Vec::new())
-}
-
 fn with_extra_class(mut card: Value, extra_class: &str) -> Value {
     if let Some(object) = card.as_object_mut() {
         object.insert("extra_class".to_string(), Value::from(extra_class));
@@ -5704,6 +5726,127 @@ fn raw_savings_sentence(
 
 fn client_budget_disclaimer() -> &'static str {
     "Это не процент от лимита этого чата. Здесь считается только размер контекста, который Amai приносит в ответ, а не все токены разговора целиком."
+}
+
+fn client_limit_alignment_metric_row(alignment: &Value) -> Option<Value> {
+    let state = alignment["alignment_state"].as_str()?;
+    let live_events = alignment["live_events_count"].as_u64().unwrap_or(0);
+    let non_live_events = alignment["non_live_events_count"].as_u64().unwrap_or(0);
+    let value = if alignment["same_meter_as_client_limit"].as_bool() == Some(true) {
+        "да".to_string()
+    } else {
+        match state {
+            "no_usage_observed" => "ещё нет usage".to_string(),
+            "only_non_live_scope_activity" => format!(
+                "нет: только non-live (live {} / non-live {})",
+                format_u64(Some(live_events)),
+                format_u64(Some(non_live_events))
+            ),
+            "live_usage_unconfirmed_not_meter_equivalent" => format!(
+                "нет: live ещё не подтверждено (live {} / non-live {})",
+                format_u64(Some(live_events)),
+                format_u64(Some(non_live_events))
+            ),
+            "partial_lower_bound_not_meter_equivalent" => format!(
+                "нет: lower bound части цикла (live {} / non-live {})",
+                format_u64(Some(live_events)),
+                format_u64(Some(non_live_events))
+            ),
+            other => format!("нет: {other}"),
+        }
+    };
+    Some(metric_row(
+        "Связь с лимитом клиента",
+        value,
+        client_limit_alignment_tooltip(alignment).as_deref(),
+    ))
+}
+
+fn client_limit_alignment_note_sentence(alignment: &Value) -> Option<String> {
+    let state = alignment["alignment_state"].as_str()?;
+    Some(match state {
+        "no_usage_observed" => {
+            "Этот срез ещё не видел usage-событий, поэтому сравнивать его со шкалой лимита клиента пока рано.".to_string()
+        }
+        "only_non_live_scope_activity" => {
+            "Сейчас в этом срезе есть только non-live активность, поэтому его цифра не обязана двигаться вместе со шкалой лимита клиента.".to_string()
+        }
+        "live_usage_unconfirmed_not_meter_equivalent" => {
+            "Здесь уже были live-события, но confirmed lower bound ещё не набрался, поэтому эта цифра пока не эквивалентна шкале лимита клиента.".to_string()
+        }
+        "partial_lower_bound_not_meter_equivalent" => {
+            "Даже здесь это пока lower bound части агентного цикла, а не тот же полный метр, которым клиент считает лимит сессии.".to_string()
+        }
+        other => format!(
+            "Этот срез пока не эквивалентен клиентскому лимиту сессии: state={other}."
+        ),
+    })
+}
+
+fn client_limit_alignment_tooltip(alignment: &Value) -> Option<String> {
+    let state = alignment["alignment_state"].as_str()?;
+    let mut reasons = alignment["blocking_reasons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|reason| reason.as_str())
+        .filter_map(human_client_limit_alignment_reason)
+        .collect::<Vec<_>>();
+    if reasons.is_empty() {
+        reasons
+            .push("текущий savings-layer всё ещё не совпадает с полным метром клиентского лимита");
+    }
+    let state_note = match state {
+        "no_usage_observed" => "В этом scope ещё нет usage-событий.",
+        "only_non_live_scope_activity" => {
+            "В этом scope пока есть только non-live события, поэтому карточка не обязана совпадать с внешней шкалой лимита."
+        }
+        "live_usage_unconfirmed_not_meter_equivalent" => {
+            "Live usage уже был, но подтверждённый lower bound ещё не накопился."
+        }
+        "partial_lower_bound_not_meter_equivalent" => {
+            "Даже подтверждённая цифра здесь пока описывает только lower bound части агентного цикла."
+        }
+        _ => "Этот scope пока не эквивалентен лимиту клиента.",
+    };
+    let mut tooltip = String::from(
+        "Эта строка показывает, обязана ли карточка двигаться в том же метре, которым клиент считает внешний лимит сессии. Сейчас ответ: нет.",
+    );
+    tooltip.push('\n');
+    tooltip.push_str("- ");
+    tooltip.push_str(state_note);
+    for reason in reasons {
+        tooltip.push('\n');
+        tooltip.push_str("- ");
+        tooltip.push_str(reason);
+    }
+    Some(tooltip)
+}
+
+fn human_client_limit_alignment_reason(reason: &str) -> Option<&'static str> {
+    match reason {
+        "client_prompt_unmeasured" => {
+            Some("в этот слой пока не входят токены исходного запроса клиента")
+        }
+        "assistant_generation_unmeasured" => {
+            Some("в этот слой пока не входят токены генерации ответа моделью")
+        }
+        "tool_overhead_outside_retrieval_unmeasured" => {
+            Some("в этот слой пока не входит tool/orchestration overhead вне retrieval")
+        }
+        "continuity_restore_outside_retrieval_unmeasured" => {
+            Some("в этот слой пока не входит continuity-restore overhead вне retrieval")
+        }
+        "no_usage_observed_in_scope" => Some("в этом scope ещё не было usage-событий"),
+        "no_live_usage_in_scope" => Some("в этом scope пока нет live usage"),
+        "non_live_events_present_in_scope" => Some(
+            "в этом scope уже есть non-live события, которые не совпадают с клиентским spend meter",
+        ),
+        "no_confirmed_live_usage_in_scope" => {
+            Some("live usage уже был, но ещё не дошёл до confirmed lane")
+        }
+        _ => None,
+    }
 }
 
 fn token_lane_summary(
@@ -7066,6 +7209,122 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("ни один случай ещё не подтвердился")
+        );
+    }
+
+    #[test]
+    fn hero_cards_surface_client_limit_alignment_when_preview_is_present() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "events_total": 4,
+                        "counted_events": 0,
+                        "verified_effective_saved_tokens": 0,
+                        "verified_effective_savings_pct": 0.0,
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 0.0,
+                        "answer_like_counted_events": 0,
+                        "verified_answer_like_savings_pct": 0.0,
+                        "excluded_events_count": 4,
+                        "excluded_effective_saved_tokens": 0,
+                        "total_naive_tokens": 1200,
+                        "total_context_tokens": 900,
+                        "effective_savings_pct": 25.0,
+                        "total_effective_saved_tokens": 300,
+                        "total_recovery_tokens": 0
+                    },
+                    "rolling_window": {
+                        "events_total": 7,
+                        "counted_events": 0,
+                        "verified_effective_saved_tokens": 0,
+                        "verified_effective_savings_pct": 0.0
+                    },
+                    "lifetime": {
+                        "events_total": 12,
+                        "counted_events": 3,
+                        "verified_effective_saved_tokens": 900,
+                        "verified_effective_savings_pct": 75.0
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "client_limit_meter_alignment": {
+                                "alignment_state": "only_non_live_scope_activity",
+                                "same_meter_as_client_limit": false,
+                                "live_events_count": 0,
+                                "non_live_events_count": 4,
+                                "blocking_reasons": [
+                                    "client_prompt_unmeasured",
+                                    "no_live_usage_in_scope",
+                                    "non_live_events_present_in_scope"
+                                ]
+                            }
+                        },
+                        "rolling_window": {
+                            "client_limit_meter_alignment": {
+                                "alignment_state": "live_usage_unconfirmed_not_meter_equivalent",
+                                "same_meter_as_client_limit": false,
+                                "live_events_count": 2,
+                                "non_live_events_count": 5,
+                                "blocking_reasons": [
+                                    "client_prompt_unmeasured",
+                                    "no_confirmed_live_usage_in_scope"
+                                ]
+                            }
+                        },
+                        "lifetime": {
+                            "client_limit_meter_alignment": {
+                                "alignment_state": "partial_lower_bound_not_meter_equivalent",
+                                "same_meter_as_client_limit": false,
+                                "live_events_count": 12,
+                                "non_live_events_count": 0,
+                                "blocking_reasons": [
+                                    "client_prompt_unmeasured",
+                                    "assistant_generation_unmeasured"
+                                ]
+                            }
+                        }
+                    },
+                    "profile": {
+                        "display_name": "Обычная рабочая машина"
+                    }
+                }
+            }
+        });
+
+        let cards = build_hero_cards(&snapshot);
+        assert!(
+            cards[0]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("только non-live активность")
+        );
+        let session_alignment = cards[0]["rows"]
+            .as_array()
+            .expect("session rows")
+            .last()
+            .expect("session alignment row");
+        assert_eq!(
+            session_alignment["label"].as_str(),
+            Some("Связь с лимитом клиента")
+        );
+        assert_eq!(
+            session_alignment["value"].as_str(),
+            Some("нет: только non-live (live 0 / non-live 4)")
+        );
+        assert!(
+            cards[1]["rows"][0]["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("live ещё не подтверждено")
+        );
+        assert!(
+            cards[2]["rows"][0]["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("lower bound части цикла")
         );
     }
 

@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 11:55 MSK
-Ручная сверка guide/docs: 2026-03-25 11:55 MSK
+modified_at: 2026-03-25 12:54 MSK
+Ручная сверка guide/docs: 2026-03-25 12:54 MSK
 
 # Operations
 
@@ -1973,7 +1973,13 @@ cargo run --release -- observe token-evidence-pack --scope current_session --out
 ./scripts/proof_token_contractual_sources.sh
 ./scripts/proof_token_freeze_close_semantics.sh
 ./scripts/proof_token_suitability.sh
+./scripts/proof_token_meter_alignment.sh
 ```
+
+Dashboard hero-cards теперь тоже обязаны поднимать `client_limit_meter_alignment`.
+Это нужно затем, чтобы оператор видел distinction между:
+- lower-bound savings inside Amai;
+- и тем самым внешним meter, которым клиент реально сжигает свой live `5h` лимит.
 
 Если нужен отдельный operator-safe inspect-layer по provider bindings, reconciliation и margin:
 

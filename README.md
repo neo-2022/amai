@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 12:38 MSK
-Ручная сверка guide/docs: 2026-03-25 12:38 MSK
+modified_at: 2026-03-25 12:54 MSK
+Ручная сверка guide/docs: 2026-03-25 12:54 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1247,6 +1247,11 @@ preview, а не только raw count.
     - `blocking_reasons`
   Это нужно затем, чтобы lower-bound savings не выглядели как уже эквивалентные
   тому же самому метру, которым клиент считает живой лимит `5h`.
+  - dashboard token-cards теперь поднимают этот же слой в user-facing surface:
+    - добавляют строку `Связь с лимитом клиента`;
+    - прямо показывают, когда текущий scope содержит только `non-live` активность;
+    - и отдельно объясняют, что even confirmed lower bound всё ещё не обязан
+      двигаться вместе с внешней шкалой клиентского лимита.
   - preview, settlement report preview и evidence pack теперь ещё несут общий
     `customer_contractual_boundary`;
   - в нём отдельно фиксируются:

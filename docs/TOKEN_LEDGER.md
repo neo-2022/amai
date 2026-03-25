@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 12:38 MSK
-Ручная сверка guide/docs: 2026-03-25 12:38 MSK
+modified_at: 2026-03-25 12:54 MSK
+Ручная сверка guide/docs: 2026-03-25 12:54 MSK
 
 # Token Ledger
 
@@ -1068,6 +1068,13 @@ Hashes по line items нужны затем, чтобы:
   - `blocking_reasons`
   Это нужно затем, чтобы live lower-bound savings не притворялись уже эквивалентными
   тому же самому полному метру, которым внешний клиент считает общий `5h` limit.
+- dashboard hero-cards обязаны поднимать этот same layer в user-facing виде:
+  - отдельная строка `Связь с лимитом клиента`;
+  - честное различение `only_non_live_scope_activity`,
+    `live_usage_unconfirmed_not_meter_equivalent` и
+    `partial_lower_bound_not_meter_equivalent`;
+  - note карточки обязан прямо сказать, почему её число не обязано совпадать
+    с внешней клиентской шкалой лимита.
 - публикует `included_events_hash / excluded_events_hash`;
 - отдельно показывает `credit_action_state` и `dispute_action_state`;
 - и хранит рядом уже готовые `statement_preview / reconciliation_preview / margin_scope`;
