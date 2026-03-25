@@ -2319,6 +2319,12 @@ fn protocol_manifest() -> Value {
                     "project_task_tree_summary",
                     "project_task_ledger_summary"
                 ],
+                "resume_enforcement": {
+                    "contract_field": "execctl_resume_contract_summary",
+                    "resume_state_field": "execctl_resume_state",
+                    "must_resume_required_return_task_before_unrelated_work": true,
+                    "no_silent_drop": true
+                },
                 "fail_closed_conditions": [
                     "project_unregistered",
                     "repo_root_binding_ambiguous",
@@ -2744,7 +2750,7 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
                     "content": {
                         "type": "text",
                         "text": format!(
-                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, and any pending_return_queue obligations before asking for retrieval or proposing new work."
+                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, and execctl_resume_contract_summary. If execctl_resume_contract_summary is not clear, treat it as a required return obligation and do not silently switch to unrelated work."
                         )
                     }
                 }]
@@ -4345,6 +4351,18 @@ mod tests {
                 .any(|field| field.as_str() == Some("project_task_ledger_summary"))
         );
         assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
+                ["must_resume_required_return_task_before_unrelated_work"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
+                ["no_silent_drop"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
             manifest["tool_contracts"]["amai_continuity_startup"]["summary_field"].as_str(),
             Some("continuity_startup_summary")
         );
@@ -4413,6 +4431,8 @@ mod tests {
             .unwrap_or_default();
         assert!(text.contains("amai_continuity_startup"));
         assert!(text.contains("pending_return_queue"));
+        assert!(text.contains("execctl_resume_contract_summary"));
+        assert!(text.contains("do not silently switch to unrelated work"));
     }
 
     #[test]

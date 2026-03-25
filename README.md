@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 21:26 MSK
-Ручная сверка guide/docs: 2026-03-25 21:26 MSK
+modified_at: 2026-03-25 21:37 MSK
+Ручная сверка guide/docs: 2026-03-25 21:37 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1139,6 +1139,10 @@ preview, а не только raw count.
   `continuity_startup_summary`;
 - поднимать вместе с этим `execctl_resume_state` и `pending_return` obligations,
   а не только headline/next step.
+- читать `resume_enforcement` из startup contract:
+  - `execctl_resume_contract_summary` является каноническим полем resume-obligation;
+  - если summary не `clear`, клиент обязан трактовать её как `required_return_task`;
+  - `no_silent_drop = true` запрещает тихо переключаться на unrelated work.
 
 Следующий practical contour теперь тоже materialized не только в docs, но и в onboarding:
 - `VS Code` получает managed workspace startup instructions
@@ -1154,6 +1158,8 @@ preview, а не только raw count.
 - но `auto-start readiness` у клиентов пока разная;
 - truthful onboarding теперь явно печатает, где контур уже instruction-backed,
   а где ещё нужен manual follow-up.
+- даже в manual-snippet клиентах startup теперь обязан surface-ить
+  `required_return_task`, а не оставлять возврат только как human hint.
 
 Тот же manifest теперь фиксирует и `error_contracts`. Это даёт внешнему клиенту
 стабильные machine-readable failure classes:

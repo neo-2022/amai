@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 21:26 MSK
-Ручная сверка guide/docs: 2026-03-25 21:26 MSK
+modified_at: 2026-03-25 21:37 MSK
+Ручная сверка guide/docs: 2026-03-25 21:37 MSK
 
 # Operations
 
@@ -758,6 +758,10 @@ cargo run -- mcp serve
   `amai_continuity_startup` обязателен до retrieval и любой новой работы,
   а client runtime должен поднимать не только headline, но и
   `execctl_resume_state` вместе с pending-return obligations.
+- тот же contract теперь несёт `resume_enforcement`, чтобы runtime не угадывал,
+  как трактовать `execctl_resume_contract_summary`:
+  если summary не `clear`, это `required_return_task`, а `no_silent_drop = true`
+  запрещает тихо уйти в unrelated work.
 - тот же startup summary теперь обязан нести и два project-bound `ExecCtl` слоя:
   - `project_task_tree_summary`
   - `project_task_ledger_summary`
@@ -832,6 +836,8 @@ cargo run -- mcp config --client vscode --cwd /path/to/art-memory-agent-index
   - onboarding пишет MCP config;
   - startup пока materialize-ится как manual snippet для project `AGENTS.md`, потому что
     `Amai` не должен молча переписывать корневой rule file пользователя;
+  - manual snippet теперь всё равно обязан отдельно поднимать
+    `execctl_resume_contract_summary` и `required_return_task`;
 - `Claude Code`, `Claude Desktop`, `Generic`
   - пока получают manual startup snippets и не должны считаться auto-start guaranteed.
 
@@ -880,6 +886,11 @@ Proof:
 `./scripts/proof_onboarding.sh` теперь дополнительно проверяет, что локальный
 onboarding печатает explainability последнего собранного контекста, а не только
 готовность stack/config.
+
+`./scripts/proof_client_lifecycle.sh` теперь дополнительно проверяет, что все
+generated startup artifacts для `Codex`, `Cursor` и `Claude Code` явно содержат
+`execctl_resume_contract_summary` и `required_return_task`, а не теряют
+resume-obligation на client edge.
 
 ## Disconnect
 
