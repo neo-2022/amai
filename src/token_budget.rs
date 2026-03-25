@@ -6784,14 +6784,24 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let current_session_assistant_scope =
-        derive_rollout_assistant_generation_scope(db, &session_events).await?;
+    let scope_events = if profile.rolling_window_hours.is_some() {
+        vec![
+            session_events.as_slice(),
+            rolling_window_events.as_slice(),
+            events.as_slice(),
+        ]
+    } else {
+        vec![session_events.as_slice(), events.as_slice()]
+    };
+    let scope_observations = derive_rollout_assistant_generation_scopes(db, &scope_events).await?;
+    let mut scope_iter = scope_observations.into_iter();
+    let current_session_assistant_scope = scope_iter.next().unwrap_or_default();
     let rolling_window_assistant_scope = if profile.rolling_window_hours.is_some() {
-        Some(derive_rollout_assistant_generation_scope(db, &rolling_window_events).await?)
+        scope_iter.next()
     } else {
         None
     };
-    let lifetime_assistant_scope = derive_rollout_assistant_generation_scope(db, &events).await?;
+    let lifetime_assistant_scope = scope_iter.next().unwrap_or_default();
     let current_session_summary = summarize_events(
         &session_events,
         now_epoch_ms,
@@ -7518,6 +7528,88 @@ async fn derive_rollout_assistant_generation_scope(
     )
     .await?;
     let metadata = latest_working_state_context_pack_metadata(db, &target_context_pack_ids).await?;
+    let thread_ids = metadata
+        .values()
+        .map(|item| item.thread_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut turns_by_thread =
+        BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
+    for thread_id in thread_ids {
+        let turns =
+            codex_threads::rollout_assistant_generation_turn_observations_for_thread(&thread_id)?;
+        if !turns.is_empty() {
+            turns_by_thread.insert(thread_id, turns);
+        }
+    }
+    Ok(derive_rollout_assistant_generation_scope_from_sources(
+        &target_context_pack_ids,
+        &direct_turns,
+        &metadata,
+        &turns_by_thread,
+    ))
+}
+
+async fn derive_rollout_assistant_generation_scopes(
+    db: &Client,
+    events_by_scope: &[&[TokenBudgetEvent]],
+) -> Result<Vec<AssistantGenerationScopeObservation>> {
+    let target_sets = events_by_scope
+        .iter()
+        .map(|events| assistant_generation_missing_scope_context_pack_ids(Some(events)))
+        .collect::<Vec<_>>();
+    let union_target_ids = target_sets
+        .iter()
+        .flat_map(|set| set.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    if union_target_ids.is_empty() {
+        return Ok(vec![
+            AssistantGenerationScopeObservation::default();
+            events_by_scope.len()
+        ]);
+    }
+
+    let direct_turns = assistant_generation_turn_observed_snapshots_for_context_packs(
+        db,
+        &union_target_ids,
+    )
+    .await?;
+    let metadata = latest_working_state_context_pack_metadata(db, &union_target_ids).await?;
+    let thread_ids = metadata
+        .values()
+        .map(|item| item.thread_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut turns_by_thread =
+        BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
+    for thread_id in thread_ids {
+        let turns =
+            codex_threads::rollout_assistant_generation_turn_observations_for_thread(&thread_id)?;
+        if !turns.is_empty() {
+            turns_by_thread.insert(thread_id, turns);
+        }
+    }
+    Ok(target_sets
+        .iter()
+        .map(|target_context_pack_ids| {
+            derive_rollout_assistant_generation_scope_from_sources(
+                target_context_pack_ids,
+                &direct_turns,
+                &metadata,
+                &turns_by_thread,
+            )
+        })
+        .collect())
+}
+
+fn derive_rollout_assistant_generation_scope_from_sources(
+    target_context_pack_ids: &BTreeSet<String>,
+    direct_turns: &[AssistantGenerationTurnObservedSnapshot],
+    metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
+    turns_by_thread: &BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
+) -> AssistantGenerationScopeObservation {
+    if target_context_pack_ids.is_empty() {
+        return AssistantGenerationScopeObservation::default();
+    }
+
     let mut matched_context_pack_ids = BTreeSet::new();
     let mut matched_turn_ids = BTreeSet::new();
     let mut matched_direct_turn_ids = BTreeSet::new();
@@ -7526,15 +7618,13 @@ async fn derive_rollout_assistant_generation_scope(
     let mut observed_group_count = 0_u64;
     let mut target_group_keys = BTreeSet::new();
     let mut grouped_context_pack_ids = BTreeMap::<(String, String), BTreeSet<String>>::new();
-    let mut turns_by_thread =
-        BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
     let mut direct_turns_by_key =
         BTreeMap::<String, AssistantGenerationTurnObservedSnapshot>::new();
 
-    for turn in &direct_turns {
+    for turn in direct_turns {
         let matched_ids = turn
             .context_pack_ids
-            .intersection(&target_context_pack_ids)
+            .intersection(target_context_pack_ids)
             .cloned()
             .collect::<BTreeSet<_>>();
         if matched_ids.is_empty() {
@@ -7551,11 +7641,11 @@ async fn derive_rollout_assistant_generation_scope(
     }
 
     let mut by_thread = BTreeMap::<String, Vec<(String, WorkingStateContextPackMeta)>>::new();
-    for context_pack_id in &target_context_pack_ids {
+    for context_pack_id in target_context_pack_ids {
         if matched_context_pack_ids.contains(context_pack_id) {
             continue;
         }
-        if let Some(meta) = metadata.get(context_pack_id) {
+        if let Some(meta) = metadata.get(context_pack_id.as_str()) {
             by_thread
                 .entry(meta.thread_id.clone())
                 .or_default()
@@ -7564,8 +7654,9 @@ async fn derive_rollout_assistant_generation_scope(
     }
 
     for (thread_id, entries) in by_thread {
-        let turns =
-            codex_threads::rollout_assistant_generation_turn_observations_for_thread(&thread_id)?;
+        let Some(turns) = turns_by_thread.get(&thread_id) else {
+            continue;
+        };
         if turns.is_empty() {
             continue;
         }
@@ -7592,7 +7683,6 @@ async fn derive_rollout_assistant_generation_scope(
                 .or_default()
                 .insert(context_pack_id);
         }
-        turns_by_thread.insert(thread_id, turns);
     }
 
     let available_turns: u64 = turns_by_thread
@@ -7627,11 +7717,11 @@ async fn derive_rollout_assistant_generation_scope(
         target_group_keys.insert(format!("context_pack:{context_pack_id}"));
     }
 
-    Ok(AssistantGenerationScopeObservation {
+    AssistantGenerationScopeObservation {
         target_group_count: target_group_keys.len() as u64,
         observed_group_count,
         observed_tokens,
-        target_context_pack_ids,
+        target_context_pack_ids: target_context_pack_ids.clone(),
         matched_context_pack_ids,
         unmatched_context_pack_ids,
         matched_turn_ids,
@@ -7640,7 +7730,7 @@ async fn derive_rollout_assistant_generation_scope(
         available_rollout_turns: available_turns,
         matched_direct_turn_ids,
         matched_rollout_turn_ids,
-    })
+    }
 }
 
 pub async fn record_continuity_restore_observed_event(
