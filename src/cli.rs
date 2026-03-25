@@ -171,6 +171,7 @@ pub enum ObserveCommand {
     TokenAdjustmentRegistry(ObserveTokenAdjustmentRegistryArgs),
     TokenAdjustmentAdd(ObserveTokenAdjustmentAddArgs),
     TokenWholeCycleAttach(ObserveTokenWholeCycleAttachArgs),
+    TokenRolloutAssistantGeneration(ObserveTokenRolloutAssistantGenerationArgs),
     CleanupSnapshots(ObserveCleanupSnapshotsArgs),
     CleanupArtifacts(ObserveCleanupArtifactsArgs),
     RepairTokenLedger(ObserveRepairTokenLedgerArgs),
@@ -799,6 +800,16 @@ pub struct ObserveTokenWholeCycleAttachArgs {
     pub tool_overhead_tokens: Option<u64>,
     #[arg(long)]
     pub continuity_restore_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveTokenRolloutAssistantGenerationArgs {
+    #[arg(long)]
+    pub rollout_path: Option<PathBuf>,
+    #[arg(long)]
+    pub repo_root: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    pub apply: bool,
 }
 
 #[derive(Debug, Clone, Args)]

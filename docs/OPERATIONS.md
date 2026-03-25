@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:53 MSK
-Ручная сверка guide/docs: 2026-03-25 14:53 MSK
+modified_at: 2026-03-25 15:07 MSK
+Ручная сверка guide/docs: 2026-03-25 15:07 MSK
 
 # Operations
 
@@ -1976,6 +1976,7 @@ cargo run --release -- observe token-evidence-pack --scope current_session --out
 ./scripts/proof_token_meter_alignment.sh
 ./scripts/proof_token_mcp_tool_overhead.sh
 ./scripts/proof_token_mcp_assistant_generation.sh
+./scripts/proof_token_rollout_assistant_generation.sh
 ```
 
 Dashboard hero-cards теперь тоже обязаны поднимать `client_limit_meter_alignment`.
@@ -1999,6 +2000,16 @@ MCP `amai_context_pack` теперь тоже участвует в same-meter p
   `scripts/proof_token_mcp_assistant_generation.sh`
 - conflicting overwrite запрещён:
   если observed value уже materialized, другой attach с новым числом должен fail-closed.
+
+Если runtime уже сохранил raw Codex rollout JSONL, можно materialize-ить
+`assistant_generation_tokens` и через rollout-backed path:
+- CLI:
+  `cargo run --release -- observe token-rollout-assistant-generation --rollout-path ... --repo-root ... --apply`
+- proof:
+  `scripts/proof_token_rollout_assistant_generation.sh`
+- этот path тоже fail-closed:
+  attach выполняется только если rollout даёт unambiguous candidate с ровно одним
+  `context_pack_id` внутри turn и ненулевым observed output token count.
 
 Customer-facing contractual export surface теперь тоже обязан поднимать
 `adjustment_activation_governance`, чтобы future adjustment path был виден отдельно от

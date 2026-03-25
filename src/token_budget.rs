@@ -1,8 +1,10 @@
 use crate::cli::{
     ContextPackArgs, ObserveTokenAdjustmentAddArgs, ObserveTokenAdjustmentRegistryArgs,
     ObserveTokenContractualSourcesArgs, ObserveTokenEvidencePackArgs, ObserveTokenReportArgs,
-    ObserveTokenStatementExportArgs, ObserveTokenWholeCycleAttachArgs,
+    ObserveTokenRolloutAssistantGenerationArgs, ObserveTokenStatementExportArgs,
+    ObserveTokenWholeCycleAttachArgs,
 };
+use crate::codex_threads;
 use crate::config::{self, AppConfig};
 use crate::language;
 use crate::postgres::{self, ObservabilitySnapshotRecord};
@@ -6650,18 +6652,16 @@ pub async fn observe_context_pack_tool_overhead(
     let config = load_config(&repo_root)?;
     let tool_overhead_tokens =
         count_tool_overhead_tokens(&config.measurement, text, structured_content)?;
-    Ok(
-        attach_context_pack_whole_cycle_observed(
-            db,
-            context_pack_id,
-            None,
-            None,
-            Some(tool_overhead_tokens),
-            None,
-        )
-        .await?
-        .is_some(),
+    Ok(attach_context_pack_whole_cycle_observed(
+        db,
+        context_pack_id,
+        None,
+        None,
+        Some(tool_overhead_tokens),
+        None,
     )
+    .await?
+    .is_some())
 }
 
 pub async fn attach_whole_cycle_observed_to_context_pack(
@@ -6700,6 +6700,56 @@ pub async fn attach_whole_cycle_observed_for_context_pack(
         args.continuity_restore_tokens,
     )
     .await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+pub async fn observe_rollout_assistant_generation(
+    db: &Client,
+    args: &ObserveTokenRolloutAssistantGenerationArgs,
+) -> Result<()> {
+    let repo_root = if let Some(path) = args.repo_root.as_ref() {
+        path.clone()
+    } else {
+        config::discover_repo_root(None)?
+    };
+    let repo_root_str = repo_root
+        .to_str()
+        .ok_or_else(|| anyhow!("repo_root must be valid UTF-8"))?;
+    let observation = codex_threads::latest_rollout_assistant_generation_observation(
+        repo_root_str,
+        args.rollout_path.as_deref(),
+    )?
+    .ok_or_else(|| {
+        anyhow!(
+            "no unambiguous rollout assistant-generation observation found for repo_root={}",
+            repo_root.display()
+        )
+    })?;
+    let attach = if args.apply {
+        Some(
+            attach_whole_cycle_observed_to_context_pack(
+                db,
+                &observation.context_pack_id,
+                None,
+                Some(observation.assistant_generation_tokens),
+                None,
+                None,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let payload = json!({
+        "rollout_assistant_generation_observation": {
+            "repo_root": repo_root.display().to_string(),
+            "apply_requested": args.apply,
+            "applied": attach.is_some(),
+            "candidate": observation,
+            "attach_result": attach,
+        }
+    });
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
@@ -10373,10 +10423,14 @@ async fn attach_context_pack_whole_cycle_observed(
             node.get("correlation_id").cloned().unwrap_or(Value::Null),
             node.get("source_kind").cloned().unwrap_or(Value::Null),
             node.get("traffic_class").cloned().unwrap_or(Value::Null),
-            node.get("measurement_scope").cloned().unwrap_or(Value::Null),
+            node.get("measurement_scope")
+                .cloned()
+                .unwrap_or(Value::Null),
             updated_fields.clone(),
             retained_fields.clone(),
-            node.get("whole_cycle_observed").cloned().unwrap_or(Value::Null),
+            node.get("whole_cycle_observed")
+                .cloned()
+                .unwrap_or(Value::Null),
             !updated_fields.is_empty(),
         )
     };

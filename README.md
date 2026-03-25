@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:53 MSK
-Ручная сверка guide/docs: 2026-03-25 14:53 MSK
+modified_at: 2026-03-25 15:07 MSK
+Ручная сверка guide/docs: 2026-03-25 15:07 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1522,6 +1522,16 @@ preview, а не только raw count.
   - conflicting overwrite тут fail-closed:
     новое число нельзя тихо переписать поверх уже наблюдённого другого значения;
     разрешён только первый attach или повтор того же самого значения;
+  - дополнительно materialized rollout-backed observation path:
+    если у upstream runtime уже есть raw Codex rollout JSONL с `token_count`,
+    `Amai` умеет взять оттуда unambiguous candidate по `turn_id + context_pack_id`
+    и применить observed `assistant_generation_tokens` через:
+    - CLI `amai observe token-rollout-assistant-generation --rollout-path ... --repo-root ... --apply`
+    - proof `scripts/proof_token_rollout_assistant_generation.sh`
+  - этот path тоже fail-closed:
+    candidate принимается только если в выбранном turn есть ровно один
+    `context_pack_id` и ненулевой `assistant_generation_tokens`;
+    ambiguous rollout не имеет права silently guess-ить attribution;
   - `continuity startup` тоже начал материализовать self-observed component:
     он может записывать `continuity_restore_tokens` от собственного `CHAT_START_RESTORE`
     prompt-text, а engineering/proof вызовы обязаны уводить это в `proof_/verify_`

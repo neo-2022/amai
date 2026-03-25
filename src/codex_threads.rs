@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -78,6 +79,14 @@ struct RolloutSummary {
     tail_messages: Vec<TranscriptMessage>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RolloutTurnObservation {
+    turn_id: String,
+    context_pack_ids: BTreeSet<String>,
+    assistant_generation_tokens: u64,
+    token_count_events: usize,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThreadIndexSummary {
     #[serde(default)]
@@ -100,6 +109,17 @@ pub struct ThreadIndexSummary {
     pub updated_at_epoch_s: i64,
     #[serde(default)]
     pub time_slices: Vec<ThreadTimeSliceSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RolloutAssistantGenerationObservation {
+    pub thread_id: String,
+    pub rollout_path: String,
+    pub turn_id: String,
+    pub context_pack_id: String,
+    pub assistant_generation_tokens: u64,
+    pub token_count_events: usize,
+    pub observation_source: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -918,6 +938,40 @@ fn thread_record_by_id(thread_id: &str) -> Result<Option<ThreadRecord>> {
     load_thread_record(&conn, thread_id)
 }
 
+pub fn latest_rollout_assistant_generation_observation(
+    repo_root: &str,
+    explicit_rollout_path: Option<&Path>,
+) -> Result<Option<RolloutAssistantGenerationObservation>> {
+    let (thread_id, rollout_path) = if let Some(path) = explicit_rollout_path {
+        let path = path.to_path_buf();
+        let thread_id = rollout_thread_id_from_path(&path).unwrap_or_default();
+        (thread_id, path)
+    } else {
+        let Some(record) = current_thread_record(repo_root, current_thread_id().as_deref())? else {
+            return Ok(None);
+        };
+        if record.rollout_path.is_empty() {
+            return Ok(None);
+        }
+        (record.thread_id, PathBuf::from(record.rollout_path))
+    };
+    if !rollout_path.exists() {
+        return Ok(None);
+    }
+    parse_rollout_assistant_generation_observation(&thread_id, &rollout_path)
+}
+
+fn rollout_thread_id_from_path(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let candidate = stem.chars().rev().take(36).collect::<String>();
+    if candidate.len() != 36 {
+        return None;
+    }
+    let thread_id = candidate.chars().rev().collect::<String>();
+    let hyphen_count = thread_id.chars().filter(|ch| *ch == '-').count();
+    (hyphen_count == 4).then_some(thread_id)
+}
+
 fn load_thread_record(conn: &Connection, thread_id: &str) -> Result<Option<ThreadRecord>> {
     let record = conn
         .query_row(
@@ -1486,6 +1540,123 @@ fn extract_chat_messages_from_rollout_text(text: &str) -> Result<Vec<RolloutMess
         });
     }
     Ok(messages)
+}
+
+fn parse_rollout_assistant_generation_observation(
+    thread_id: &str,
+    rollout_path: &Path,
+) -> Result<Option<RolloutAssistantGenerationObservation>> {
+    let text = fs::read_to_string(rollout_path)
+        .with_context(|| format!("failed to read {}", rollout_path.display()))?;
+    let turns = collect_rollout_turn_observations(&text)?;
+    let Some(turn) = turns
+        .into_iter()
+        .rev()
+        .find(|turn| turn.assistant_generation_tokens > 0 && turn.context_pack_ids.len() == 1)
+    else {
+        return Ok(None);
+    };
+    let context_pack_id = turn
+        .context_pack_ids
+        .iter()
+        .next()
+        .cloned()
+        .unwrap_or_default();
+    if context_pack_id.is_empty() || turn.turn_id.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(RolloutAssistantGenerationObservation {
+        thread_id: thread_id.to_string(),
+        rollout_path: rollout_path.display().to_string(),
+        turn_id: turn.turn_id,
+        context_pack_id,
+        assistant_generation_tokens: turn.assistant_generation_tokens,
+        token_count_events: turn.token_count_events,
+        observation_source: "codex_rollout_last_token_usage_sum_v1".to_string(),
+    }))
+}
+
+fn collect_rollout_turn_observations(text: &str) -> Result<Vec<RolloutTurnObservation>> {
+    let mut observations = Vec::new();
+    let mut current = None::<RolloutTurnObservation>;
+    for line in text.lines() {
+        let row: Value =
+            serde_json::from_str(line).context("failed to parse rollout jsonl line")?;
+        let row_type = row["type"].as_str().unwrap_or_default();
+        let payload = &row["payload"];
+        match (row_type, payload["type"].as_str().unwrap_or_default()) {
+            ("event_msg", "task_started") => {
+                if let Some(turn) = current.take() {
+                    observations.push(turn);
+                }
+                current = Some(RolloutTurnObservation {
+                    turn_id: payload["turn_id"].as_str().unwrap_or_default().to_string(),
+                    ..RolloutTurnObservation::default()
+                });
+            }
+            ("event_msg", "task_complete") => {
+                if let Some(turn) = current.take() {
+                    observations.push(turn);
+                }
+            }
+            ("event_msg", "token_count") => {
+                if let Some(turn) = current.as_mut() {
+                    let output_tokens = payload["info"]["last_token_usage"]["output_tokens"]
+                        .as_u64()
+                        .unwrap_or_default();
+                    if output_tokens > 0 {
+                        turn.assistant_generation_tokens = turn
+                            .assistant_generation_tokens
+                            .saturating_add(output_tokens);
+                        turn.token_count_events += 1;
+                    }
+                }
+            }
+            ("response_item", "function_call_output") => {
+                if let Some(turn) = current.as_mut() {
+                    collect_context_pack_ids_from_rollout_output(
+                        &payload["output"],
+                        &mut turn.context_pack_ids,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(turn) = current.take() {
+        observations.push(turn);
+    }
+    Ok(observations)
+}
+
+fn collect_context_pack_ids_from_rollout_output(value: &Value, target: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(context_pack_id) = map.get("context_pack_id").and_then(Value::as_str)
+                && !context_pack_id.is_empty()
+            {
+                target.insert(context_pack_id.to_string());
+            }
+            for value in map.values() {
+                collect_context_pack_ids_from_rollout_output(value, target);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_context_pack_ids_from_rollout_output(item, target);
+            }
+        }
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+                return;
+            }
+            if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+                collect_context_pack_ids_from_rollout_output(&parsed, target);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn extract_message_text(payload: &Value) -> String {
@@ -2255,11 +2426,13 @@ fn collapse_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        EXACT_TIME_MAX_SLICE_DRIFT_S, ThreadTimeSliceSummary, chat_tail_at_time_from_snapshots,
-        collapse_text, compact_headline_from_text, compact_next_step_from_text,
+        EXACT_TIME_MAX_SLICE_DRIFT_S, RolloutAssistantGenerationObservation,
+        ThreadTimeSliceSummary, chat_tail_at_time_from_snapshots, collapse_text,
+        compact_headline_from_text, compact_next_step_from_text,
         extract_chat_messages_from_rollout_text, extract_last_messages,
-        nth_previous_chat_tail_from_snapshots, parse_rfc3339_epoch_s, parse_role_heading,
-        rendered_transcript_summary, rollout_summary_from_path, select_messages_for_time,
+        latest_rollout_assistant_generation_observation, nth_previous_chat_tail_from_snapshots,
+        parse_rfc3339_epoch_s, parse_role_heading, rendered_transcript_summary,
+        rollout_summary_from_path, rollout_thread_id_from_path, select_messages_for_time,
         select_tail_messages, time_slice_matches_exact_time,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
@@ -2416,6 +2589,78 @@ mod tests {
         assert_eq!(selected[0].text, "старый вопрос");
         assert_eq!(selected[1].role, "assistant");
         assert_eq!(selected[1].text, "старый ответ");
+    }
+
+    #[test]
+    fn rollout_thread_id_from_path_extracts_uuid_tail() {
+        let path = std::path::Path::new(
+            "/tmp/rollout-2026-03-13T01-44-23-019ce438-f3bd-7c60-aa28-3284a96bfeb5.jsonl",
+        );
+        assert_eq!(
+            rollout_thread_id_from_path(path).as_deref(),
+            Some("019ce438-f3bd-7c60-aa28-3284a96bfeb5")
+        );
+    }
+
+    #[test]
+    fn latest_rollout_assistant_generation_observation_reads_unambiguous_turn() {
+        let rollout_path =
+            std::env::temp_dir().join(format!("amai-rollout-observed-{}.jsonl", Uuid::new_v4()));
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","output":"{\"context_pack_id\":\"ctx-pack-1\"}"}}
+{"timestamp":"2026-03-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":17}}}}
+{"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":23}}}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+"#,
+        )
+        .expect("write rollout");
+
+        let observation =
+            latest_rollout_assistant_generation_observation("/home/art/Art", Some(&rollout_path))
+                .expect("observation")
+                .expect("candidate");
+        let _ = fs::remove_file(&rollout_path);
+
+        assert_eq!(
+            observation,
+            RolloutAssistantGenerationObservation {
+                thread_id: rollout_thread_id_from_path(&rollout_path).expect("thread id"),
+                rollout_path: rollout_path.display().to_string(),
+                turn_id: "turn-1".to_string(),
+                context_pack_id: "ctx-pack-1".to_string(),
+                assistant_generation_tokens: 40,
+                token_count_events: 2,
+                observation_source: "codex_rollout_last_token_usage_sum_v1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn latest_rollout_assistant_generation_observation_fails_closed_on_ambiguous_context_pack_ids()
+    {
+        let rollout_path = std::env::temp_dir().join(format!(
+            "amai-rollout-observed-ambiguous-{}.jsonl",
+            Uuid::new_v4()
+        ));
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","output":"{\"context_pack_id\":\"ctx-pack-1\"}"}}
+{"timestamp":"2026-03-25T10:00:02Z","type":"response_item","payload":{"type":"function_call_output","output":"{\"context_pack_id\":\"ctx-pack-2\"}"}}
+{"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":17}}}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+"#,
+        )
+        .expect("write rollout");
+
+        let observation =
+            latest_rollout_assistant_generation_observation("/home/art/Art", Some(&rollout_path))
+                .expect("observation");
+        let _ = fs::remove_file(&rollout_path);
+
+        assert!(observation.is_none());
     }
 
     #[test]

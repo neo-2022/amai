@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 14:53 MSK
-Ручная сверка guide/docs: 2026-03-25 14:53 MSK
+modified_at: 2026-03-25 15:07 MSK
+Ручная сверка guide/docs: 2026-03-25 15:07 MSK
 
 # Token Ledger
 
@@ -490,6 +490,18 @@ Ledger обязан различать:
     конфликтный overwrite другим числом запрещён;
   - это нужно затем, чтобы last missing same-meter component не оставался навсегда
     неobserved только из-за timing mismatch между tool call и финальным ответом клиента;
+- дополнительно materialized rollout-backed assistant-generation path:
+  - если runtime уже сохранил raw Codex rollout JSONL, `Amai` умеет извлечь оттуда
+    post-call observed `assistant_generation_tokens` по `turn_id`;
+  - CLI:
+    `observe token-rollout-assistant-generation --rollout-path ... --repo-root ... --apply`
+  - proof:
+    `scripts/proof_token_rollout_assistant_generation.sh`
+  - candidate принимается только fail-closed:
+    в выбранном turn должен быть ровно один `context_pack_id`,
+    а observed output tokens должны быть ненулевыми;
+  - ambiguous rollout не имеет права silently привязывать assistant-generation к
+    произвольному usage event;
 - это означает, что live caller может materialize-ить same-meter evidence не только через
   прямой бинарь `amai`, но и через MCP/bridge path;
 - retrieval path не притворяется, что знает их сам;
