@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 19:02 MSK
-Ручная сверка guide/docs: 2026-03-25 19:02 MSK
+modified_at: 2026-03-25 19:22 MSK
+Ручная сверка guide/docs: 2026-03-25 19:22 MSK
 
 # Architecture
 
@@ -208,6 +208,30 @@ Code structure plane:
 - auto-restore обязан выполняться клиентским startup contour после разового подключения клиента
   к `Amai`;
 - пользователь не должен вручную запускать restore в каждом новом чате.
+
+## First ExecCtl slice
+
+Полное дерево задач ещё не materialized, но первый enforceable `ExecCtl` contour теперь уже есть
+внутри `working_state`.
+
+Его задача простая:
+- новый `continuity handoff` не должен тихо стирать предыдущую рабочую линию;
+- если агент временно уходит на другой contour того же проекта, предыдущая линия должна
+  сохраниться как machine-readable `pending return`;
+- новый startup/restore обязан поднять не только active line, но и suspended workline,
+  к которой потом надо вернуться.
+
+Для этого baseline сейчас materialize-ит:
+- `pending_return_queue`
+- `pending_return_summary`
+- `execctl_resume_state`
+
+Это пока не финальный task tree, но уже fail-closed защита против silent preemption.
+Архитектурный закон здесь такой:
+- continuity не равна “последний headline победил”;
+- project-bound task memory должна помнить и active line, и обязательные линии к возврату;
+- любой следующий `ExecCtl` layer должен расти поверх этого состояния, а не заменять его
+  prompt-договорённостью.
 
 ## Compatibility contour
 

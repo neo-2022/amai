@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 19:02 MSK
-Ручная сверка guide/docs: 2026-03-25 19:02 MSK
+modified_at: 2026-03-25 19:22 MSK
+Ручная сверка guide/docs: 2026-03-25 19:22 MSK
 
 # Operations
 
@@ -396,13 +396,19 @@ cd /home/art/agent-memory-index
 - `working_state_restore` теперь execution-aware:
   - `next_step_state` всегда показывает, что следующий шаг пока только `planned`;
   - `recent_actions[].execution_state` разводит `attempted / succeeded / superseded / stale`;
+  - `pending_return_queue`, `pending_return_summary` и `execctl_resume_state` не дают новому
+    `continuity_handoff` тихо затереть прошлую рабочую линию;
   - `state_lineage` хранит `lineage_model_version = lineage-v2`, authoritative event, supporting event ids, truth ranking и явный graph-слой `nodes / edges`;
   - `workspace_graph` хранит versioned structural runtime/workspace graph:
     `context_pack -> file / structure_item / symbol / chunk / import_ref / export_ref / call_ref`,
     а в `workspace-graph-v10` ещё и resolved relations `imports_file / re_exports_file / imports_symbol / re_exports_symbol / resolves_file / resolves_symbol / calls_file / calls_symbol / resolves_call_file / resolves_call_symbol`, включая owner-aware Rust symbol lookup для provable path-cases вроде `Type::new`, `Self::helper()`, `self.helper()`, trait-qualified forms вида `<Type as Trait>::make`, trait-qualified forms через доказанный imported alias, module-alias forms вроде `trait_mod::Factory`, owner-side module alias paths вроде `type_mod::Beta::new` и combined forms вроде `<type_mod::Beta as trait_mod::Factory>::make` и `<type_mod::Beta as FactoryAlias>::make`; если impl-owner или impl-trait в symbol metadata видны только как alias, импортированный terminal selector или module alias, graph пишет дополнительные поля `owner_path_canonical` и `trait_name_canonical` только при единственном доказуемом import-target;
   - для single exact-document pack и single symbol-only pack provenance теперь может честно materialize-ить минимальный graph без полного file-обхода; это режет cold latency, но не теряет source-of-truth по самому retrieved file/symbol;
   - `workspace_graph_summary` в `chat_start_restore` и startup-output нужен как короткий human-readable слой поверх этого graph;
+  - тот же `chat_start_restore` теперь обязан печатать `Незавершённые линии к возврату` и
+    `ExecCtl` warning, если в проекте уже есть suspended workline, которую потом надо вернуть;
   - при битом `session_id` restore-path теперь fail-closed и не смешивает несколько пустых сессий в один bundle.
+  - product proof для этого minimal `ExecCtl` contour:
+    `./scripts/proof_execctl_pending_return.sh`
 
 Если передан `--question`, helper сам должен:
 - распознать `прошлый / текущий чат`;

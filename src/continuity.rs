@@ -2202,6 +2202,14 @@ fn build_chat_start_restore(
         restore_node.and_then(|value| summarize_string_list(&value["open_questions"], 3));
     let workspace_graph_summary =
         restore_node.and_then(|value| workspace_graph::human_summary(&value["workspace_graph"]));
+    let pending_return_summary = restore_node
+        .and_then(|value| value["pending_return_summary"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let execctl_resume_state = restore_node
+        .and_then(|value| value["execctl_resume_state"].as_str())
+        .unwrap_or("clear")
+        .to_string();
     let included_reasons_summary = restore_node.and_then(|value| {
         continuity_decision_trace_summary(Some(&value["latest_decision_trace"]), "included")
     });
@@ -2262,6 +2270,8 @@ fn build_chat_start_restore(
             "active_files_summary": active_files_summary,
             "open_questions_summary": open_questions_summary,
             "workspace_graph_summary": workspace_graph_summary,
+            "pending_return_summary": pending_return_summary,
+            "execctl_resume_state": execctl_resume_state,
             "included_reasons_summary": included_reasons_summary,
             "excluded_reasons_summary": excluded_reasons_summary,
             "active_files": active_files,
@@ -2305,6 +2315,13 @@ fn render_chat_start_prompt(
         restore_node.and_then(|value| summarize_string_list(&value["open_questions"], 3));
     let workspace_graph_summary =
         restore_node.and_then(|value| workspace_graph::human_summary(&value["workspace_graph"]));
+    let pending_return_summary = restore_node
+        .and_then(|value| value["pending_return_summary"].as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let execctl_resume_state = restore_node
+        .and_then(|value| value["execctl_resume_state"].as_str())
+        .unwrap_or("clear");
     let included_reasons_summary = restore_node.and_then(|value| {
         continuity_decision_trace_summary(Some(&value["latest_decision_trace"]), "included")
     });
@@ -2336,6 +2353,9 @@ fn render_chat_start_prompt(
     if let Some(value) = workspace_graph_summary {
         lines.push(format!("Структурный граф рабочей области: {value}"));
     }
+    if let Some(value) = pending_return_summary {
+        lines.push(format!("Незавершённые линии к возврату: {value}"));
+    }
     if let Some(value) = included_reasons_summary {
         lines.push(format!("Почему вошёл последний контекст: {value}"));
     }
@@ -2349,6 +2369,12 @@ fn render_chat_start_prompt(
     if restore_confidence == "preliminary" {
         lines.push(
             "Статус recovery: preliminary; first substantive reply should still continue from this pack, not restart continuity from zero.".to_string(),
+        );
+    }
+    if execctl_resume_state == "pending_return_queue_present" {
+        lines.push(
+            "ExecCtl: есть незавершённые линии к возврату; не теряй их и не делай silent preemption."
+                .to_string(),
         );
     }
     lines.push(
@@ -2394,6 +2420,12 @@ fn print_chat_start_restore_human(value: &Value) {
         .filter(|value| !value.is_empty())
     {
         println!("- Структурный граф рабочей области: {value}");
+    }
+    if let Some(value) = node["pending_return_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Незавершённые линии к возврату: {value}");
     }
     if let Some(value) = node["included_reasons_summary"]
         .as_str()
@@ -3999,6 +4031,8 @@ mod tests {
             "working_state_restore": {
                 "current_goal": "Amai upstream thread-index enrich materialized",
                 "restore_confidence": "high",
+                "execctl_resume_state": "pending_return_queue_present",
+                "pending_return_summary": "Same-meter spend control -> Materialize live assistant generation source.",
                 "materialized_notes": [
                     "Enriched temporal summaries теперь пишутся upstream."
                 ],
@@ -4028,7 +4062,15 @@ mod tests {
         assert!(prompt.contains(
             "Недавние действия: Проверили previous chat lookup; Проверили exact-time lookup"
         ));
+        assert!(prompt.contains(
+            "Незавершённые линии к возврату: Same-meter spend control -> Materialize live assistant generation source."
+        ));
+        assert!(prompt.contains("ExecCtl: есть незавершённые линии к возврату"));
         assert_eq!(node["thread_count"], json!(16));
+        assert_eq!(
+            node["execctl_resume_state"],
+            json!("pending_return_queue_present")
+        );
     }
 
     #[test]

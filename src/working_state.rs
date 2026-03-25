@@ -20,6 +20,7 @@ const MAX_ACTIVE_FILES: usize = 8;
 const MAX_OPEN_QUESTIONS: usize = 6;
 const MAX_MATERIALIZED_NOTES: usize = 6;
 const MAX_RECENT_DECISION_TRACES: usize = 3;
+const MAX_PENDING_RETURN_QUEUE: usize = 6;
 
 pub async fn record_handoff_event(
     db: &Client,
@@ -33,6 +34,15 @@ pub async fn record_handoff_event(
     let recorded_at_epoch_ms = now_epoch_ms()?;
     let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
     let next_step = normalize_next_step_hint(next_step);
+    let previous_restore = build_restore_bundle(db, project, namespace).await?;
+    let pending_return_queue = derive_pending_return_queue(
+        previous_restore
+            .as_ref()
+            .map(|value| &value["working_state_restore"]),
+        headline,
+        &next_step,
+        recorded_at_epoch_ms,
+    );
     let thread_id = current_thread_id();
     let session_id = resolve_session_id(
         db,
@@ -67,6 +77,7 @@ pub async fn record_handoff_event(
             "rejected_hypotheses": Vec::<String>::new(),
             "open_questions": derive_open_questions(details),
             "materialized_notes": extract_materialized_notes(details),
+            "pending_return_queue": pending_return_queue,
             "last_command": "continuity handoff".to_string(),
             "last_results_summary": format!("Зафиксирован handoff для {} :: {}", project.code, namespace.code),
             "local_path": local_path,
@@ -289,6 +300,12 @@ pub fn print_restore_bundle_human(restore: &Value) {
         &node["materialized_notes"],
         MAX_MATERIALIZED_NOTES,
     );
+    if let Some(value) = node["pending_return_summary"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        println!("- Незавершённые линии к возврату: {value}");
+    }
     if let Some(value) = node["included_reasons_summary"]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -496,6 +513,21 @@ fn compose_restore_bundle(
         })
         .collect::<Vec<_>>();
     let action_state_counts = collect_action_state_counts(&recent_actions);
+    let pending_return_queue = extract_pending_return_queue(
+        authoritative_event,
+        latest_recorded_at,
+        &current_goal,
+        &next_step,
+    );
+    let pending_return_summary = summarize_pending_return_queue(&pending_return_queue);
+    let has_pending_return_queue = pending_return_queue
+        .as_array()
+        .is_some_and(|items| !items.is_empty());
+    let execctl_resume_state = if has_pending_return_queue {
+        "pending_return_queue_present"
+    } else {
+        "clear"
+    };
     let restore_freshness_state =
         if now_epoch_ms.saturating_sub(latest_recorded_at) > 15 * 60 * 1000 {
             "stale"
@@ -532,6 +564,9 @@ fn compose_restore_bundle(
             "visible_projects": visible_projects,
             "recent_queries": recent_queries,
             "recent_actions": recent_actions,
+            "pending_return_queue": pending_return_queue,
+            "pending_return_summary": pending_return_summary,
+            "execctl_resume_state": execctl_resume_state,
             "last_command": last_command,
             "last_results_summary": last_results_summary,
             "latest_decision_trace": latest_decision_trace,
@@ -1282,6 +1317,125 @@ fn derive_retrieval_next_step(active_files: &[String], target_kind: &str) -> Str
     }
 }
 
+fn derive_pending_return_queue(
+    restore_node: Option<&Value>,
+    new_headline: &str,
+    new_next_step: &str,
+    queued_at_epoch_ms: u64,
+) -> Vec<Value> {
+    let mut queue = restore_node
+        .and_then(|node| node["pending_return_queue"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    let Some(node) = restore_node else {
+        return queue;
+    };
+    let previous_goal = node["current_goal"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    let previous_next_step = node["next_step"]
+        .as_str()
+        .map(normalize_next_step_hint)
+        .unwrap_or_default();
+    let normalized_new_next_step = normalize_next_step_hint(new_next_step);
+    if previous_goal.is_empty()
+        || previous_goal == new_headline
+        || (!previous_next_step.is_empty() && previous_next_step == normalized_new_next_step)
+    {
+        return queue;
+    }
+    let candidate = json!({
+        "headline": previous_goal,
+        "next_step": previous_next_step,
+        "queued_at_epoch_ms": queued_at_epoch_ms,
+        "queued_reason": "interrupted_by_new_handoff",
+        "resume_state": "pending_return",
+        "authoritative_event_id": node["state_lineage"]["authoritative_event_id"],
+        "authoritative_event_kind": node["state_lineage"]["authoritative_event_kind"],
+        "authoritative_local_path": node["state_lineage"]["authoritative_local_path"],
+    });
+    prepend_pending_return_item(&mut queue, candidate);
+    queue.truncate(MAX_PENDING_RETURN_QUEUE);
+    queue
+}
+
+fn extract_pending_return_queue(
+    authoritative_event: &Value,
+    fallback_epoch_ms: u64,
+    current_goal: &str,
+    current_next_step: &str,
+) -> Value {
+    let mut queue = authoritative_event["pending_return_queue"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    queue.retain(|item| {
+        let headline = item["headline"].as_str().unwrap_or_default();
+        let next_step = item["next_step"].as_str().unwrap_or_default();
+        !headline.is_empty()
+            && !(headline == current_goal
+                && normalize_next_step_hint(next_step)
+                    == normalize_next_step_hint(current_next_step))
+    });
+    for item in &mut queue {
+        if item["queued_at_epoch_ms"].is_null() {
+            item["queued_at_epoch_ms"] = json!(fallback_epoch_ms);
+        }
+        if item["resume_state"].is_null() {
+            item["resume_state"] = json!("pending_return");
+        }
+        if item["queued_reason"].is_null() {
+            item["queued_reason"] = json!("interrupted_by_new_handoff");
+        }
+    }
+    queue.truncate(MAX_PENDING_RETURN_QUEUE);
+    Value::Array(queue)
+}
+
+fn prepend_pending_return_item(queue: &mut Vec<Value>, candidate: Value) {
+    let candidate_event_id = candidate["authoritative_event_id"]
+        .as_str()
+        .unwrap_or_default();
+    let candidate_headline = candidate["headline"].as_str().unwrap_or_default();
+    let candidate_next_step = candidate["next_step"].as_str().unwrap_or_default();
+    queue.retain(|item| {
+        let item_event_id = item["authoritative_event_id"].as_str().unwrap_or_default();
+        let item_headline = item["headline"].as_str().unwrap_or_default();
+        let item_next_step = item["next_step"].as_str().unwrap_or_default();
+        if !candidate_event_id.is_empty() && item_event_id == candidate_event_id {
+            return false;
+        }
+        !(item_headline == candidate_headline && item_next_step == candidate_next_step)
+    });
+    queue.insert(0, candidate);
+}
+
+fn summarize_pending_return_queue(value: &Value) -> Option<String> {
+    let items = value.as_array()?;
+    let rendered = items
+        .iter()
+        .take(3)
+        .filter_map(|item| {
+            let headline = item["headline"].as_str().unwrap_or_default();
+            let next_step = item["next_step"].as_str().unwrap_or_default();
+            if headline.is_empty() {
+                None
+            } else if next_step.is_empty() {
+                Some(headline.to_string())
+            } else {
+                Some(format!("{headline} -> {next_step}"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" || ");
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered)
+    }
+}
+
 fn normalize_next_step_hint(value: &str) -> String {
     let mut normalized = value.trim().to_string();
     for _ in 0..3 {
@@ -1909,6 +2063,100 @@ mod tests {
                 .is_some_and(|value| value.starts_with("Рабочий запрос: current context-"))
                 && edge["relation"] == json!("supports")
         }));
+    }
+
+    #[test]
+    fn derive_pending_return_queue_captures_interrupted_previous_line() {
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Same-meter spend control",
+                "next_step": "Materialize live assistant generation source.",
+                "pending_return_queue": [
+                    {
+                        "headline": "Older suspended line",
+                        "next_step": "Return there later.",
+                        "queued_at_epoch_ms": 5,
+                        "resume_state": "pending_return"
+                    }
+                ],
+                "state_lineage": {
+                    "authoritative_event_id": "event-123",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/home/art/agent-memory-index"
+                }
+            }
+        });
+        let queue = derive_pending_return_queue(
+            Some(&restore["working_state_restore"]),
+            "Project relocation contour",
+            "Document automatic startup behavior.",
+            42,
+        );
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0]["headline"], json!("Same-meter spend control"));
+        assert_eq!(
+            queue[0]["next_step"],
+            json!("Materialize live assistant generation source.")
+        );
+        assert_eq!(
+            queue[0]["queued_reason"],
+            json!("interrupted_by_new_handoff")
+        );
+        assert_eq!(queue[0]["resume_state"], json!("pending_return"));
+        assert_eq!(queue[0]["authoritative_event_id"], json!("event-123"));
+        assert_eq!(queue[1]["headline"], json!("Older suspended line"));
+    }
+
+    #[test]
+    fn compose_restore_bundle_surfaces_pending_return_queue() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let latest_handoff = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "handoff-1",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "event_kind": "continuity_handoff",
+                    "headline": "Project relocation contour",
+                    "next_step_hint": "Dovetail runtime auto-start guarantees.",
+                    "summary": "Relocation contour materialized.",
+                    "recorded_at_epoch_ms": base,
+                    "pending_return_queue": [
+                        {
+                            "headline": "Same-meter spend control",
+                            "next_step": "Materialize live assistant generation source.",
+                            "queued_at_epoch_ms": base - 1,
+                            "resume_state": "pending_return",
+                            "queued_reason": "interrupted_by_new_handoff"
+                        }
+                    ]
+                }
+            }),
+            created_at_epoch_ms: base,
+        };
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[latest_handoff],
+        );
+        let restore = &bundle["working_state_restore"];
+        assert_eq!(
+            restore["execctl_resume_state"],
+            json!("pending_return_queue_present")
+        );
+        assert_eq!(
+            restore["pending_return_queue"][0]["headline"],
+            json!("Same-meter spend control")
+        );
+        assert!(
+            restore["pending_return_summary"]
+                .as_str()
+                .is_some_and(|value| value.contains("Same-meter spend control"))
+        );
     }
 
     #[test]
