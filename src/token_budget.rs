@@ -114,6 +114,8 @@ struct TokenBudgetContractConfig {
     contractual_readiness_model_version: String,
     #[serde(default = "default_customer_contractual_boundary_version")]
     customer_contractual_boundary_version: String,
+    #[serde(default = "default_settlement_activation_governance_version")]
+    settlement_activation_governance_version: String,
     #[serde(default = "default_billing_mode")]
     billing_mode: String,
     #[serde(default = "default_reconciliation_contract_version")]
@@ -168,6 +170,8 @@ impl Default for TokenBudgetContractConfig {
             suitability_model_version: default_suitability_model_version(),
             contractual_readiness_model_version: default_contractual_readiness_model_version(),
             customer_contractual_boundary_version: default_customer_contractual_boundary_version(),
+            settlement_activation_governance_version:
+                default_settlement_activation_governance_version(),
             billing_mode: default_billing_mode(),
             reconciliation_contract_version: default_reconciliation_contract_version(),
             margin_model_version: default_margin_model_version(),
@@ -571,6 +575,10 @@ fn default_customer_contractual_boundary_version() -> String {
     "customer-contractual-boundary-v1".to_string()
 }
 
+fn default_settlement_activation_governance_version() -> String {
+    "settlement-activation-governance-v1".to_string()
+}
+
 fn default_billing_mode() -> String {
     "report_only".to_string()
 }
@@ -588,15 +596,15 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v15".to_string()
+    "contractual-evidence-pack-v16".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v15".to_string()
+    "contractual-statement-export-v16".to_string()
 }
 
 fn default_settlement_report_preview_version() -> String {
-    "settlement-report-preview-v6".to_string()
+    "settlement-report-preview-v7".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -642,6 +650,9 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "suitability_model_version": contract.suitability_model_version.clone(),
         "contractual_readiness_model_version": contract.contractual_readiness_model_version.clone(),
         "customer_contractual_boundary_version": contract.customer_contractual_boundary_version.clone(),
+        "settlement_activation_governance_version": contract
+            .settlement_activation_governance_version
+            .clone(),
         "billing_mode": contract.billing_mode.clone(),
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "margin_model_version": contract.margin_model_version.clone(),
@@ -686,6 +697,9 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "suitability_model_version": contract.suitability_model_version.clone(),
         "contractual_readiness_model_version": contract.contractual_readiness_model_version.clone(),
         "customer_contractual_boundary_version": contract.customer_contractual_boundary_version.clone(),
+        "settlement_activation_governance_version": contract
+            .settlement_activation_governance_version
+            .clone(),
         "billing_mode": contract.billing_mode.clone(),
         "reconciliation_contract_version": contract.reconciliation_contract_version.clone(),
         "margin_model_version": contract.margin_model_version.clone(),
@@ -4287,6 +4301,79 @@ fn build_customer_contractual_boundary_from_export(
     })
 }
 
+fn settlement_activation_governance_state(statement_export_preview: &Value) -> &'static str {
+    let statement_preview = &statement_export_preview["line_item_surfaces"]["statement_preview"];
+    let adjustment_preview = &statement_preview["adjustment_preview"];
+
+    if adjustment_preview["disputed_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "dispute_hold_open_report_only"
+    } else if adjustment_preview["pending_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "pending_adjustment_review_report_only"
+    } else if adjustment_preview["applied_entries_count"]
+        .as_u64()
+        .unwrap_or(0)
+        > 0
+    {
+        "adjusted_report_only"
+    } else if statement_export_preview["customer_contractual_boundary"]
+        ["future_settlement_activation_state"]
+        .as_str()
+        == Some("future_settlement_ready_reserved")
+    {
+        "future_settlement_ready_reserved"
+    } else {
+        "activation_blocked_report_only"
+    }
+}
+
+fn build_settlement_activation_governance_from_export(
+    contract: &TokenBudgetContractConfig,
+    statement_export_preview: &Value,
+) -> Value {
+    let statement_preview = &statement_export_preview["line_item_surfaces"]["statement_preview"];
+    let adjustment_preview = &statement_preview["adjustment_preview"];
+    let registry_status = adjustment_preview["registry_status"]
+        .as_str()
+        .or_else(|| adjustment_preview["status"].as_str())
+        .unwrap_or("unknown");
+    let adjustment_status = adjustment_preview["status"]
+        .as_str()
+        .or_else(|| adjustment_preview["registry_status"].as_str())
+        .unwrap_or("unknown");
+
+    json!({
+        "model_version": contract.settlement_activation_governance_version.clone(),
+        "governance_state": settlement_activation_governance_state(statement_export_preview),
+        "future_settlement_activation_state": statement_export_preview["customer_contractual_boundary"]["future_settlement_activation_state"].clone(),
+        "future_settlement_activation_blocking_reasons": statement_export_preview["customer_contractual_boundary"]["future_settlement_activation_blocking_reasons"].clone(),
+        "next_settlement_stage_candidate": statement_preview["next_settlement_stage_candidate"].clone(),
+        "next_settlement_stage_blockers": statement_preview["next_settlement_stage_blockers"].clone(),
+        "provisional_close_state": statement_preview["provisional_close_state"].clone(),
+        "provisional_close_candidate": statement_preview["provisional_close_candidate"].clone(),
+        "provisional_close_barriers": statement_preview["provisional_close_barriers"].clone(),
+        "billing_close_barriers": statement_preview["billing_close_barriers"].clone(),
+        "close_barriers": statement_preview["close_barriers"].clone(),
+        "registry_status": registry_status,
+        "adjustment_status": adjustment_status,
+        "correction_action_state": adjustment_preview["correction_action_state"].clone(),
+        "credit_action_state": statement_export_preview["credit_action_state"].clone(),
+        "dispute_action_state": statement_export_preview["dispute_action_state"].clone(),
+        "pending_entries_count": adjustment_preview["pending_entries_count"].as_u64().unwrap_or(0),
+        "applied_entries_count": adjustment_preview["applied_entries_count"].as_u64().unwrap_or(0),
+        "disputed_entries_count": adjustment_preview["disputed_entries_count"].as_u64().unwrap_or(0),
+        "allowed_future_actions": adjustment_preview["allowed_future_actions"].clone(),
+        "note": "Этот governance-слой отдельно объясняет, какие barriers и adjustment semantics сейчас держат будущую settlement activation в report-only режиме."
+    })
+}
+
 fn settlement_report_preview_from_export(
     contract: &TokenBudgetContractConfig,
     statement_export_preview: &Value,
@@ -5181,6 +5268,7 @@ fn build_settlement_report_preview(
             "customer_settlement_report_preview_report_only",
             statement_export_preview,
         ),
+        "settlement_activation_governance": statement_export_preview["settlement_activation_governance"].clone(),
         "adjustment_summary": {
             "registry_status": adjustment_preview["registry_status"].clone(),
             "correction_action_state": adjustment_preview["correction_action_state"].clone(),
@@ -5587,6 +5675,8 @@ fn build_statement_export_preview(
         "customer_review_report_only",
         &preview,
     );
+    preview["settlement_activation_governance"] =
+        build_settlement_activation_governance_from_export(contract, &preview);
     preview["settlement_report_preview"] = build_settlement_report_preview(contract, &preview);
     Ok(preview)
 }
@@ -5670,6 +5760,7 @@ fn build_contractual_evidence_pack(
         "external_truth_manifest": report["token_budget_report"]["external_truth_manifest"].clone(),
         "settlement_report_preview": settlement_report_preview,
         "customer_contractual_boundary": customer_contractual_boundary,
+        "settlement_activation_governance": statement_export_preview["settlement_activation_governance"].clone(),
         "export_semantics": {
             "surface_kind": "customer_evidence_pack_report_only",
             "self_serve_state": "self_serve_ready_report_only",
@@ -5979,6 +6070,7 @@ fn build_contractual_sources_value(
         "margin_scope": report["token_budget_report"]["margin_view"][scope_code].clone(),
         "statement_export_preview": statement_export_preview,
         "settlement_report_preview": report["token_budget_report"]["settlement_report_previews"][scope_code].clone(),
+        "settlement_activation_governance": report["token_budget_report"]["statement_export_previews"][scope_code]["settlement_activation_governance"].clone(),
         "transactional_statuses": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["transactional_statuses"].clone(),
         "customer_contractual_boundary": customer_contractual_boundary,
         "suggested_repo_local_paths": {
@@ -6144,6 +6236,7 @@ pub async fn print_statement_export_bundle(
         "contractual_evidence_pack": evidence_pack["contractual_evidence_pack"].clone(),
         "token_contractual_sources": contractual_sources,
         "customer_contractual_boundary": customer_contractual_boundary.clone(),
+        "settlement_activation_governance": statement_export_preview["settlement_activation_governance"].clone(),
         "surface_kind": "customer_review_bundle_report_only",
         "self_serve_state": "self_serve_ready_report_only",
         "invoice_grade": false,
@@ -6167,6 +6260,7 @@ pub async fn print_statement_export_bundle(
             "invoice_grade": root["invoice_grade"].clone(),
             "operational_telemetry_included": root["operational_telemetry_included"].clone(),
             "customer_contractual_boundary": root["customer_contractual_boundary"].clone(),
+            "settlement_activation_governance": root["settlement_activation_governance"].clone(),
             "redaction_policy": root["redaction_policy"].clone(),
             "statement_preview_id": root["statement_preview_id"].clone(),
             "files": root["files"].clone(),
@@ -10865,6 +10959,10 @@ mod tests {
             token_event["contract"]["customer_contractual_boundary_version"],
             "customer-contractual-boundary-v1"
         );
+        assert_eq!(
+            token_event["contract"]["settlement_activation_governance_version"],
+            "settlement-activation-governance-v1"
+        );
         assert_eq!(token_event["contract"]["billing_mode"], "report_only");
         assert_eq!(
             token_event["contract"]["reconciliation_contract_version"],
@@ -10880,7 +10978,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v15"
+            "contractual-evidence-pack-v16"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -12963,7 +13061,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v15");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v16");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -13041,6 +13139,50 @@ effective_to_epoch_ms = 2000
             json!(["coverage_not_final", "money_arithmetic_not_ready"])
         );
         assert_eq!(
+            preview["settlement_activation_governance"]["model_version"],
+            "settlement-activation-governance-v1"
+        );
+        assert_eq!(
+            preview["settlement_activation_governance"]["governance_state"],
+            "activation_blocked_report_only"
+        );
+        assert_eq!(
+            preview["settlement_activation_governance"]["future_settlement_activation_state"],
+            "review_not_yet_ready_for_future_settlement"
+        );
+        assert_eq!(
+            preview["settlement_activation_governance"]["future_settlement_activation_blocking_reasons"],
+            json!(["coverage_not_final", "money_arithmetic_not_ready"])
+        );
+        assert_eq!(
+            preview["settlement_activation_governance"]["registry_status"],
+            "not_configured"
+        );
+        assert_eq!(
+            preview["settlement_activation_governance"]["adjustment_status"],
+            "not_configured"
+        );
+        assert_eq!(
+            preview["settlement_activation_governance"]["credit_action_state"],
+            "registry_not_configured"
+        );
+        assert_eq!(
+            preview["settlement_activation_governance"]["dispute_action_state"],
+            "no_open_disputes"
+        );
+        assert_eq!(
+            preview["settlement_activation_governance"]["pending_entries_count"],
+            0
+        );
+        assert_eq!(
+            preview["settlement_activation_governance"]["applied_entries_count"],
+            0
+        );
+        assert_eq!(
+            preview["settlement_activation_governance"]["disputed_entries_count"],
+            0
+        );
+        assert_eq!(
             preview["internal_money_arithmetic_readiness_state"],
             "awaiting_pricing_truth"
         );
@@ -13075,7 +13217,7 @@ effective_to_epoch_ms = 2000
         assert_eq!(preview["evidence_pack_available"], true);
         assert_eq!(
             preview["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v6"
+            "settlement-report-preview-v7"
         );
         assert_eq!(
             preview["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],
@@ -13213,7 +13355,7 @@ effective_to_epoch_ms = 2000
                 "statement_export_previews": {
                     "lifetime": {
                         "settlement_report_preview": {
-                            "model_version": "settlement-report-preview-v6",
+                            "model_version": "settlement-report-preview-v7",
                             "settlement_report_id": "preview-hash"
                         },
                         "customer_contractual_boundary": {
@@ -13223,6 +13365,29 @@ effective_to_epoch_ms = 2000
                             "review_surface_blocking_reasons": [],
                             "future_settlement_activation_state": "future_settlement_activation_blocked_report_only",
                             "future_settlement_activation_blocking_reasons": ["billing_mode_report_only", "money_arithmetic_not_ready"]
+                        },
+                        "settlement_activation_governance": {
+                            "model_version": "settlement-activation-governance-v1",
+                            "governance_state": "activation_blocked_report_only",
+                            "future_settlement_activation_state": "future_settlement_activation_blocked_report_only",
+                            "future_settlement_activation_blocking_reasons": ["billing_mode_report_only", "money_arithmetic_not_ready"],
+                            "next_settlement_stage_candidate": "billable_blocked",
+                            "next_settlement_stage_blockers": ["billing_mode_report_only"],
+                            "provisional_close_state": "provisional_close_blocked",
+                            "provisional_close_candidate": "provisional_close_blocked",
+                            "provisional_close_barriers": ["coverage_not_final"],
+                            "billing_close_barriers": ["billing_mode_report_only"],
+                            "close_barriers": ["coverage_not_final", "billing_mode_report_only"],
+                            "registry_status": "not_configured",
+                            "adjustment_status": "not_configured",
+                            "correction_action_state": "registry_not_configured",
+                            "credit_action_state": "registry_not_configured",
+                            "dispute_action_state": "no_open_disputes",
+                            "pending_entries_count": 0,
+                            "applied_entries_count": 0,
+                            "disputed_entries_count": 0,
+                            "allowed_future_actions": [],
+                            "note": "test"
                         }
                     }
                 },
@@ -13272,7 +13437,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v15");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v16");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -13309,6 +13474,42 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             payload["customer_contractual_boundary"]["future_settlement_activation_state"],
             "future_settlement_activation_blocked_report_only"
+        );
+        assert_eq!(
+            payload["settlement_activation_governance"]["model_version"],
+            "settlement-activation-governance-v1"
+        );
+        assert_eq!(
+            payload["settlement_activation_governance"]["governance_state"],
+            "activation_blocked_report_only"
+        );
+        assert_eq!(
+            payload["settlement_activation_governance"]["registry_status"],
+            "not_configured"
+        );
+        assert_eq!(
+            payload["settlement_activation_governance"]["future_settlement_activation_state"],
+            "future_settlement_activation_blocked_report_only"
+        );
+        assert_eq!(
+            payload["settlement_activation_governance"]["next_settlement_stage_candidate"],
+            "billable_blocked"
+        );
+        assert_eq!(
+            payload["settlement_activation_governance"]["billing_close_barriers"],
+            json!(["billing_mode_report_only"])
+        );
+        assert_eq!(
+            payload["settlement_activation_governance"]["adjustment_status"],
+            "not_configured"
+        );
+        assert_eq!(
+            payload["settlement_activation_governance"]["credit_action_state"],
+            "registry_not_configured"
+        );
+        assert_eq!(
+            payload["settlement_activation_governance"]["dispute_action_state"],
+            "no_open_disputes"
         );
         assert_eq!(
             payload["internal_money_arithmetic_readiness_state"],
@@ -13366,7 +13567,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             payload["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v6"
+            "settlement-report-preview-v7"
         );
         assert_eq!(
             payload["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],

@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 11:55 MSK
-Ручная сверка guide/docs: 2026-03-25 11:55 MSK
+modified_at: 2026-03-25 12:16 MSK
+Ручная сверка guide/docs: 2026-03-25 12:16 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1247,6 +1247,15 @@ preview, а не только raw count.
     - `future_settlement_activation_blocking_reasons`
   Это нужно затем, чтобы customer review surface не выдавал свою готовность за готовность
   будущего settlement activation.
+  - те же surface-ы теперь ещё несут отдельный `settlement_activation_governance`;
+  - в нём отдельно фиксируются:
+    - `governance_state`
+    - `next_settlement_stage_candidate / blockers`
+    - `provisional_close_barriers / billing_close_barriers / close_barriers`
+    - `registry_status / adjustment_status`
+    - `credit_action_state / dispute_action_state`
+  Это нужно затем, чтобы future settlement activation не выглядел как одна абстрактная
+  blocked-ready метка, а показывал конкретные governance-барьеры и adjustment semantics.
 - `settlement_report_previews`
   - по каждому scope теперь есть отдельный review-grade settlement object;
   - он собирает в одном месте:
@@ -1432,13 +1441,14 @@ preview, а не только raw count.
   - это уже customer-facing review surface с hashes и contract states, но всё ещё строго
     `report_only`, а не invoice.
   - export/evidence surface versions теперь подняты до:
-    - `contractual-statement-export-v15`
-    - `settlement-report-preview-v6`
-    - `contractual-evidence-pack-v15`
-    потому что customer-facing payload теперь уже явно различает:
+    - `contractual-statement-export-v16`
+    - `settlement-report-preview-v7`
+    - `contractual-evidence-pack-v16`
+  потому что customer-facing payload теперь уже явно различает:
     - `customer review ready`
     - `internal money arithmetic ready`
     - `contractual settlement ready`
+    - `future settlement activation governance`
 - metering freshness теперь тоже first-class:
   - `metering_freshness.current_session / rolling_window / lifetime`
   - она отдельно показывает:

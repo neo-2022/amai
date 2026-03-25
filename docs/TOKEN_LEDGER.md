@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 11:28 MSK
-Ручная сверка guide/docs: 2026-03-25 11:28 MSK
+modified_at: 2026-03-25 12:16 MSK
+Ручная сверка guide/docs: 2026-03-25 12:16 MSK
 
 # Token Ledger
 
@@ -1041,6 +1041,19 @@ Hashes по line items нужны затем, чтобы:
   - `future_settlement_activation_blocking_reasons`
   Это нужно затем, чтобы customer-facing review layer и будущий settlement activation
   были видны как два разных договора, а не как одна обобщённая готовность.
+- preview, settlement report preview, contractual sources и evidence pack теперь ещё несут
+  `settlement_activation_governance`;
+- governance отдельно фиксирует:
+  - `governance_state`
+  - `next_settlement_stage_candidate`
+  - `next_settlement_stage_blockers`
+  - `provisional_close_barriers`
+  - `billing_close_barriers`
+  - `close_barriers`
+  - `registry_status / adjustment_status`
+  - `credit_action_state / dispute_action_state`
+  Это нужно затем, чтобы report-only review surface явно показывал, какие governance и
+  adjustment-барьеры удерживают будущую settlement activation.
 - preview теперь ещё несёт `transactional_statuses`, чтобы export не путал уже materialized
   measured/report-only стадии с будущими reserved billing стадиями;
 - preview и evidence pack теперь ещё несут `export_semantics`, чтобы customer review surface
@@ -1056,9 +1069,9 @@ Hashes по line items нужны затем, чтобы:
 - и только потом, в будущем, settlement/dispute workflow.
 
 Текущие surface versions для этого слоя:
-- `contractual-statement-export-v15`
-- `settlement-report-preview-v6`
-- `contractual-evidence-pack-v15`
+- `contractual-statement-export-v16`
+- `settlement-report-preview-v7`
+- `contractual-evidence-pack-v16`
 
 ## Preliminary vs stable
 

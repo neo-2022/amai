@@ -32,15 +32,19 @@ assert settlement_report["scope_code"] == "lifetime", settlement_report
 assert statement_export["scope_code"] == "lifetime", statement_export
 assert evidence_pack["scope_code"] == "lifetime", evidence_pack
 assert contractual_sources["scope_code"] == "lifetime", contractual_sources
-assert statement_export["model_version"] == "contractual-statement-export-v15", statement_export
-assert settlement_report["model_version"] == "settlement-report-preview-v6", settlement_report
-assert evidence_pack["pack_version"] == "contractual-evidence-pack-v15", evidence_pack
+assert statement_export["model_version"] == "contractual-statement-export-v16", statement_export
+assert settlement_report["model_version"] == "settlement-report-preview-v7", settlement_report
+assert evidence_pack["pack_version"] == "contractual-evidence-pack-v16", evidence_pack
 assert statement_export["contractual_readiness_model_version"] == "contractual-readiness-v1", statement_export
 assert settlement_report["contractual_readiness_model_version"] == "contractual-readiness-v1", settlement_report
 assert evidence_pack["contractual_readiness_model_version"] == "contractual-readiness-v1", evidence_pack
 assert statement_export["customer_contractual_boundary"]["model_version"] == "customer-contractual-boundary-v1", statement_export
 assert settlement_report["customer_contractual_boundary"]["model_version"] == "customer-contractual-boundary-v1", settlement_report
 assert evidence_pack["customer_contractual_boundary"]["model_version"] == "customer-contractual-boundary-v1", evidence_pack
+assert statement_export["settlement_activation_governance"]["model_version"] == "settlement-activation-governance-v1", statement_export
+assert settlement_report["settlement_activation_governance"]["model_version"] == "settlement-activation-governance-v1", settlement_report
+assert evidence_pack["settlement_activation_governance"]["model_version"] == "settlement-activation-governance-v1", evidence_pack
+assert contractual_sources["settlement_activation_governance"]["model_version"] == "settlement-activation-governance-v1", contractual_sources
 assert statement_export["internal_money_arithmetic_readiness_state"] is not None, statement_export
 assert settlement_report["internal_money_arithmetic_readiness_state"] is not None, settlement_report
 assert evidence_pack["internal_money_arithmetic_readiness_state"] is not None, evidence_pack
@@ -83,6 +87,9 @@ assert statement_export["customer_contractual_boundary"]["surface_kind"] == "cus
 assert settlement_report["customer_contractual_boundary"]["surface_kind"] == "customer_settlement_report_preview_report_only", settlement_report
 assert evidence_pack["customer_contractual_boundary"]["surface_kind"] == "customer_evidence_pack_report_only", evidence_pack
 assert contractual_sources["customer_contractual_boundary"]["surface_kind"] == "customer_contractual_sources_report_only", contractual_sources
+assert statement_export["settlement_activation_governance"]["future_settlement_activation_state"] == statement_export["customer_contractual_boundary"]["future_settlement_activation_state"], statement_export
+assert evidence_pack["settlement_activation_governance"]["future_settlement_activation_state"] == evidence_pack["customer_contractual_boundary"]["future_settlement_activation_state"], evidence_pack
+assert contractual_sources["settlement_activation_governance"]["future_settlement_activation_state"] == contractual_sources["customer_contractual_boundary"]["future_settlement_activation_state"], contractual_sources
 assert contractual_sources["customer_contractual_boundary"]["operational_telemetry_included"] is False, contractual_sources
 assert manifest["surface_kind"] == "customer_review_bundle_report_only", manifest
 assert manifest["customer_contractual_boundary"]["surface_kind"] == "customer_review_bundle_report_only", manifest
