@@ -1578,6 +1578,9 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     let resume_state_field = resume_enforcement["resume_state_field"]
         .as_str()
         .ok_or_else(|| anyhow!("project_chat_startup contract is missing resume_enforcement.resume_state_field"))?;
+    let resume_obligation_field = resume_enforcement["obligation_field"]
+        .as_str()
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing resume_enforcement.obligation_field"))?;
     let must_resume_before_unrelated = resume_enforcement
         ["must_resume_required_return_task_before_unrelated_work"]
         .as_bool()
@@ -1587,7 +1590,7 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
         .unwrap_or(false);
 
     Ok(format!(
-        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала вызови MCP tool `{tool}`.\n3. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n4. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n5. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n6. После restore обязательно подними поля: {required_summary_fields}.\n7. Верни в активную рабочую линию obligations: {restored_obligations}.\n8. Смотри поля `{resume_state_field}` и `{resume_contract_field}`.\n9. Если `{resume_contract_field}` не `clear`, считай это required_return_task и вернись к нему до unrelated work: {}.\n10. Silent drop запрещён: {}.\n11. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
+        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала вызови MCP tool `{tool}`.\n3. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n4. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n5. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n6. После restore обязательно подними поля: {required_summary_fields}.\n7. Верни в активную рабочую линию obligations: {restored_obligations}.\n8. Смотри поля `{resume_state_field}`, `{resume_contract_field}` и `{resume_obligation_field}`.\n9. Если `{resume_obligation_field}.resume_state` не `clear`, считай это required_return_task и вернись к нему до unrelated work: {}.\n10. Silent drop запрещён: {}.\n11. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
         repo_root.display(),
         repo_root.display(),
         "amai_context_pack",
@@ -1807,6 +1810,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("/tmp/amai"));
         assert!(text.contains("continuity_startup_summary"));
         assert!(text.contains("execctl_resume_contract_summary"));
+        assert!(text.contains("execctl_resume_obligation"));
         assert!(text.contains("required_return_task"));
         assert!(text.contains("no_silent_drop = true"));
     }

@@ -15,6 +15,7 @@ grep -q '\[mcp_servers.amai\]' "${temp_home}/.codex/config.toml"
 test -f tmp/onboarding/codex-amai-startup-AGENTS.snippet.md
 grep -q 'project `AGENTS.md`' tmp/onboarding/codex-amai-startup-AGENTS.snippet.md
 grep -q 'execctl_resume_contract_summary' tmp/onboarding/codex-amai-startup-AGENTS.snippet.md
+grep -q 'execctl_resume_obligation' tmp/onboarding/codex-amai-startup-AGENTS.snippet.md
 grep -q 'required_return_task' tmp/onboarding/codex-amai-startup-AGENTS.snippet.md
 
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client codex
@@ -33,6 +34,7 @@ grep -q '"amai"' "${temp_home}/.cursor/mcp.json"
 test -f .cursor/rules/amai-continuity-startup.mdc
 grep -q 'amai_continuity_startup' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'execctl_resume_contract_summary' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'execctl_resume_obligation' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'required_return_task' .cursor/rules/amai-continuity-startup.mdc
 
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client cursor
@@ -51,6 +53,7 @@ grep -q '"amai"' .mcp.json
 test -f tmp/onboarding/claude-code-amai-startup.md
 grep -q 'amai_continuity_startup' tmp/onboarding/claude-code-amai-startup.md
 grep -q 'execctl_resume_contract_summary' tmp/onboarding/claude-code-amai-startup.md
+grep -q 'execctl_resume_obligation' tmp/onboarding/claude-code-amai-startup.md
 grep -q 'required_return_task' tmp/onboarding/claude-code-amai-startup.md
 
 ./scripts/disconnect_local.sh --client claude-code

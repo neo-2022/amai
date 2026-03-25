@@ -18,6 +18,7 @@ grep -q '"servers"' "${output}"
 grep -q 'run_mcp_stdio.sh' "${output}"
 grep -q 'amai_continuity_startup' "${startup_output}"
 grep -q 'execctl_resume_contract_summary' "${startup_output}"
+grep -q 'execctl_resume_obligation' "${startup_output}"
 grep -q 'required_return_task' "${startup_output}"
 grep -q 'Auto-start readiness: instruction-backed' "${human_output}"
 if ! grep -q 'Почему последний собранный контекст что-то включил:' "${human_output}"; then

@@ -2241,6 +2241,9 @@ fn build_chat_start_restore(
         .and_then(|value| value["execctl_resume_contract_summary"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let execctl_resume_obligation = restore_node
+        .map(|value| summarize_execctl_resume_obligation(&value["execctl_resume_contract"]))
+        .unwrap_or_else(|| default_execctl_resume_obligation(None, "clear"));
     let project_task_tree_summary = restore_node
         .and_then(|value| value["project_task_tree_summary"].as_str())
         .filter(|value| !value.is_empty())
@@ -2315,6 +2318,7 @@ fn build_chat_start_restore(
             "workspace_graph_summary": workspace_graph_summary,
             "pending_return_summary": pending_return_summary,
             "execctl_resume_contract_summary": execctl_resume_contract_summary,
+            "execctl_resume_obligation": execctl_resume_obligation,
             "project_task_tree_summary": project_task_tree_summary,
             "project_task_ledger_summary": project_task_ledger_summary,
             "execctl_resume_state": execctl_resume_state,
@@ -2330,6 +2334,39 @@ fn build_chat_start_restore(
                 thread_count,
             ),
         }
+    })
+}
+
+fn default_execctl_resume_obligation(required_return_task: Option<&Value>, resume_state: &str) -> Value {
+    let required_headline = required_return_task
+        .and_then(|task| task["headline"].as_str())
+        .filter(|value| !value.is_empty());
+    let required_next_step = required_return_task
+        .and_then(|task| task["next_step"].as_str())
+        .filter(|value| !value.is_empty());
+    json!({
+        "resume_state": resume_state,
+        "no_silent_drop": true,
+        "pending_return_count": if required_headline.is_some() { 1 } else { 0 },
+        "active_task_headline": Value::Null,
+        "required_return_headline": required_headline,
+        "required_return_next_step": required_next_step,
+    })
+}
+
+fn summarize_execctl_resume_obligation(contract: &Value) -> Value {
+    if !contract.is_object() {
+        return default_execctl_resume_obligation(None, "clear");
+    }
+    let active_task = &contract["active_task"];
+    let required_return_task = &contract["required_return_task"];
+    json!({
+        "resume_state": contract["resume_state"].as_str().unwrap_or("clear"),
+        "no_silent_drop": contract["no_silent_drop"].as_bool().unwrap_or(true),
+        "pending_return_count": contract["pending_return_count"].as_u64().unwrap_or_default(),
+        "active_task_headline": active_task["headline"].as_str().filter(|value| !value.is_empty()),
+        "required_return_headline": required_return_task["headline"].as_str().filter(|value| !value.is_empty()),
+        "required_return_next_step": required_return_task["next_step"].as_str().filter(|value| !value.is_empty()),
     })
 }
 
@@ -4106,6 +4143,18 @@ mod tests {
                 "restore_confidence": "high",
                 "execctl_resume_state": "pending_return_queue_present",
                 "pending_return_summary": "Same-meter spend control -> Materialize live assistant generation source.",
+                "execctl_resume_contract": {
+                    "resume_state": "return_required",
+                    "no_silent_drop": true,
+                    "pending_return_count": 1,
+                    "active_task": {
+                        "headline": "Amai upstream thread-index enrich materialized"
+                    },
+                    "required_return_task": {
+                        "headline": "Same-meter spend control",
+                        "next_step": "Materialize live assistant generation source."
+                    }
+                },
                 "execctl_resume_contract_summary": "return_required(1): Same-meter spend control -> Materialize live assistant generation source.",
                 "project_task_tree_summary": "active: Amai upstream thread-index enrich materialized; pending_return(1): Same-meter spend control -> Materialize live assistant generation source.",
                 "materialized_notes": [
@@ -4151,6 +4200,14 @@ mod tests {
         assert_eq!(
             node["execctl_resume_state"],
             json!("pending_return_queue_present")
+        );
+        assert_eq!(
+            node["execctl_resume_obligation"]["resume_state"],
+            json!("return_required")
+        );
+        assert_eq!(
+            node["execctl_resume_obligation"]["required_return_headline"],
+            json!("Same-meter spend control")
         );
     }
 

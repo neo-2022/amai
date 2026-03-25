@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 21:37 MSK
-Ручная сверка guide/docs: 2026-03-25 21:37 MSK
+modified_at: 2026-03-25 21:49 MSK
+Ручная сверка guide/docs: 2026-03-25 21:49 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1141,6 +1141,7 @@ preview, а не только raw count.
   а не только headline/next step.
 - читать `resume_enforcement` из startup contract:
   - `execctl_resume_contract_summary` является каноническим полем resume-obligation;
+  - `execctl_resume_obligation` даёт тот же контур уже как machine-readable object;
   - если summary не `clear`, клиент обязан трактовать её как `required_return_task`;
   - `no_silent_drop = true` запрещает тихо переключаться на unrelated work.
 
@@ -1160,6 +1161,8 @@ preview, а не только raw count.
   а где ещё нужен manual follow-up.
 - даже в manual-snippet клиентах startup теперь обязан surface-ить
   `required_return_task`, а не оставлять возврат только как human hint.
+- для client automation теперь важнее читать `execctl_resume_obligation.resume_state`
+  и `required_return_*`, чем парсить human summary строку.
 
 Тот же manifest теперь фиксирует и `error_contracts`. Это даёт внешнему клиенту
 стабильные machine-readable failure classes:

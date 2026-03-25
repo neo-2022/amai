@@ -1270,6 +1270,7 @@ async fn tool_continuity_startup(
                 "execctl_resume_state": summary.execctl_resume_state,
                 "pending_return_summary": summary.pending_return_summary,
                 "execctl_resume_contract_summary": summary.execctl_resume_contract_summary,
+                "execctl_resume_obligation": summary.execctl_resume_obligation,
                 "project_task_tree_summary": summary.project_task_tree_summary,
                 "project_task_ledger_summary": summary.project_task_ledger_summary,
                 "included_reasons_summary": summary.included_reasons_summary,
@@ -1838,6 +1839,7 @@ struct ContinuityStartupSummary {
     execctl_resume_state: String,
     pending_return_summary: Option<String>,
     execctl_resume_contract_summary: Option<String>,
+    execctl_resume_obligation: Value,
     project_task_tree_summary: Option<String>,
     project_task_ledger_summary: Option<String>,
     included_reasons_summary: Option<String>,
@@ -1885,6 +1887,22 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
             .as_str()
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
+        execctl_resume_obligation: if payload["chat_start_restore"]["execctl_resume_obligation"]
+            .is_object()
+        {
+            payload["chat_start_restore"]["execctl_resume_obligation"].clone()
+        } else {
+            json!({
+                "resume_state": payload["chat_start_restore"]["execctl_resume_state"]
+                    .as_str()
+                    .unwrap_or("clear"),
+                "no_silent_drop": true,
+                "pending_return_count": 0,
+                "active_task_headline": Value::Null,
+                "required_return_headline": Value::Null,
+                "required_return_next_step": Value::Null,
+            })
+        },
         project_task_tree_summary: payload["chat_start_restore"]["project_task_tree_summary"]
             .as_str()
             .filter(|value| !value.is_empty())
@@ -2307,6 +2325,7 @@ fn protocol_manifest() -> Value {
                     "prompt_text_present",
                     "execctl_resume_state",
                     "execctl_resume_contract_summary",
+                    "execctl_resume_obligation",
                     "project_task_tree_summary",
                     "project_task_ledger_summary"
                 ],
@@ -2316,12 +2335,14 @@ fn protocol_manifest() -> Value {
                     "execctl_resume_state",
                     "pending_return_summary",
                     "execctl_resume_contract_summary",
+                    "execctl_resume_obligation",
                     "project_task_tree_summary",
                     "project_task_ledger_summary"
                 ],
                 "resume_enforcement": {
                     "contract_field": "execctl_resume_contract_summary",
                     "resume_state_field": "execctl_resume_state",
+                    "obligation_field": "execctl_resume_obligation",
                     "must_resume_required_return_task_before_unrelated_work": true,
                     "no_silent_drop": true
                 },
@@ -2750,7 +2771,7 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
                     "content": {
                         "type": "text",
                         "text": format!(
-                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, and execctl_resume_contract_summary. If execctl_resume_contract_summary is not clear, treat it as a required return obligation and do not silently switch to unrelated work."
+                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, and execctl_resume_obligation. If execctl_resume_obligation.resume_state is not clear, treat it as a required return obligation and do not silently switch to unrelated work."
                         )
                     }
                 }]
@@ -4343,12 +4364,23 @@ mod tests {
         assert!(
             startup_required_fields
                 .iter()
+                .any(|field| field.as_str() == Some("execctl_resume_obligation"))
+        );
+        assert!(
+            startup_required_fields
+                .iter()
                 .any(|field| field.as_str() == Some("project_task_tree_summary"))
         );
         assert!(
             startup_required_fields
                 .iter()
                 .any(|field| field.as_str() == Some("project_task_ledger_summary"))
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
+                ["obligation_field"]
+                .as_str(),
+            Some("execctl_resume_obligation")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
@@ -4432,6 +4464,7 @@ mod tests {
         assert!(text.contains("amai_continuity_startup"));
         assert!(text.contains("pending_return_queue"));
         assert!(text.contains("execctl_resume_contract_summary"));
+        assert!(text.contains("execctl_resume_obligation"));
         assert!(text.contains("do not silently switch to unrelated work"));
     }
 
@@ -4451,6 +4484,14 @@ mod tests {
                 "execctl_resume_state": "pending_return_queue_present",
                 "pending_return_summary": "Same-meter spend control -> Materialize live assistant generation source.",
                 "execctl_resume_contract_summary": "return_required(1): Same-meter spend control -> Materialize live assistant generation source.",
+                "execctl_resume_obligation": {
+                    "resume_state": "return_required",
+                    "no_silent_drop": true,
+                    "pending_return_count": 1,
+                    "active_task_headline": "Continue runtime auto-start guarantees.",
+                    "required_return_headline": "Same-meter spend control",
+                    "required_return_next_step": "Materialize live assistant generation source."
+                },
                 "project_task_tree_summary": "active: Continue runtime auto-start guarantees.; pending_return(1): Same-meter spend control -> Materialize live assistant generation source.",
                 "project_task_ledger_summary": "active: Continue runtime auto-start guarantees.; pending_return(1); historical_handoffs(3)",
                 "included_reasons_summary": "exact_documents (1) — Exact layer matched.",
@@ -4474,6 +4515,14 @@ mod tests {
                 .execctl_resume_contract_summary
                 .as_deref()
                 .is_some_and(|value| value.contains("return_required(1)"))
+        );
+        assert_eq!(
+            summary.execctl_resume_obligation["resume_state"],
+            json!("return_required")
+        );
+        assert_eq!(
+            summary.execctl_resume_obligation["required_return_headline"],
+            json!("Same-meter spend control")
         );
         assert!(
             summary
