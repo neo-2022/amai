@@ -13,6 +13,11 @@ HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./sc
 test -f "${temp_home}/.codex/config.toml"
 grep -q '\[mcp_servers.amai\]' "${temp_home}/.codex/config.toml"
 test -f AGENTS.md
+test -f .amai/onboarding/project-chat-startup-contract.json
+grep -q '"artifact_version": "workspace-startup-contract-v1"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"required_action_kind_when_resume_required": "resume_required_return_task"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"project_task_tree"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"project_task_ledger"' .amai/onboarding/project-chat-startup-contract.json
 grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' AGENTS.md
 grep -q 'project `AGENTS.md`' AGENTS.md
 grep -q 'execctl_resume_contract_summary' AGENTS.md
@@ -39,6 +44,8 @@ fi
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client cursor --yes --skip-stack --skip-release-build
 test -f "${temp_home}/.cursor/mcp.json"
 grep -q '"amai"' "${temp_home}/.cursor/mcp.json"
+test -f .amai/onboarding/project-chat-startup-contract.json
+grep -q '"artifact_version": "workspace-startup-contract-v1"' .amai/onboarding/project-chat-startup-contract.json
 test -f .cursor/rules/amai-continuity-startup.mdc
 grep -q 'amai_continuity_startup' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'execctl_resume_contract_summary' .cursor/rules/amai-continuity-startup.mdc
@@ -65,6 +72,8 @@ fi
 ./scripts/onboard_local.sh --client claude-code --yes --skip-stack --skip-release-build
 test -f .mcp.json
 grep -q '"amai"' .mcp.json
+test -f .amai/onboarding/project-chat-startup-contract.json
+grep -q '"artifact_version": "workspace-startup-contract-v1"' .amai/onboarding/project-chat-startup-contract.json
 test -f CLAUDE.md
 grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' CLAUDE.md
 grep -q 'amai_continuity_startup' CLAUDE.md

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 01:33 MSK
-Ручная сверка guide/docs: 2026-03-26 01:33 MSK
+modified_at: 2026-03-26 02:49 MSK
+Ручная сверка guide/docs: 2026-03-26 02:49 MSK
 
 # Operations
 
@@ -825,6 +825,10 @@ cargo run -- mcp serve
   - `project_task_ledger`
   - `project_task_ledger_summary`
   чтобы клиент видел не только open-task tree, но и append-only handoff ledger.
+- onboarding теперь materialize-ит и отдельный workspace-level JSON artifact
+  `.amai/onboarding/project-chat-startup-contract.json`;
+  это нужно затем, чтобы supported clients имели machine-readable startup source-of-truth и не
+  зависели только от парсинга managed markdown/rule block.
 - тот же `amai_protocol_manifest` теперь несёт `error_contracts`, а `tools/call`
   и JSON-RPC errors отдают machine-readable taxonomy вместо голого текста:
   `invalid_json_rpc_payload`, `invalid_request`, `method_not_found`,

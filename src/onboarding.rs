@@ -6,7 +6,7 @@ use crate::profiles;
 use anyhow::{Context, Result, anyhow, bail};
 use dirs::home_dir;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
@@ -33,6 +33,10 @@ struct InstallState {
     startup_instruction_path: Option<String>,
     #[serde(default)]
     startup_instruction_status: Option<String>,
+    #[serde(default)]
+    startup_contract_path: Option<String>,
+    #[serde(default)]
+    startup_contract_status: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +167,7 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
     }
     let backup = maybe_backup_user_global(&output, &target.install_scope)?;
     mcp::write_client_config(&config_args)?;
+    let startup_contract_summary = install_startup_contract_artifact(&repo_root)?;
     let startup_instructions_summary =
         install_startup_instructions(&repo_root, &client_resolution)?;
     let install_status = build_install_status(
@@ -193,6 +198,12 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
                 .as_ref()
                 .map(|summary| summary.output_path.display().to_string()),
             startup_instruction_status: startup_instructions_summary
+                .as_ref()
+                .map(|summary| summary.status.clone()),
+            startup_contract_path: startup_contract_summary
+                .as_ref()
+                .map(|summary| summary.output_path.display().to_string()),
+            startup_contract_status: startup_contract_summary
                 .as_ref()
                 .map(|summary| summary.status.clone()),
         },
@@ -266,6 +277,18 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
         println!("Почему такой режим: {}", summary.reason);
     } else {
         println!("Startup contract для клиента: отдельный artifact не materialized");
+    }
+    if let Some(summary) = &startup_contract_summary {
+        println!("Machine-readable startup contract: {}", summary.status);
+        println!(
+            "Где лежит startup contract JSON: {}",
+            summary.output_path.display()
+        );
+        println!(
+            "Где лежит startup contract по scope: {}",
+            install_scope_status(&summary.install_scope)
+        );
+        println!("Почему contract materialized: {}", summary.reason);
     }
     if let Some(summary) = &local_memory_bridge_summary {
         println!("Внешний memory bridge: {}", summary.status);
@@ -1011,6 +1034,14 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
         println!("startup_instruction_removed: false");
     }
     if let Some(state) = &install_state_before {
+        if let Some(startup_contract_path) = &state.startup_contract_path {
+            println!("startup_contract_path: {}", startup_contract_path);
+        }
+        if let Some(startup_contract_status) = &state.startup_contract_status {
+            println!("startup_contract_status: {}", startup_contract_status);
+        }
+    }
+    if let Some(state) = &install_state_before {
         if let Some(memory_bridge_path) = &state.memory_bridge_path {
             println!("memory_bridge: {}", memory_bridge_path);
         }
@@ -1232,6 +1263,14 @@ struct StartupInstructionsInstallSummary {
 }
 
 #[derive(Debug, Clone)]
+struct StartupContractInstallSummary {
+    status: String,
+    output_path: PathBuf,
+    install_scope: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone)]
 struct ClientResolution {
     client_key: String,
     target: ClientTarget,
@@ -1401,6 +1440,10 @@ fn expand_target_template(template: &str, repo_root: &Path, home: &Path) -> Path
 const STARTUP_INSTRUCTIONS_MARKER: &str = "<!-- AMAI MANAGED STARTUP INSTRUCTIONS v1 -->";
 const STARTUP_INSTRUCTIONS_END_MARKER: &str = "<!-- /AMAI MANAGED STARTUP INSTRUCTIONS v1 -->";
 
+fn startup_contract_artifact_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".amai/onboarding/project-chat-startup-contract.json")
+}
+
 fn managed_startup_block_bounds(content: &str) -> Result<Option<(usize, usize)>> {
     let start = content.find(STARTUP_INSTRUCTIONS_MARKER);
     let end = content.find(STARTUP_INSTRUCTIONS_END_MARKER);
@@ -1567,6 +1610,27 @@ fn install_startup_instructions(
     }
 }
 
+fn install_startup_contract_artifact(
+    repo_root: &Path,
+) -> Result<Option<StartupContractInstallSummary>> {
+    let output_path = startup_contract_artifact_path(repo_root);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let content = render_startup_contract_artifact(repo_root)?;
+    fs::write(&output_path, content.as_bytes())
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    Ok(Some(StartupContractInstallSummary {
+        status: "workspace_startup_contract_materialized".to_string(),
+        output_path,
+        install_scope: "workspace_local".to_string(),
+        reason:
+            "supported clients now get a machine-readable startup source-of-truth alongside managed instructions"
+                .to_string(),
+    }))
+}
+
 fn remove_startup_instructions(
     repo_root: &Path,
     target: &ClientTarget,
@@ -1653,6 +1717,7 @@ fn render_startup_instructions(
 
 fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     let contract = mcp::project_chat_startup_contract();
+    let contract_path = startup_contract_artifact_path(repo_root);
     let tool = contract["tool"]
         .as_str()
         .ok_or_else(|| anyhow!("project_chat_startup contract is missing tool"))?;
@@ -1742,8 +1807,9 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
         .unwrap_or(false);
 
     Ok(format!(
-        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала вызови MCP tool `{tool}`.\n3. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n4. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n5. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n6. После restore обязательно подними поля: {required_summary_fields}.\n7. Верни в активную рабочую линию obligations: {restored_obligations}.\n8. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n9. `{startup_next_action_field}` считается первым обязательным действием после startup.\n10. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n11. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n12. Silent drop запрещён: {}.\n13. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
+        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала прочитай machine-readable startup contract `{}` и используй его как source-of-truth, а не этот markdown-блок.\n3. Затем вызови MCP tool `{tool}`.\n4. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n5. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n6. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n7. После restore обязательно подними поля: {required_summary_fields}.\n8. Верни в активную рабочую линию obligations: {restored_obligations}.\n9. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n10. `{startup_next_action_field}` считается первым обязательным действием после startup.\n11. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n12. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n13. Silent drop запрещён: {}.\n14. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
         repo_root.display(),
+        contract_path.display(),
         repo_root.display(),
         "amai_context_pack",
         if must_resume_before_unrelated {
@@ -1762,6 +1828,33 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
             "no_silent_drop = false"
         }
     ))
+}
+
+fn render_startup_contract_artifact(repo_root: &Path) -> Result<String> {
+    let contract = mcp::project_chat_startup_contract();
+    let tool = contract["tool"]
+        .as_str()
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing tool"))?;
+    let namespace = contract["default_namespace"]
+        .as_str()
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing default_namespace"))?;
+    let payload = json!({
+        "artifact_version": "workspace-startup-contract-v1",
+        "contract_kind": "project_chat_startup",
+        "repo_root": repo_root.display().to_string(),
+        "default_namespace": namespace,
+        "tool": tool,
+        "recommended_startup_call": {
+            "tool": tool,
+            "arguments": {
+                "repo_root": repo_root.display().to_string(),
+                "namespace": namespace
+            },
+            "project_argument_rule": "pass project when already known, otherwise require exact binding by repo_root"
+        },
+        "startup_contract": contract
+    });
+    serde_json::to_string_pretty(&payload).context("failed to serialize startup contract artifact")
 }
 
 fn install_scope_status(scope: &str) -> &'static str {
@@ -1854,10 +1947,11 @@ fn maybe_backup_user_global(path: &Path, install_scope: &str) -> Result<Option<P
 mod tests {
     use super::{
         detection_score, env_keys, expand_target_template, install_scope_status,
-        merge_managed_startup_block, render_startup_instructions, resolve_client_target,
-        resolve_output_path, strip_managed_startup_block, working_state_reason_summary,
+        merge_managed_startup_block, render_startup_contract_artifact, render_startup_instructions,
+        resolve_client_target, resolve_output_path, startup_contract_artifact_path,
+        strip_managed_startup_block, working_state_reason_summary,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1985,8 +2079,37 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("required_return_task"));
         assert!(text.contains("project_task_tree"));
         assert!(text.contains("project_task_ledger"));
+        assert!(
+            text.contains(
+                startup_contract_artifact_path(repo)
+                    .display()
+                    .to_string()
+                    .as_str()
+            )
+        );
+        assert!(text.contains("machine-readable startup contract"));
         assert!(text.contains("previous_session_owner_must_follow_startup_next_action = true"));
         assert!(text.contains("no_silent_drop = true"));
+    }
+
+    #[test]
+    fn renders_machine_readable_startup_contract_artifact() {
+        let repo = Path::new("/tmp/amai");
+        let text = render_startup_contract_artifact(repo).expect("startup contract must render");
+        let payload: Value = serde_json::from_str(&text).expect("startup contract json");
+        assert_eq!(
+            payload["artifact_version"],
+            json!("workspace-startup-contract-v1")
+        );
+        assert_eq!(payload["repo_root"], json!("/tmp/amai"));
+        assert_eq!(
+            payload["recommended_startup_call"]["arguments"]["repo_root"],
+            json!("/tmp/amai")
+        );
+        assert_eq!(
+            payload["startup_contract"]["resume_enforcement"]["required_action_kind_when_resume_required"],
+            json!("resume_required_return_task")
+        );
     }
 
     #[test]

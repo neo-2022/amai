@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 01:33 MSK
-Ручная сверка guide/docs: 2026-03-26 01:33 MSK
+modified_at: 2026-03-26 02:49 MSK
+Ручная сверка guide/docs: 2026-03-26 02:49 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1207,10 +1207,14 @@ preview, а не только raw count.
   `.cursor/rules/amai-continuity-startup.mdc`;
 - `Codex` теперь получает managed append-block в project `AGENTS.md`;
 - `Claude Code` теперь получает managed append-block в project `CLAUDE.md`;
+- все эти клиенты теперь получают и общий workspace-level machine-readable startup contract
+  `.amai/onboarding/project-chat-startup-contract.json`;
 - `Claude Desktop` и `Generic` пока всё ещё получают только manual startup snippets.
 
 Это важно читать строго:
 - `startup contract` уже общий и machine-readable;
+- source of truth теперь не только managed markdown/rule block, но и JSON artifact
+  `.amai/onboarding/project-chat-startup-contract.json`;
 - но `auto-start readiness` у клиентов пока разная;
 - bounded managed block не переписывает весь user rule file целиком: `Amai` теперь обновляет
   только свой собственный marker-bounded startup block и при disconnect/remove удаляет только его;

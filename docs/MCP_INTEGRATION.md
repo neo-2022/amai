@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 01:33 MSK
-Ручная сверка guide/docs: 2026-03-26 01:33 MSK
+modified_at: 2026-03-26 02:49 MSK
+Ручная сверка guide/docs: 2026-03-26 02:49 MSK
 
 # MCP Integration
 
@@ -403,6 +403,9 @@ stack-а, но и какие deployment promises вообще честно до�
   тихо захватывать workline и обязан follow `startup_next_action` first;
 - startup artifact или managed rule должны прямо говорить про
   `required_return_task`, а не только про общий restore.
+- onboarding теперь materialize-ит и отдельный workspace JSON artifact:
+  `.amai/onboarding/project-chat-startup-contract.json`;
+  клиент может читать его как machine-readable source-of-truth вместо парсинга markdown/rule file.
 - сам `amai_continuity_startup` теперь перед чтением restore-state ещё и делает schema-sync;
   это важно затем, чтобы новый `ExecCtl` lease lane не рвал MCP startup после partial-upgrade
   на ошибке `relation ami.execctl_task_leases does not exist`.
