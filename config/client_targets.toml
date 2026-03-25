@@ -41,9 +41,9 @@ detect_workspace_markers = [".mcp.json"]
 detect_home_markers = []
 
 [clients.claude-code.startup_instructions]
-mode = "manual_snippet_only"
-default_output = "${repo_root}/tmp/onboarding/claude-code-amai-startup.md"
-install_scope = "manual_generated"
+mode = "managed_append_block"
+default_output = "${repo_root}/CLAUDE.md"
+install_scope = "workspace_local"
 format = "generic_markdown"
 
 [clients.codex]
@@ -56,9 +56,9 @@ detect_workspace_markers = []
 detect_home_markers = [".codex", ".codex/config.toml"]
 
 [clients.codex.startup_instructions]
-mode = "manual_snippet_only"
-default_output = "${repo_root}/tmp/onboarding/codex-amai-startup-AGENTS.snippet.md"
-install_scope = "manual_generated"
+mode = "managed_append_block"
+default_output = "${repo_root}/AGENTS.md"
+install_scope = "workspace_local"
 format = "codex_agents_snippet"
 
 [clients.claude-desktop]

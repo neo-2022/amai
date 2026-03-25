@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 21:49 MSK
-Ручная сверка guide/docs: 2026-03-25 21:49 MSK
+modified_at: 2026-03-25 23:21 MSK
+Ручная сверка guide/docs: 2026-03-25 23:21 MSK
 
 # MCP Integration
 
@@ -118,11 +118,11 @@ scripts\install_amai.cmd
   - и отдельно materialize-ит project rule file `.cursor/rules/amai-continuity-startup.mdc`;
 - `Codex`
   - onboarding по умолчанию пишет config в user-scope path;
-  - но `Amai` не имеет права молча переписывать project `AGENTS.md`, поэтому для startup
-    пока генерируется manual snippet в `tmp/onboarding`;
+  - startup теперь materialize-ится как bounded managed block внутри project `AGENTS.md`;
+  - `Amai` не переписывает весь rule file: он обновляет только marker-bounded startup block;
 - `Claude Code`
   - onboarding пишет workspace-local `.mcp.json`;
-  - для startup сейчас тоже получает manual snippet, а не автоперезапись project rules;
+  - startup теперь materialize-ится как bounded managed block внутри project `CLAUDE.md`;
 - `Claude Desktop`
   - пока получает generated file для ручного импорта.
 
@@ -144,9 +144,9 @@ scripts\install_amai.cmd
   `.github/instructions/amai-continuity-startup.instructions.md`;
 - `Cursor` получает managed project rule file
   `.cursor/rules/amai-continuity-startup.mdc`;
-- `Codex`, `Claude Code`, `Claude Desktop` и `Generic` пока получают только
-  сгенерированный snippet, потому что `Amai` не должен самовольно перетирать
-  `AGENTS.md` / `CLAUDE.md` / другие пользовательские rules-файлы.
+- `Codex` получает instruction-backed startup через managed append-block в `AGENTS.md`;
+- `Claude Code` получает instruction-backed startup через managed append-block в `CLAUDE.md`;
+- `Claude Desktop` и `Generic` пока получают только сгенерированный snippet.
 
 ## Минимальные шаги
 

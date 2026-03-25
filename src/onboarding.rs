@@ -1399,6 +1399,66 @@ fn expand_target_template(template: &str, repo_root: &Path, home: &Path) -> Path
 }
 
 const STARTUP_INSTRUCTIONS_MARKER: &str = "<!-- AMAI MANAGED STARTUP INSTRUCTIONS v1 -->";
+const STARTUP_INSTRUCTIONS_END_MARKER: &str = "<!-- /AMAI MANAGED STARTUP INSTRUCTIONS v1 -->";
+
+fn managed_startup_block_bounds(content: &str) -> Result<Option<(usize, usize)>> {
+    let start = content.find(STARTUP_INSTRUCTIONS_MARKER);
+    let end = content.find(STARTUP_INSTRUCTIONS_END_MARKER);
+    match (start, end) {
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => Err(anyhow!(
+            "managed startup block is malformed: expected both start and end markers"
+        )),
+        (Some(start_index), Some(end_index)) => {
+            if end_index < start_index {
+                return Err(anyhow!(
+                    "managed startup block is malformed: end marker precedes start marker"
+                ));
+            }
+            Ok(Some((
+                start_index,
+                end_index + STARTUP_INSTRUCTIONS_END_MARKER.len(),
+            )))
+        }
+    }
+}
+
+fn merge_managed_startup_block(existing: &str, block: &str) -> Result<String> {
+    let block = block.trim();
+    if block.is_empty() {
+        bail!("managed startup block must not be empty");
+    }
+    if let Some((start, end)) = managed_startup_block_bounds(existing)? {
+        let prefix = existing[..start].trim_end();
+        let suffix = existing[end..].trim_start();
+        return Ok(match (prefix.is_empty(), suffix.is_empty()) {
+            (true, true) => format!("{block}\n"),
+            (false, true) => format!("{prefix}\n\n{block}\n"),
+            (true, false) => format!("{block}\n\n{suffix}\n"),
+            (false, false) => format!("{prefix}\n\n{block}\n\n{suffix}\n"),
+        });
+    }
+    if existing.trim().is_empty() {
+        Ok(format!("{block}\n"))
+    } else {
+        Ok(format!("{}\n\n{block}\n", existing.trim_end()))
+    }
+}
+
+fn strip_managed_startup_block(existing: &str) -> Result<Option<String>> {
+    let Some((start, end)) = managed_startup_block_bounds(existing)? else {
+        return Ok(None);
+    };
+    let prefix = existing[..start].trim_end();
+    let suffix = existing[end..].trim_start();
+    let stripped = match (prefix.is_empty(), suffix.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => format!("{prefix}\n"),
+        (true, false) => format!("{suffix}\n"),
+        (false, false) => format!("{prefix}\n\n{suffix}\n"),
+    };
+    Ok(Some(stripped))
+}
 
 fn install_startup_instructions(
     repo_root: &Path,
@@ -1461,6 +1521,29 @@ fn install_startup_instructions(
                     .to_string(),
             }))
         }
+        "managed_append_block" => {
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            let existing = if output_path.is_file() {
+                fs::read_to_string(&output_path)
+                    .with_context(|| format!("failed to read {}", output_path.display()))?
+            } else {
+                String::new()
+            };
+            let merged = merge_managed_startup_block(&existing, &content)?;
+            fs::write(&output_path, merged.as_bytes())
+                .with_context(|| format!("failed to write {}", output_path.display()))?;
+            Ok(Some(StartupInstructionsInstallSummary {
+                status: "managed_append_instruction_installed".to_string(),
+                output_path,
+                install_scope: startup.install_scope.clone(),
+                auto_start_ready: true,
+                reason: "client-native startup block is now embedded in the project rule file"
+                    .to_string(),
+            }))
+        }
         "manual_snippet_only" => {
             if let Some(parent) = output_path.parent() {
                 fs::create_dir_all(parent)
@@ -1499,21 +1582,47 @@ fn remove_startup_instructions(
 
     let existing = fs::read_to_string(&output_path)
         .with_context(|| format!("failed to read {}", output_path.display()))?;
-    let removable =
-        startup.mode == "manual_snippet_only" || existing.contains(STARTUP_INSTRUCTIONS_MARKER);
-    if !removable {
-        return Ok(None);
-    }
+    match startup.mode.as_str() {
+        "managed_workspace_file" | "manual_snippet_only" => {
+            let removable = startup.mode == "manual_snippet_only"
+                || existing.contains(STARTUP_INSTRUCTIONS_MARKER);
+            if !removable {
+                return Ok(None);
+            }
 
-    fs::remove_file(&output_path)
-        .with_context(|| format!("failed to remove {}", output_path.display()))?;
-    Ok(Some(StartupInstructionsInstallSummary {
-        status: "startup_instructions_removed".to_string(),
-        output_path,
-        install_scope: startup.install_scope.clone(),
-        auto_start_ready: false,
-        reason: "Amai-managed startup instructions removed".to_string(),
-    }))
+            fs::remove_file(&output_path)
+                .with_context(|| format!("failed to remove {}", output_path.display()))?;
+            Ok(Some(StartupInstructionsInstallSummary {
+                status: "startup_instructions_removed".to_string(),
+                output_path,
+                install_scope: startup.install_scope.clone(),
+                auto_start_ready: false,
+                reason: "Amai-managed startup instructions removed".to_string(),
+            }))
+        }
+        "managed_append_block" => {
+            let Some(stripped) = strip_managed_startup_block(&existing)? else {
+                return Ok(None);
+            };
+            if stripped.trim().is_empty() {
+                fs::remove_file(&output_path)
+                    .with_context(|| format!("failed to remove {}", output_path.display()))?;
+            } else {
+                fs::write(&output_path, stripped.as_bytes())
+                    .with_context(|| format!("failed to write {}", output_path.display()))?;
+            }
+            Ok(Some(StartupInstructionsInstallSummary {
+                status: "startup_instructions_removed".to_string(),
+                output_path,
+                install_scope: startup.install_scope.clone(),
+                auto_start_ready: false,
+                reason: "Amai-managed startup block removed".to_string(),
+            }))
+        }
+        other => Err(anyhow!(
+            "unsupported startup_instructions.mode in config/client_targets.toml: {other}"
+        )),
+    }
 }
 
 fn render_startup_instructions(
@@ -1525,16 +1634,16 @@ fn render_startup_instructions(
     let body = render_startup_instruction_body(repo_root)?;
     match format {
         "vscode_instructions_md" => Ok(format!(
-            "{STARTUP_INSTRUCTIONS_MARKER}\n---\napplyTo: \"**\"\ndescription: \"Amai continuity startup for this workspace\"\n---\n\n# Amai continuity startup ({client_display_name})\n\n{body}\n"
+            "{STARTUP_INSTRUCTIONS_MARKER}\n---\napplyTo: \"**\"\ndescription: \"Amai continuity startup for this workspace\"\n---\n\n# Amai continuity startup ({client_display_name})\n\n{body}\n{STARTUP_INSTRUCTIONS_END_MARKER}\n"
         )),
         "cursor_rules_mdc" => Ok(format!(
-            "{STARTUP_INSTRUCTIONS_MARKER}\n---\ndescription: Amai continuity startup for this workspace\nglobs: [\"**/*\"]\nalwaysApply: true\n---\n\n# Amai continuity startup ({client_display_name})\n\n{body}\n"
+            "{STARTUP_INSTRUCTIONS_MARKER}\n---\ndescription: Amai continuity startup for this workspace\nglobs: [\"**/*\"]\nalwaysApply: true\n---\n\n# Amai continuity startup ({client_display_name})\n\n{body}\n{STARTUP_INSTRUCTIONS_END_MARKER}\n"
         )),
         "codex_agents_snippet" => Ok(format!(
-            "{STARTUP_INSTRUCTIONS_MARKER}\n# Amai continuity startup for Codex\n\nДобавьте этот блок в project `AGENTS.md`, а не в global config.\n\n{body}\n"
+            "{STARTUP_INSTRUCTIONS_MARKER}\n# Amai continuity startup for Codex\n\nЭтот managed block должен жить в project `AGENTS.md`, а не в global config.\n\n{body}\n{STARTUP_INSTRUCTIONS_END_MARKER}\n"
         )),
         "generic_markdown" => Ok(format!(
-            "{STARTUP_INSTRUCTIONS_MARKER}\n# Amai continuity startup ({client_display_name})\n\n{body}\n"
+            "{STARTUP_INSTRUCTIONS_MARKER}\n# Amai continuity startup ({client_display_name})\n\n{body}\n{STARTUP_INSTRUCTIONS_END_MARKER}\n"
         )),
         other => Err(anyhow!(
             "unsupported startup instructions format for client {client_key}: {other}"
@@ -1708,8 +1817,8 @@ fn maybe_backup_user_global(path: &Path, install_scope: &str) -> Result<Option<P
 mod tests {
     use super::{
         detection_score, env_keys, expand_target_template, install_scope_status,
-        render_startup_instructions, resolve_client_target, resolve_output_path,
-        working_state_reason_summary,
+        merge_managed_startup_block, render_startup_instructions, resolve_client_target,
+        resolve_output_path, strip_managed_startup_block, working_state_reason_summary,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -1742,6 +1851,14 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             .expect("vscode startup instructions must be configured");
         assert_eq!(startup.mode, "managed_workspace_file");
         assert_eq!(startup.format, "vscode_instructions_md");
+        let codex = resolve_client_target(repo, "codex", false)
+            .expect("codex target must exist")
+            .target;
+        let codex_startup = codex
+            .startup_instructions
+            .expect("codex startup instructions must be configured");
+        assert_eq!(codex_startup.mode, "managed_append_block");
+        assert_eq!(codex_startup.install_scope, "workspace_local");
     }
 
     #[test]
@@ -1817,6 +1934,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         let text = render_startup_instructions(repo, "VS Code", "vscode", "vscode_instructions_md")
             .expect("startup instructions must render");
         assert!(text.contains("AMAI MANAGED STARTUP INSTRUCTIONS v1"));
+        assert!(text.contains("/AMAI MANAGED STARTUP INSTRUCTIONS v1"));
         assert!(text.contains("amai_continuity_startup"));
         assert!(text.contains("/tmp/amai"));
         assert!(text.contains("continuity_startup_summary"));
@@ -1824,6 +1942,34 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("execctl_resume_obligation"));
         assert!(text.contains("required_return_task"));
         assert!(text.contains("no_silent_drop = true"));
+    }
+
+    #[test]
+    fn managed_startup_block_appends_to_existing_rules_file() {
+        let repo = Path::new("/tmp/amai");
+        let block = render_startup_instructions(repo, "Codex", "codex", "codex_agents_snippet")
+            .expect("codex startup instructions must render");
+        let existing = "# Existing project rules\n\n- keep this content\n";
+        let merged = merge_managed_startup_block(existing, &block).expect("managed merge");
+        assert!(merged.contains("# Existing project rules"));
+        assert!(merged.contains("AMAI MANAGED STARTUP INSTRUCTIONS v1"));
+        assert!(merged.contains("/AMAI MANAGED STARTUP INSTRUCTIONS v1"));
+        assert!(merged.contains("project `AGENTS.md`"));
+    }
+
+    #[test]
+    fn strip_managed_startup_block_removes_only_embedded_block() {
+        let repo = Path::new("/tmp/amai");
+        let block = render_startup_instructions(repo, "Codex", "codex", "codex_agents_snippet")
+            .expect("codex startup instructions must render");
+        let existing = format!("# Existing project rules\n\n{block}\n## Keep me too\n");
+        let stripped = strip_managed_startup_block(&existing)
+            .expect("managed strip should succeed")
+            .expect("managed block should be found");
+        assert!(stripped.contains("# Existing project rules"));
+        assert!(stripped.contains("## Keep me too"));
+        assert!(!stripped.contains("AMAI MANAGED STARTUP INSTRUCTIONS v1"));
+        assert!(!stripped.contains("amai_continuity_startup"));
     }
 
     #[test]

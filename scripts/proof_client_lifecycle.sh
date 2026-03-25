@@ -12,19 +12,20 @@ CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/onboard_local.sh --client codex --yes --skip-stack --skip-release-build
 test -f "${temp_home}/.codex/config.toml"
 grep -q '\[mcp_servers.amai\]' "${temp_home}/.codex/config.toml"
-test -f tmp/onboarding/codex-amai-startup-AGENTS.snippet.md
-grep -q 'project `AGENTS.md`' tmp/onboarding/codex-amai-startup-AGENTS.snippet.md
-grep -q 'execctl_resume_contract_summary' tmp/onboarding/codex-amai-startup-AGENTS.snippet.md
-grep -q 'execctl_resume_obligation' tmp/onboarding/codex-amai-startup-AGENTS.snippet.md
-grep -q 'required_return_task' tmp/onboarding/codex-amai-startup-AGENTS.snippet.md
+test -f AGENTS.md
+grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' AGENTS.md
+grep -q 'project `AGENTS.md`' AGENTS.md
+grep -q 'execctl_resume_contract_summary' AGENTS.md
+grep -q 'execctl_resume_obligation' AGENTS.md
+grep -q 'required_return_task' AGENTS.md
 
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client codex
 if [[ -f "${temp_home}/.codex/config.toml" ]] && grep -q '\[mcp_servers.amai\]' "${temp_home}/.codex/config.toml"; then
   echo "proof_client_lifecycle: codex server entry still present after disconnect"
   exit 1
 fi
-if [[ -f tmp/onboarding/codex-amai-startup-AGENTS.snippet.md ]]; then
-  echo "proof_client_lifecycle: codex startup snippet still present after disconnect"
+if grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' AGENTS.md; then
+  echo "proof_client_lifecycle: codex managed startup block still present after disconnect"
   exit 1
 fi
 
@@ -50,19 +51,20 @@ fi
 ./scripts/onboard_local.sh --client claude-code --yes --skip-stack --skip-release-build
 test -f .mcp.json
 grep -q '"amai"' .mcp.json
-test -f tmp/onboarding/claude-code-amai-startup.md
-grep -q 'amai_continuity_startup' tmp/onboarding/claude-code-amai-startup.md
-grep -q 'execctl_resume_contract_summary' tmp/onboarding/claude-code-amai-startup.md
-grep -q 'execctl_resume_obligation' tmp/onboarding/claude-code-amai-startup.md
-grep -q 'required_return_task' tmp/onboarding/claude-code-amai-startup.md
+test -f CLAUDE.md
+grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' CLAUDE.md
+grep -q 'amai_continuity_startup' CLAUDE.md
+grep -q 'execctl_resume_contract_summary' CLAUDE.md
+grep -q 'execctl_resume_obligation' CLAUDE.md
+grep -q 'required_return_task' CLAUDE.md
 
 ./scripts/disconnect_local.sh --client claude-code
 if [[ -f .mcp.json ]] && grep -q '"amai"' .mcp.json; then
   echo "proof_client_lifecycle: claude-code server entry still present after disconnect"
   exit 1
 fi
-if [[ -f tmp/onboarding/claude-code-amai-startup.md ]]; then
-  echo "proof_client_lifecycle: claude-code startup snippet still present after disconnect"
+if [[ -f CLAUDE.md ]] && grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' CLAUDE.md; then
+  echo "proof_client_lifecycle: claude-code managed startup block still present after disconnect"
   exit 1
 fi
 

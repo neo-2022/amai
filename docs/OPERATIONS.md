@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 22:55 MSK
-Ручная сверка guide/docs: 2026-03-25 22:55 MSK
+modified_at: 2026-03-25 23:21 MSK
+Ручная сверка guide/docs: 2026-03-25 23:21 MSK
 
 # Operations
 
@@ -861,11 +861,14 @@ cargo run -- mcp config --client vscode --cwd /path/to/art-memory-agent-index
   - это instruction-backed auto-start contour;
 - `Codex`
   - onboarding пишет MCP config;
-  - startup пока materialize-ится как manual snippet для project `AGENTS.md`, потому что
-    `Amai` не должен молча переписывать корневой rule file пользователя;
-  - manual snippet теперь всё равно обязан отдельно поднимать
-    `execctl_resume_contract_summary`, `execctl_resume_obligation` и `required_return_task`;
-- `Claude Code`, `Claude Desktop`, `Generic`
+  - startup теперь materialize-ится как bounded managed block в project `AGENTS.md`;
+  - `Amai` не трогает остальной user content файла и удаляет при disconnect только свой block;
+  - это instruction-backed auto-start contour;
+- `Claude Code`
+  - onboarding пишет workspace-local `.mcp.json`;
+  - startup теперь materialize-ится как bounded managed block в project `CLAUDE.md`;
+  - это instruction-backed auto-start contour;
+- `Claude Desktop`, `Generic`
   - пока получают manual startup snippets и не должны считаться auto-start guaranteed.
 
 ## Onboarding

@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 22:55 MSK
-Ручная сверка guide/docs: 2026-03-25 22:55 MSK
+modified_at: 2026-03-25 23:21 MSK
+Ручная сверка guide/docs: 2026-03-25 23:21 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1171,13 +1171,15 @@ preview, а не только raw count.
   `.github/instructions/amai-continuity-startup.instructions.md`;
 - `Cursor` получает managed project rule
   `.cursor/rules/amai-continuity-startup.mdc`;
-- `Codex`, `Claude Code`, `Claude Desktop` и `Generic` пока получают только
-  manual startup snippets, потому что `Amai` не должен самовольно перетирать
-  `AGENTS.md`, `CLAUDE.md` и другие пользовательские rule files.
+- `Codex` теперь получает managed append-block в project `AGENTS.md`;
+- `Claude Code` теперь получает managed append-block в project `CLAUDE.md`;
+- `Claude Desktop` и `Generic` пока всё ещё получают только manual startup snippets.
 
 Это важно читать строго:
 - `startup contract` уже общий и machine-readable;
 - но `auto-start readiness` у клиентов пока разная;
+- bounded managed block не переписывает весь user rule file целиком: `Amai` теперь обновляет
+  только свой собственный marker-bounded startup block и при disconnect/remove удаляет только его;
 - truthful onboarding теперь явно печатает, где контур уже instruction-backed,
   а где ещё нужен manual follow-up.
 - даже в manual-snippet клиентах startup теперь обязан surface-ить
