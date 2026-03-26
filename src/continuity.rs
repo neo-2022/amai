@@ -1,7 +1,7 @@
 use crate::chat_question;
 use crate::cli::{
     ContinuityAnswerArgs, ContinuityHandoffArgs, ContinuityImportArgs, ContinuityStartupArgs,
-    ContinuityThreadIndexEnrichArgs, VerifyContinuityArgs,
+    ContinuityStartupStateArgs, ContinuityThreadIndexEnrichArgs, VerifyContinuityArgs,
 };
 use crate::codex_threads;
 use crate::config::AppConfig;
@@ -225,6 +225,93 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         action_kind,
         lease_owner_state,
     })
+}
+
+pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<()> {
+    let repo_root = canonical_path(&args.repo_root)?;
+    let audit = inspect_startup_runtime_state(&repo_root)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "startup_runtime_state": {
+                    "status": audit.status,
+                    "output_path": audit.output_path.display().to_string(),
+                    "artifact_exists": audit.artifact_exists,
+                    "startup_contract_sha_matches_current_contract": audit.startup_contract_sha_matches_current_contract,
+                    "source_summary_field_matches": audit.source_summary_field_matches,
+                    "prompt_text_present": audit.prompt_text_present,
+                    "startup_next_action_present": audit.startup_next_action_present,
+                    "required_return_task_field_present": audit.required_return_task_field_present,
+                    "execctl_active_lease_field_present": audit.execctl_active_lease_field_present,
+                    "project_task_tree_field_present": audit.project_task_tree_field_present,
+                    "project_task_ledger_field_present": audit.project_task_ledger_field_present,
+                    "resume_state": audit.resume_state,
+                    "action_kind": audit.action_kind,
+                    "lease_owner_state": audit.lease_owner_state,
+                }
+            }))?
+        );
+        return Ok(());
+    }
+    println!("Amai continuity startup runtime state");
+    println!("Workspace repo root: {}", repo_root.display());
+    println!("Artifact path: {}", audit.output_path.display());
+    println!("Status: {}", audit.status);
+    println!("Artifact present: {}", audit.artifact_exists);
+    println!(
+        "Contract hash matches current startup contract: {}",
+        audit
+            .startup_contract_sha_matches_current_contract
+            .unwrap_or(false)
+    );
+    println!(
+        "Source summary field matches continuity_startup_summary: {}",
+        audit.source_summary_field_matches.unwrap_or(false)
+    );
+    println!(
+        "Prompt text present: {}",
+        audit.prompt_text_present.unwrap_or(false)
+    );
+    println!(
+        "startup_next_action present: {}",
+        audit.startup_next_action_present.unwrap_or(false)
+    );
+    println!(
+        "required_return_task field present: {}",
+        audit.required_return_task_field_present.unwrap_or(false)
+    );
+    println!(
+        "execctl_active_lease field present: {}",
+        audit.execctl_active_lease_field_present.unwrap_or(false)
+    );
+    println!(
+        "project_task_tree field present: {}",
+        audit.project_task_tree_field_present.unwrap_or(false)
+    );
+    println!(
+        "project_task_ledger field present: {}",
+        audit.project_task_ledger_field_present.unwrap_or(false)
+    );
+    println!(
+        "Resume state: {}",
+        audit.resume_state.as_deref().unwrap_or("n/a")
+    );
+    println!(
+        "Action kind: {}",
+        audit.action_kind.as_deref().unwrap_or("n/a")
+    );
+    println!(
+        "Lease owner state: {}",
+        audit.lease_owner_state.as_deref().unwrap_or("n/a")
+    );
+    if audit.status != "ok" {
+        println!(
+            "Repair: rerun cargo run -- continuity startup --repo-root {} --namespace continuity --json >/dev/null",
+            repo_root.display()
+        );
+    }
+    Ok(())
 }
 
 pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<()> {

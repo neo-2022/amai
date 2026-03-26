@@ -29,5 +29,9 @@ jq -e '.continuity_startup_summary.startup_next_action.action_kind != null' "${s
 jq -e '.continuity_startup_summary.required_return_task != null' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.project_task_tree != null' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.project_task_ledger != null' "${startup_state_artifact}" >/dev/null
+startup_state_output="$(./target/release/amai continuity startup-state --repo-root "${art_repo_root}" --json)"
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.status == "ok"' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.prompt_text_present == true' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_next_action_present == true' >/dev/null
 
 echo "proof_art_continuity_startup: PASS"

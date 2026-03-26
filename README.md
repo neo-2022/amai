@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 04:11 MSK
-Ручная сверка guide/docs: 2026-03-26 04:11 MSK
+modified_at: 2026-03-26 04:18 MSK
+Ручная сверка guide/docs: 2026-03-26 04:18 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1256,6 +1256,10 @@ preview, а не только raw count.
     machine-readable поля resume/return;
 - рядом status теперь печатает и runtime repair path:
   `startup_runtime_state_repair: rerun cargo run -- continuity startup --repo-root ... --namespace continuity --json >/dev/null`
+- тот же runtime artifact теперь можно inspect-ить и вне `Amai` repo-root через
+  `cargo run -- continuity startup-state --repo-root /path/to/project --json`;
+  это нужно затем, чтобы operator или внешний клиент мог проверить live return contour в
+  конкретном workspace, а не только статический onboarding contract.
 
 Это важно читать строго:
 - `startup contract` уже общий и machine-readable;

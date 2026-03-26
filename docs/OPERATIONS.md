@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 04:11 MSK
-Ручная сверка guide/docs: 2026-03-26 04:11 MSK
+modified_at: 2026-03-26 04:18 MSK
+Ручная сверка guide/docs: 2026-03-26 04:18 MSK
 
 # Operations
 
@@ -884,6 +884,9 @@ cargo run -- mcp serve
     `prompt_text` или обязательные machine-readable return поля.
 - repair path для такого drift теперь честный и bounded:
   `startup_runtime_state_repair: rerun cargo run -- continuity startup --repo-root ... --namespace continuity --json >/dev/null`
+- если нужно audit-ить runtime artifact не в самом `Amai` repo-root, а в конкретном project
+  workspace, теперь есть отдельный read-only path:
+  `cargo run -- continuity startup-state --repo-root /path/to/project --json`
 - тот же `amai_protocol_manifest` теперь несёт `error_contracts`, а `tools/call`
   и JSON-RPC errors отдают machine-readable taxonomy вместо голого текста:
   `invalid_json_rpc_payload`, `invalid_request`, `method_not_found`,

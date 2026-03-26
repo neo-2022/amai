@@ -125,6 +125,9 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 continuity::print_startup(&cfg, &args).await?;
             }
+            ContinuityCommand::StartupState(args) => {
+                continuity::print_startup_runtime_state(&args)?;
+            }
             ContinuityCommand::Restore(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

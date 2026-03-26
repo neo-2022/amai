@@ -95,6 +95,7 @@ pub enum ContinuityCommand {
     Import(ContinuityImportArgs),
     EnrichThreadIndex(ContinuityThreadIndexEnrichArgs),
     Startup(ContinuityStartupArgs),
+    StartupState(ContinuityStartupStateArgs),
     Restore(ContinuityStartupArgs),
     Answer(ContinuityAnswerArgs),
     Handoff(ContinuityHandoffArgs),
@@ -256,6 +257,14 @@ pub struct ContinuityThreadIndexEnrichArgs {
     pub input: PathBuf,
     #[arg(long)]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ContinuityStartupStateArgs {
+    #[arg(long)]
+    pub repo_root: PathBuf,
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
