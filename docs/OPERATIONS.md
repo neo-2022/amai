@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 11:39 MSK
-Ручная сверка guide/docs: 2026-03-26 11:39 MSK
+modified_at: 2026-03-26 11:44 MSK
+Ручная сверка guide/docs: 2026-03-26 11:44 MSK
 
 # Operations
 
@@ -2863,8 +2863,8 @@ Grafana login берётся из `.env`:
     semantic input:
     - steady-state dashboard обязан переиспользовать cached report по signature текущих
       `current_session / rolling_window / lifetime` events и assistant-scope contour;
-    - time-only drift для age/freshness на dashboard допустимо re-bucket-ить по `5s`, чтобы
-      сохранить near-live поведение без полной пересборки на каждом секундном тике;
+    - при cache-hit runtime обязан обновлять только live age-поля scope без полной пересборки
+      отчёта, чтобы wall-clock drift сам по себе не возвращал cold rebuild;
   - long-lived `observe serve` теперь обязан переиспользовать machine summary cache до `60` секунд;
   - static memory inventory provider chain (`sudo dmidecode`, `dmidecode`, `lshw`, `inxi`) теперь
     должен жить отдельно от минутного live cache:

@@ -27,7 +27,6 @@ const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
 const AGENT_CYCLE_TIMELINE_MAX_POINTS: usize = 256;
 const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
 const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_generation_turn_observed";
-const DASHBOARD_REPORT_LIVE_TIME_BUCKET_MS: i64 = 5_000;
 static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<Mutex<Option<DashboardRolloutObservationCache>>> =
     OnceLock::new();
 static DASHBOARD_ASSISTANT_SCOPE_CACHE: OnceLock<Mutex<Option<DashboardAssistantScopeCache>>> =
@@ -6932,10 +6931,15 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         &current_session_assistant_scope,
         rolling_window_assistant_scope.as_ref(),
         &lifetime_assistant_scope,
-        now_epoch_ms,
     );
     if let Some(report) = cached_dashboard_report(&repo_root, &report_signature) {
-        return Ok(report);
+        return Ok(refresh_dashboard_report_live_ages(
+            report,
+            now_epoch_ms,
+            &session_events,
+            &rolling_window_events,
+            &events,
+        ));
     }
     let current_session_summary = summarize_events(
         &session_events,
@@ -7980,10 +7984,8 @@ fn dashboard_report_signature(
     current_session_assistant_scope: &AssistantGenerationScopeObservation,
     rolling_window_assistant_scope: Option<&AssistantGenerationScopeObservation>,
     lifetime_assistant_scope: &AssistantGenerationScopeObservation,
-    now_epoch_ms: i64,
 ) -> String {
     let payload = json!({
-        "live_time_bucket": now_epoch_ms.div_euclid(DASHBOARD_REPORT_LIVE_TIME_BUCKET_MS),
         "current_session_events": dashboard_report_event_signature_payload(current_session_events),
         "rolling_window_events": dashboard_report_event_signature_payload(rolling_window_events),
         "lifetime_events": dashboard_report_event_signature_payload(lifetime_events),
@@ -8001,6 +8003,52 @@ fn dashboard_report_signature(
         &serde_json::to_vec(&payload)
             .unwrap_or_else(|_| payload.to_string().into_bytes()),
     )
+}
+
+fn refresh_dashboard_report_live_ages(
+    mut report: Value,
+    now_epoch_ms: i64,
+    current_session_events: &[TokenBudgetEvent],
+    rolling_window_events: &[TokenBudgetEvent],
+    lifetime_events: &[TokenBudgetEvent],
+) -> Value {
+    refresh_dashboard_report_scope_age(
+        &mut report,
+        "current_session",
+        now_epoch_ms,
+        current_session_events,
+    );
+    refresh_dashboard_report_scope_age(
+        &mut report,
+        "rolling_window",
+        now_epoch_ms,
+        rolling_window_events,
+    );
+    refresh_dashboard_report_scope_age(&mut report, "lifetime", now_epoch_ms, lifetime_events);
+    report
+}
+
+fn refresh_dashboard_report_scope_age(
+    report: &mut Value,
+    scope_key: &str,
+    now_epoch_ms: i64,
+    events: &[TokenBudgetEvent],
+) {
+    let Some(scope) = report["token_budget_report"][scope_key].as_object_mut() else {
+        return;
+    };
+    if events.is_empty() {
+        scope.insert("age_ms_since_latest".to_string(), Value::Null);
+        return;
+    }
+    let latest_epoch_ms = events
+        .last()
+        .map(|event| event.created_at_epoch_ms)
+        .unwrap_or_default();
+    scope.insert(
+        "age_ms_since_latest".to_string(),
+        Value::from(now_epoch_ms.saturating_sub(latest_epoch_ms)),
+    );
 }
 
 fn dashboard_report_event_signature_payload(events: &[TokenBudgetEvent]) -> Value {
@@ -19046,7 +19094,7 @@ effective_to_epoch_ms = 2000
     }
 
     #[test]
-    fn dashboard_report_signature_changes_on_live_bucket_boundary() {
+    fn dashboard_report_signature_ignores_wall_clock_when_inputs_match() {
         let events = vec![token_event! {
             created_at_epoch_ms: 10,
             event_id: "event-a".to_string(),
@@ -19102,7 +19150,6 @@ effective_to_epoch_ms = 2000
             &scope,
             Some(&scope),
             &scope,
-            4_999,
         );
         let right = dashboard_report_signature(
             &events,
@@ -19111,10 +19158,9 @@ effective_to_epoch_ms = 2000
             &scope,
             Some(&scope),
             &scope,
-            5_000,
         );
 
-        assert_ne!(left, right);
+        assert_eq!(left, right);
     }
 
     #[test]
@@ -19179,7 +19225,6 @@ effective_to_epoch_ms = 2000
             &base_scope,
             Some(&base_scope),
             &base_scope,
-            5_000,
         );
         let right = dashboard_report_signature(
             &events,
@@ -19188,7 +19233,6 @@ effective_to_epoch_ms = 2000
             &changed_scope,
             Some(&base_scope),
             &base_scope,
-            5_000,
         );
 
         assert_ne!(left, right);
