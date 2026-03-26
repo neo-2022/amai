@@ -36,5 +36,7 @@ printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.status == 
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.prompt_text_present == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_next_action_present == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_execution_gate_present == true' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_execution_gate.action_kind != null' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.required_return_task != null' >/dev/null
 
 echo "proof_art_continuity_startup: PASS"

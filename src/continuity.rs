@@ -127,9 +127,21 @@ pub(crate) fn startup_runtime_state_artifact_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".amai/continuity/project-chat-startup-state.json")
 }
 
-pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupRuntimeStateAudit> {
+fn load_startup_runtime_state_artifact(repo_root: &Path) -> Result<Option<Value>> {
     let output_path = startup_runtime_state_artifact_path(repo_root);
     if !output_path.is_file() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&output_path)
+        .with_context(|| format!("failed to read {}", output_path.display()))?;
+    let payload: Value = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", output_path.display()))?;
+    Ok(Some(payload))
+}
+
+pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupRuntimeStateAudit> {
+    let output_path = startup_runtime_state_artifact_path(repo_root);
+    let Some(payload) = load_startup_runtime_state_artifact(repo_root)? else {
         return Ok(StartupRuntimeStateAudit {
             status: "not_materialized".to_string(),
             output_path,
@@ -149,12 +161,7 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             must_follow_startup_next_action: None,
             unrelated_work_allowed: None,
         });
-    }
-
-    let content = fs::read_to_string(&output_path)
-        .with_context(|| format!("failed to read {}", output_path.display()))?;
-    let payload: Value = serde_json::from_str(&content)
-        .with_context(|| format!("failed to parse {}", output_path.display()))?;
+    };
     let expected_contract_sha =
         hex_sha256(&serde_json::to_vec(&mcp::project_chat_startup_contract())?);
     let summary = &payload["continuity_startup_summary"];
@@ -248,6 +255,7 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
 pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<()> {
     let repo_root = canonical_path(&args.repo_root)?;
     let audit = inspect_startup_runtime_state(&repo_root)?;
+    let artifact_payload = load_startup_runtime_state_artifact(&repo_root)?;
     if args.json {
         println!(
             "{}",
@@ -270,6 +278,12 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
                     "lease_owner_state": audit.lease_owner_state,
                     "must_follow_startup_next_action": audit.must_follow_startup_next_action,
                     "unrelated_work_allowed": audit.unrelated_work_allowed,
+                    "startup_execution_gate": artifact_payload.as_ref().map(|payload| payload["startup_execution_gate"].clone()).unwrap_or(Value::Null),
+                    "startup_next_action": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["startup_next_action"].clone()).unwrap_or(Value::Null),
+                    "required_return_task": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["required_return_task"].clone()).unwrap_or(Value::Null),
+                    "execctl_active_lease": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["execctl_active_lease"].clone()).unwrap_or(Value::Null),
+                    "project_task_tree": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["project_task_tree"].clone()).unwrap_or(Value::Null),
+                    "project_task_ledger": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["project_task_ledger"].clone()).unwrap_or(Value::Null),
                 }
             }))?
         );
@@ -338,6 +352,20 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
         "Unrelated work allowed: {}",
         audit.unrelated_work_allowed.unwrap_or(false)
     );
+    if let Some(payload) = artifact_payload.as_ref() {
+        println!(
+            "Immediate gate action kind: {}",
+            payload["startup_execution_gate"]["action_kind"]
+                .as_str()
+                .unwrap_or("n/a")
+        );
+        println!(
+            "Immediate gate required return: {}",
+            payload["startup_execution_gate"]["required_return_task_headline"]
+                .as_str()
+                .unwrap_or("n/a")
+        );
+    }
     if audit.status != "ok" {
         println!(
             "Repair: rerun cargo run -- continuity startup --repo-root {} --namespace continuity --json >/dev/null",

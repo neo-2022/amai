@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 04:47 MSK
-Ручная сверка guide/docs: 2026-03-26 04:47 MSK
+modified_at: 2026-03-26 04:59 MSK
+Ручная сверка guide/docs: 2026-03-26 04:59 MSK
 
 # Operations
 
@@ -895,6 +895,8 @@ cargo run -- mcp serve
 - если нужно audit-ить runtime artifact не в самом `Amai` repo-root, а в конкретном project
   workspace, теперь есть отдельный read-only path:
   `cargo run -- continuity startup-state --repo-root /path/to/project --json`
+- этот CLI path теперь считается pinned fallback для клиентов, которым неудобно читать runtime
+  artifact напрямую: он обязан вернуть тот же `startup_execution_gate`.
 - тот же `amai_protocol_manifest` теперь несёт `error_contracts`, а `tools/call`
   и JSON-RPC errors отдают machine-readable taxonomy вместо голого текста:
   `invalid_json_rpc_payload`, `invalid_request`, `method_not_found`,

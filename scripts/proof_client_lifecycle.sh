@@ -21,6 +21,7 @@ grep -q '"missing_or_unreadable_fail_closed": true' .amai/onboarding/project-cha
 grep -q '"required_action_kind_when_resume_required": "resume_required_return_task"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '".amai/continuity/project-chat-startup-state.json"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"startup_execution_gate_field": "startup_execution_gate"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"command": "continuity startup-state"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"project_task_tree"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"project_task_ledger"' .amai/onboarding/project-chat-startup-contract.json
 grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' AGENTS.md
@@ -39,6 +40,7 @@ grep -q 'missing_or_unreadable_fail_closed = true' AGENTS.md
 grep -q 'sha256_mismatch_fail_closed = true' AGENTS.md
 grep -q '.amai/continuity/project-chat-startup-state.json' AGENTS.md
 grep -q 'startup_execution_gate' AGENTS.md
+grep -q 'continuity startup-state --repo-root' AGENTS.md
 grep -q 'project_task_tree' AGENTS.md
 grep -q 'project_task_ledger' AGENTS.md
 
@@ -61,6 +63,7 @@ grep -q '"startup_contract_sha256": "' .amai/onboarding/project-chat-startup-con
 grep -q '"missing_or_unreadable_fail_closed": true' .amai/onboarding/project-chat-startup-contract.json
 grep -q '".amai/continuity/project-chat-startup-state.json"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"startup_execution_gate_field": "startup_execution_gate"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"command": "continuity startup-state"' .amai/onboarding/project-chat-startup-contract.json
 test -f .cursor/rules/amai-continuity-startup.mdc
 grep -q 'amai_continuity_startup' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'execctl_resume_contract_summary' .cursor/rules/amai-continuity-startup.mdc
@@ -77,6 +80,7 @@ grep -q 'missing_or_unreadable_fail_closed = true' .cursor/rules/amai-continuity
 grep -q 'sha256_mismatch_fail_closed = true' .cursor/rules/amai-continuity-startup.mdc
 grep -q '.amai/continuity/project-chat-startup-state.json' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'startup_execution_gate' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'continuity startup-state --repo-root' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'project_task_tree' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'project_task_ledger' .cursor/rules/amai-continuity-startup.mdc
 
@@ -99,6 +103,7 @@ grep -q '"startup_contract_sha256": "' .amai/onboarding/project-chat-startup-con
 grep -q '"missing_or_unreadable_fail_closed": true' .amai/onboarding/project-chat-startup-contract.json
 grep -q '".amai/continuity/project-chat-startup-state.json"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"startup_execution_gate_field": "startup_execution_gate"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"command": "continuity startup-state"' .amai/onboarding/project-chat-startup-contract.json
 test -f CLAUDE.md
 grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' CLAUDE.md
 grep -q 'amai_continuity_startup' CLAUDE.md
@@ -116,6 +121,7 @@ grep -q 'missing_or_unreadable_fail_closed = true' CLAUDE.md
 grep -q 'sha256_mismatch_fail_closed = true' CLAUDE.md
 grep -q '.amai/continuity/project-chat-startup-state.json' CLAUDE.md
 grep -q 'startup_execution_gate' CLAUDE.md
+grep -q 'continuity startup-state --repo-root' CLAUDE.md
 grep -q 'project_task_tree' CLAUDE.md
 grep -q 'project_task_ledger' CLAUDE.md
 
