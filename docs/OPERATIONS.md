@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 12:03 MSK
-Ручная сверка guide/docs: 2026-03-26 12:03 MSK
+modified_at: 2026-03-26 12:15 MSK
+Ручная сверка guide/docs: 2026-03-26 12:15 MSK
 
 # Operations
 
@@ -2892,6 +2892,11 @@ Grafana login берётся из `.env`:
   - repo rollout observations теперь reuse-ятся по file signature текущего thread rollout, но
     downstream invalidation должен смотреть уже на semantic contents parsed observations, а не на
     любой raw file churn;
+  - upstream source-bundle для `dashboard assistant scope` тоже должен жить отдельно от готового
+    result-cache:
+    - `working_state_event` и `assistant_generation_turn_observed` не должны every-tick
+      перечитываться по full history-path, если `target_context_pack_ids`, summary этих
+      snapshot-kind'ов и rollout source signatures задействованных thread-ов не менялись;
   - derived assistant scopes reuse-ятся по combined input signature:
     missing target sets + direct-turn snapshots + working-state meta + semantic contents parsed
     turn observations задействованных thread-ов;

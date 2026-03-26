@@ -29,6 +29,9 @@ const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
 const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_generation_turn_observed";
 static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<Mutex<Option<DashboardRolloutObservationCache>>> =
     OnceLock::new();
+static DASHBOARD_ASSISTANT_SCOPE_SOURCE_CACHE: OnceLock<
+    Mutex<Option<DashboardAssistantScopeSourceCache>>,
+> = OnceLock::new();
 static DASHBOARD_ASSISTANT_SCOPE_CACHE: OnceLock<Mutex<Option<DashboardAssistantScopeCache>>> =
     OnceLock::new();
 static DASHBOARD_SAME_METER_SYNC_CACHE: OnceLock<Mutex<Option<DashboardSameMeterSyncCache>>> =
@@ -466,6 +469,16 @@ struct DashboardAssistantScopeCache {
     repo_root: PathBuf,
     signature: String,
     scopes: Vec<AssistantGenerationScopeObservation>,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardAssistantScopeSourceCache {
+    repo_root: PathBuf,
+    signature: String,
+    target_context_pack_ids: BTreeSet<String>,
+    direct_turns: Vec<AssistantGenerationTurnObservedSnapshot>,
+    metadata: BTreeMap<String, WorkingStateContextPackMeta>,
+    turns_by_thread: BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
 }
 
 #[derive(Debug, Clone)]
@@ -7808,6 +7821,70 @@ async fn derive_rollout_assistant_generation_scope(
     ))
 }
 
+async fn dashboard_assistant_scope_sources(
+    db: &Client,
+    repo_root: &Path,
+    union_target_ids: &BTreeSet<String>,
+) -> Result<(
+    Vec<AssistantGenerationTurnObservedSnapshot>,
+    BTreeMap<String, WorkingStateContextPackMeta>,
+    BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
+)> {
+    let working_state_summary =
+        postgres::summarize_observability_snapshots_by_kinds(db, &["working_state_event"]).await?;
+    let direct_turn_summary = postgres::summarize_observability_snapshots_by_kinds(
+        db,
+        &[ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND],
+    )
+    .await?;
+    if let Some((
+        direct_turns,
+        metadata,
+        turns_by_thread,
+    )) = cached_dashboard_assistant_scope_sources(
+        repo_root,
+        union_target_ids,
+        &working_state_summary,
+        &direct_turn_summary,
+    )? {
+        return Ok((direct_turns, metadata, turns_by_thread));
+    }
+
+    let direct_turns =
+        assistant_generation_turn_observed_snapshots_for_context_packs(db, union_target_ids)
+            .await?;
+    let metadata = latest_working_state_context_pack_metadata(db, union_target_ids).await?;
+    let thread_ids = metadata
+        .values()
+        .map(|item| item.thread_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut turns_by_thread =
+        BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
+    for thread_id in &thread_ids {
+        let turns =
+            codex_threads::rollout_assistant_generation_turn_observations_for_thread(thread_id)?;
+        if !turns.is_empty() {
+            turns_by_thread.insert(thread_id.clone(), turns);
+        }
+    }
+    let thread_signatures = dashboard_assistant_scope_thread_signatures(&thread_ids)?;
+    let signature = dashboard_assistant_scope_source_signature(
+        union_target_ids,
+        &working_state_summary,
+        &direct_turn_summary,
+        &thread_signatures,
+    );
+    store_dashboard_assistant_scope_sources(
+        repo_root,
+        &signature,
+        union_target_ids,
+        &direct_turns,
+        &metadata,
+        &turns_by_thread,
+    );
+    Ok((direct_turns, metadata, turns_by_thread))
+}
+
 async fn derive_dashboard_rollout_assistant_generation_scopes(
     db: &Client,
     repo_root: &Path,
@@ -7828,23 +7905,8 @@ async fn derive_dashboard_rollout_assistant_generation_scopes(
         ]);
     }
 
-    let direct_turns =
-        assistant_generation_turn_observed_snapshots_for_context_packs(db, &union_target_ids)
-            .await?;
-    let metadata = latest_working_state_context_pack_metadata(db, &union_target_ids).await?;
-    let thread_ids = metadata
-        .values()
-        .map(|item| item.thread_id.clone())
-        .collect::<BTreeSet<_>>();
-    let mut turns_by_thread =
-        BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
-    for thread_id in &thread_ids {
-        let turns =
-            codex_threads::rollout_assistant_generation_turn_observations_for_thread(thread_id)?;
-        if !turns.is_empty() {
-            turns_by_thread.insert(thread_id.clone(), turns);
-        }
-    }
+    let (direct_turns, metadata, turns_by_thread) =
+        dashboard_assistant_scope_sources(db, repo_root, &union_target_ids).await?;
     let signature = dashboard_assistant_scope_signature(
         &target_sets,
         &direct_turns,
@@ -7936,6 +7998,119 @@ fn dashboard_assistant_scope_signature(
         &serde_json::to_vec(&payload)
             .unwrap_or_else(|_| payload.to_string().into_bytes()),
     )
+}
+
+fn dashboard_assistant_scope_source_signature(
+    target_context_pack_ids: &BTreeSet<String>,
+    working_state_summary: &[postgres::ObservabilitySnapshotKindSummary],
+    direct_turn_summary: &[postgres::ObservabilitySnapshotKindSummary],
+    rollout_thread_signatures: &BTreeMap<String, String>,
+) -> String {
+    let summary_json = |items: &[postgres::ObservabilitySnapshotKindSummary]| {
+        items.iter()
+            .map(|item| {
+                json!({
+                    "snapshot_kind": item.snapshot_kind,
+                    "snapshots_count": item.snapshots_count,
+                    "latest_created_at_epoch_ms": item.latest_created_at_epoch_ms,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let payload = json!({
+        "target_context_pack_ids": target_context_pack_ids.iter().cloned().collect::<Vec<_>>(),
+        "working_state_summary": summary_json(working_state_summary),
+        "direct_turn_summary": summary_json(direct_turn_summary),
+        "rollout_thread_signatures": rollout_thread_signatures,
+    });
+    hex_sha256(
+        &serde_json::to_vec(&payload)
+            .unwrap_or_else(|_| payload.to_string().into_bytes()),
+    )
+}
+
+fn dashboard_assistant_scope_thread_signatures(
+    thread_ids: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut signatures = BTreeMap::new();
+    for thread_id in thread_ids {
+        let signature =
+            codex_threads::rollout_assistant_generation_turn_source_signature_for_thread(thread_id)?
+                .unwrap_or_else(|| "no_rollout_source".to_string());
+        signatures.insert(thread_id.clone(), signature);
+    }
+    Ok(signatures)
+}
+
+fn cached_dashboard_assistant_scope_sources(
+    repo_root: &Path,
+    target_context_pack_ids: &BTreeSet<String>,
+    working_state_summary: &[postgres::ObservabilitySnapshotKindSummary],
+    direct_turn_summary: &[postgres::ObservabilitySnapshotKindSummary],
+) -> Result<
+    Option<(
+        Vec<AssistantGenerationTurnObservedSnapshot>,
+        BTreeMap<String, WorkingStateContextPackMeta>,
+        BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
+    )>,
+> {
+    let cache = DASHBOARD_ASSISTANT_SCOPE_SOURCE_CACHE.get_or_init(|| Mutex::new(None));
+    let guard = cache
+        .lock()
+        .map_err(|_| anyhow!("dashboard assistant scope source cache poisoned"))?;
+    let Some(entry) = guard.as_ref() else {
+        return Ok(None);
+    };
+    if canonical_repo_root(repo_root) != entry.repo_root
+        || target_context_pack_ids != &entry.target_context_pack_ids
+    {
+        return Ok(None);
+    }
+    let thread_ids = entry
+        .metadata
+        .values()
+        .map(|item| item.thread_id.clone())
+        .collect::<BTreeSet<_>>();
+    let thread_signatures = dashboard_assistant_scope_thread_signatures(&thread_ids)?;
+    let signature = dashboard_assistant_scope_source_signature(
+        target_context_pack_ids,
+        working_state_summary,
+        direct_turn_summary,
+        &thread_signatures,
+    );
+    if entry.signature != signature {
+        return Ok(None);
+    }
+    Ok(Some((
+        entry.direct_turns.clone(),
+        entry.metadata.clone(),
+        entry.turns_by_thread.clone(),
+    )))
+}
+
+fn store_dashboard_assistant_scope_sources(
+    repo_root: &Path,
+    signature: &str,
+    target_context_pack_ids: &BTreeSet<String>,
+    direct_turns: &[AssistantGenerationTurnObservedSnapshot],
+    metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
+    turns_by_thread: &BTreeMap<
+        String,
+        Vec<codex_threads::RolloutAssistantGenerationTurnObservation>,
+    >,
+) {
+    let cache = DASHBOARD_ASSISTANT_SCOPE_SOURCE_CACHE.get_or_init(|| Mutex::new(None));
+    let Some(mut guard) = cache.lock().ok() else {
+        return;
+    };
+    *guard = Some(DashboardAssistantScopeSourceCache {
+        repo_root: canonical_repo_root(repo_root),
+        signature: signature.to_string(),
+        target_context_pack_ids: target_context_pack_ids.clone(),
+        direct_turns: direct_turns.to_vec(),
+        metadata: metadata.clone(),
+        turns_by_thread: turns_by_thread.clone(),
+    });
 }
 
 fn cached_dashboard_assistant_generation_scopes(
@@ -14166,6 +14341,7 @@ mod tests {
         configured_provider_usage_source, contractual_line_item_json,
         count_cli_context_pack_output_overhead_tokens, count_tool_overhead_tokens,
         current_session_events, dashboard_report_signature,
+        dashboard_assistant_scope_source_signature,
         dashboard_same_meter_sync_signature, dashboard_token_events_delta_limit,
         dashboard_token_events_signature_from_summary,
         default_adjustment_preview_model_version,
@@ -14196,6 +14372,7 @@ mod tests {
     };
     use crate::postgres::{ObservabilitySnapshotKindSummary, ObservabilitySnapshotRecord};
     use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -19466,6 +19643,36 @@ effective_to_epoch_ms = 2000
             dashboard_token_events_delta_limit(&previous, &regressed_latest, 32),
             None
         );
+    }
+
+    #[test]
+    fn dashboard_assistant_scope_source_signature_changes_with_rollout_threads() {
+        let target_context_pack_ids =
+            BTreeSet::from(["ctx-a".to_string(), "ctx-b".to_string()]);
+        let working_state_summary = vec![ObservabilitySnapshotKindSummary {
+            snapshot_kind: "working_state_event".to_string(),
+            snapshots_count: 10,
+            latest_created_at_epoch_ms: Some(100),
+        }];
+        let direct_turn_summary = vec![ObservabilitySnapshotKindSummary {
+            snapshot_kind: "assistant_generation_turn_observed".to_string(),
+            snapshots_count: 3,
+            latest_created_at_epoch_ms: Some(90),
+        }];
+        let left = dashboard_assistant_scope_source_signature(
+            &target_context_pack_ids,
+            &working_state_summary,
+            &direct_turn_summary,
+            &BTreeMap::from([("thread-a".to_string(), "sig-a".to_string())]),
+        );
+        let right = dashboard_assistant_scope_source_signature(
+            &target_context_pack_ids,
+            &working_state_summary,
+            &direct_turn_summary,
+            &BTreeMap::from([("thread-a".to_string(), "sig-b".to_string())]),
+        );
+
+        assert_ne!(left, right);
     }
 
     #[test]

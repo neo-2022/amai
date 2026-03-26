@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 12:03 MSK
-Ручная сверка guide/docs: 2026-03-26 12:03 MSK
+modified_at: 2026-03-26 12:15 MSK
+Ручная сверка guide/docs: 2026-03-26 12:15 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -745,6 +745,11 @@ http://127.0.0.1:9464/
     - current rollout observations reuse-ятся по file signature rollout JSONL, но downstream
       invalidation завязана уже не на raw file churn, а на semantic signature самих parsed
       observations;
+    - upstream source-bundle для `dashboard assistant scope` теперь тоже reuse-ится отдельно:
+      - `working_state_event` и `assistant_generation_turn_observed` больше не перечитываются по
+        полному history-path на каждом steady-state refresh, если `target_context_pack_ids`,
+        summary этих snapshot-kind'ов и rollout source signatures задействованных thread-ов не
+        менялись;
     - parsed rollout turn observations теперь тоже reuse-ятся по file signature, чтобы один и тот
       же active rollout не перечитывался и не разбирался повторно несколько раз внутри одного
       dashboard refresh;
