@@ -6765,15 +6765,15 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     let rollout_observations = rollout_assistant_generation_observations_for_repo(&repo_root)?;
     let mut events = load_events(db, include_verify_events, None).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
-    let events =
+    let mut events =
         reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
     let now_epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
         .as_millis() as i64;
     let session_gap_ms = profile.session_gap_minutes.saturating_mul(60_000) as i64;
-    let session_events = current_session_events(&events, session_gap_ms);
-    let rolling_window_events = profile
+    let mut session_events = current_session_events(&events, session_gap_ms);
+    let mut rolling_window_events = profile
         .rolling_window_hours
         .map(|hours| {
             let lower_bound = now_epoch_ms.saturating_sub((hours as i64).saturating_mul(3_600_000));
@@ -6784,6 +6784,31 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let sync_scope_events = active_same_meter_scope_events(&session_events, &rolling_window_events);
+    let tool_overhead_changed =
+        sync_context_pack_tool_overhead_for_events(db, &repo_root, &sync_scope_events).await?;
+    let assistant_generation_changed =
+        sync_rollout_assistant_generation_for_events(db, &sync_scope_events, &rollout_observations)
+            .await?;
+    if tool_overhead_changed || assistant_generation_changed {
+        let mut refreshed = load_events(db, include_verify_events, None).await?;
+        refreshed.sort_by_key(|event| event.created_at_epoch_ms);
+        events =
+            reconcile_followup_recovery(&refreshed, profile.session_gap_minutes as i64 * 60_000);
+        session_events = current_session_events(&events, session_gap_ms);
+        rolling_window_events = profile
+            .rolling_window_hours
+            .map(|hours| {
+                let lower_bound =
+                    now_epoch_ms.saturating_sub((hours as i64).saturating_mul(3_600_000));
+                events
+                    .iter()
+                    .filter(|event| event.created_at_epoch_ms >= lower_bound)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+    }
     let scope_events = if profile.rolling_window_hours.is_some() {
         vec![
             session_events.as_slice(),
@@ -6878,7 +6903,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                     Some(&lifetime_assistant_scope),
                 ),
             },
-            "note": "Это облегчённый dashboard read-only report: он сохраняет честные current_session / rolling_window / lifetime rollups и client-limit alignment, но не разворачивает полный contractual/export contour и не делает quiet sync/write-back во время refresh карточек.",
+            "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups и client-limit alignment, не разворачивает полный contractual/export contour, но делает ограниченный quiet same-meter sync/write-back только для active live scope текущей сессии и рабочего окна.",
         }
     }))
 }
