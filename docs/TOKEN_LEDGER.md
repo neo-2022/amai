@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 16:31 MSK
-Ручная сверка guide/docs: 2026-03-26 16:31 MSK
+modified_at: 2026-03-27 00:01 MSK
+Ручная сверка guide/docs: 2026-03-27 00:01 MSK
 
 # Token Ledger
 
@@ -778,6 +778,13 @@ whole-cycle компонент на одинаковое число всех liv
 
 `statement_previews` нужны затем, чтобы по каждому scope показать:
 - measured non-billable lower bound;
+- прямую verified correlation между model tokens `без Amai / с Amai`;
+- concrete `verified_measured_saved_pct`, который dashboard поднимает как строку
+  `Экономия токенов модели`;
+- этот процент для dashboard обязан читаться из verified scope summary, а не из
+  contractual `statement_preview`, если preview-layer не materialize-ит такую пару напрямую;
+- если full same-meter equivalence ещё не materialized, тот же процент обязан
+  оставаться truthful measured-slice percentage и не притворяться полным client-limit meter;
 - coverage;
 - settlement status;
 - settlement stage;

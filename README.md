@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 16:31 MSK
-Ручная сверка guide/docs: 2026-03-26 16:31 MSK
+modified_at: 2026-03-27 00:01 MSK
+Ручная сверка guide/docs: 2026-03-27 00:01 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1699,6 +1699,10 @@ preview, а не только raw count.
 - settlement preview теперь тоже first-class:
   - `statement_previews.current_session / rolling_window / lifetime`
   - там уже видно measured non-billable lower bound по scope;
+  - dashboard hero-cards теперь ещё поднимают из verified scope summary прямую строку
+    `Экономия токенов модели`: если same-meter already materialized, процент читается
+    как тот же meter клиента; если нет, карточка честно показывает measured percentage
+    только по verified model-token slice и отдельно напоминает про explicit continuity boundary;
   - там теперь ещё явно видны `lifecycle_state`, `contractual_state`, `settlement_stage`,
     `next_settlement_stage_candidate` и `close_barriers`;
   - там теперь ещё есть `transactional_statuses`, чтобы customer-facing export видел отдельно

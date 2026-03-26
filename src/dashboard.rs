@@ -3292,6 +3292,11 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_note.push(' ');
         session_note.push_str(&sentence);
     }
+    if let Some(sentence) = model_token_savings_note_sentence(current_session, current_session_alignment)
+    {
+        session_note.push(' ');
+        session_note.push_str(&sentence);
+    }
     let session_boundary_pressure =
         continuity_boundary_pressure(current_session, current_session_alignment);
     if let Some((boundary_tokens, strict_tokens)) = session_boundary_pressure {
@@ -3302,6 +3307,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         ));
     }
     let mut session_rows = current_session_lane_rows(current_session);
+    session_rows.push(model_token_savings_metric_row(current_session, current_session_alignment));
     if let Some(row) = client_limit_alignment_metric_row(current_session_alignment) {
         session_rows.push(row);
     }
@@ -3387,6 +3393,11 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         rolling_note.push(' ');
         rolling_note.push_str(&sentence);
     }
+    if let Some(sentence) = model_token_savings_note_sentence(rolling_window, rolling_window_alignment)
+    {
+        rolling_note.push(' ');
+        rolling_note.push_str(&sentence);
+    }
     let rolling_boundary_pressure =
         continuity_boundary_pressure(rolling_window, rolling_window_alignment);
     if let Some((boundary_tokens, strict_tokens)) = rolling_boundary_pressure {
@@ -3397,6 +3408,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         ));
     }
     let mut rolling_rows = Vec::new();
+    rolling_rows.push(model_token_savings_metric_row(rolling_window, rolling_window_alignment));
     if let Some(row) = client_limit_alignment_metric_row(rolling_window_alignment) {
         rolling_rows.push(row);
     }
@@ -3484,7 +3496,12 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         lifetime_note.push(' ');
         lifetime_note.push_str(&sentence);
     }
+    if let Some(sentence) = model_token_savings_note_sentence(lifetime, lifetime_alignment) {
+        lifetime_note.push(' ');
+        lifetime_note.push_str(&sentence);
+    }
     let mut lifetime_rows = Vec::new();
+    lifetime_rows.push(model_token_savings_metric_row(lifetime, lifetime_alignment));
     if let Some(row) = client_limit_alignment_metric_row(lifetime_alignment) {
         lifetime_rows.push(row);
     }
@@ -6189,6 +6206,173 @@ fn client_budget_disclaimer() -> &'static str {
     "Это не процент от лимита этого чата. Здесь считается только размер контекста, который Amai приносит в ответ, а не все токены разговора целиком."
 }
 
+fn model_token_savings_metric_row(scope_summary: &Value, alignment: &Value) -> Value {
+    let verified_without = scope_summary["verified_baseline_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    let verified_with = scope_summary["verified_delivered_tokens"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_add(scope_summary["verified_recovery_tokens"].as_u64().unwrap_or(0));
+    let verified_saved = scope_summary["verified_effective_saved_tokens"].as_i64();
+    let verified_pct = scope_summary["verified_effective_savings_pct"].as_f64();
+    let observed_with_amai = scope_summary["verified_observed_whole_cycle_with_amai_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    let tooltip = model_token_savings_tooltip(scope_summary, alignment);
+
+    let value = if verified_without == 0 {
+        if observed_with_amai > 0 {
+            format!(
+                "ещё нет baseline pair; с Amai уже видно {}",
+                format_u64(Some(observed_with_amai))
+            )
+        } else {
+            "ещё нет verified measured slice".to_string()
+        }
+    } else if alignment["same_meter_as_client_limit"].as_bool() == Some(true) {
+        format!(
+            "{}: без Amai {}, с Amai {}, экономия {}",
+            format_percent(verified_pct),
+            format_u64(Some(verified_without)),
+            format_u64(Some(verified_with)),
+            format_signed_count(verified_saved)
+        )
+    } else {
+        format!(
+            "{} по measured slice: без Amai {}, с Amai {}, экономия {}",
+            format_percent(verified_pct),
+            format_u64(Some(verified_without)),
+            format_u64(Some(verified_with)),
+            format_signed_count(verified_saved)
+        )
+    };
+
+    metric_row("Экономия токенов модели", value, Some(tooltip.as_str()))
+}
+
+fn model_token_savings_note_sentence(scope_summary: &Value, alignment: &Value) -> Option<String> {
+    let verified_without = scope_summary["verified_baseline_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    let verified_with = scope_summary["verified_delivered_tokens"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_add(scope_summary["verified_recovery_tokens"].as_u64().unwrap_or(0));
+    let verified_saved = scope_summary["verified_effective_saved_tokens"].as_i64();
+    let verified_pct = scope_summary["verified_effective_savings_pct"].as_f64();
+    let observed_with_amai = scope_summary["verified_observed_whole_cycle_with_amai_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+
+    if verified_without == 0 {
+        return Some(if observed_with_amai > 0 {
+            format!(
+                "Процент экономии токенов модели здесь пока не показан: с Amai уже честно видно {} observed токенов, но verified baseline pair «без Amai / с Amai» для этого scope ещё нет.",
+                format_u64(Some(observed_with_amai))
+            )
+        } else {
+            "Процент экономии токенов модели здесь пока не показан: у этого scope ещё нет verified measured пары «без Amai / с Amai»."
+                .to_string()
+        });
+    }
+
+    let base = format!(
+        "По measured model-token срезу уже видно {}: без Amai было {}, с Amai стало {}, экономия {}.",
+        format_percent(verified_pct),
+        format_u64(Some(verified_without)),
+        format_u64(Some(verified_with)),
+        format_signed_count(verified_saved)
+    );
+
+    if alignment["same_meter_as_client_limit"].as_bool() == Some(true) {
+        return Some(format!(
+            "{base} Здесь этот процент уже совпадает с тем же meter, которым клиент считает лимит."
+        ));
+    }
+
+    let boundary_tokens = alignment["continuity_boundary_rollup"]["observed_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    if alignment["explicit_boundary_surface"]["state"].as_str() == Some("amai_continuity_boundary")
+        && boundary_tokens > 0
+    {
+        return Some(format!(
+            "{base} Это прямой процент по уже measured slice, но ещё {} токенов continuity boundary остаются вне него.",
+            format_u64(Some(boundary_tokens))
+        ));
+    }
+
+    Some(format!(
+        "{base} Это уже прямой measured процент по модели для текущего scope, но ещё не полный client-limit meter."
+    ))
+}
+
+fn model_token_savings_tooltip(scope_summary: &Value, alignment: &Value) -> String {
+    let verified_without = scope_summary["verified_baseline_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    let verified_with = scope_summary["verified_delivered_tokens"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_add(scope_summary["verified_recovery_tokens"].as_u64().unwrap_or(0));
+    let verified_saved = scope_summary["verified_effective_saved_tokens"].as_i64();
+    let verified_pct = scope_summary["verified_effective_savings_pct"].as_f64();
+    let observed_with_amai = scope_summary["verified_observed_whole_cycle_with_amai_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+
+    if verified_without == 0 {
+        return if observed_with_amai > 0 {
+            format!(
+                "Этот ряд нужен для прямой корреляции между токенами модели без Amai и с Amai за тот же time scope. С Amai уже видно {} observed токенов, но verified baseline pair для этого scope ещё не materialized, поэтому процент честно не показывается.",
+                format_u64(Some(observed_with_amai))
+            )
+        } else {
+            "Этот ряд нужен для прямой корреляции между токенами модели без Amai и с Amai за тот же time scope. Пока verified measured baseline для этого scope ещё не materialized, поэтому процент честно не показывается.".to_string()
+        };
+    }
+
+    let mut tooltip = format!(
+        "Этот ряд показывает прямую корреляцию между measured токенами модели без Amai и с Amai за тот же time scope.
+- Без Amai: {}
+- С Amai: {}
+- Экономия: {}
+- Процент: {}",
+        format_u64(Some(verified_without)),
+        format_u64(Some(verified_with)),
+        format_signed_count(verified_saved),
+        format_percent(verified_pct)
+    );
+
+    if alignment["same_meter_as_client_limit"].as_bool() == Some(true) {
+        tooltip.push_str(
+            "
+- В этом scope same-meter alignment уже materialized, поэтому процент можно читать как тот же meter, которым клиент считает лимит.",
+        );
+    } else {
+        tooltip.push_str(
+            "
+- Это truthful measured percentage по already-verified model-token slice, но не полный client-limit meter.",
+        );
+        let boundary_tokens = alignment["continuity_boundary_rollup"]["observed_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+        if alignment["explicit_boundary_surface"]["state"].as_str()
+            == Some("amai_continuity_boundary")
+            && boundary_tokens > 0
+        {
+            tooltip.push_str(&format!(
+                "
+- Вне этого процента сейчас остаются ещё {} токенов explicit continuity boundary.",
+                format_u64(Some(boundary_tokens))
+            ));
+        }
+    }
+
+    tooltip
+}
+
 fn client_limit_alignment_metric_row(alignment: &Value) -> Option<Value> {
     let state = alignment["alignment_state"].as_str()?;
     let live_events = alignment["live_events_count"].as_u64().unwrap_or(0);
@@ -8112,9 +8296,10 @@ mod tests {
         assert!(note.contains("без Amai было бы"));
         assert!(note.contains("Это не процент от лимита этого чата"));
         let rows = cards[0]["rows"].as_array().expect("rows");
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         assert_eq!(rows[0]["label"].as_str(), Some("Главный итог"));
         assert_eq!(rows[1]["label"].as_str(), Some("Весь живой поток"));
+        assert_eq!(rows[3]["label"].as_str(), Some("Экономия токенов модели"));
     }
 
     #[test]
@@ -8371,14 +8556,26 @@ mod tests {
             session_alignment["value"].as_str(),
             Some("нет: только non-live (live 0 / non-live 4)")
         );
+        let rolling_alignment = cards[1]["rows"]
+            .as_array()
+            .expect("rolling rows")
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Связь с лимитом клиента"))
+            .expect("rolling alignment row");
         assert!(
-            cards[1]["rows"][0]["value"]
+            rolling_alignment["value"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("live ещё не подтверждено")
         );
+        let lifetime_alignment = cards[2]["rows"]
+            .as_array()
+            .expect("lifetime rows")
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Связь с лимитом клиента"))
+            .expect("lifetime alignment row");
         assert!(
-            cards[2]["rows"][0]["value"]
+            lifetime_alignment["value"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("lower bound части цикла")
@@ -8521,6 +8718,80 @@ mod tests {
                 .unwrap_or_default()
                 .contains("живой расход уже уходит в continuity startup")
         );
+    }
+
+    #[test]
+    fn model_token_savings_row_surfaces_exact_meter_equivalent_percent() {
+        let scope_summary = json!({
+            "verified_baseline_tokens": 320,
+            "verified_delivered_tokens": 220,
+            "verified_recovery_tokens": 20,
+            "verified_effective_saved_tokens": 80,
+            "verified_effective_savings_pct": 25.0,
+            "verified_observed_whole_cycle_with_amai_tokens": 240
+        });
+        let alignment = json!({
+            "same_meter_as_client_limit": true,
+            "continuity_boundary_rollup": {
+                "observed_tokens": 0
+            }
+        });
+
+        let row = super::model_token_savings_metric_row(&scope_summary, &alignment);
+        assert_eq!(row["label"].as_str(), Some("Экономия токенов модели"));
+        assert_eq!(
+            row["value"].as_str(),
+            Some("25.00%: без Amai 320, с Amai 240, экономия 80")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("тот же meter, которым клиент считает лимит")
+        );
+
+        let note = super::model_token_savings_note_sentence(&scope_summary, &alignment)
+            .expect("note");
+        assert!(note.contains("25.00%"));
+        assert!(note.contains("совпадает с тем же meter"));
+    }
+
+    #[test]
+    fn model_token_savings_row_surfaces_measured_slice_with_continuity_boundary() {
+        let scope_summary = json!({
+            "verified_baseline_tokens": 320,
+            "verified_delivered_tokens": 248,
+            "verified_recovery_tokens": 8,
+            "verified_effective_saved_tokens": 64,
+            "verified_effective_savings_pct": 20.0,
+            "verified_observed_whole_cycle_with_amai_tokens": 609
+        });
+        let alignment = json!({
+            "same_meter_as_client_limit": false,
+            "explicit_boundary_surface": {
+                "state": "amai_continuity_boundary"
+            },
+            "continuity_boundary_rollup": {
+                "observed_tokens": 609
+            }
+        });
+
+        let row = super::model_token_savings_metric_row(&scope_summary, &alignment);
+        assert_eq!(
+            row["value"].as_str(),
+            Some("20.00% по measured slice: без Amai 320, с Amai 256, экономия 64")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("609 токенов explicit continuity boundary")
+        );
+
+        let note = super::model_token_savings_note_sentence(&scope_summary, &alignment)
+            .expect("note");
+        assert!(note.contains("20.00%"));
+        assert!(note.contains("609 токенов continuity boundary остаются вне него"));
     }
 
     #[test]
