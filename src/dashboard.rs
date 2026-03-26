@@ -6111,6 +6111,11 @@ fn client_limit_alignment_metric_row(alignment: &Value) -> Option<Value> {
                 format_u64(Some(live_events)),
                 format_u64(Some(non_live_events))
             ),
+            "whole_cycle_observed_explicit_boundary_not_meter_equivalent" => format!(
+                "нет: strict slice есть, continuity boundary explicit (live {} / non-live {})",
+                format_u64(Some(live_events)),
+                format_u64(Some(non_live_events))
+            ),
             other => format!("нет: {other}"),
         }
     };
@@ -6214,6 +6219,20 @@ fn client_limit_alignment_note_sentence(alignment: &Value) -> Option<String> {
         "whole_cycle_partially_observed_not_meter_equivalent" => {
             "Здесь уже начали появляться observed whole-cycle компоненты, но покрытие ещё неполное, поэтому эта цифра всё ещё не эквивалентна шкале лимита клиента.".to_string()
         }
+        "whole_cycle_observed_explicit_boundary_not_meter_equivalent" => {
+            let measured = human_client_limit_components(
+                &alignment["baseline_equivalence"]["measured_baseline_components"],
+            );
+            let boundary = human_client_limit_components(
+                &alignment["baseline_equivalence"]["explicitly_unmodeled_baseline_components"],
+            );
+            match (measured, boundary) {
+                (Some(measured), Some(boundary)) => format!(
+                    "Здесь whole-cycle компоненты уже fully observed; strict same-meter lower bound уже materialized для {measured}, а для {boundary} boundary сознательно поднят как explicit truth-boundary. Это уже не просто partial baseline, но и не полный client-limit meter."
+                ),
+                _ => "Здесь whole-cycle observed компоненты уже видны по live событиям, а remaining gap оставлен как explicit truth-boundary, поэтому метрика остаётся честно non-equivalent.".to_string(),
+            }
+        }
         "whole_cycle_observed_baseline_partial" => {
             if alignment["baseline_equivalence"]["state"].as_str()
                 == Some("baseline_semantics_unmaterialized")
@@ -6293,6 +6312,9 @@ fn client_limit_alignment_tooltip(alignment: &Value) -> Option<String> {
         }
         "whole_cycle_partially_observed_not_meter_equivalent" => {
             "Whole-cycle observed компоненты уже начали materialize-иться, но покрытие по live событиям ещё неполное."
+        }
+        "whole_cycle_observed_explicit_boundary_not_meter_equivalent" => {
+            "Whole-cycle observed компоненты уже fully covered, strict same-meter lower bound уже materialized, но remaining gap оставлен как explicit continuity truth-boundary."
         }
         "whole_cycle_observed_baseline_partial" => {
             "Whole-cycle observed компоненты уже видны по live событиям, но baseline-equivalent semantics для клиентского лимита ещё не materialized."
@@ -8213,7 +8235,7 @@ mod tests {
     #[test]
     fn client_limit_alignment_tooltip_surfaces_explicit_baseline_boundary_components() {
         let alignment = json!({
-            "alignment_state": "whole_cycle_observed_baseline_partial",
+            "alignment_state": "whole_cycle_observed_explicit_boundary_not_meter_equivalent",
             "same_meter_as_client_limit": false,
             "live_events_count": 79,
             "non_live_events_count": 0,
@@ -8248,6 +8270,7 @@ mod tests {
         let note = super::client_limit_alignment_note_sentence(&alignment)
             .expect("baseline equivalence note");
         assert!(note.contains("explicit truth-boundary"));
+        assert!(note.contains("не просто partial baseline"));
     }
 
     #[test]

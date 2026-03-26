@@ -650,7 +650,7 @@ fn default_agent_cycle_model_version() -> String {
 }
 
 fn default_client_limit_meter_alignment_version() -> String {
-    "client-limit-meter-alignment-v8".to_string()
+    "client-limit-meter-alignment-v9".to_string()
 }
 
 fn default_client_limit_baseline_equivalence_version() -> String {
@@ -11870,6 +11870,7 @@ fn client_limit_meter_alignment_state(
     summary: &Value,
     events: Option<&[TokenBudgetEvent]>,
     assistant_scope: Option<&AssistantGenerationScopeObservation>,
+    baseline_equivalence: &Value,
 ) -> &'static str {
     let (events_total, live_events_count, _non_live_events_count, counted_events) =
         client_limit_meter_alignment_counts(summary, events);
@@ -11908,7 +11909,13 @@ fn client_limit_meter_alignment_state(
     } else if counted_events == 0 {
         "live_usage_unconfirmed_not_meter_equivalent"
     } else if any_component_applicable && all_components_observed {
-        "whole_cycle_observed_baseline_partial"
+        if baseline_equivalence["state"].as_str()
+            == Some("baseline_component_semantics_explicit_boundary")
+        {
+            "whole_cycle_observed_explicit_boundary_not_meter_equivalent"
+        } else {
+            "whole_cycle_observed_baseline_partial"
+        }
     } else if any_component_observed {
         "whole_cycle_partially_observed_not_meter_equivalent"
     } else {
@@ -12383,7 +12390,12 @@ fn build_client_limit_meter_alignment(
     json!({
         "model_version": contract.client_limit_meter_alignment_version.clone(),
         "surface_kind": surface_kind,
-        "alignment_state": client_limit_meter_alignment_state(summary, events, assistant_scope),
+        "alignment_state": client_limit_meter_alignment_state(
+            summary,
+            events,
+            assistant_scope,
+            &baseline_equivalence,
+        ),
         "same_meter_as_client_limit": false,
         "events_total": events_total,
         "live_events_count": live_events_count,
@@ -15266,7 +15278,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_meter_alignment_version"],
-            "client-limit-meter-alignment-v8"
+            "client-limit-meter-alignment-v9"
         );
         assert_eq!(
             token_event["contract"]["client_limit_baseline_equivalence_version"],
@@ -15871,7 +15883,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v8"
+            "client-limit-meter-alignment-v9"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["baseline_equivalence"]["model_version"],
@@ -18497,7 +18509,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v8"
+            "client-limit-meter-alignment-v9"
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["baseline_equivalence_model_version"],
@@ -18664,6 +18676,10 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             alignment["baseline_equivalence"]["state"],
             "baseline_component_semantics_explicit_boundary"
+        );
+        assert_eq!(
+            alignment["alignment_state"],
+            "whole_cycle_observed_explicit_boundary_not_meter_equivalent"
         );
         assert_eq!(
             alignment["baseline_equivalence"]["explicitly_unmodeled_baseline_components"],

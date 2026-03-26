@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 10:11 MSK
-Ручная сверка guide/docs: 2026-03-26 10:11 MSK
+modified_at: 2026-03-26 15:03 MSK
+Ручная сверка guide/docs: 2026-03-26 15:03 MSK
 
 # Token Ledger
 
@@ -456,7 +456,7 @@ Ledger обязан различать:
 - частично наблюдаемые whole-cycle компоненты;
 - whole-cycle observed компоненты при всё ещё partial baseline.
 
-Начиная с `client-limit-meter-alignment-v8` `client_prompt` считается observed component
+Начиная с `client-limit-meter-alignment-v9` `client_prompt` считается observed component
 не только если он явно пришёл в `whole_cycle_observed`, но и как derived fallback из
 уже записанных `query + tokenizer`. Это нужно затем, чтобы progress к client-limit meter
 был виден честно даже на исторических live events, где старый payload ещё не нёс
@@ -468,6 +468,7 @@ Ledger обязан различать:
 - `component_event_coverage`;
 - state `whole_cycle_partially_observed_not_meter_equivalent`;
 - state `whole_cycle_observed_baseline_partial`.
+- state `whole_cycle_observed_explicit_boundary_not_meter_equivalent`.
 - `assistant_generation_observation_source`.
 - `baseline_equivalence`.
 
@@ -1298,7 +1299,8 @@ Hashes по line items нужны затем, чтобы:
     `live_usage_unconfirmed_not_meter_equivalent` и
     `partial_lower_bound_not_meter_equivalent`,
     `whole_cycle_partially_observed_not_meter_equivalent`,
-    `whole_cycle_observed_baseline_partial`;
+    `whole_cycle_observed_baseline_partial`,
+    `whole_cycle_observed_explicit_boundary_not_meter_equivalent`;
   - note карточки обязан прямо сказать, почему её число не обязано совпадать
     с внешней клиентской шкалой лимита.
 - публикует `included_events_hash / excluded_events_hash`;
@@ -1315,7 +1317,7 @@ Hashes по line items нужны затем, чтобы:
 - `contractual-statement-export-v19`
 - `settlement-report-preview-v10`
 - `contractual-evidence-pack-v19`
-- `client-limit-meter-alignment-v8`
+- `client-limit-meter-alignment-v9`
 - `client-limit-baseline-equivalence-v3`
 - `client-limit-strict-meter-slice-v1`
 - `client-limit-explicit-boundary-surface-v1`

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 14:57 MSK
-Ручная сверка guide/docs: 2026-03-26 14:57 MSK
+modified_at: 2026-03-26 15:03 MSK
+Ручная сверка guide/docs: 2026-03-26 15:03 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1568,8 +1568,10 @@ preview, а не только raw count.
     - `partial_lower_bound_not_meter_equivalent`
     - `whole_cycle_partially_observed_not_meter_equivalent`
     - `whole_cycle_observed_baseline_partial`
+    - `whole_cycle_observed_explicit_boundary_not_meter_equivalent`
   Это нужно затем, чтобы по мере materialize-инга observed whole-cycle fields было видно,
-  что покрытие уже стало шире, но baseline всё ещё не разрешено выдавать за full same-meter.
+  что покрытие уже стало шире, а explicit continuity boundary не маскировалась под обычный
+  `baseline partial`.
   - начиная с этого шага тот же contour ещё и публикует versioned
     `baseline_equivalence`, где machine-readable фиксируются:
     - `state`
@@ -1586,7 +1588,8 @@ preview, а не только raw count.
   - dashboard token-cards теперь поднимают этот же слой в user-facing surface:
     - добавляют строку `Связь с лимитом клиента`;
     - прямо показывают, когда текущий scope содержит только `non-live` активность;
-    - для `whole_cycle_observed_baseline_partial` tooltip/note теперь ещё поднимают
+    - для `whole_cycle_observed_baseline_partial /
+      whole_cycle_observed_explicit_boundary_not_meter_equivalent` tooltip/note теперь ещё поднимают
       `baseline_equivalence.fully_observed_components /
       measured_baseline_components / explicitly_unmodeled_baseline_components /
       missing_baseline_components`, чтобы operator видел, какие applicable whole-cycle
@@ -1830,7 +1833,7 @@ preview, а не только raw count.
     direct turn attach или rollout turn timeline и не может быть честно разложено
     по каждому retrieval event без дублирования токенов.
   - operational metering contract теперь ещё несёт:
-  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v8`
+  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v9`
   - `client_limit_baseline_equivalence_version = client-limit-baseline-equivalence-v3`
   - `client_limit_strict_meter_slice_version = client-limit-strict-meter-slice-v1`
   - `client_limit_explicit_boundary_surface_version = client-limit-explicit-boundary-surface-v1`
