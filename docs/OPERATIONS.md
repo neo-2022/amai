@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 11:24 MSK
-Ручная сверка guide/docs: 2026-03-26 11:24 MSK
+modified_at: 2026-03-26 11:28 MSK
+Ручная сверка guide/docs: 2026-03-26 11:28 MSK
 
 # Operations
 
@@ -2855,6 +2855,10 @@ Grafana login берётся из `.env`:
   - в UI показываются с буквальным оператором `<=` или `>=`, а не просто голым числом;
 - machine summary contour на human dashboard больше не имеет права дёргать privileged hardware
   probes на каждом секундном refresh:
+  - после initial cache fill при startup background refresh loop не должен делать второй полный
+    refresh немедленно:
+    - initial `refresh_observe_cache(...)` уже заполняет cache до bind;
+    - loop обязан сначала ждать `refresh_ms`, а не запускать ещё один cold pass сразу после старта;
   - long-lived `observe serve` теперь обязан переиспользовать machine summary cache до `60` секунд;
   - static memory inventory provider chain (`sudo dmidecode`, `dmidecode`, `lshw`, `inxi`) теперь
     должен жить отдельно от минутного live cache:

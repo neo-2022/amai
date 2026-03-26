@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 11:24 MSK
-Ручная сверка guide/docs: 2026-03-26 11:24 MSK
+modified_at: 2026-03-26 11:28 MSK
+Ручная сверка guide/docs: 2026-03-26 11:28 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -712,6 +712,11 @@ http://127.0.0.1:9464/
     - если ускоритель найден только inventory-путём, а live telemetry недоступна, панель честно оставляет поля пустыми;
   - этот hardware contour больше не имеет права на каждом dashboard refresh заново дёргать тяжёлые
     privileged probes;
+  - после startup initial refresh background refresh loop больше не должен немедленно запускать ещё
+    один полный refresh в тот же такт:
+    - loop обязан сначала подождать `refresh_ms`, потому что первый cache fill уже выполнен до
+      bind listener;
+    - это убирает бессмысленный двойной cold refresh сразу после рестарта human dashboard.
   - machine summary теперь переиспользуется как cache до `60` секунд, чтобы human dashboard не
     зависал на `dmidecode/sysinfo`-хвосте и не раздувал long-lived `observe serve`.
   - при этом статическая host-инвентаризация памяти больше не должна заново ходить в `dmidecode`

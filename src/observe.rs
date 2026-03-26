@@ -245,13 +245,19 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
     maybe_cleanup_observability_snapshots(cfg).await?;
     maybe_cleanup_local_artifacts().await?;
     let cache = Arc::new(RwLock::new(ObserveCache::default()));
-    refresh_observe_cache(cache.clone(), cfg.clone(), bind.to_string(), profile.dashboard.refresh_ms)
-        .await?;
+    refresh_observe_cache(
+        cache.clone(),
+        cfg.clone(),
+        bind.to_string(),
+        profile.dashboard.refresh_ms,
+    )
+    .await?;
     let refresh_cache = cache.clone();
     let refresh_cfg = cfg.clone();
     let refresh_bind = bind.to_string();
     let refresh_interval_ms = profile.dashboard.refresh_ms.max(250);
     tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(refresh_interval_ms)).await;
         loop {
             if let Err(error) = refresh_observe_cache(
                 refresh_cache.clone(),
