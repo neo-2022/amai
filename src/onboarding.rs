@@ -98,6 +98,8 @@ pub(crate) struct StartupArtifactAudit {
     pub startup_instruction_contains_startup_next_action: Option<bool>,
     pub startup_instruction_contains_required_return_task: Option<bool>,
     pub startup_instruction_contains_resume_required_action_kind: Option<bool>,
+    pub startup_instruction_contains_execctl_resume_contract_summary: Option<bool>,
+    pub startup_instruction_contains_execctl_resume_obligation: Option<bool>,
     pub startup_instruction_contains_previous_session_owner_follow: Option<bool>,
     pub startup_instruction_contains_no_silent_drop: Option<bool>,
     pub startup_instruction_contains_runtime_state_artifact: Option<bool>,
@@ -584,6 +586,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_startup_next_action,
         startup_instruction_contains_required_return_task,
         startup_instruction_contains_resume_required_action_kind,
+        startup_instruction_contains_execctl_resume_contract_summary,
+        startup_instruction_contains_execctl_resume_obligation,
         startup_instruction_contains_previous_session_owner_follow,
         startup_instruction_contains_no_silent_drop,
         startup_instruction_contains_runtime_state_artifact,
@@ -614,6 +618,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             Some(content.contains("startup_next_action")),
             Some(content.contains("required_return_task")),
             Some(content.contains("resume_required_return_task")),
+            Some(content.contains("execctl_resume_contract_summary")),
+            Some(content.contains("execctl_resume_obligation")),
             Some(content.contains("previous_session_owner_must_follow_startup_next_action = true")),
             Some(content.contains("no_silent_drop = true")),
             Some(content.contains(".amai/continuity/project-chat-startup-state.json")),
@@ -641,7 +647,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         )
     } else {
         (
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         )
     };
 
@@ -847,6 +853,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         || startup_instruction_contains_startup_next_action != Some(true)
         || startup_instruction_contains_required_return_task != Some(true)
         || startup_instruction_contains_resume_required_action_kind != Some(true)
+        || startup_instruction_contains_execctl_resume_contract_summary != Some(true)
+        || startup_instruction_contains_execctl_resume_obligation != Some(true)
         || startup_instruction_contains_previous_session_owner_follow != Some(true)
         || startup_instruction_contains_no_silent_drop != Some(true)
         || startup_instruction_contains_runtime_state_artifact != Some(true)
@@ -898,6 +906,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_startup_next_action,
         startup_instruction_contains_required_return_task,
         startup_instruction_contains_resume_required_action_kind,
+        startup_instruction_contains_execctl_resume_contract_summary,
+        startup_instruction_contains_execctl_resume_obligation,
         startup_instruction_contains_previous_session_owner_follow,
         startup_instruction_contains_no_silent_drop,
         startup_instruction_contains_runtime_state_artifact,
@@ -2845,6 +2855,14 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             audit.startup_instruction_contains_resume_required_action_kind,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_execctl_resume_contract_summary,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_execctl_resume_obligation,
             Some(true)
         );
         assert_eq!(
