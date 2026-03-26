@@ -2102,7 +2102,7 @@ pub fn build_payload(
         "benchmark_cards": build_benchmark_cards(snapshot),
         "machine_cards": build_machine_cards(snapshot, machine.as_ref(), install_state.as_ref()),
         "service_cards": build_service_cards(snapshot),
-        "warnings": build_warnings(snapshot),
+        "warnings": build_warnings(snapshot, machine.as_ref()),
         "glossary": build_glossary(),
         "links": build_links(&base_url),
     }))
@@ -3646,13 +3646,13 @@ fn build_machine_cards(
         ));
     }
     cards.push(with_extra_class(
-        artifact_cleanup_card(snapshot),
+        artifact_cleanup_card(snapshot, machine),
         "machine-compact",
     ));
     cards
 }
 
-fn artifact_cleanup_card(snapshot: &Value) -> Value {
+fn artifact_cleanup_card(snapshot: &Value, machine: Option<&MachineSummary>) -> Value {
     let cleanup = &snapshot["artifact_cleanup"];
     if !cleanup.is_object() || cleanup["status"].as_str().is_some() {
         return card_with_rows(
@@ -3775,7 +3775,7 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
         "Локальный мусор и retention",
         value,
         note,
-        artifact_cleanup_status(snapshot),
+        artifact_cleanup_status(snapshot, machine),
         Some("Источник: state/tooling/artifact_cleanup/latest.json".to_string()),
         Some("Это локальный hygiene contour для build/cache хвостов Amai. Он не удаляет state PostgreSQL, Qdrant, MinIO или NATS.".to_string()),
         vec![
@@ -3941,8 +3941,8 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
         ],
     );
     if let Some(tooltip) = status_reason_tooltip(
-        artifact_cleanup_status(snapshot),
-        artifact_cleanup_warning(snapshot).into_iter().collect(),
+        artifact_cleanup_status(snapshot, machine),
+        artifact_cleanup_warning(snapshot, machine).into_iter().collect(),
         "Cleanup contour видит локальный rebuildable хвост, который уже требует внимания.",
     ) {
         card = with_status_tooltip(card, &tooltip);
@@ -4763,7 +4763,7 @@ fn benchmark_qdrant_status_tooltip(snapshot: &Value) -> Option<String> {
     )
 }
 
-fn build_warnings(snapshot: &Value) -> Vec<String> {
+fn build_warnings(snapshot: &Value, machine: Option<&MachineSummary>) -> Vec<String> {
     let mut warnings = Vec::new();
     for check in snapshot["sla"]["checks"]
         .as_array()
@@ -4773,7 +4773,7 @@ fn build_warnings(snapshot: &Value) -> Vec<String> {
     {
         warnings.push(humanize_check(snapshot, check));
     }
-    if let Some(warning) = artifact_cleanup_warning(snapshot) {
+    if let Some(warning) = artifact_cleanup_warning(snapshot, machine) {
         warnings.push(warning);
     }
     warnings
@@ -6410,7 +6410,34 @@ fn token_lane_summary(
     }
 }
 
-fn artifact_cleanup_status(snapshot: &Value) -> &'static str {
+fn artifact_cleanup_pressure_state(
+    cleanup: &Value,
+    machine: Option<&MachineSummary>,
+) -> Option<&'static str> {
+    if cleanup["policy_retained_reclaimable_bytes"].as_u64().unwrap_or(0) == 0 {
+        return None;
+    }
+    let Some(machine) = machine else {
+        return Some("waiting");
+    };
+    let thresholds = &cleanup["disk_pressure_thresholds"];
+    let used_percent = machine.disk_used_percent.unwrap_or(0.0);
+    let available_gib = machine.disk_available_gib;
+    let alert_used_percent = thresholds["alert_used_percent"].as_f64().unwrap_or(85.0);
+    let critical_used_percent = thresholds["critical_used_percent"].as_f64().unwrap_or(92.0);
+    let alert_available_gib = thresholds["alert_available_gib"].as_f64().unwrap_or(150.0);
+    let critical_available_gib = thresholds["critical_available_gib"].as_f64().unwrap_or(60.0);
+
+    if used_percent >= critical_used_percent || available_gib <= critical_available_gib {
+        Some("critical")
+    } else if used_percent >= alert_used_percent || available_gib <= alert_available_gib {
+        Some("alert")
+    } else {
+        Some("waiting")
+    }
+}
+
+fn artifact_cleanup_status(snapshot: &Value, machine: Option<&MachineSummary>) -> &'static str {
     let cleanup = &snapshot["artifact_cleanup"];
     if !cleanup.is_object() || cleanup["status"].as_str().is_some() {
         return "unknown";
@@ -6421,8 +6448,8 @@ fn artifact_cleanup_status(snapshot: &Value) -> &'static str {
         "alert"
     } else if cleanup["manual_only_reclaimable_bytes"].as_u64().unwrap_or(0) > 0 {
         "alert"
-    } else if cleanup["policy_retained_reclaimable_bytes"].as_u64().unwrap_or(0) > 0 {
-        "waiting"
+    } else if let Some(status) = artifact_cleanup_pressure_state(cleanup, machine) {
+        status
     } else if cleanup["aggressive_preview_selected"].as_u64().unwrap_or(0) > 0 {
         "alert"
     } else {
@@ -6430,7 +6457,7 @@ fn artifact_cleanup_status(snapshot: &Value) -> &'static str {
     }
 }
 
-fn artifact_cleanup_warning(snapshot: &Value) -> Option<String> {
+fn artifact_cleanup_warning(snapshot: &Value, machine: Option<&MachineSummary>) -> Option<String> {
     let cleanup = &snapshot["artifact_cleanup"];
     if !cleanup.is_object() || cleanup["status"].as_str().is_some() {
         return None;
@@ -6485,10 +6512,36 @@ fn artifact_cleanup_warning(snapshot: &Value) -> Option<String> {
         .as_u64()
         .unwrap_or(0);
     if policy_retained_bytes > 0 {
-        return Some(format!(
-            "Сейчас {} rebuildable веса уже policy-covered, но intentionally удерживается TTL/keep-latest. Cleanup не сломан: это hot storage, которое auto-path уберёт позже, а aggressive path может снять раньше.",
-            human_bytes(policy_retained_bytes as f64)
-        ));
+        let pressure_state = artifact_cleanup_pressure_state(cleanup, machine).unwrap_or("waiting");
+        let first_target = cleanup["policy_retained_targets"]
+            .as_array()
+            .and_then(|targets| targets.first())
+            .cloned()
+            .unwrap_or_default();
+        let target_path = first_target["path"].as_str().unwrap_or("policy target");
+        let target_bytes = first_target["aggressive_preview_reclaimable_bytes"]
+            .as_u64()
+            .unwrap_or(0);
+        return Some(match pressure_state {
+            "critical" | "alert" => {
+                let used = machine
+                    .and_then(|summary| summary.disk_used_percent)
+                    .map(|value| format!("{value:.1}%"))
+                    .unwrap_or_else(|| "неизвестно".to_string());
+                let available = machine
+                    .map(|summary| format!("{:.2} GiB", summary.disk_available_gib))
+                    .unwrap_or_else(|| "неизвестно".to_string());
+                format!(
+                    "На диске уже есть давление: used {used}, свободно {available}. При этом {} policy-covered hot storage всё ещё удерживается TTL/keep-latest. Следующий manual reclaim кандидат: {target_path} = {} через `observe cleanup-artifacts --target {target_path} --aggressive --apply`.",
+                    human_bytes(policy_retained_bytes as f64),
+                    human_bytes(target_bytes as f64)
+                )
+            }
+            _ => format!(
+                "Сейчас {} rebuildable веса уже policy-covered, но intentionally удерживается TTL/keep-latest. Cleanup не сломан: это hot storage, которое auto-path уберёт позже, а aggressive path может снять раньше.",
+                human_bytes(policy_retained_bytes as f64)
+            ),
+        });
     }
     if aggressive_bytes > 0 {
         return Some(format!(
@@ -7073,7 +7126,45 @@ mod tests {
         format_time_compare_pair, human_elapsed_ms, live_latency_compare_card, monitoring_url,
         working_state_live_card, worst_status,
     };
+    use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary};
     use serde_json::json;
+
+    fn synthetic_machine_summary(
+        disk_available_gib: f64,
+        disk_used_percent: Option<f64>,
+    ) -> MachineSummary {
+        MachineSummary {
+            cpu_model: "Synthetic CPU".to_string(),
+            logical_cpus: 8,
+            physical_cpus: Some(4),
+            cpu_usage_percent: Some(12.0),
+            cpu_temperature_celsius: None,
+            cpu_max_mhz: Some(4200.0),
+            cpu_source_label: "synthetic".to_string(),
+            total_memory_gib: 64.0,
+            available_memory_gib: 48.0,
+            used_memory_gib: 16.0,
+            memory_used_percent: Some(25.0),
+            memory_type: "DDR5".to_string(),
+            memory_speed_label: "5600 MT/s".to_string(),
+            memory_source_label: "synthetic".to_string(),
+            swap_total_gib: 16.0,
+            swap_used_gib: 0.0,
+            disk_device: Some("/dev/nvme0n1".to_string()),
+            disk_model: "Synthetic NVMe".to_string(),
+            disk_kind: "NVMe SSD".to_string(),
+            disk_source_label: "synthetic".to_string(),
+            disk_total_gib: 1900.0,
+            disk_available_gib,
+            disk_used_percent,
+            disk_busy_percent: None,
+            disk_read_mib_per_sec: None,
+            disk_write_mib_per_sec: None,
+            disk_temperature_celsius: None,
+            disk_firmware: "test".to_string(),
+            accelerators: Vec::<AcceleratorSummary>::new(),
+        }
+    }
 
     #[test]
     fn browser_url_rewrites_unspecified_v4() {
@@ -8193,7 +8284,7 @@ mod tests {
                 }
             }
         });
-        let warning = artifact_cleanup_warning(&snapshot).expect("warning");
+        let warning = artifact_cleanup_warning(&snapshot, None).expect("warning");
         assert!(warning.contains("вне cleanup policy"));
         assert!(warning.contains("output/windows-vm-lab"));
         assert!(warning.contains("observe cleanup-artifacts --target output/windows-vm-lab --apply"));
@@ -8254,9 +8345,69 @@ mod tests {
             .expect("cleanup card");
         assert_eq!(cleanup_card["status"].as_str(), Some("waiting"));
         assert_eq!(cleanup_card["value"].as_str(), Some("17.19 GiB ждёт TTL"));
-        let warning = artifact_cleanup_warning(&snapshot).expect("warning");
+        let warning = artifact_cleanup_warning(&snapshot, None).expect("warning");
         assert!(warning.contains("policy-covered"));
         assert!(warning.contains("TTL/keep-latest"));
+    }
+
+    #[test]
+    fn artifact_cleanup_card_escalates_policy_retained_hot_storage_under_disk_pressure() {
+        let snapshot = json!({
+            "artifact_cleanup": {
+                "captured_at_epoch_ms": 42,
+                "selected": 0,
+                "selected_reclaimable_bytes": 0,
+                "policy_retained_reclaimable_bytes": 18_460_613_632u64,
+                "policy_retained_targets": [
+                    {
+                        "path": "target/debug",
+                        "ttl_hours": 168,
+                        "keep_latest": 3,
+                        "aggressive_preview_reclaimable_bytes": 16_254_702_590u64
+                    }
+                ],
+                "manual_only_reclaimable_bytes": 0,
+                "manual_only_reclaimable_targets": [],
+                "disk_pressure_thresholds": {
+                    "alert_used_percent": 85.0,
+                    "critical_used_percent": 92.0,
+                    "alert_available_gib": 150.0,
+                    "critical_available_gib": 60.0
+                },
+                "expired": 0,
+                "kept_latest": 13,
+                "protected": 0,
+                "targets_scanned": 8,
+                "aggressive_preview_selected": 19,
+                "aggressive_preview_reclaimable_bytes": 32_577_450_367u64,
+                "last_apply": {
+                    "captured_at_epoch_ms": 41,
+                    "mode": "aggressive",
+                    "deleted": 1,
+                    "reclaimed_bytes": 28_888_311_035u64
+                },
+                "repo_inventory": {
+                    "repo_total_bytes": 35_728_482_155u64,
+                    "cleanup_scope_bytes": 32_698_373_188u64,
+                    "out_of_policy_bytes": 3_030_108_967u64,
+                    "unmanaged_alert_triggered": false,
+                    "large_unmanaged_roots": [],
+                    "manual_only_targets": [],
+                    "unreadable_paths_count": 1
+                }
+            }
+        });
+        let machine = synthetic_machine_summary(48.0, Some(94.0));
+        let cards = build_machine_cards(&snapshot, Some(&machine), None);
+        let cleanup_card = cards
+            .iter()
+            .find(|card| card["title"].as_str() == Some("Локальный мусор и retention"))
+            .expect("cleanup card");
+        assert_eq!(cleanup_card["status"].as_str(), Some("critical"));
+        let warning = artifact_cleanup_warning(&snapshot, Some(&machine)).expect("warning");
+        assert!(warning.contains("давление"));
+        assert!(warning.contains("target/debug"));
+        assert!(warning.contains("--aggressive --apply"));
     }
 
     #[test]

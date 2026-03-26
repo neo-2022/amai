@@ -1,5 +1,5 @@
-modified_at = "2026-03-26 14:12 MSK"
-"Ручная сверка guide/docs" = "2026-03-26 14:12 MSK"
+modified_at = "2026-03-26 14:44 MSK"
+"Ручная сверка guide/docs" = "2026-03-26 14:44 MSK"
 
 [observability]
 schema_version = 2
@@ -36,6 +36,10 @@ nanoseconds_decimals = 0
 sweep_interval_seconds = 3600
 unmanaged_root_alert_bytes = 10737418240
 max_unmanaged_roots = 3
+disk_pressure_alert_used_percent = 85.0
+disk_pressure_critical_used_percent = 92.0
+disk_pressure_alert_available_gib = 150.0
+disk_pressure_critical_available_gib = 60.0
 
 [[artifact_cleanup.targets]]
 path = "target/debug"

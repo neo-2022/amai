@@ -22,6 +22,14 @@ pub struct ArtifactCleanupProfile {
     pub unmanaged_root_alert_bytes: u64,
     #[serde(default = "default_max_unmanaged_roots")]
     pub max_unmanaged_roots: usize,
+    #[serde(default = "default_disk_pressure_alert_used_percent")]
+    pub disk_pressure_alert_used_percent: f64,
+    #[serde(default = "default_disk_pressure_critical_used_percent")]
+    pub disk_pressure_critical_used_percent: f64,
+    #[serde(default = "default_disk_pressure_alert_available_gib")]
+    pub disk_pressure_alert_available_gib: f64,
+    #[serde(default = "default_disk_pressure_critical_available_gib")]
+    pub disk_pressure_critical_available_gib: f64,
     pub targets: Vec<ArtifactCleanupTarget>,
 }
 
@@ -99,6 +107,22 @@ fn default_max_unmanaged_roots() -> usize {
 
 fn default_entry_cleanup_strategy() -> String {
     "delete_entry".to_string()
+}
+
+fn default_disk_pressure_alert_used_percent() -> f64 {
+    85.0
+}
+
+fn default_disk_pressure_critical_used_percent() -> f64 {
+    92.0
+}
+
+fn default_disk_pressure_alert_available_gib() -> f64 {
+    150.0
+}
+
+fn default_disk_pressure_critical_available_gib() -> f64 {
+    60.0
 }
 
 pub fn load_profile() -> Result<ArtifactCleanupProfile> {
@@ -315,6 +339,12 @@ pub fn run_cleanup(
             "policy_retained_targets": policy_retained_targets_json,
             "manual_only_reclaimable_bytes": manual_only_reclaimable_bytes_total,
             "manual_only_reclaimable_targets": manual_only_reclaimable_targets_json,
+            "disk_pressure_thresholds": {
+                "alert_used_percent": profile.disk_pressure_alert_used_percent,
+                "critical_used_percent": profile.disk_pressure_critical_used_percent,
+                "alert_available_gib": profile.disk_pressure_alert_available_gib,
+                "critical_available_gib": profile.disk_pressure_critical_available_gib,
+            },
             "deleted": deleted_total,
             "reclaimed_bytes": reclaimed_bytes_total,
             "kept_latest": kept_latest_total,
