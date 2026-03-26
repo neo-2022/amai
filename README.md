@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:21 MSK
-Ручная сверка guide/docs: 2026-03-26 03:21 MSK
+modified_at: 2026-03-26 03:30 MSK
+Ручная сверка guide/docs: 2026-03-26 03:30 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1219,6 +1219,12 @@ preview, а не только raw count.
   это значит, что supported client не имеет права читать только markdown/rule block и продолжать
   работу, если workspace contract artifact отсутствует, не читается или не совпадает по hash;
 - `Claude Desktop` и `Generic` пока всё ещё получают только manual startup snippets.
+- теперь этот contour можно проверить не только proof-скриптами, но и обычным
+  `amai status`: строка `startup_artifacts: ...` показывает, жив ли managed startup artifact,
+  совпадает ли workspace contract с текущим pinned hash и остались ли fail-closed поля на месте;
+- truthful пример:
+  если после `disconnect` managed startup block снят, `amai status` должен честно показать
+  `startup_artifacts: missing_startup_instruction`, а не делать вид, что startup всё ещё готов.
 
 Это важно читать строго:
 - `startup contract` уже общий и machine-readable;

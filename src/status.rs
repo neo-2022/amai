@@ -1,9 +1,10 @@
-use crate::{compatibility, config::AppConfig, nats, postgres, qdrant, s3};
+use crate::{compatibility, config, config::AppConfig, nats, onboarding, postgres, qdrant, s3};
 use anyhow::{Context, Result};
 use reqwest::StatusCode;
 use std::time::Duration;
 
 pub async fn print_status(cfg: &AppConfig) -> Result<()> {
+    let repo_root = config::discover_repo_root(None)?;
     let db = postgres::connect_admin(cfg).await?;
     let (projects, namespaces, documents) = postgres::status_counts(&db).await?;
     let app_db = postgres::connect_app(cfg).await?;
@@ -56,6 +57,33 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
         compatibility.nats.raw_version,
         compatibility.s3.raw_version
     );
+    match onboarding::inspect_startup_artifacts(&repo_root) {
+        Ok(Some(audit)) => {
+            println!(
+                "startup_artifacts: {} (instruction_present={}, instruction_sha_match={}, instruction_requires_pre_tool_read={}, instruction_missing_fail_closed={}, instruction_sha_mismatch_fail_closed={}, contract_present={}, contract_sha_match={}, install_state_sha_match={}, contract_fail_closed={}, instruction_path={}, contract_path={})",
+                audit.status,
+                audit.startup_instruction_exists,
+                audit.startup_instruction_contains_expected_sha.unwrap_or(false),
+                audit.startup_instruction_contains_required_before_tool_call.unwrap_or(false),
+                audit.startup_instruction_contains_missing_fail_closed.unwrap_or(false),
+                audit.startup_instruction_contains_sha_mismatch_fail_closed.unwrap_or(false),
+                audit.startup_contract_exists,
+                audit.startup_contract_sha_matches_current_contract.unwrap_or(false),
+                audit.install_state_sha_matches_current_contract.unwrap_or(false),
+                audit.startup_contract_enforces_fail_closed.unwrap_or(false),
+                audit.startup_instruction_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                audit.startup_contract_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "n/a".to_string())
+            );
+        }
+        Ok(None) => println!("startup_artifacts: no_install_state"),
+        Err(error) => println!("startup_artifacts: error ({error:#})"),
+    }
     Ok(())
 }
 

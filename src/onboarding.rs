@@ -85,6 +85,22 @@ struct InstallMetricsSummary {
     latest_retrieval_excluded_reasons: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StartupArtifactAudit {
+    pub status: String,
+    pub startup_instruction_path: Option<PathBuf>,
+    pub startup_instruction_exists: bool,
+    pub startup_instruction_contains_expected_sha: Option<bool>,
+    pub startup_instruction_contains_required_before_tool_call: Option<bool>,
+    pub startup_instruction_contains_missing_fail_closed: Option<bool>,
+    pub startup_instruction_contains_sha_mismatch_fail_closed: Option<bool>,
+    pub startup_contract_path: Option<PathBuf>,
+    pub startup_contract_exists: bool,
+    pub startup_contract_sha_matches_current_contract: Option<bool>,
+    pub install_state_sha_matches_current_contract: Option<bool>,
+    pub startup_contract_enforces_fail_closed: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 struct MemoryBridgeInstallSummary {
     bridge_path: PathBuf,
@@ -516,6 +532,111 @@ fn load_install_state(repo_root: &Path) -> Result<Option<InstallState>> {
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let state = serde_json::from_str(&content).context("failed to parse install state json")?;
     Ok(Some(state))
+}
+
+pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<StartupArtifactAudit>> {
+    let Some(state) = load_install_state(repo_root)? else {
+        return Ok(None);
+    };
+    let expected_contract_sha = startup_contract_sha256(&mcp::project_chat_startup_contract())?;
+    let startup_instruction_path = state.startup_instruction_path.as_ref().map(PathBuf::from);
+    let startup_instruction_exists = startup_instruction_path
+        .as_ref()
+        .map(|path| path.is_file())
+        .unwrap_or(false);
+    let (
+        startup_instruction_contains_expected_sha,
+        startup_instruction_contains_required_before_tool_call,
+        startup_instruction_contains_missing_fail_closed,
+        startup_instruction_contains_sha_mismatch_fail_closed,
+    ) = if startup_instruction_exists {
+        let path = startup_instruction_path
+            .as_ref()
+            .expect("startup instruction path must exist when marked present");
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        (
+            Some(content.contains(&format!(
+                "startup_contract_sha256 = \"{expected_contract_sha}\""
+            ))),
+            Some(content.contains("workspace_contract_required_before_tool_call = true")),
+            Some(content.contains("missing_or_unreadable_fail_closed = true")),
+            Some(content.contains("sha256_mismatch_fail_closed = true")),
+        )
+    } else {
+        (None, None, None, None)
+    };
+
+    let startup_contract_path = state.startup_contract_path.as_ref().map(PathBuf::from);
+    let startup_contract_exists = startup_contract_path
+        .as_ref()
+        .map(|path| path.is_file())
+        .unwrap_or(false);
+    let (startup_contract_sha_matches_current_contract, startup_contract_enforces_fail_closed) =
+        if startup_contract_exists {
+            let path = startup_contract_path
+                .as_ref()
+                .expect("startup contract path must exist when marked present");
+            let content = fs::read_to_string(path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            let payload: Value = serde_json::from_str(&content)
+                .with_context(|| format!("failed to parse {}", path.display()))?;
+            let artifact_sha = payload["startup_contract_sha256"].as_str();
+            let artifact_fail_closed = payload["startup_contract"]["artifact_enforcement"]
+                ["missing_or_unreadable_fail_closed"]
+                .as_bool()
+                .unwrap_or(false)
+                && payload["startup_contract"]["artifact_enforcement"]
+                    ["sha256_mismatch_fail_closed"]
+                    .as_bool()
+                    .unwrap_or(false)
+                && payload["startup_contract"]["artifact_enforcement"]
+                    ["workspace_contract_required_before_tool_call"]
+                    .as_bool()
+                    .unwrap_or(false);
+            (
+                Some(artifact_sha == Some(expected_contract_sha.as_str())),
+                Some(artifact_fail_closed),
+            )
+        } else {
+            (None, None)
+        };
+
+    let install_state_sha_matches_current_contract =
+        state.startup_contract_sha256.as_deref().map(|sha| sha == expected_contract_sha);
+    let status = if !startup_instruction_exists {
+        "missing_startup_instruction".to_string()
+    } else if !startup_contract_exists {
+        "missing_startup_contract".to_string()
+    } else if startup_instruction_contains_expected_sha != Some(true)
+        || startup_instruction_contains_required_before_tool_call != Some(true)
+        || startup_instruction_contains_missing_fail_closed != Some(true)
+        || startup_instruction_contains_sha_mismatch_fail_closed != Some(true)
+    {
+        "startup_instruction_drift".to_string()
+    } else if startup_contract_sha_matches_current_contract != Some(true)
+        || install_state_sha_matches_current_contract != Some(true)
+        || startup_contract_enforces_fail_closed != Some(true)
+    {
+        "startup_contract_drift".to_string()
+    } else {
+        "ok".to_string()
+    };
+
+    Ok(Some(StartupArtifactAudit {
+        status,
+        startup_instruction_path,
+        startup_instruction_exists,
+        startup_instruction_contains_expected_sha,
+        startup_instruction_contains_required_before_tool_call,
+        startup_instruction_contains_missing_fail_closed,
+        startup_instruction_contains_sha_mismatch_fail_closed,
+        startup_contract_path,
+        startup_contract_exists,
+        startup_contract_sha_matches_current_contract,
+        install_state_sha_matches_current_contract,
+        startup_contract_enforces_fail_closed,
+    }))
 }
 
 fn save_install_state(repo_root: &Path, state: &InstallState) -> Result<()> {
@@ -2024,13 +2145,16 @@ fn maybe_backup_user_global(path: &Path, install_scope: &str) -> Result<Option<P
 mod tests {
     use crate::mcp;
     use super::{
-        detection_score, env_keys, expand_target_template, install_scope_status,
+        detection_score, env_keys, expand_target_template, inspect_startup_artifacts,
+        install_scope_status,
+        save_install_state,
         merge_managed_startup_block, render_startup_contract_artifact, render_startup_instructions,
         resolve_client_target, resolve_output_path, startup_contract_artifact_path,
         startup_contract_sha256,
-        strip_managed_startup_block, working_state_reason_summary,
+        strip_managed_startup_block, working_state_reason_summary, InstallState,
     };
     use serde_json::{Value, json};
+    use std::fs;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -2206,6 +2330,79 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             payload["startup_contract"]["resume_enforcement"]["required_action_kind_when_resume_required"],
             json!("resume_required_return_task")
         );
+    }
+
+    #[test]
+    fn startup_artifact_audit_reports_ok_for_matching_install_state() {
+        let unique = format!(
+            "amai-startup-artifact-audit-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_nanos()
+        );
+        let repo = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&repo).expect("temp repo");
+
+        let startup_contract_path = startup_contract_artifact_path(&repo);
+        if let Some(parent) = startup_contract_path.parent() {
+            fs::create_dir_all(parent).expect("startup contract dir");
+        }
+        let (contract_text, contract_sha) =
+            render_startup_contract_artifact(&repo).expect("startup contract");
+        fs::write(&startup_contract_path, contract_text).expect("write startup contract");
+
+        let startup_instruction_path = repo.join(".github/instructions/amai-continuity-startup.instructions.md");
+        if let Some(parent) = startup_instruction_path.parent() {
+            fs::create_dir_all(parent).expect("startup instruction dir");
+        }
+        let startup_instructions =
+            render_startup_instructions(&repo, "VS Code", "vscode", "vscode_instructions_md")
+                .expect("startup instructions");
+        fs::write(&startup_instruction_path, startup_instructions).expect("write startup instructions");
+
+        save_install_state(
+            &repo,
+            &InstallState {
+                package_version: "0.1.0".to_string(),
+                repo_revision: "test".to_string(),
+                client_key: "vscode".to_string(),
+                client_config: repo.join(".vscode/mcp.json").display().to_string(),
+                stack_profile: "default".to_string(),
+                installed_at_epoch_seconds: 1,
+                memory_bridge_path: None,
+                memory_bridge_backup_path: None,
+                startup_instruction_path: Some(startup_instruction_path.display().to_string()),
+                startup_instruction_status: Some("managed_workspace_instruction_installed".to_string()),
+                startup_contract_path: Some(startup_contract_path.display().to_string()),
+                startup_contract_status: Some("workspace_startup_contract_materialized".to_string()),
+                startup_contract_sha256: Some(contract_sha),
+            },
+        )
+        .expect("save install state");
+
+        let audit = inspect_startup_artifacts(&repo)
+            .expect("startup artifact audit")
+            .expect("startup artifact audit payload");
+        assert_eq!(audit.status, "ok");
+        assert_eq!(audit.startup_instruction_contains_expected_sha, Some(true));
+        assert_eq!(
+            audit.startup_instruction_contains_required_before_tool_call,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_missing_fail_closed,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_sha_mismatch_fail_closed,
+            Some(true)
+        );
+        assert_eq!(audit.startup_contract_sha_matches_current_contract, Some(true));
+        assert_eq!(audit.install_state_sha_matches_current_contract, Some(true));
+        assert_eq!(audit.startup_contract_enforces_fail_closed, Some(true));
+
+        fs::remove_dir_all(&repo).expect("cleanup temp repo");
     }
 
     #[test]

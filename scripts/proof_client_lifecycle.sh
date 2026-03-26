@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 
 temp_home="$(mktemp -d)"
 trap 'rm -rf "${temp_home}"' EXIT
+export AMAI_INSTALL_STATE_PATH="${temp_home}/install_state.json"
 
 RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"

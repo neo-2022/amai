@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:21 MSK
-Ручная сверка guide/docs: 2026-03-26 03:21 MSK
+modified_at: 2026-03-26 03:30 MSK
+Ручная сверка guide/docs: 2026-03-26 03:30 MSK
 
 # Operations
 
@@ -841,6 +841,16 @@ cargo run -- mcp serve
   supported client не имеет права делать `amai_continuity_startup`, если workspace contract artifact
   пропал, не читается или не совпадает по pinned hash; correct behavior здесь fail-closed stop, а
   не fallback на старый markdown/rule block.
+- этот же contour теперь обязан быть виден и в обычном `amai status`:
+  строка `startup_artifacts: ...` показывает, есть ли managed startup instruction, совпадает ли
+  текущий workspace contract с pinned hash из install state и не потерялись ли literal
+  fail-closed flags в artifact/instruction layer.
+- truthful интерпретация status такая:
+  - `ok` — managed startup artifact на месте и contract drift не обнаружен;
+  - `missing_startup_instruction` — onboarding когда-то materialized startup artifact, но сейчас он
+    снят или пропал;
+  - `startup_instruction_drift` или `startup_contract_drift` — artifact жив, но уже не совпадает с
+    текущим contract/enforcement baseline.
 - тот же `amai_protocol_manifest` теперь несёт `error_contracts`, а `tools/call`
   и JSON-RPC errors отдают machine-readable taxonomy вместо голого текста:
   `invalid_json_rpc_payload`, `invalid_request`, `method_not_found`,
