@@ -30,7 +30,10 @@ grep -q 'lease_owner_state' AGENTS.md
 grep -q 'previous_session_owner' AGENTS.md
 grep -q 'resume_required_return_task' AGENTS.md
 grep -q 'required_return_task' AGENTS.md
+grep -q 'startup_contract_sha256 = "' AGENTS.md
+grep -q 'workspace_contract_required_before_tool_call = true' AGENTS.md
 grep -q 'missing_or_unreadable_fail_closed = true' AGENTS.md
+grep -q 'sha256_mismatch_fail_closed = true' AGENTS.md
 grep -q 'project_task_tree' AGENTS.md
 grep -q 'project_task_ledger' AGENTS.md
 
@@ -61,7 +64,10 @@ grep -q 'lease_owner_state' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'previous_session_owner' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'resume_required_return_task' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'required_return_task' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'startup_contract_sha256 = "' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'workspace_contract_required_before_tool_call = true' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'missing_or_unreadable_fail_closed = true' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'sha256_mismatch_fail_closed = true' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'project_task_tree' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'project_task_ledger' .cursor/rules/amai-continuity-startup.mdc
 
@@ -93,7 +99,10 @@ grep -q 'lease_owner_state' CLAUDE.md
 grep -q 'previous_session_owner' CLAUDE.md
 grep -q 'resume_required_return_task' CLAUDE.md
 grep -q 'required_return_task' CLAUDE.md
+grep -q 'startup_contract_sha256 = "' CLAUDE.md
+grep -q 'workspace_contract_required_before_tool_call = true' CLAUDE.md
 grep -q 'missing_or_unreadable_fail_closed = true' CLAUDE.md
+grep -q 'sha256_mismatch_fail_closed = true' CLAUDE.md
 grep -q 'project_task_tree' CLAUDE.md
 grep -q 'project_task_ledger' CLAUDE.md
 
