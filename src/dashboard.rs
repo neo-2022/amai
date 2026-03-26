@@ -3302,6 +3302,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if let Some(row) = client_limit_explicit_boundary_metric_row(current_session_alignment) {
         session_rows.push(row);
     }
+    if let Some(row) = client_limit_boundary_tokens_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
     let mut session_card = card_with_rows(
         "Экономия токенов за текущую сессию",
         format_signed_count(session_saved),
@@ -3361,6 +3364,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         rolling_rows.push(row);
     }
     if let Some(row) = client_limit_explicit_boundary_metric_row(rolling_window_alignment) {
+        rolling_rows.push(row);
+    }
+    if let Some(row) = client_limit_boundary_tokens_metric_row(rolling_window_alignment) {
         rolling_rows.push(row);
     }
     let mut rolling_card = card_with_rows(
@@ -3424,6 +3430,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         lifetime_rows.push(row);
     }
     if let Some(row) = client_limit_explicit_boundary_metric_row(lifetime_alignment) {
+        lifetime_rows.push(row);
+    }
+    if let Some(row) = client_limit_boundary_tokens_metric_row(lifetime_alignment) {
         lifetime_rows.push(row);
     }
     let mut lifetime_card = card_with_rows(
@@ -6176,6 +6185,36 @@ fn client_limit_explicit_boundary_metric_row(alignment: &Value) -> Option<Value>
     ))
 }
 
+fn client_limit_boundary_tokens_metric_row(alignment: &Value) -> Option<Value> {
+    if alignment["explicit_boundary_surface"]["state"].as_str() != Some("amai_continuity_boundary")
+    {
+        return None;
+    }
+    let boundary_components = alignment["explicit_boundary_surface"]["components"].as_array()?;
+    let observed_tokens = alignment["baseline_equivalence"]["component_semantics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            item["code"]
+                .as_str()
+                .is_some_and(|code| boundary_components.iter().any(|component| component.as_str() == Some(code)))
+        })
+        .filter(|item| item["whole_cycle_observed_complete"].as_bool() == Some(true))
+        .filter_map(|item| item["observed_tokens"].as_u64())
+        .sum::<u64>();
+    if observed_tokens == 0 {
+        return None;
+    }
+    Some(metric_row(
+        "Токены continuity boundary",
+        format!("{} токенов вне strict client-meter slice", format_u64(Some(observed_tokens))),
+        Some(
+            "Этот ряд показывает observed token weight для Amai-specific continuity boundary. Эти токены уже честно видны в agent cycle, но не входят в strict same-meter client slice, пока для них нет truthful pre-Amai baseline-equivalent модели.",
+        ),
+    ))
+}
+
 fn human_client_limit_component(code: &str) -> Option<&'static str> {
     match code {
         "client_prompt" => Some("исходный запрос клиента"),
@@ -8316,6 +8355,34 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("continuity-restore overhead вне retrieval")
+        );
+
+        let boundary_tokens_row =
+            super::client_limit_boundary_tokens_metric_row(&json!({
+                "explicit_boundary_surface": {
+                    "state": "amai_continuity_boundary",
+                    "components": ["continuity_restore_outside_retrieval"]
+                },
+                "baseline_equivalence": {
+                    "component_semantics": [
+                        {
+                            "code": "continuity_restore_outside_retrieval",
+                            "whole_cycle_observed_complete": true,
+                            "observed_tokens": 50329
+                        }
+                    ]
+                }
+            }))
+            .expect("boundary tokens row");
+        assert_eq!(
+            boundary_tokens_row["label"].as_str(),
+            Some("Токены continuity boundary")
+        );
+        assert!(
+            boundary_tokens_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("50329")
         );
     }
 

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 15:03 MSK
-Ручная сверка guide/docs: 2026-03-26 15:03 MSK
+modified_at: 2026-03-26 15:09 MSK
+Ручная сверка guide/docs: 2026-03-26 15:09 MSK
 
 # Token Ledger
 
@@ -513,6 +513,13 @@ truthful/measured contour:
 
 Он нужен затем, чтобы explicit continuity boundary не терялась внутри общего
 `baseline_equivalence` и не выглядела как обычный missing implementation gap.
+
+Dashboard hero-cards теперь обязаны поднимать рядом ещё и отдельный user-facing row
+`Токены continuity boundary`, если boundary-state = `amai_continuity_boundary` и observed
+tokens для этого компонента уже есть.
+
+Он нужен затем, чтобы Amai-specific continuity boundary была видна не только как причина
+non-equivalent state, но и как отдельный non-client-meter token rollup.
 
 `component_event_coverage` теперь обязан быть `target-aware`, а не делить каждый
 whole-cycle компонент на одинаковое число всех live events.

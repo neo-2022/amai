@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 15:03 MSK
-Ручная сверка guide/docs: 2026-03-26 15:03 MSK
+modified_at: 2026-03-26 15:09 MSK
+Ручная сверка guide/docs: 2026-03-26 15:09 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1602,6 +1602,9 @@ preview, а не только raw count.
       даже когда `continuity_restore` остаётся explicit boundary;
     - и рядом поднимают `explicit_boundary_surface`, чтобы Amai-specific continuity
       boundary была first-class surfaced отдельно от общего baseline-gap;
+    - и теперь отдельно поднимают observed row `Токены continuity boundary`, чтобы вес
+      Amai-specific continuity boundary был виден не только как blocker state, но и как
+      отдельный non-client-meter token rollup;
     - и отдельно объясняют, что even confirmed lower bound всё ещё не обязан
       двигаться вместе с внешней шкалой клиентского лимита.
   - preview, settlement report preview и evidence pack теперь ещё несут общий
