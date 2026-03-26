@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -8347,41 +8348,17 @@ fn dashboard_report_signature_components(
     lifetime_assistant_scope: &AssistantGenerationScopeObservation,
 ) -> DashboardReportSignatureComponents {
     DashboardReportSignatureComponents {
-        current_session_events: hex_sha256(
-            &serde_json::to_vec(&dashboard_report_event_signature_payload(
-                current_session_events,
-            ))
-            .unwrap_or_else(|_| b"dashboard_current_session_events".to_vec()),
+        current_session_events: dashboard_report_events_signature(current_session_events),
+        rolling_window_events: dashboard_report_events_signature(rolling_window_events),
+        lifetime_events: dashboard_report_events_signature(lifetime_events),
+        current_session_assistant_scope: dashboard_report_assistant_scope_signature(
+            current_session_assistant_scope,
         ),
-        rolling_window_events: hex_sha256(
-            &serde_json::to_vec(&dashboard_report_event_signature_payload(
-                rolling_window_events,
-            ))
-            .unwrap_or_else(|_| b"dashboard_rolling_window_events".to_vec()),
-        ),
-        lifetime_events: hex_sha256(
-            &serde_json::to_vec(&dashboard_report_event_signature_payload(lifetime_events))
-                .unwrap_or_else(|_| b"dashboard_lifetime_events".to_vec()),
-        ),
-        current_session_assistant_scope: hex_sha256(
-            &serde_json::to_vec(&dashboard_report_assistant_scope_signature_payload(
-                current_session_assistant_scope,
-            ))
-            .unwrap_or_else(|_| b"dashboard_current_session_scope".to_vec()),
-        ),
-        rolling_window_assistant_scope: hex_sha256(
-            &serde_json::to_vec(
-                &rolling_window_assistant_scope
-                    .map(dashboard_report_assistant_scope_signature_payload)
-                    .unwrap_or(Value::Null),
-            )
-            .unwrap_or_else(|_| b"dashboard_rolling_window_scope".to_vec()),
-        ),
-        lifetime_assistant_scope: hex_sha256(
-            &serde_json::to_vec(&dashboard_report_assistant_scope_signature_payload(
-                lifetime_assistant_scope,
-            ))
-            .unwrap_or_else(|_| b"dashboard_lifetime_scope".to_vec()),
+        rolling_window_assistant_scope: rolling_window_assistant_scope
+            .map(dashboard_report_assistant_scope_signature)
+            .unwrap_or_else(|| hex_sha256(b"dashboard_rolling_window_scope:null")),
+        lifetime_assistant_scope: dashboard_report_assistant_scope_signature(
+            lifetime_assistant_scope,
         ),
     }
 }
@@ -8461,68 +8438,91 @@ fn refresh_dashboard_report_scope_age(
     );
 }
 
-fn dashboard_report_event_signature_payload(events: &[TokenBudgetEvent]) -> Value {
-    Value::Array(
-        events
-            .iter()
-            .map(|event| {
-                json!({
-                    "created_at_epoch_ms": event.created_at_epoch_ms,
-                    "event_id": event.event_id,
-                    "correlation_id": event.correlation_id,
-                    "session_id": event.session_id,
-                    "source_kind": event.source_kind,
-                    "traffic_class": event.traffic_class,
-                    "measurement_scope": event.measurement_scope,
-                    "query": event.query,
-                    "query_type": event.query_type,
-                    "target_kind": event.target_kind,
-                    "tokenizer": event.tokenizer,
-                    "latency_ms": event.latency_ms,
-                    "saved_tokens": event.saved_tokens,
-                    "naive_tokens": event.naive_tokens,
-                    "context_tokens": event.context_tokens,
-                    "recovery_tokens": event.recovery_tokens,
-                    "effective_saved_tokens": event.effective_saved_tokens,
-                    "quality_ok": event.quality_ok,
-                    "quality_method": event.quality_method,
-                    "quality_tier": event.quality_tier,
-                    "head_hit_target": event.head_hit_target,
-                    "needed_followup": event.needed_followup,
-                    "resolved_by_event_id": event.resolved_by_event_id,
-                    "fallback_triggered": event.fallback_triggered,
-                    "document_hits": event.document_hits,
-                    "symbol_hits_count": event.symbol_hits_count,
-                    "file_hits": event.file_hits,
-                    "sources_count": event.sources_count,
-                    "chunks_count": event.chunks_count,
-                    "client_prompt_tokens": event.client_prompt_tokens,
-                    "assistant_generation_tokens": event.assistant_generation_tokens,
-                    "tool_overhead_tokens": event.tool_overhead_tokens,
-                    "continuity_restore_tokens": event.continuity_restore_tokens,
-                })
-            })
-            .collect(),
-    )
+fn dashboard_report_events_signature(events: &[TokenBudgetEvent]) -> String {
+    let mut buffer = String::new();
+    for event in events {
+        let parts = [
+            event.created_at_epoch_ms.to_string(),
+            event.event_id.clone(),
+            event.correlation_id.clone(),
+            event.session_id.clone(),
+            event.source_kind.clone(),
+            event.traffic_class.clone(),
+            event.measurement_scope.clone(),
+            event.query.clone(),
+            event.query_type.clone(),
+            event.target_kind.clone(),
+            event.tokenizer.clone(),
+            event.latency_ms.to_string(),
+            event.saved_tokens.to_string(),
+            event.naive_tokens.to_string(),
+            event.context_tokens.to_string(),
+            event.recovery_tokens.to_string(),
+            event.effective_saved_tokens.to_string(),
+            event.quality_ok.to_string(),
+            event.quality_method.clone(),
+            event.quality_tier.clone(),
+            event.head_hit_target.to_string(),
+            event.needed_followup.to_string(),
+            event.resolved_by_event_id.clone().unwrap_or_default(),
+            event.fallback_triggered.to_string(),
+            event.document_hits.to_string(),
+            event.symbol_hits_count.to_string(),
+            event.file_hits.to_string(),
+            event.sources_count.to_string(),
+            event.chunks_count.to_string(),
+            event
+                .client_prompt_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            event
+                .assistant_generation_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            event
+                .tool_overhead_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            event
+                .continuity_restore_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ];
+        buffer.push_str(&parts.join("\\u{1f}"));
+        buffer.push('\u{1e}');
+    }
+    hex_sha256(buffer.as_bytes())
 }
 
-fn dashboard_report_assistant_scope_signature_payload(
+fn dashboard_report_assistant_scope_signature(
     scope: &AssistantGenerationScopeObservation,
-) -> Value {
-    json!({
-        "target_group_count": scope.target_group_count,
-        "observed_group_count": scope.observed_group_count,
-        "observed_tokens": scope.observed_tokens,
-        "target_context_pack_ids": scope.target_context_pack_ids,
-        "matched_context_pack_ids": scope.matched_context_pack_ids,
-        "unmatched_context_pack_ids": scope.unmatched_context_pack_ids,
-        "matched_turn_ids": scope.matched_turn_ids,
-        "available_turns": scope.available_turns,
-        "available_direct_turns": scope.available_direct_turns,
-        "available_rollout_turns": scope.available_rollout_turns,
-        "matched_direct_turn_ids": scope.matched_direct_turn_ids,
-        "matched_rollout_turn_ids": scope.matched_rollout_turn_ids,
-    })
+) -> String {
+    let mut buffer = String::new();
+    let header = [
+        scope.target_group_count.to_string(),
+        scope.observed_group_count.to_string(),
+        scope.observed_tokens.to_string(),
+        scope.available_turns.to_string(),
+        scope.available_direct_turns.to_string(),
+        scope.available_rollout_turns.to_string(),
+        scope.target_context_pack_ids.len().to_string(),
+    ];
+    buffer.push_str(&header.join("\\u{1f}"));
+    buffer.push('\u{1f}');
+    append_sorted_signature_items(&mut buffer, &scope.target_context_pack_ids);
+    append_sorted_signature_items(&mut buffer, &scope.matched_context_pack_ids);
+    append_sorted_signature_items(&mut buffer, &scope.unmatched_context_pack_ids);
+    append_sorted_signature_items(&mut buffer, &scope.matched_turn_ids);
+    append_sorted_signature_items(&mut buffer, &scope.matched_direct_turn_ids);
+    append_sorted_signature_items(&mut buffer, &scope.matched_rollout_turn_ids);
+    hex_sha256(buffer.as_bytes())
+}
+
+fn append_sorted_signature_items(buffer: &mut String, values: &BTreeSet<String>) {
+    for value in values {
+        let _ = write!(buffer, "{}\u{1f}", value);
+    }
+    buffer.push('\u{1e}');
 }
 
 fn dashboard_report_cache_debug(
