@@ -1,5 +1,5 @@
-modified_at = "2026-03-26 15:12 MSK"
-"Ручная сверка guide/docs" = "2026-03-26 15:12 MSK"
+modified_at = "2026-03-26 15:20 MSK"
+"Ручная сверка guide/docs" = "2026-03-26 15:20 MSK"
 
 default_profile = "local_default"
 
@@ -56,8 +56,8 @@ rate_card_binding_model_version = "rate-card-binding-v3"
 rate_card_version = "unpriced-v1"
 currency_profile = "unpriced"
 settlement_status = "unsettled_report_only"
-contractual_statement_export_version = "contractual-statement-export-v19"
-settlement_report_preview_version = "settlement-report-preview-v10"
+contractual_statement_export_version = "contractual-statement-export-v20"
+settlement_report_preview_version = "settlement-report-preview-v11"
 contractual_evidence_pack_version = "contractual-evidence-pack-v19"
 
 [profiles.local_default]

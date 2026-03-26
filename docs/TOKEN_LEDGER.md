@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 15:12 MSK
-Ручная сверка guide/docs: 2026-03-26 15:12 MSK
+modified_at: 2026-03-26 15:20 MSK
+Ручная сверка guide/docs: 2026-03-26 15:20 MSK
 
 # Token Ledger
 
@@ -1331,8 +1331,8 @@ Hashes по line items нужны затем, чтобы:
 - и только потом, в будущем, settlement/dispute workflow.
 
 Текущие surface versions для этого слоя:
-- `contractual-statement-export-v19`
-- `settlement-report-preview-v10`
+- `contractual-statement-export-v20`
+- `settlement-report-preview-v11`
 - `contractual-evidence-pack-v19`
 - `client-limit-meter-alignment-v9`
 - `client-limit-baseline-equivalence-v3`
@@ -1340,6 +1340,20 @@ Hashes по line items нужны затем, чтобы:
 - `client-limit-explicit-boundary-surface-v1`
 - `client-limit-continuity-boundary-rollup-v1`
 - `adjustment-activation-governance-v1`
+
+Начиная с этих версий customer-facing export/report surface больше не держит
+`continuity boundary` только внутри dashboard:
+- `statement_export_preview`
+- `settlement_report_preview`
+
+теперь отдельно несут compact `client_limit_boundary_semantics`, где есть:
+- `strict_client_meter_slice`
+- `explicit_boundary_surface`
+- `continuity_boundary_rollup`
+
+Это нужно затем, чтобы customer/audit preview видел честную границу между:
+- measured strict same-meter lower bound;
+- и Amai-specific continuity boundary вне strict client-meter slice.
 
 Теперь те же customer-facing surface-ы ещё несут `adjustment_activation_governance`.
 Это отдельный report-only governance слой, который показывает:

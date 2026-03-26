@@ -782,11 +782,11 @@ fn default_contractual_evidence_pack_version() -> String {
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v19".to_string()
+    "contractual-statement-export-v20".to_string()
 }
 
 fn default_settlement_report_preview_version() -> String {
-    "settlement-report-preview-v10".to_string()
+    "settlement-report-preview-v11".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -5495,6 +5495,63 @@ fn build_statement_preview(
     })
 }
 
+fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Value {
+    let alignment = &statement_preview["client_limit_meter_alignment"];
+    let explicit_boundary_surface = alignment["explicit_boundary_surface"].clone();
+    let continuity_boundary_rollup = alignment["continuity_boundary_rollup"].clone();
+    let strict_client_meter_slice = alignment["strict_client_meter_slice"].clone();
+    let review_state = match (
+        continuity_boundary_rollup["state"].as_str().unwrap_or("unknown"),
+        explicit_boundary_surface["state"].as_str().unwrap_or("unknown"),
+        strict_client_meter_slice["state"].as_str().unwrap_or("unknown"),
+    ) {
+        ("amai_continuity_boundary_observed", "amai_continuity_boundary", _) => {
+            "strict_slice_plus_observed_amai_continuity_boundary"
+        }
+        ("amai_continuity_boundary_present_without_tokens", "amai_continuity_boundary", _) => {
+            "strict_slice_plus_empty_amai_continuity_boundary"
+        }
+        (_, "amai_continuity_boundary", _) => "amai_continuity_boundary_present",
+        (_, "no_explicit_boundary", "strict_slice_covers_all_applicable_components") => {
+            "strict_slice_covers_all_applicable_components"
+        }
+        (_, "no_explicit_boundary", "strict_slice_partial_lower_bound") => {
+            "strict_slice_partial_without_explicit_boundary"
+        }
+        _ => "client_limit_boundary_review_unknown",
+    };
+    let note = match review_state {
+        "strict_slice_plus_observed_amai_continuity_boundary" => {
+            "Strict client-meter slice уже measured, а Amai-specific continuity boundary вынесена отдельно как observed token weight вне same-meter slice."
+        }
+        "strict_slice_plus_empty_amai_continuity_boundary" => {
+            "Amai continuity boundary уже объявлена как explicit boundary, но в текущем scope у неё ещё нет observed token weight."
+        }
+        "amai_continuity_boundary_present" => {
+            "В этом scope остаётся explicit Amai continuity boundary, поэтому full same-meter equivalence с клиентским лимитом честно не заявляется."
+        }
+        "strict_slice_covers_all_applicable_components" => {
+            "В этом scope strict client-meter slice покрывает все applicable components без отдельной explicit boundary."
+        }
+        "strict_slice_partial_without_explicit_boundary" => {
+            "Strict client-meter slice уже materialized, но пока покрывает только часть applicable components и не должен выдаваться за полный client-limit meter."
+        }
+        _ => {
+            "Этот surface оставляет boundary semantics отдельным review/export слоем: он показывает measured strict slice и explicit continuity boundary без operational same-meter детализации."
+        }
+    };
+    json!({
+        "same_meter_as_client_limit": false,
+        "alignment_state": alignment["alignment_state"].clone(),
+        "baseline_equivalence_state": alignment["baseline_equivalence"]["state"].clone(),
+        "review_state": review_state,
+        "strict_client_meter_slice": strict_client_meter_slice,
+        "explicit_boundary_surface": explicit_boundary_surface,
+        "continuity_boundary_rollup": continuity_boundary_rollup,
+        "note": note,
+    })
+}
+
 fn build_dashboard_statement_preview(
     scope_code: &str,
     scope_label: &str,
@@ -5679,6 +5736,7 @@ fn build_settlement_report_preview(
         "final_amount": statement_preview["final_amount"].clone(),
         "currency_profile": statement_export_preview["currency_profile"].clone(),
         "external_truth_manifest_hash": external_truth_manifest["manifest_hash"].clone(),
+        "client_limit_boundary_semantics": statement_export_preview["client_limit_boundary_semantics"].clone(),
         "customer_contractual_boundary": build_customer_contractual_boundary_from_export(
             contract,
             "customer_settlement_report_preview_report_only",
@@ -6038,6 +6096,7 @@ fn build_statement_export_preview(
             "customer_visible_sections": [
                 "statement_preview_id",
                 "settlement_report_preview",
+                "client_limit_boundary_semantics",
                 "contractual_state",
                 "coverage_state",
                 "external_truth_manifest",
@@ -6071,13 +6130,20 @@ fn build_statement_export_preview(
             }
         )),
     );
+    let line_item_surfaces = json!({
+        "statement_preview": statement_preview,
+        "reconciliation_preview": reconciliation_preview,
+        "margin_scope": margin_scope,
+    });
+    let client_limit_boundary_semantics =
+        build_client_limit_boundary_review_surface(&line_item_surfaces["statement_preview"]);
     insert(
         "line_item_surfaces",
-        json!({
-            "statement_preview": statement_preview,
-            "reconciliation_preview": reconciliation_preview,
-            "margin_scope": margin_scope,
-        }),
+        line_item_surfaces,
+    );
+    insert(
+        "client_limit_boundary_semantics",
+        client_limit_boundary_semantics,
     );
     insert(
         "note",
@@ -17553,6 +17619,33 @@ effective_to_epoch_ms = 2000
                             "status": "not_configured",
                             "pending_entries_count": 0,
                             "disputed_entries_count": 0,
+                        },
+                        "client_limit_meter_alignment": {
+                            "alignment_state": "whole_cycle_observed_explicit_boundary_not_meter_equivalent",
+                            "baseline_equivalence": {
+                                "state": "baseline_component_semantics_explicit_boundary"
+                            },
+                            "strict_client_meter_slice": {
+                                "model_version": "client-limit-strict-meter-slice-v1",
+                                "state": "strict_slice_partial_lower_bound",
+                                "same_meter_equivalent_for_slice": true,
+                                "lower_bound_tokens": 320,
+                                "components": ["client_prompt"],
+                                "explicit_boundary_components": ["continuity_restore_outside_retrieval"],
+                                "missing_components": []
+                            },
+                            "explicit_boundary_surface": {
+                                "model_version": "client-limit-explicit-boundary-surface-v1",
+                                "state": "amai_continuity_boundary",
+                                "components": ["continuity_restore_outside_retrieval"]
+                            },
+                            "continuity_boundary_rollup": {
+                                "model_version": "client-limit-continuity-boundary-rollup-v1",
+                                "state": "amai_continuity_boundary_observed",
+                                "components": ["continuity_restore_outside_retrieval"],
+                                "observed_tokens": 50329,
+                                "observed_live_events": 80
+                            }
                         }
                     }
                 },
@@ -17682,7 +17775,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v19");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v20");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -17851,6 +17944,14 @@ effective_to_epoch_ms = 2000
             preview["export_semantics"]["operational_telemetry_included"],
             false
         );
+        assert_eq!(
+            preview["client_limit_boundary_semantics"]["review_state"],
+            "strict_slice_plus_observed_amai_continuity_boundary"
+        );
+        assert_eq!(
+            preview["client_limit_boundary_semantics"]["continuity_boundary_rollup"]["observed_tokens"],
+            50329
+        );
         assert_eq!(preview["included_events_count"], 1);
         assert_eq!(preview["excluded_events_count"], 1);
         assert_eq!(
@@ -17862,7 +17963,11 @@ effective_to_epoch_ms = 2000
         assert_eq!(preview["evidence_pack_available"], true);
         assert_eq!(
             preview["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v10"
+            "settlement-report-preview-v11"
+        );
+        assert_eq!(
+            preview["settlement_report_preview"]["client_limit_boundary_semantics"]["continuity_boundary_rollup"]["observed_tokens"],
+            50329
         );
         assert_eq!(
             preview["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],
@@ -18000,7 +18105,7 @@ effective_to_epoch_ms = 2000
                 "statement_export_previews": {
                     "lifetime": {
                         "settlement_report_preview": {
-                            "model_version": "settlement-report-preview-v10",
+                            "model_version": "settlement-report-preview-v11",
                             "settlement_report_id": "preview-hash"
                         },
                         "customer_contractual_boundary": {
@@ -18246,7 +18351,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             payload["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v10"
+            "settlement-report-preview-v11"
         );
         assert_eq!(
             payload["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 15:12 MSK
-Ручная сверка guide/docs: 2026-03-26 15:12 MSK
+modified_at: 2026-03-26 15:20 MSK
+Ручная сверка guide/docs: 2026-03-26 15:20 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1823,8 +1823,8 @@ preview, а не только raw count.
   - это уже customer-facing review surface с hashes и contract states, но всё ещё строго
     `report_only`, а не invoice.
   - export/evidence surface versions теперь подняты до:
-    - `contractual-statement-export-v19`
-    - `settlement-report-preview-v10`
+    - `contractual-statement-export-v20`
+    - `settlement-report-preview-v11`
     - `contractual-evidence-pack-v19`
   потому что customer-facing payload теперь уже явно различает:
     - `customer review ready`
@@ -1842,6 +1842,11 @@ preview, а не только raw count.
   - `client_limit_strict_meter_slice_version = client-limit-strict-meter-slice-v1`
   - `client_limit_explicit_boundary_surface_version = client-limit-explicit-boundary-surface-v1`
   - `client_limit_continuity_boundary_rollup_version = client-limit-continuity-boundary-rollup-v1`
+  - `statement_export_preview.json` и `settlement_report_preview.json` теперь отдельно несут
+    compact `client_limit_boundary_semantics` surface:
+    - measured `strict_client_meter_slice`
+    - explicit `continuity_boundary_rollup`
+    - без притворства, что этот boundary уже эквивалентен full client-limit meter
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
   - начиная с `v9/v3` слой ещё и честно поднимает `baseline_equivalence` как отдельный
