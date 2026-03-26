@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 11:44 MSK
-Ручная сверка guide/docs: 2026-03-26 11:44 MSK
+modified_at: 2026-03-26 11:50 MSK
+Ручная сверка guide/docs: 2026-03-26 11:50 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -723,6 +723,10 @@ http://127.0.0.1:9464/
       и assistant-scope contour;
     - при cache-hit живыми пересчитываются только age-поля текущих scope, поэтому steady-state
       refresh не должен снова уходить в cold rebuild только из-за wall-clock drift.
+  - отдельный token-events слой для dashboard теперь тоже переиспользуется по лёгкой DB summary,
+    а не заново читает и парсит весь `token_budget_event` ledger на каждом refresh:
+    - signature строится по `count + latest_created_at` для `token_budget_event / token_benchmark`;
+    - это снимает repeated cold parse даже при большом lifetime ledger.
   - machine summary теперь переиспользуется как cache до `60` секунд, чтобы human dashboard не
     зависал на `dmidecode/sysinfo`-хвосте и не раздувал long-lived `observe serve`.
   - при этом статическая host-инвентаризация памяти больше не должна заново ходить в `dmidecode`

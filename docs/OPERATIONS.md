@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 11:44 MSK
-Ручная сверка guide/docs: 2026-03-26 11:44 MSK
+modified_at: 2026-03-26 11:50 MSK
+Ручная сверка guide/docs: 2026-03-26 11:50 MSK
 
 # Operations
 
@@ -2865,6 +2865,11 @@ Grafana login берётся из `.env`:
       `current_session / rolling_window / lifetime` events и assistant-scope contour;
     - при cache-hit runtime обязан обновлять только live age-поля scope без полной пересборки
       отчёта, чтобы wall-clock drift сам по себе не возвращал cold rebuild;
+  - dashboard token ledger input тоже обязан жить через отдельный event-cache:
+    - перед полным `load_events()` runtime сначала читает дешёвую DB summary по
+      `token_budget_event / token_benchmark`;
+    - если `count + latest_created_at` не изменились, cached parsed events должны
+      переиспользоваться без нового полного ledger parse;
   - long-lived `observe serve` теперь обязан переиспользовать machine summary cache до `60` секунд;
   - static memory inventory provider chain (`sudo dmidecode`, `dmidecode`, `lshw`, `inxi`) теперь
     должен жить отдельно от минутного live cache:

@@ -124,6 +124,13 @@ pub struct ObservabilitySnapshotRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct ObservabilitySnapshotKindSummary {
+    pub snapshot_kind: String,
+    pub snapshots_count: i64,
+    pub latest_created_at_epoch_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ExecCtlTaskLedgerEntryRecord {
     pub ledger_entry_id: Uuid,
     pub source_snapshot_id: Option<Uuid>,
@@ -2223,6 +2230,39 @@ pub async fn list_observability_snapshots_by_kinds(
             snapshot_kind: row.get(1),
             payload: row.get(2),
             created_at_epoch_ms: row.get(3),
+        })
+        .collect())
+}
+
+pub async fn summarize_observability_snapshots_by_kinds(
+    client: &Client,
+    kinds: &[&str],
+) -> Result<Vec<ObservabilitySnapshotKindSummary>> {
+    if kinds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = client
+        .query(
+            r#"
+            SELECT
+                snapshot_kind,
+                COUNT(*)::bigint AS snapshots_count,
+                MAX((EXTRACT(EPOCH FROM created_at) * 1000)::bigint) AS latest_created_at_epoch_ms
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = ANY($1::text[])
+            GROUP BY snapshot_kind
+            ORDER BY snapshot_kind ASC
+            "#,
+            &[&kinds],
+        )
+        .await
+        .context("failed to summarize observability snapshots by kinds")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ObservabilitySnapshotKindSummary {
+            snapshot_kind: row.get(0),
+            snapshots_count: row.get(1),
+            latest_created_at_epoch_ms: row.get(2),
         })
         .collect())
 }

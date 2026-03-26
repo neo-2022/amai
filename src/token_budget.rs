@@ -34,6 +34,8 @@ static DASHBOARD_ASSISTANT_SCOPE_CACHE: OnceLock<Mutex<Option<DashboardAssistant
 static DASHBOARD_SAME_METER_SYNC_CACHE: OnceLock<Mutex<Option<DashboardSameMeterSyncCache>>> =
     OnceLock::new();
 static DASHBOARD_REPORT_CACHE: OnceLock<Mutex<Option<DashboardReportCache>>> = OnceLock::new();
+static DASHBOARD_TOKEN_EVENTS_CACHE: OnceLock<Mutex<Option<DashboardTokenEventsCache>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
 struct TokenBudgetConfigFile {
@@ -477,6 +479,14 @@ struct DashboardReportCache {
     repo_root: PathBuf,
     signature: String,
     report: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardTokenEventsCache {
+    repo_root: PathBuf,
+    signature: String,
+    include_verify_events: bool,
+    events: Vec<TokenBudgetEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -6841,7 +6851,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     let include_verify_events = config.measurement.include_verify_events_by_default;
     let (rollout_observation_signature, rollout_observations) =
         dashboard_rollout_assistant_generation_observations_for_repo(&repo_root)?;
-    let mut events = load_events(db, include_verify_events, None).await?;
+    let mut events = load_dashboard_token_events(db, &repo_root, include_verify_events).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
     let mut events =
         reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
@@ -6883,7 +6893,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
             (false, false)
         };
     if tool_overhead_changed || assistant_generation_changed {
-        let mut refreshed = load_events(db, include_verify_events, None).await?;
+        let mut refreshed = load_dashboard_token_events(db, &repo_root, include_verify_events).await?;
         refreshed.sort_by_key(|event| event.created_at_epoch_ms);
         events =
             reconcile_followup_recovery(&refreshed, profile.session_gap_minutes as i64 * 60_000);
@@ -9132,6 +9142,94 @@ async fn load_events(
         .into_iter()
         .filter(|event| include_traffic_class_in_report(&event.traffic_class, include_verify_events))
         .collect())
+}
+
+async fn load_dashboard_token_events(
+    db: &Client,
+    repo_root: &Path,
+    include_verify_events: bool,
+) -> Result<Vec<TokenBudgetEvent>> {
+    let signature = dashboard_token_events_signature(db, include_verify_events).await?;
+    if let Some(events) =
+        cached_dashboard_token_events(repo_root, &signature, include_verify_events)
+    {
+        return Ok(events);
+    }
+    let events = load_events(db, include_verify_events, None).await?;
+    store_dashboard_token_events(repo_root, &signature, include_verify_events, &events);
+    Ok(events)
+}
+
+async fn dashboard_token_events_signature(
+    db: &Client,
+    include_verify_events: bool,
+) -> Result<String> {
+    let summary =
+        postgres::summarize_observability_snapshots_by_kinds(db, &["token_budget_event", "token_benchmark"])
+            .await?;
+    Ok(dashboard_token_events_signature_from_summary(
+        &summary,
+        include_verify_events,
+    ))
+}
+
+fn dashboard_token_events_signature_from_summary(
+    summary: &[postgres::ObservabilitySnapshotKindSummary],
+    include_verify_events: bool,
+) -> String {
+    let payload = json!({
+        "include_verify_events": include_verify_events,
+        "summary": summary
+            .iter()
+            .map(|item| {
+                json!({
+                    "snapshot_kind": item.snapshot_kind,
+                    "snapshots_count": item.snapshots_count,
+                    "latest_created_at_epoch_ms": item.latest_created_at_epoch_ms,
+                })
+            })
+            .collect::<Vec<_>>(),
+    });
+    hex_sha256(
+        &serde_json::to_vec(&payload)
+            .unwrap_or_else(|_| payload.to_string().into_bytes()),
+    )
+}
+
+fn cached_dashboard_token_events(
+    repo_root: &Path,
+    signature: &str,
+    include_verify_events: bool,
+) -> Option<Vec<TokenBudgetEvent>> {
+    let cache = DASHBOARD_TOKEN_EVENTS_CACHE.get_or_init(|| Mutex::new(None));
+    let guard = cache.lock().ok()?;
+    let entry = guard.as_ref()?;
+    if canonical_repo_root(repo_root) == entry.repo_root
+        && entry.signature == signature
+        && entry.include_verify_events == include_verify_events
+    {
+        Some(entry.events.clone())
+    } else {
+        None
+    }
+}
+
+fn store_dashboard_token_events(
+    repo_root: &Path,
+    signature: &str,
+    include_verify_events: bool,
+    events: &[TokenBudgetEvent],
+) {
+    let cache = DASHBOARD_TOKEN_EVENTS_CACHE.get_or_init(|| Mutex::new(None));
+    let Some(mut guard) = cache.lock().ok() else {
+        return;
+    };
+    *guard = Some(DashboardTokenEventsCache {
+        repo_root: canonical_repo_root(repo_root),
+        signature: signature.to_string(),
+        include_verify_events,
+        events: events.to_vec(),
+    });
 }
 
 fn can_shadow_live_report_event(event: &TokenBudgetEvent) -> bool {
@@ -14018,7 +14116,8 @@ mod tests {
         configured_provider_usage_source, contractual_line_item_json,
         count_cli_context_pack_output_overhead_tokens, count_tool_overhead_tokens,
         current_session_events, dashboard_report_signature,
-        dashboard_same_meter_sync_signature, default_adjustment_preview_model_version,
+        dashboard_same_meter_sync_signature, dashboard_token_events_signature_from_summary,
+        default_adjustment_preview_model_version,
         default_adjustment_registry_version, default_adjustment_request_schema_version,
         default_backfill_policy_version, default_baseline_method_version, default_billing_mode,
         default_billing_policy_version, default_contractual_evidence_pack_version,
@@ -14044,7 +14143,7 @@ mod tests {
         repair_legacy_token_event_payload, report_contract_json, resolve_session_id,
         rewrite_token_ledger_source_kind_payload, summarize_events, suppress_shadowed_live_events,
     };
-    use crate::postgres::ObservabilitySnapshotRecord;
+    use crate::postgres::{ObservabilitySnapshotKindSummary, ObservabilitySnapshotRecord};
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -19236,6 +19335,39 @@ effective_to_epoch_ms = 2000
         );
 
         assert_ne!(left, right);
+    }
+
+    #[test]
+    fn dashboard_token_events_signature_changes_with_snapshot_summary() {
+        let base = vec![ObservabilitySnapshotKindSummary {
+            snapshot_kind: "token_budget_event".to_string(),
+            snapshots_count: 10,
+            latest_created_at_epoch_ms: Some(100),
+        }];
+        let changed_count = vec![ObservabilitySnapshotKindSummary {
+            snapshot_kind: "token_budget_event".to_string(),
+            snapshots_count: 11,
+            latest_created_at_epoch_ms: Some(100),
+        }];
+        let changed_latest = vec![ObservabilitySnapshotKindSummary {
+            snapshot_kind: "token_budget_event".to_string(),
+            snapshots_count: 10,
+            latest_created_at_epoch_ms: Some(101),
+        }];
+
+        let base_sig = dashboard_token_events_signature_from_summary(&base, false);
+        assert_ne!(
+            base_sig,
+            dashboard_token_events_signature_from_summary(&changed_count, false)
+        );
+        assert_ne!(
+            base_sig,
+            dashboard_token_events_signature_from_summary(&changed_latest, false)
+        );
+        assert_ne!(
+            base_sig,
+            dashboard_token_events_signature_from_summary(&base, true)
+        );
     }
 
     #[test]
