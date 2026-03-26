@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 10:41 MSK
-Ручная сверка guide/docs: 2026-03-26 10:41 MSK
+modified_at: 2026-03-26 10:49 MSK
+Ручная сверка guide/docs: 2026-03-26 10:49 MSK
 
 # Operations
 
@@ -2860,6 +2860,14 @@ Grafana login берётся из `.env`:
   - если точные hardware details требуют тяжёлого provider chain, dashboard лучше покажет слегка
     устаревший machine summary, чем будет каждые секунды раздувать `/proc`-FD хвост и подвешивать
     весь live refresh.
+- same-meter assist contour для human dashboard тоже не должен повторять одну и ту же тяжёлую
+  работу каждую секунду, если active live scope не менялся:
+  - repo rollout observations и derived assistant scopes теперь разрешено переиспользовать как
+    bounded dashboard cache до `10` секунд;
+  - quiet same-meter sync/write-back для dashboard теперь тоже должен уважать тот же TTL, если
+    набор missing `assistant_generation/tool_overhead` context_pack_ids не изменился;
+  - это не снимает truthful semantics: как только active scope меняется, cache обязан invalidated,
+    а dashboard — снова пересчитать assist contour честно.
   - для повторного запроса сейчас целевой набор такой:
     - `P50 < 1 ms`
     - `P95 < 1 ms`

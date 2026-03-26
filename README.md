@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 10:41 MSK
-Ручная сверка guide/docs: 2026-03-26 10:41 MSK
+modified_at: 2026-03-26 10:49 MSK
+Ручная сверка guide/docs: 2026-03-26 10:49 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -714,6 +714,12 @@ http://127.0.0.1:9464/
     privileged probes;
   - machine summary теперь переиспользуется как cache до `60` секунд, чтобы human dashboard не
     зависал на `dmidecode/sysinfo`-хвосте и не раздувал long-lived `observe serve`.
+  - same-meter assist contour для dashboard тоже больше не имеет права заново перечитывать repo
+    rollout observations и derive-ить assistant scopes на каждом секундном refresh, если active
+    scope не изменился;
+  - для human dashboard этот assist contour теперь переиспользуется как bounded cache до `10`
+    секунд, чтобы `token_budget_dashboard_report` не жёг секунду за секундой один и тот же
+    unchanged same-meter path.
     - если ускорителей нет вообще, карточка не исчезает, а показывает `не обнаружено`;
   - `Установленный клиент` и `Сборка`
     - теперь живут как компактные карточки рядом друг с другом, а не занимают место hardware-card первого ряда;

@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tiktoken_rs::{CoreBPE, cl100k_base, o200k_base};
 use tokio_postgres::Client;
@@ -26,6 +27,14 @@ const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
 const AGENT_CYCLE_TIMELINE_MAX_POINTS: usize = 256;
 const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
 const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_generation_turn_observed";
+const DASHBOARD_ASSIST_CONTOUR_CACHE_TTL_MS: u64 = 10_000;
+
+static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<Mutex<Option<DashboardRolloutObservationCache>>> =
+    OnceLock::new();
+static DASHBOARD_ASSISTANT_SCOPE_CACHE: OnceLock<Mutex<Option<DashboardAssistantScopeCache>>> =
+    OnceLock::new();
+static DASHBOARD_SAME_METER_SYNC_CACHE: OnceLock<Mutex<Option<DashboardSameMeterSyncCache>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
 struct TokenBudgetConfigFile {
@@ -442,6 +451,28 @@ struct AssistantGenerationScopeObservation {
     available_rollout_turns: u64,
     matched_direct_turn_ids: BTreeSet<String>,
     matched_rollout_turn_ids: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardRolloutObservationCache {
+    repo_root: PathBuf,
+    captured_at_ms: u64,
+    observations: Vec<codex_threads::RolloutAssistantGenerationObservation>,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardAssistantScopeCache {
+    repo_root: PathBuf,
+    captured_at_ms: u64,
+    signature: String,
+    scopes: Vec<AssistantGenerationScopeObservation>,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardSameMeterSyncCache {
+    repo_root: PathBuf,
+    captured_at_ms: u64,
+    signature: String,
 }
 
 #[derive(Debug, Clone)]
@@ -6804,7 +6835,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     let config = load_config(&repo_root)?;
     let profile = resolve_profile(&config, None, &repo_root)?;
     let include_verify_events = config.measurement.include_verify_events_by_default;
-    let rollout_observations = rollout_assistant_generation_observations_for_repo(&repo_root)?;
+    let rollout_observations = dashboard_rollout_assistant_generation_observations_for_repo(&repo_root)?;
     let mut events = load_events(db, include_verify_events, None).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
     let mut events =
@@ -6827,11 +6858,22 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         })
         .unwrap_or_default();
     let sync_scope_events = active_same_meter_scope_events(&session_events, &rolling_window_events);
-    let tool_overhead_changed =
-        sync_context_pack_tool_overhead_for_events(db, &repo_root, &sync_scope_events).await?;
-    let assistant_generation_changed =
-        sync_rollout_assistant_generation_for_events(db, &sync_scope_events, &rollout_observations)
-            .await?;
+    let dashboard_sync_signature = dashboard_same_meter_sync_signature(&sync_scope_events);
+    let (tool_overhead_changed, assistant_generation_changed) =
+        if should_run_dashboard_same_meter_sync(&repo_root, &dashboard_sync_signature) {
+            (
+                sync_context_pack_tool_overhead_for_events(db, &repo_root, &sync_scope_events)
+                    .await?,
+                sync_rollout_assistant_generation_for_events(
+                    db,
+                    &sync_scope_events,
+                    &rollout_observations,
+                )
+                .await?,
+            )
+        } else {
+            (false, false)
+        };
     if tool_overhead_changed || assistant_generation_changed {
         let mut refreshed = load_events(db, include_verify_events, None).await?;
         refreshed.sort_by_key(|event| event.created_at_epoch_ms);
@@ -6860,7 +6902,9 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     } else {
         vec![session_events.as_slice(), events.as_slice()]
     };
-    let scope_observations = derive_rollout_assistant_generation_scopes(db, &scope_events).await?;
+    let scope_observations =
+        derive_dashboard_rollout_assistant_generation_scopes(db, &repo_root, &scope_events)
+            .await?;
     let mut scope_iter = scope_observations.into_iter();
     let current_session_assistant_scope = scope_iter.next().unwrap_or_default();
     let rolling_window_assistant_scope = if profile.rolling_window_hours.is_some() {
@@ -7159,6 +7203,45 @@ fn rollout_assistant_generation_observations_for_repo(
     codex_threads::rollout_assistant_generation_observations(repo_root_str, None)
 }
 
+fn dashboard_rollout_assistant_generation_observations_for_repo(
+    repo_root: &Path,
+) -> Result<Vec<codex_threads::RolloutAssistantGenerationObservation>> {
+    if let Some(observations) = cached_dashboard_rollout_observations(repo_root) {
+        return Ok(observations);
+    }
+    let observations = rollout_assistant_generation_observations_for_repo(repo_root)?;
+    store_dashboard_rollout_observations(repo_root, &observations);
+    Ok(observations)
+}
+
+fn cached_dashboard_rollout_observations(
+    repo_root: &Path,
+) -> Option<Vec<codex_threads::RolloutAssistantGenerationObservation>> {
+    let cache = DASHBOARD_ROLLOUT_OBSERVATION_CACHE.get_or_init(|| Mutex::new(None));
+    let guard = cache.lock().ok()?;
+    let entry = guard.as_ref()?;
+    if dashboard_cache_entry_is_fresh(repo_root, &entry.repo_root, entry.captured_at_ms) {
+        Some(entry.observations.clone())
+    } else {
+        None
+    }
+}
+
+fn store_dashboard_rollout_observations(
+    repo_root: &Path,
+    observations: &[codex_threads::RolloutAssistantGenerationObservation],
+) {
+    let cache = DASHBOARD_ROLLOUT_OBSERVATION_CACHE.get_or_init(|| Mutex::new(None));
+    let Some(mut guard) = cache.lock().ok() else {
+        return;
+    };
+    *guard = Some(DashboardRolloutObservationCache {
+        repo_root: canonical_repo_root(repo_root),
+        captured_at_ms: dashboard_cache_now_epoch_ms(),
+        observations: observations.to_vec(),
+    });
+}
+
 async fn sync_rollout_assistant_generation_for_events(
     db: &Client,
     events: &[TokenBudgetEvent],
@@ -7218,6 +7301,60 @@ async fn sync_rollout_assistant_generation_for_events(
         }
     }
     Ok(changed)
+}
+
+fn dashboard_same_meter_sync_signature(events: &[TokenBudgetEvent]) -> String {
+    let assistant_generation_missing_context_pack_ids = events
+        .iter()
+        .filter(|event| {
+            event.traffic_class == "live"
+                && event.measurement_scope == "retrieval_lower_bound"
+                && event.assistant_generation_tokens.is_none()
+        })
+        .map(|event| event.correlation_id.clone())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>();
+    let tool_overhead_missing_context_pack_ids = events
+        .iter()
+        .filter(|event| {
+            event.traffic_class == "live"
+                && event.measurement_scope == "retrieval_lower_bound"
+                && event.tool_overhead_tokens.is_none()
+        })
+        .map(|event| event.correlation_id.clone())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>();
+    let payload = json!({
+        "assistant_generation_missing_context_pack_ids": assistant_generation_missing_context_pack_ids,
+        "tool_overhead_missing_context_pack_ids": tool_overhead_missing_context_pack_ids,
+    });
+    hex_sha256(
+        &serde_json::to_vec(&payload)
+            .unwrap_or_else(|_| payload.to_string().into_bytes()),
+    )
+}
+
+fn should_run_dashboard_same_meter_sync(repo_root: &Path, signature: &str) -> bool {
+    let cache = DASHBOARD_SAME_METER_SYNC_CACHE.get_or_init(|| Mutex::new(None));
+    let Some(mut guard) = cache.lock().ok() else {
+        return true;
+    };
+    let now_ms = dashboard_cache_now_epoch_ms();
+    let repo_root = canonical_repo_root(repo_root);
+    if let Some(entry) = guard.as_ref() {
+        if entry.repo_root == repo_root
+            && entry.signature == signature
+            && now_ms.saturating_sub(entry.captured_at_ms) <= DASHBOARD_ASSIST_CONTOUR_CACHE_TTL_MS
+        {
+            return false;
+        }
+    }
+    *guard = Some(DashboardSameMeterSyncCache {
+        repo_root,
+        captured_at_ms: now_ms,
+        signature: signature.to_string(),
+    });
+    true
 }
 
 async fn sync_context_pack_tool_overhead_for_events(
@@ -7635,11 +7772,9 @@ async fn derive_rollout_assistant_generation_scopes(
         ]);
     }
 
-    let direct_turns = assistant_generation_turn_observed_snapshots_for_context_packs(
-        db,
-        &union_target_ids,
-    )
-    .await?;
+    let direct_turns =
+        assistant_generation_turn_observed_snapshots_for_context_packs(db, &union_target_ids)
+            .await?;
     let metadata = latest_working_state_context_pack_metadata(db, &union_target_ids).await?;
     let thread_ids = metadata
         .values()
@@ -7667,11 +7802,95 @@ async fn derive_rollout_assistant_generation_scopes(
         .collect())
 }
 
+async fn derive_dashboard_rollout_assistant_generation_scopes(
+    db: &Client,
+    repo_root: &Path,
+    events_by_scope: &[&[TokenBudgetEvent]],
+) -> Result<Vec<AssistantGenerationScopeObservation>> {
+    let signature = dashboard_assistant_scope_signature(events_by_scope);
+    if let Some(scopes) = cached_dashboard_assistant_generation_scopes(repo_root, &signature) {
+        return Ok(scopes);
+    }
+    let scopes = derive_rollout_assistant_generation_scopes(db, events_by_scope).await?;
+    store_dashboard_assistant_generation_scopes(repo_root, &signature, &scopes);
+    Ok(scopes)
+}
+
+fn dashboard_assistant_scope_signature(events_by_scope: &[&[TokenBudgetEvent]]) -> String {
+    let target_sets = events_by_scope
+        .iter()
+        .map(|events| assistant_generation_missing_scope_context_pack_ids(Some(events)))
+        .map(|set| set.into_iter().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let payload = json!({ "target_sets": target_sets });
+    hex_sha256(
+        &serde_json::to_vec(&payload)
+            .unwrap_or_else(|_| payload.to_string().into_bytes()),
+    )
+}
+
+fn cached_dashboard_assistant_generation_scopes(
+    repo_root: &Path,
+    signature: &str,
+) -> Option<Vec<AssistantGenerationScopeObservation>> {
+    let cache = DASHBOARD_ASSISTANT_SCOPE_CACHE.get_or_init(|| Mutex::new(None));
+    let guard = cache.lock().ok()?;
+    let entry = guard.as_ref()?;
+    if dashboard_cache_entry_is_fresh(repo_root, &entry.repo_root, entry.captured_at_ms)
+        && entry.signature == signature
+    {
+        Some(entry.scopes.clone())
+    } else {
+        None
+    }
+}
+
+fn store_dashboard_assistant_generation_scopes(
+    repo_root: &Path,
+    signature: &str,
+    scopes: &[AssistantGenerationScopeObservation],
+) {
+    let cache = DASHBOARD_ASSISTANT_SCOPE_CACHE.get_or_init(|| Mutex::new(None));
+    let Some(mut guard) = cache.lock().ok() else {
+        return;
+    };
+    *guard = Some(DashboardAssistantScopeCache {
+        repo_root: canonical_repo_root(repo_root),
+        captured_at_ms: dashboard_cache_now_epoch_ms(),
+        signature: signature.to_string(),
+        scopes: scopes.to_vec(),
+    });
+}
+
+fn dashboard_cache_entry_is_fresh(
+    requested_repo_root: &Path,
+    cached_repo_root: &Path,
+    captured_at_ms: u64,
+) -> bool {
+    canonical_repo_root(requested_repo_root) == cached_repo_root
+        && dashboard_cache_now_epoch_ms().saturating_sub(captured_at_ms)
+            <= DASHBOARD_ASSIST_CONTOUR_CACHE_TTL_MS
+}
+
+fn dashboard_cache_now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn canonical_repo_root(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn derive_rollout_assistant_generation_scope_from_sources(
     target_context_pack_ids: &BTreeSet<String>,
     direct_turns: &[AssistantGenerationTurnObservedSnapshot],
     metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
-    turns_by_thread: &BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
+    turns_by_thread: &BTreeMap<
+        String,
+        Vec<codex_threads::RolloutAssistantGenerationTurnObservation>,
+    >,
 ) -> AssistantGenerationScopeObservation {
     if target_context_pack_ids.is_empty() {
         return AssistantGenerationScopeObservation::default();
@@ -13563,7 +13782,7 @@ mod tests {
         provider_rate_card_default_path, provider_usage_default_path, reconcile_followup_recovery,
         repair_legacy_token_event_payload, report_contract_json, resolve_session_id,
         rewrite_token_ledger_source_kind_payload, summarize_events,
-        suppress_shadowed_live_events,
+        suppress_shadowed_live_events, dashboard_same_meter_sync_signature,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -18496,6 +18715,120 @@ effective_to_epoch_ms = 2000
         assert_eq!(hot["display_name"], "hot");
         assert_eq!(cold["sample_count"], 1);
         assert_eq!(cold["display_name"], "cold");
+    }
+
+    #[test]
+    fn dashboard_same_meter_sync_signature_tracks_missing_whole_cycle_targets() {
+        let events = vec![
+            token_event! {
+                created_at_epoch_ms: 10,
+                event_id: "event-a".to_string(),
+                correlation_id: "ctx-a".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 10,
+                occurred_at_epoch_ms: 10,
+                ingested_at_epoch_ms: 10,
+                query: "q-a".to_string(),
+                query_hash: "hash-a".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "warm".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 1.0,
+                saved_tokens: 10,
+                naive_tokens: 20,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 10,
+                savings_factor: 2.0,
+                savings_percent: 50.0,
+                effective_savings_percent: 50.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+                tool_overhead_tokens: None,
+                assistant_generation_tokens: None,
+            },
+            token_event! {
+                created_at_epoch_ms: 20,
+                event_id: "event-b".to_string(),
+                correlation_id: "ctx-b".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 20,
+                occurred_at_epoch_ms: 20,
+                ingested_at_epoch_ms: 20,
+                query: "q-b".to_string(),
+                query_hash: "hash-b".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "cold".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 2.0,
+                saved_tokens: 10,
+                naive_tokens: 20,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 10,
+                savings_factor: 2.0,
+                savings_percent: 50.0,
+                effective_savings_percent: 50.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+                tool_overhead_tokens: Some(4),
+                assistant_generation_tokens: None,
+            },
+        ];
+
+        let signature = dashboard_same_meter_sync_signature(&events);
+        let reversed = vec![events[1].clone(), events[0].clone()];
+        let reversed_signature = dashboard_same_meter_sync_signature(&reversed);
+        assert_eq!(signature, reversed_signature);
+
+        let mut resolved = events.clone();
+        resolved[0].assistant_generation_tokens = Some(5);
+        let resolved_signature = dashboard_same_meter_sync_signature(&resolved);
+        assert_ne!(signature, resolved_signature);
     }
 
     #[test]
