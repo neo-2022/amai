@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 08:51 MSK
-Ручная сверка guide/docs: 2026-03-26 08:51 MSK
+modified_at: 2026-03-26 09:04 MSK
+Ручная сверка guide/docs: 2026-03-26 09:04 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1498,6 +1498,7 @@ preview, а не только raw count.
     - `measured_components / partially_measured_components / missing_components`
     - `component_event_coverage`
     - `blocking_reasons`
+    - `baseline_equivalence`
   Это нужно затем, чтобы lower-bound savings не выглядели как уже эквивалентные
   тому же самому метру, которым клиент считает живой лимит `5h`.
   - тот же слой теперь ещё честно различает:
@@ -1506,6 +1507,14 @@ preview, а не только raw count.
     - `whole_cycle_observed_baseline_partial`
   Это нужно затем, чтобы по мере materialize-инга observed whole-cycle fields было видно,
   что покрытие уже стало шире, но baseline всё ещё не разрешено выдавать за full same-meter.
+  - начиная с этого шага тот же contour ещё и публикует versioned
+    `baseline_equivalence`, где machine-readable фиксируются:
+    - `state`
+    - `remaining_gap_reason`
+    - `applicable_components / fully_observed_components / incomplete_components`
+    - `whole_cycle_components_fully_observed`
+  Это нужно затем, чтобы `same_meter_baseline_unmeasured` перестал жить только как
+  строка-blocker и стал отдельным truthful object про незавершённый baseline-equivalent слой.
   - dashboard token-cards теперь поднимают этот же слой в user-facing surface:
     - добавляют строку `Связь с лимитом клиента`;
     - прямо показывают, когда текущий scope содержит только `non-live` активность;
@@ -1740,13 +1749,18 @@ preview, а не только raw count.
     direct turn attach или rollout turn timeline и не может быть честно разложено
     по каждому retrieval event без дублирования токенов.
   - operational metering contract теперь ещё несёт:
-  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v6`
+  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v7`
+  - `client_limit_baseline_equivalence_version = client-limit-baseline-equivalence-v1`
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
-  - начиная с `v6` слой ещё и честно поднимает `client_prompt` как observed component
+  - начиная с `v7` слой ещё и честно поднимает `baseline_equivalence` как отдельный
+    machine-readable contour; если applicable whole-cycle components уже полностью observed,
+    он явно показывает `state = baseline_semantics_unmaterialized`, а не оставляет этот gap
+    только в `blocking_reasons`.
+  - и тот же `v7` продолжает честно поднимать `client_prompt` как observed component
     из уже записанных `query + tokenizer`, даже если старое событие не несло
     отдельный `whole_cycle_observed.client_prompt_tokens`.
-  - тот же `v6` теперь ещё публикует
+  - тот же `v7` теперь ещё публикует
     `assistant_generation_observation_source`, чтобы `current_session /
     rolling_window` можно было объяснить не только общей missing-меткой, но и
     machine-readable source-gap причиной:
@@ -1754,7 +1768,7 @@ preview, а не только raw count.
     assistant_generation_source_no_scope_overlap /
     assistant_generation_source_partial_scope_overlap /
     assistant_generation_source_covers_missing_scope`.
-  - этот же `v6` уже различает не только rollout path, но и direct turn attach:
+  - этот же `v7` уже различает не только rollout path, но и direct turn attach:
     `source_kind` теперь может честно быть
     `direct_turn_attach_v1 / codex_rollout_turn_timeline_v1 /
     direct_turn_attach_plus_rollout_turn_timeline_v1`.
@@ -1763,7 +1777,7 @@ preview, а не только raw count.
     не считается approved context-pack call сам по себе; учитываются только реальные
     command invocation path (`mcp__amai__amai_context_pack`, `cargo run ... context pack`,
     `./target/release/amai context pack`, `$AMAI context pack`, `memory search`).
-  - и тот же `v6` больше не делит все whole-cycle компоненты на один и тот же
+  - и тот же `v7` больше не делит все whole-cycle компоненты на один и тот же
     denominator:
     `client_prompt`, `assistant_generation`, `tool_overhead_outside_retrieval` и
     `continuity_restore_outside_retrieval` теперь публикуются с

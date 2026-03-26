@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 08:51 MSK
-Ручная сверка guide/docs: 2026-03-26 08:51 MSK
+modified_at: 2026-03-26 09:04 MSK
+Ручная сверка guide/docs: 2026-03-26 09:04 MSK
 
 # Operations
 
@@ -2326,10 +2326,23 @@ Operator contour обязан учитывать:
 - `component_event_coverage[].target_live_events_count`
 - `component_event_coverage[].target_scope_kind`
 - `not_applicable_components`
+- `baseline_equivalence.state / remaining_gap_reason`
 
 Именно это позволяет не считать `continuity_restore_outside_retrieval` missing в scope,
 где вообще не было live restore-event, и не завышать remaining gap искусственным
 denominator drift.
+
+Если remaining blocker сводится уже не к missing whole-cycle components, а только к
+`same_meter_baseline_unmeasured`, operator обязан смотреть не только `blocking_reasons`,
+но и отдельный versioned contour:
+- `client_limit_meter_alignment.baseline_equivalence.model_version`
+- `client_limit_meter_alignment.baseline_equivalence.state`
+- `client_limit_meter_alignment.baseline_equivalence.applicable_components`
+- `client_limit_meter_alignment.baseline_equivalence.fully_observed_components`
+- `client_limit_meter_alignment.baseline_equivalence.incomplete_components`
+
+Это нужно затем, чтобы baseline-gap был machine-readable и не зависел только от human tooltip
+в dashboard или одной blocker-строки.
 
 Customer-facing contractual export surface теперь тоже обязан поднимать
 `adjustment_activation_governance`, чтобы future adjustment path был виден отдельно от

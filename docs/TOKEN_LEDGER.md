@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 08:51 MSK
-Ручная сверка guide/docs: 2026-03-26 08:51 MSK
+modified_at: 2026-03-26 09:04 MSK
+Ручная сверка guide/docs: 2026-03-26 09:04 MSK
 
 # Token Ledger
 
@@ -456,7 +456,7 @@ Ledger обязан различать:
 - частично наблюдаемые whole-cycle компоненты;
 - whole-cycle observed компоненты при всё ещё partial baseline.
 
-Начиная с `client-limit-meter-alignment-v6` `client_prompt` считается observed component
+Начиная с `client-limit-meter-alignment-v7` `client_prompt` считается observed component
 не только если он явно пришёл в `whole_cycle_observed`, но и как derived fallback из
 уже записанных `query + tokenizer`. Это нужно затем, чтобы progress к client-limit meter
 был виден честно даже на исторических live events, где старый payload ещё не нёс
@@ -469,9 +469,22 @@ Ledger обязан различать:
 - state `whole_cycle_partially_observed_not_meter_equivalent`;
 - state `whole_cycle_observed_baseline_partial`.
 - `assistant_generation_observation_source`.
+- `baseline_equivalence`.
 
 Это нужно затем, чтобы progress к реальному client-limit meter был виден честно, без
 ложного переключения `same_meter_as_client_limit=true` раньше времени.
+
+`baseline_equivalence` теперь обязан быть versioned и machine-readable:
+- `model_version = client-limit-baseline-equivalence-v1`
+- `state`
+- `remaining_gap_reason`
+- `applicable_components / fully_observed_components / incomplete_components`
+- `whole_cycle_components_fully_observed`
+
+Это нужно затем, чтобы `same_meter_baseline_unmeasured` не оставался только строкой в
+`blocking_reasons`, а был отдельным truthful contour про то, что whole-cycle observed
+слой уже дотянулся до applicable components, но baseline-equivalent semantics для
+клиентского spend meter ещё не materialized.
 
 `component_event_coverage` теперь обязан быть `target-aware`, а не делить каждый
 whole-cycle компонент на одинаковое число всех live events.
@@ -1275,7 +1288,8 @@ Hashes по line items нужны затем, чтобы:
 - `contractual-statement-export-v19`
 - `settlement-report-preview-v10`
 - `contractual-evidence-pack-v19`
-- `client-limit-meter-alignment-v6`
+- `client-limit-meter-alignment-v7`
+- `client-limit-baseline-equivalence-v1`
 - `adjustment-activation-governance-v1`
 
 Теперь те же customer-facing surface-ы ещё несут `adjustment_activation_governance`.

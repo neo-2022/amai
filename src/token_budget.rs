@@ -80,6 +80,8 @@ struct TokenBudgetContractConfig {
     agent_cycle_model_version: String,
     #[serde(default = "default_client_limit_meter_alignment_version")]
     client_limit_meter_alignment_version: String,
+    #[serde(default = "default_client_limit_baseline_equivalence_version")]
+    client_limit_baseline_equivalence_version: String,
     #[serde(default = "default_excluded_taxonomy_version")]
     excluded_taxonomy_version: String,
     #[serde(default = "default_dedup_contract_version")]
@@ -159,6 +161,8 @@ impl Default for TokenBudgetContractConfig {
             metering_freshness_model_version: default_metering_freshness_model_version(),
             agent_cycle_model_version: default_agent_cycle_model_version(),
             client_limit_meter_alignment_version: default_client_limit_meter_alignment_version(),
+            client_limit_baseline_equivalence_version:
+                default_client_limit_baseline_equivalence_version(),
             excluded_taxonomy_version: default_excluded_taxonomy_version(),
             dedup_contract_version: default_dedup_contract_version(),
             backfill_policy_version: default_backfill_policy_version(),
@@ -541,7 +545,11 @@ fn default_agent_cycle_model_version() -> String {
 }
 
 fn default_client_limit_meter_alignment_version() -> String {
-    "client-limit-meter-alignment-v6".to_string()
+    "client-limit-meter-alignment-v7".to_string()
+}
+
+fn default_client_limit_baseline_equivalence_version() -> String {
+    "client-limit-baseline-equivalence-v1".to_string()
 }
 
 fn default_excluded_taxonomy_version() -> String {
@@ -684,6 +692,9 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "metering_freshness_model_version": contract.metering_freshness_model_version.clone(),
         "agent_cycle_model_version": contract.agent_cycle_model_version.clone(),
         "client_limit_meter_alignment_version": contract.client_limit_meter_alignment_version.clone(),
+        "client_limit_baseline_equivalence_version": contract
+            .client_limit_baseline_equivalence_version
+            .clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
         "backfill_policy_version": contract.backfill_policy_version.clone(),
@@ -736,6 +747,9 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "metering_freshness_model_version": contract.metering_freshness_model_version.clone(),
         "agent_cycle_model_version": contract.agent_cycle_model_version.clone(),
         "client_limit_meter_alignment_version": contract.client_limit_meter_alignment_version.clone(),
+        "client_limit_baseline_equivalence_version": contract
+            .client_limit_baseline_equivalence_version
+            .clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
         "backfill_policy_version": contract.backfill_policy_version.clone(),
@@ -10778,6 +10792,81 @@ fn assistant_generation_observation_source_status(
     })
 }
 
+fn build_client_limit_baseline_equivalence(
+    contract: &TokenBudgetContractConfig,
+    summary: &Value,
+    events: Option<&[TokenBudgetEvent]>,
+    assistant_scope: Option<&AssistantGenerationScopeObservation>,
+) -> Value {
+    let (_events_total, live_events_count, _non_live_events_count, counted_events) =
+        client_limit_meter_alignment_counts(summary, events);
+    let mut applicable_components = Vec::new();
+    let mut fully_observed_components = Vec::new();
+    let mut incomplete_components = Vec::new();
+    for (code, observed_live_events, _observed_tokens) in
+        client_limit_component_stats(summary, assistant_scope)
+    {
+        let target_live_events = client_limit_component_target_live_events(
+            code,
+            events,
+            live_events_count,
+            assistant_scope,
+        );
+        if target_live_events == 0 {
+            continue;
+        }
+        applicable_components.push(code.to_string());
+        if observed_live_events == target_live_events {
+            fully_observed_components.push(code.to_string());
+        } else {
+            incomplete_components.push(code.to_string());
+        }
+    }
+    let whole_cycle_components_fully_observed =
+        !applicable_components.is_empty() && incomplete_components.is_empty();
+    let (state, remaining_gap_reason, note) = if live_events_count == 0 {
+        (
+            "no_live_scope",
+            "no_live_usage_in_scope",
+            "В этом scope ещё нет live usage, поэтому baseline-equivalent сравнение с клиентским лимитом пока не на чем строить.",
+        )
+    } else if counted_events == 0 {
+        (
+            "live_scope_unconfirmed",
+            "no_confirmed_live_usage_in_scope",
+            "Live usage уже был, но confirmed lane ещё не набрался, поэтому baseline-equivalent метр пока нечем честно заякорить.",
+        )
+    } else if !whole_cycle_components_fully_observed {
+        (
+            "whole_cycle_components_incomplete",
+            "whole_cycle_components_incomplete",
+            "Whole-cycle observed компоненты ещё покрывают не весь applicable live scope, поэтому baseline-equivalent semantics пока преждевременны.",
+        )
+    } else {
+        (
+            "baseline_semantics_unmaterialized",
+            "same_meter_baseline_unmeasured",
+            "Applicable whole-cycle components уже полностью observed, но отдельный baseline-equivalent слой для клиентского spend meter ещё не materialized.",
+        )
+    };
+    json!({
+        "model_version": contract.client_limit_baseline_equivalence_version.clone(),
+        "state": state,
+        "same_meter_baseline_measured": false,
+        "baseline_equivalent_to_client_limit": false,
+        "live_events_count": live_events_count,
+        "counted_live_events": counted_events,
+        "applicable_component_count": applicable_components.len(),
+        "fully_observed_component_count": fully_observed_components.len(),
+        "applicable_components": applicable_components,
+        "fully_observed_components": fully_observed_components,
+        "incomplete_components": incomplete_components,
+        "whole_cycle_components_fully_observed": whole_cycle_components_fully_observed,
+        "remaining_gap_reason": remaining_gap_reason,
+        "note": note,
+    })
+}
+
 fn build_client_limit_meter_alignment(
     contract: &TokenBudgetContractConfig,
     surface_kind: &str,
@@ -10821,6 +10910,8 @@ fn build_client_limit_meter_alignment(
         rollout_observations,
         assistant_scope,
     );
+    let baseline_equivalence =
+        build_client_limit_baseline_equivalence(contract, summary, events, assistant_scope);
     let mut blocking_reasons =
         client_limit_meter_alignment_blocking_reasons(summary, events, assistant_scope);
     match assistant_generation_observation_source["state"]
@@ -10854,6 +10945,7 @@ fn build_client_limit_meter_alignment(
         "component_event_coverage": component_coverage,
         "blocking_reasons": blocking_reasons,
         "assistant_generation_observation_source": assistant_generation_observation_source,
+        "baseline_equivalence": baseline_equivalence,
         "note": "Этот слой честно показывает, что текущие savings пока считаются как lower-bound части агентного цикла. Whole-cycle observed components могут постепенно materialize-иться, но same meter с клиентским лимитом нельзя объявлять раньше, чем появится и полное observed покрытие, и baseline-equivalent semantics."
     })
 }
@@ -10881,6 +10973,9 @@ fn build_agent_cycle_economics(
             "billing_policy_version": contract.billing_policy_version.clone(),
             "client_limit_meter_alignment": {
                 "model_version": contract.client_limit_meter_alignment_version.clone(),
+                "baseline_equivalence_model_version": contract
+                    .client_limit_baseline_equivalence_version
+                    .clone(),
                 "alignment_state": "partial_lower_bound_not_meter_equivalent",
                 "same_meter_as_client_limit": false,
                 "measured_components": [
@@ -13708,7 +13803,11 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_meter_alignment_version"],
-            "client-limit-meter-alignment-v6"
+            "client-limit-meter-alignment-v7"
+        );
+        assert_eq!(
+            token_event["contract"]["client_limit_baseline_equivalence_version"],
+            "client-limit-baseline-equivalence-v1"
         );
         assert_eq!(
             token_event["whole_cycle_observed"]["client_prompt_tokens"],
@@ -14305,7 +14404,11 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v6"
+            "client-limit-meter-alignment-v7"
+        );
+        assert_eq!(
+            preview["client_limit_meter_alignment"]["baseline_equivalence"]["model_version"],
+            "client-limit-baseline-equivalence-v1"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -16919,7 +17022,11 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v6"
+            "client-limit-meter-alignment-v7"
+        );
+        assert_eq!(
+            economics["contract"]["client_limit_meter_alignment"]["baseline_equivalence_model_version"],
+            "client-limit-baseline-equivalence-v1"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["surface_kind"],
@@ -16932,6 +17039,10 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["partially_measured_components"],
             json!([])
+        );
+        assert_eq!(
+            economics["current_session"]["client_limit_meter_alignment"]["baseline_equivalence"]["state"],
+            "baseline_semantics_unmaterialized"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["live_events_count"],
@@ -16997,6 +17108,10 @@ effective_to_epoch_ms = 2000
                         .iter()
                         .any(|reason| reason == "client_prompt_partially_measured")
                 })
+        );
+        assert_eq!(
+            alignment["baseline_equivalence"]["state"],
+            "whole_cycle_components_incomplete"
         );
     }
 
