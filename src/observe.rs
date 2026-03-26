@@ -232,9 +232,11 @@ pub async fn print_artifact_cleanup(
     apply: bool,
     limit: Option<usize>,
     aggressive: bool,
+    target: Option<&str>,
 ) -> Result<()> {
     let repo_root = discover_repo_root(None)?;
-    let summary = collect_artifact_cleanup_summary(&repo_root, apply, false, limit, aggressive)?;
+    let summary =
+        collect_artifact_cleanup_summary(&repo_root, apply, false, limit, aggressive, target)?;
     let _ = artifact_cleanup::write_latest_summary(&repo_root, &summary)?;
     println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
@@ -1492,7 +1494,7 @@ async fn maybe_cleanup_observability_snapshots(cfg: &AppConfig) -> Result<()> {
 
 async fn maybe_cleanup_local_artifacts() -> Result<()> {
     let repo_root = discover_repo_root(None)?;
-    let summary = collect_artifact_cleanup_summary(&repo_root, true, true, None, false)?;
+    let summary = collect_artifact_cleanup_summary(&repo_root, true, true, None, false, None)?;
     let _ = artifact_cleanup::write_latest_summary(&repo_root, &summary)?;
     let cleanup = &summary["artifact_cleanup"];
     let deleted = cleanup["deleted"].as_u64().unwrap_or(0);
@@ -1514,12 +1516,13 @@ fn collect_artifact_cleanup_summary(
     auto_only: bool,
     limit: Option<usize>,
     aggressive: bool,
+    target: Option<&str>,
 ) -> Result<Value> {
     let existing_last_apply = artifact_cleanup::read_latest_summary(repo_root)?
         .and_then(|summary| extract_last_artifact_cleanup_apply(&summary));
     if !apply {
         let mut current =
-            artifact_cleanup::run_cleanup(repo_root, false, auto_only, limit, aggressive)?;
+            artifact_cleanup::run_cleanup(repo_root, false, auto_only, limit, aggressive, target)?;
         if let Some(last_apply) = existing_last_apply {
             if let Some(object) = current["artifact_cleanup"].as_object_mut() {
                 object.insert("last_apply".to_string(), last_apply);
@@ -1528,8 +1531,10 @@ fn collect_artifact_cleanup_summary(
         return Ok(current);
     }
 
-    let applied = artifact_cleanup::run_cleanup(repo_root, true, auto_only, limit, aggressive)?;
-    let mut current = artifact_cleanup::run_cleanup(repo_root, false, auto_only, None, false)?;
+    let applied =
+        artifact_cleanup::run_cleanup(repo_root, true, auto_only, limit, aggressive, target)?;
+    let mut current =
+        artifact_cleanup::run_cleanup(repo_root, false, auto_only, None, false, target)?;
     let applied_cleanup = &applied["artifact_cleanup"];
     let last_apply = if applied_cleanup["reclaimed_bytes"].as_u64().unwrap_or(0) > 0
         || applied_cleanup["deleted"].as_u64().unwrap_or(0) > 0

@@ -850,6 +850,8 @@ pub struct ObserveCleanupArtifactsArgs {
     pub limit: Option<usize>,
     #[arg(long, default_value_t = false)]
     pub aggressive: bool,
+    #[arg(long)]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]

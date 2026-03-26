@@ -445,8 +445,14 @@ async fn main() -> Result<()> {
             ObserveCommand::CleanupArtifacts(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
-                observe::print_artifact_cleanup(&cfg, args.apply, args.limit, args.aggressive)
-                    .await?;
+                observe::print_artifact_cleanup(
+                    &cfg,
+                    args.apply,
+                    args.limit,
+                    args.aggressive,
+                    args.target.as_deref(),
+                )
+                .await?;
             }
             ObserveCommand::RepairTokenLedger(args) => {
                 let cfg = config::AppConfig::from_env()?;

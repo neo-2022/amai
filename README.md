@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 13:52 MSK
-Ручная сверка guide/docs: 2026-03-26 13:52 MSK
+modified_at: 2026-03-26 14:00 MSK
+Ручная сверка guide/docs: 2026-03-26 14:00 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -2141,7 +2141,8 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
 - текущий запущенный бинарь защищён от удаления, даже если его директория уже попала под TTL.
 - `--aggressive` выключает возрастной запас и `keep_latest` только для rebuildable хвоста, поэтому это уже explicit reclaim path, а не обычный auto-retention;
 - для `output/windows-vm-lab` это означает отдельный explicit/manual contour:
-  - обычный `observe cleanup-artifacts --apply` может убрать старые proof-run directories по TTL;
+  - `observe cleanup-artifacts --target output/windows-vm-lab --apply` может убрать старые proof-run directories по TTL;
+  - `observe cleanup-artifacts --target output/windows-vm-lab --aggressive --apply` принудительно срежет rebuildable хвост внутри этого target;
   - auto-path этого не сделает;
   - symlink `output/windows-vm-lab/latest` теперь не считается cleanup-entry и не съедает `keep_latest`;
 - в human dashboard теперь есть отдельная карточка `Локальный мусор и retention`, где явно видны:

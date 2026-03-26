@@ -3727,7 +3727,7 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
     if let Some(target) = manual_only_targets.first() {
         let target_path = target["path"].as_str().unwrap_or("неизвестный target");
         note.push_str(&format!(
-            " Для {target_path} уже есть explicit manual-only cleanup contour: используйте `observe cleanup-artifacts --apply` или `--aggressive --apply`, auto-retention этот путь не трогает."
+            " Для {target_path} уже есть explicit manual-only cleanup contour: используйте `observe cleanup-artifacts --target {target_path} --apply` или `--target {target_path} --aggressive --apply`, auto-retention этот путь не трогает."
         ));
     }
     if last_reclaim_bytes > 0 {
@@ -6381,7 +6381,7 @@ fn artifact_cleanup_warning(snapshot: &Value) -> Option<String> {
         let manual_only_path = manual_only_target["path"].as_str();
         let manual_hint = manual_only_path.map(|path| {
             format!(
-                " Для {path} уже есть explicit manual cleanup contour: `observe cleanup-artifacts --apply` или `--aggressive --apply`."
+                " Для {path} уже есть explicit manual cleanup contour: `observe cleanup-artifacts --target {path} --apply` или `--target {path} --aggressive --apply`."
             )
         }).unwrap_or_default();
         return Some(format!(
@@ -8088,7 +8088,7 @@ mod tests {
         let warning = artifact_cleanup_warning(&snapshot).expect("warning");
         assert!(warning.contains("вне cleanup policy"));
         assert!(warning.contains("output/windows-vm-lab"));
-        assert!(warning.contains("observe cleanup-artifacts --apply"));
+        assert!(warning.contains("observe cleanup-artifacts --target output/windows-vm-lab --apply"));
     }
 
     #[test]

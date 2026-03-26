@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::cmp::Reverse;
@@ -112,6 +112,7 @@ pub fn run_cleanup(
     auto_only: bool,
     limit: Option<usize>,
     aggressive: bool,
+    target: Option<&str>,
 ) -> Result<Value> {
     let profile = load_profile()?;
     let now = SystemTime::now();
@@ -141,12 +142,19 @@ pub fn run_cleanup(
     let mut aggressive_preview_total = 0_u64;
     let mut aggressive_preview_reclaimed_bytes = 0_u64;
     let mut managed_target_sizes = Vec::new();
+    let mut target_matched = target.is_none();
 
     for target in profile
         .targets
         .iter()
-        .filter(|target| !auto_only || target.auto_apply)
+        .filter(|target_entry| !auto_only || target_entry.auto_apply)
+        .filter(|target_entry| {
+            target
+                .map(|target_filter| target_entry.path == target_filter)
+                .unwrap_or(true)
+        })
     {
+        target_matched = true;
         targets_scanned += 1;
         let root = repo_root.join(&target.path);
         if !root.exists() {
@@ -243,6 +251,13 @@ pub fn run_cleanup(
             "aggressive_preview_selected": aggressive_preview.selected,
             "aggressive_preview_reclaimable_bytes": selected_reclaimable_bytes(&aggressive_preview),
         }));
+    }
+
+    if !target_matched {
+        return Err(anyhow!(
+            "artifact cleanup target not found in active policy: {}",
+            target.unwrap_or_default()
+        ));
     }
 
     Ok(json!({

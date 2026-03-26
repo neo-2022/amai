@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 13:52 MSK
-Ручная сверка guide/docs: 2026-03-26 13:52 MSK
+modified_at: 2026-03-26 14:00 MSK
+Ручная сверка guide/docs: 2026-03-26 14:00 MSK
 
 # Operations
 
@@ -2506,7 +2506,8 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
 - `observe serve`, `observe snapshot` и `observe sla-check` сами запускают этот cleanup, поэтому локальный мусор должен уходить без ручного обхода.
 - `--aggressive` — это уже explicit reclaim path: он не ждёт TTL и не держит `keep_latest`, но всё равно не лезет в live state и защищает текущий исполняемый бинарь.
 - для `output/windows-vm-lab` cleanup остаётся explicit/manual:
-  - `observe cleanup-artifacts --apply` теперь может срезать старые proof-run directories по TTL и `keep_latest`;
+  - `observe cleanup-artifacts --target output/windows-vm-lab --apply` теперь может срезать старые proof-run directories по TTL и `keep_latest`;
+  - `observe cleanup-artifacts --target output/windows-vm-lab --aggressive --apply` режет этот target без ожидания TTL;
   - auto-path их не удаляет;
   - symlink `output/windows-vm-lab/latest` игнорируется cleanup-сканером и не вмешивается в `keep_latest`.
 - human dashboard теперь показывает отдельную карточку `Локальный мусор и retention`, чтобы оператор видел:
