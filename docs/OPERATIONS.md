@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 09:04 MSK
-Ручная сверка guide/docs: 2026-03-26 09:04 MSK
+modified_at: 2026-03-26 09:18 MSK
+Ручная сверка guide/docs: 2026-03-26 09:18 MSK
 
 # Operations
 
@@ -2343,6 +2343,12 @@ denominator drift.
 
 Это нужно затем, чтобы baseline-gap был machine-readable и не зависел только от human tooltip
 в dashboard или одной blocker-строки.
+
+Dashboard/operator contour теперь обязан это поднимать и user-facing:
+- в tooltip строки `Связь с лимитом клиента`;
+- в note для `whole_cycle_observed_baseline_partial`;
+- с human-readable перечислением `fully_observed_components`, если baseline-gap уже
+  свёлся не к missing component coverage, а именно к незавершённому baseline-equivalent слою.
 
 Customer-facing contractual export surface теперь тоже обязан поднимать
 `adjustment_activation_governance`, чтобы future adjustment path был виден отдельно от

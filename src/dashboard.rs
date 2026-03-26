@@ -5824,6 +5824,33 @@ fn client_limit_alignment_metric_row(alignment: &Value) -> Option<Value> {
     ))
 }
 
+fn human_client_limit_component(code: &str) -> Option<&'static str> {
+    match code {
+        "client_prompt" => Some("исходный запрос клиента"),
+        "assistant_generation" => Some("генерация ответа моделью"),
+        "tool_overhead_outside_retrieval" => Some("tool/orchestration overhead вне retrieval"),
+        "continuity_restore_outside_retrieval" => {
+            Some("continuity-restore overhead вне retrieval")
+        }
+        _ => None,
+    }
+}
+
+fn human_client_limit_components(node: &Value) -> Option<String> {
+    let components = node
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str())
+        .filter_map(human_client_limit_component)
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        None
+    } else {
+        Some(components.join(", "))
+    }
+}
+
 fn client_limit_alignment_note_sentence(alignment: &Value) -> Option<String> {
     let state = alignment["alignment_state"].as_str()?;
     Some(match state {
@@ -5843,7 +5870,21 @@ fn client_limit_alignment_note_sentence(alignment: &Value) -> Option<String> {
             "Здесь уже начали появляться observed whole-cycle компоненты, но покрытие ещё неполное, поэтому эта цифра всё ещё не эквивалентна шкале лимита клиента.".to_string()
         }
         "whole_cycle_observed_baseline_partial" => {
-            "Здесь whole-cycle observed компоненты уже видны по live событиям, но baseline всё ещё не эквивалентен полному клиентскому лимиту, поэтому метрика остаётся честно non-equivalent.".to_string()
+            if alignment["baseline_equivalence"]["state"].as_str()
+                == Some("baseline_semantics_unmaterialized")
+            {
+                if let Some(fully_observed) = human_client_limit_components(
+                    &alignment["baseline_equivalence"]["fully_observed_components"],
+                ) {
+                    format!(
+                        "Здесь applicable whole-cycle компоненты уже полностью observed ({fully_observed}), но baseline всё ещё не эквивалентен полному клиентскому лимиту, поэтому метрика остаётся честно non-equivalent."
+                    )
+                } else {
+                    "Здесь whole-cycle observed компоненты уже видны по live событиям, но baseline всё ещё не эквивалентен полному клиентскому лимиту, поэтому метрика остаётся честно non-equivalent.".to_string()
+                }
+            } else {
+                "Здесь whole-cycle observed компоненты уже видны по live событиям, но baseline всё ещё не эквивалентен полному клиентскому лимиту, поэтому метрика остаётся честно non-equivalent.".to_string()
+            }
         }
         other => format!(
             "Этот срез пока не эквивалентен клиентскому лимиту сессии: state={other}."
@@ -5889,6 +5930,28 @@ fn client_limit_alignment_tooltip(alignment: &Value) -> Option<String> {
     tooltip.push('\n');
     tooltip.push_str("- ");
     tooltip.push_str(state_note);
+    if alignment["baseline_equivalence"]["state"].as_str() == Some("baseline_semantics_unmaterialized")
+    {
+        if let Some(fully_observed) =
+            human_client_limit_components(&alignment["baseline_equivalence"]["fully_observed_components"])
+        {
+            tooltip.push('\n');
+            tooltip.push_str("- ");
+            tooltip.push_str("applicable whole-cycle компоненты уже fully observed: ");
+            tooltip.push_str(&fully_observed);
+        }
+    } else if alignment["baseline_equivalence"]["state"].as_str()
+        == Some("whole_cycle_components_incomplete")
+    {
+        if let Some(incomplete) =
+            human_client_limit_components(&alignment["baseline_equivalence"]["incomplete_components"])
+        {
+            tooltip.push('\n');
+            tooltip.push_str("- ");
+            tooltip.push_str("whole-cycle coverage ещё incomplete по: ");
+            tooltip.push_str(&incomplete);
+        }
+    }
     for reason in reasons {
         tooltip.push('\n');
         tooltip.push_str("- ");
@@ -7415,6 +7478,37 @@ mod tests {
                 .unwrap_or_default()
                 .contains("lower bound части цикла")
         );
+    }
+
+    #[test]
+    fn client_limit_alignment_tooltip_surfaces_baseline_equivalence_components() {
+        let alignment = json!({
+            "alignment_state": "whole_cycle_observed_baseline_partial",
+            "same_meter_as_client_limit": false,
+            "live_events_count": 79,
+            "non_live_events_count": 0,
+            "blocking_reasons": [
+                "same_meter_baseline_unmeasured"
+            ],
+            "baseline_equivalence": {
+                "state": "baseline_semantics_unmaterialized",
+                "fully_observed_components": [
+                    "client_prompt",
+                    "continuity_restore_outside_retrieval"
+                ],
+                "remaining_gap_reason": "same_meter_baseline_unmeasured"
+            }
+        });
+
+        let tooltip = super::client_limit_alignment_tooltip(&alignment)
+            .expect("baseline equivalence tooltip");
+        assert!(tooltip.contains("исходный запрос клиента"));
+        assert!(tooltip.contains("continuity-restore overhead вне retrieval"));
+
+        let note = super::client_limit_alignment_note_sentence(&alignment)
+            .expect("baseline equivalence note");
+        assert!(note.contains("применимые whole-cycle компоненты уже полностью observed")
+            || note.contains("applicable whole-cycle компоненты уже полностью observed"));
     }
 
     #[test]

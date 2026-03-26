@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 09:04 MSK
-Ручная сверка guide/docs: 2026-03-26 09:04 MSK
+modified_at: 2026-03-26 09:18 MSK
+Ручная сверка guide/docs: 2026-03-26 09:18 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1518,6 +1518,9 @@ preview, а не только raw count.
   - dashboard token-cards теперь поднимают этот же слой в user-facing surface:
     - добавляют строку `Связь с лимитом клиента`;
     - прямо показывают, когда текущий scope содержит только `non-live` активность;
+    - для `whole_cycle_observed_baseline_partial` tooltip/note теперь ещё поднимают
+      `baseline_equivalence.fully_observed_components`, чтобы operator видел, какие
+      applicable whole-cycle компоненты уже дотянуты, а какой baseline-gap остался;
     - и отдельно объясняют, что even confirmed lower bound всё ещё не обязан
       двигаться вместе с внешней шкалой клиентского лимита.
   - preview, settlement report preview и evidence pack теперь ещё несут общий
