@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 05:35 MSK
-Ручная сверка guide/docs: 2026-03-26 05:35 MSK
+modified_at: 2026-03-26 05:48 MSK
+Ручная сверка guide/docs: 2026-03-26 05:48 MSK
 
 # Operations
 
@@ -903,6 +903,11 @@ cargo run -- mcp serve
   - `not_materialized` — клиент/оператор ещё не поднимал startup в этом workspace;
   - `startup_runtime_state_drift` — artifact есть, но он потерял expected contract hash,
     `prompt_text` или обязательные machine-readable return поля.
+- в эти обязательные runtime gate fields теперь входят не только
+  `must_follow_startup_next_action / unrelated_work_allowed`, но и:
+  - `must_read_prompt_text_before_reply`;
+  - `required_action_kind_when_resume_required`;
+  - `no_silent_drop`.
 - repair path для такого drift теперь честный и bounded:
   `startup_runtime_state_repair: rerun cargo run -- continuity startup --repo-root ... --namespace continuity --json >/dev/null`
 - если нужно audit-ить runtime artifact не в самом `Amai` repo-root, а в конкретном project

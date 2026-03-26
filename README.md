@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 05:35 MSK
-Ручная сверка guide/docs: 2026-03-26 05:35 MSK
+modified_at: 2026-03-26 05:48 MSK
+Ручная сверка guide/docs: 2026-03-26 05:48 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1269,6 +1269,13 @@ preview, а не только raw count.
     выполнен или runtime artifact снят;
   - `startup_runtime_state_drift` — artifact жив, но потерял contract-hash, prompt или обязательные
     machine-readable поля resume/return;
+- этот runtime audit теперь обязан поднимать не только
+  `must_follow_startup_next_action / unrelated_work_allowed`, но и:
+  - `must_read_prompt_text_before_reply`;
+  - `required_action_kind_when_resume_required`;
+  - `no_silent_drop`;
+  если любой из этих gate fields пропал, truthful статус должен стать
+  `startup_runtime_state_drift`, а не `ok`.
 - рядом status теперь печатает и runtime repair path:
   `startup_runtime_state_repair: rerun cargo run -- continuity startup --repo-root ... --namespace continuity --json >/dev/null`
 - тот же runtime artifact теперь можно inspect-ить и вне `Amai` repo-root через

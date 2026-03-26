@@ -26,6 +26,8 @@ jq -e '.source_tool == "amai_continuity_startup"' "${startup_state_artifact}" >/
 jq -e '.source_summary_field == "continuity_startup_summary"' "${startup_state_artifact}" >/dev/null
 jq -e '.startup_execution_gate.gate_version == "startup-execution-gate-v1"' "${startup_state_artifact}" >/dev/null
 jq -e '.startup_execution_gate.no_silent_drop == true' "${startup_state_artifact}" >/dev/null
+jq -e '.startup_execution_gate.must_read_prompt_text_before_reply == true' "${startup_state_artifact}" >/dev/null
+jq -e '.startup_execution_gate.required_action_kind_when_resume_required == "resume_required_return_task"' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.prompt_text_present == true' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.startup_next_action.action_kind != null' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.required_return_task != null' "${startup_state_artifact}" >/dev/null
@@ -36,6 +38,9 @@ printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.status == 
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.prompt_text_present == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_next_action_present == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_execution_gate_present == true' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.must_read_prompt_text_before_reply == true' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.required_action_kind_when_resume_required == "resume_required_return_task"' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.no_silent_drop == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_execution_gate.action_kind != null' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.required_return_task != null' >/dev/null
 

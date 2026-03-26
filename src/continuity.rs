@@ -106,6 +106,9 @@ pub(crate) struct StartupRuntimeStateAudit {
     pub lease_owner_state: Option<String>,
     pub must_follow_startup_next_action: Option<bool>,
     pub unrelated_work_allowed: Option<bool>,
+    pub must_read_prompt_text_before_reply: Option<bool>,
+    pub required_action_kind_when_resume_required: Option<String>,
+    pub no_silent_drop: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -160,6 +163,9 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             lease_owner_state: None,
             must_follow_startup_next_action: None,
             unrelated_work_allowed: None,
+            must_read_prompt_text_before_reply: None,
+            required_action_kind_when_resume_required: None,
+            no_silent_drop: None,
         });
     };
     let expected_contract_sha =
@@ -210,6 +216,14 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         .as_bool();
     let unrelated_work_allowed = payload["startup_execution_gate"]["unrelated_work_allowed"]
         .as_bool();
+    let must_read_prompt_text_before_reply = payload["startup_execution_gate"]
+        ["must_read_prompt_text_before_reply"]
+        .as_bool();
+    let required_action_kind_when_resume_required = payload["startup_execution_gate"]
+        ["required_action_kind_when_resume_required"]
+        .as_str()
+        .map(ToOwned::to_owned);
+    let no_silent_drop = payload["startup_execution_gate"]["no_silent_drop"].as_bool();
 
     let status = if payload["artifact_version"].as_str()
         != Some("workspace-startup-runtime-state-v2")
@@ -225,6 +239,9 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         || project_task_ledger_field_present != Some(true)
         || must_follow_startup_next_action.is_none()
         || unrelated_work_allowed.is_none()
+        || must_read_prompt_text_before_reply.is_none()
+        || required_action_kind_when_resume_required.is_none()
+        || no_silent_drop.is_none()
     {
         "startup_runtime_state_drift".to_string()
     } else {
@@ -249,6 +266,9 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         lease_owner_state,
         must_follow_startup_next_action,
         unrelated_work_allowed,
+        must_read_prompt_text_before_reply,
+        required_action_kind_when_resume_required,
+        no_silent_drop,
     })
 }
 
@@ -278,6 +298,9 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
                     "lease_owner_state": audit.lease_owner_state,
                     "must_follow_startup_next_action": audit.must_follow_startup_next_action,
                     "unrelated_work_allowed": audit.unrelated_work_allowed,
+                    "must_read_prompt_text_before_reply": audit.must_read_prompt_text_before_reply,
+                    "required_action_kind_when_resume_required": audit.required_action_kind_when_resume_required,
+                    "no_silent_drop": audit.no_silent_drop,
                     "startup_execution_gate": artifact_payload.as_ref().map(|payload| payload["startup_execution_gate"].clone()).unwrap_or(Value::Null),
                     "startup_next_action": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["startup_next_action"].clone()).unwrap_or(Value::Null),
                     "required_return_task": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["required_return_task"].clone()).unwrap_or(Value::Null),
@@ -351,6 +374,21 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
     println!(
         "Unrelated work allowed: {}",
         audit.unrelated_work_allowed.unwrap_or(false)
+    );
+    println!(
+        "Must read prompt_text before reply: {}",
+        audit.must_read_prompt_text_before_reply.unwrap_or(false)
+    );
+    println!(
+        "Required action kind when resume is required: {}",
+        audit
+            .required_action_kind_when_resume_required
+            .as_deref()
+            .unwrap_or("n/a")
+    );
+    println!(
+        "No silent drop: {}",
+        audit.no_silent_drop.unwrap_or(false)
     );
     if let Some(payload) = artifact_payload.as_ref() {
         println!(
@@ -4865,6 +4903,18 @@ mod tests {
         assert_eq!(
             artifact["startup_execution_gate"]["unrelated_work_allowed"],
             json!(false)
+        );
+        assert_eq!(
+            artifact["startup_execution_gate"]["must_read_prompt_text_before_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["startup_execution_gate"]["required_action_kind_when_resume_required"],
+            json!("resume_required_return_task")
+        );
+        assert_eq!(
+            artifact["startup_execution_gate"]["no_silent_drop"],
+            json!(true)
         );
         assert_eq!(
             artifact["continuity_startup_summary"]["startup_next_action"]["action_kind"],
