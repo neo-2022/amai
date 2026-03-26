@@ -6939,32 +6939,6 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         None
     };
     let lifetime_assistant_scope = scope_iter.next().unwrap_or_default();
-    let current_session_summary = summarize_events(
-        &session_events,
-        now_epoch_ms,
-        &config.measurement,
-        &config.contract,
-    );
-    let rolling_window_summary = if profile.rolling_window_hours.is_some() {
-        summarize_events(
-            &rolling_window_events,
-            now_epoch_ms,
-            &config.measurement,
-            &config.contract,
-        )
-    } else {
-        Value::Null
-    };
-    let lifetime_summary =
-        summarize_events(&events, now_epoch_ms, &config.measurement, &config.contract);
-    let headline_summary = if profile.rolling_window_hours.is_some() {
-        build_product_headline(
-            &rolling_window_summary,
-            &format!("окно {}", profile.display_name),
-        )
-    } else {
-        build_product_headline(&lifetime_summary, "всё время записи")
-    };
     let report_components = dashboard_report_signature_components(
         &session_events,
         &rolling_window_events,
@@ -6991,6 +6965,32 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         &report_signature,
         &report_components,
     );
+    let current_session_summary = summarize_events(
+        &session_events,
+        now_epoch_ms,
+        &config.measurement,
+        &config.contract,
+    );
+    let rolling_window_summary = if profile.rolling_window_hours.is_some() {
+        summarize_events(
+            &rolling_window_events,
+            now_epoch_ms,
+            &config.measurement,
+            &config.contract,
+        )
+    } else {
+        Value::Null
+    };
+    let lifetime_summary =
+        summarize_events(&events, now_epoch_ms, &config.measurement, &config.contract);
+    let headline_summary = if profile.rolling_window_hours.is_some() {
+        build_product_headline(
+            &rolling_window_summary,
+            &format!("окно {}", profile.display_name),
+        )
+    } else {
+        build_product_headline(&lifetime_summary, "всё время записи")
+    };
     let mut report = json!({
         "token_budget_report": {
             "surface": "dashboard_read_only",
