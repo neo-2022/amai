@@ -11476,7 +11476,11 @@ fn summarize_events(
     recovery_values
         .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     let median_recovery_tokens = percentile_from_sorted(&recovery_values, 0.5);
-    let mut latency_values = events
+    let latency_events = events
+        .iter()
+        .filter(|event| event.measurement_scope == "retrieval_lower_bound")
+        .collect::<Vec<_>>();
+    let mut latency_values = latency_events
         .iter()
         .map(|event| event.latency_ms)
         .filter(|value| value.is_finite())
@@ -11484,7 +11488,7 @@ fn summarize_events(
     latency_values
         .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     let latency_sample_count = latency_values.len();
-    let current_latency_ms = events
+    let current_latency_ms = latency_events
         .iter()
         .rev()
         .map(|event| event.latency_ms)
@@ -13200,6 +13204,9 @@ fn latency_slice_breakdown(events: &[TokenBudgetEvent]) -> Value {
     let mut current_latency = BTreeMap::<String, f64>::new();
 
     for event in events {
+        if event.measurement_scope != "retrieval_lower_bound" {
+            continue;
+        }
         if !event.latency_ms.is_finite() {
             continue;
         }
@@ -20206,6 +20213,95 @@ effective_to_epoch_ms = 2000
         assert_eq!(hot["display_name"], "hot");
         assert_eq!(cold["sample_count"], 1);
         assert_eq!(cold["display_name"], "cold");
+    }
+
+    #[test]
+    fn latency_slice_breakdown_ignores_continuity_restore_observed_events() {
+        let events = vec![
+            token_event! {
+                created_at_epoch_ms: 10,
+                event_id: "retrieval-event".to_string(),
+                correlation_id: "retrieval-event".to_string(),
+                session_id: "session-1".to_string(),
+                rolling_window_profile: "codex_5h".to_string(),
+                timestamp_utc: 10,
+                occurred_at_epoch_ms: 10,
+                ingested_at_epoch_ms: 10,
+                query: "lookup".to_string(),
+                query_hash: "hash-1".to_string(),
+                query_type: "code_lookup".to_string(),
+                target_kind: "file".to_string(),
+                baseline_hit_target: true,
+                amai_hit_target: true,
+                cold_warm_state: "warm".to_string(),
+                baseline_strategy: "naive_top_files".to_string(),
+                retrieval_mode: Some("local_strict".to_string()),
+                tokenizer: "o200k_base".to_string(),
+                latency_ms: 12.0,
+                saved_tokens: 90,
+                naive_tokens: 100,
+                context_tokens: 10,
+                recovery_tokens: 0,
+                effective_saved_tokens: 90,
+                savings_factor: 10.0,
+                savings_percent: 90.0,
+                effective_savings_percent: 90.0,
+                quality_ok: true,
+                quality_score: 1.0,
+                quality_method: "retrieval_parity".to_string(),
+                quality_tier: "retrieval".to_string(),
+                head_hit_target: true,
+                needed_followup: false,
+                followup_count: 0,
+                followup_of_event_id: None,
+                resolved_by_event_id: None,
+                fallback_triggered: false,
+                fallback_count: 0,
+                document_hits: 1,
+                symbol_hits_count: 0,
+                file_hits: 1,
+                sources_count: 1,
+                chunks_count: 1,
+                pack_token_count: 10,
+                deduped_token_count: 10,
+            },
+            token_event! {
+                created_at_epoch_ms: 20,
+                occurred_at_epoch_ms: 20,
+                ingested_at_epoch_ms: 20,
+                event_id: "continuity-restore".to_string(),
+                correlation_id: "continuity-restore".to_string(),
+                session_id: "session-1".to_string(),
+                source_kind: "live_continuity_startup".to_string(),
+                measurement_scope: "whole_cycle_observed_lower_bound".to_string(),
+                query: "CHAT_START_RESTORE".to_string(),
+                query_hash: "hash-2".to_string(),
+                query_type: "continuity_restore".to_string(),
+                target_kind: "continuity_restore".to_string(),
+                baseline_hit_target: false,
+                cold_warm_state: "observed_only".to_string(),
+                baseline_strategy: "observed_only".to_string(),
+                retrieval_mode: None,
+                quality_method: "continuity_restore_observed".to_string(),
+                quality_tier: "observed_only".to_string(),
+                document_hits: 0,
+                file_hits: 0,
+                sources_count: 0,
+                chunks_count: 0,
+                continuity_restore_tokens: Some(817),
+            },
+        ];
+
+        let breakdown = latency_slice_breakdown(&events);
+        let slices = breakdown.as_array().expect("array");
+        let mixed = slices
+            .iter()
+            .find(|slice| slice["state"].as_str() == Some("mixed"))
+            .expect("mixed");
+
+        assert_eq!(mixed["sample_count"], 1);
+        assert_eq!(mixed["current_latency_ms"], 12.0);
+        assert_eq!(mixed["p50_latency_ms"], 12.0);
     }
 
     #[test]

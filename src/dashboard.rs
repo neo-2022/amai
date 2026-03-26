@@ -3292,6 +3292,15 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_note.push(' ');
         session_note.push_str(&sentence);
     }
+    let session_boundary_pressure =
+        continuity_boundary_pressure(current_session, current_session_alignment);
+    if let Some((boundary_tokens, strict_tokens)) = session_boundary_pressure {
+        session_note.push(' ');
+        session_note.push_str(&continuity_boundary_pressure_sentence(
+            boundary_tokens,
+            strict_tokens,
+        ));
+    }
     let mut session_rows = current_session_lane_rows(current_session);
     if let Some(row) = client_limit_alignment_metric_row(current_session_alignment) {
         session_rows.push(row);
@@ -3305,16 +3314,38 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if let Some(row) = client_limit_boundary_tokens_metric_row(current_session_alignment) {
         session_rows.push(row);
     }
+    let session_status =
+        if session_boundary_pressure.is_some_and(|(boundary_tokens, strict_tokens)| {
+            continuity_boundary_pressure_is_alert(session_saved, boundary_tokens, strict_tokens)
+        }) {
+            "alert"
+        } else {
+            savings_status(session_saved, session_events, session_events_total)
+        };
     let mut session_card = card_with_rows(
         "Экономия токенов за текущую сессию",
         format_signed_count(session_saved),
         session_note,
-        savings_status(session_saved, session_events, session_events_total),
+        session_status,
         None,
         Some("Эта карточка показывает, сколько токенов Amai сэкономил в текущем непрерывном заходе работы. Новый заход начинается после паузы дольше 30 минут. В главный итог попадают только те живые запросы, которые уже подтвердились как полезные без потери качества. Нижние строки нужны, чтобы показать разницу между главным итогом и всем живым потоком.".to_string()),
         session_rows,
     );
-    if session_events_total > 0 && session_events == 0 {
+    if let Some((boundary_tokens, strict_tokens)) =
+        session_boundary_pressure.filter(|(boundary_tokens, strict_tokens)| {
+            continuity_boundary_pressure_is_alert(session_saved, *boundary_tokens, *strict_tokens)
+        })
+    {
+        session_card = with_status_label(session_card, "burn в continuity startup");
+        session_card = with_status_tooltip(
+            session_card,
+            &format!(
+                "Статус требует внимания по следующим причинам:\n- В этой сессии savings-KPI пока не показывает положительную подтверждённую экономию.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит лимит сейчас уходит главным образом в continuity restore, а не в retrieval/workflow effect.",
+                format_u64(Some(boundary_tokens)),
+                format_u64(Some(strict_tokens))
+            ),
+        );
+    } else if session_events_total > 0 && session_events == 0 {
         session_card = with_status_tooltip(
             session_card,
             "Статус пока не может считаться нормальным по следующим причинам:\n- В этой сессии уже были живые запросы.\n- Но пока ни один из них ещё не подтвердился как полезный без потери качества.\n- Как только появится первый такой случай, главный итог этой карточки начнёт считаться.",
@@ -3356,6 +3387,15 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         rolling_note.push(' ');
         rolling_note.push_str(&sentence);
     }
+    let rolling_boundary_pressure =
+        continuity_boundary_pressure(rolling_window, rolling_window_alignment);
+    if let Some((boundary_tokens, strict_tokens)) = rolling_boundary_pressure {
+        rolling_note.push(' ');
+        rolling_note.push_str(&continuity_boundary_pressure_sentence(
+            boundary_tokens,
+            strict_tokens,
+        ));
+    }
     let mut rolling_rows = Vec::new();
     if let Some(row) = client_limit_alignment_metric_row(rolling_window_alignment) {
         rolling_rows.push(row);
@@ -3369,11 +3409,19 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if let Some(row) = client_limit_boundary_tokens_metric_row(rolling_window_alignment) {
         rolling_rows.push(row);
     }
+    let rolling_status =
+        if rolling_boundary_pressure.is_some_and(|(boundary_tokens, strict_tokens)| {
+            continuity_boundary_pressure_is_alert(rolling_saved, boundary_tokens, strict_tokens)
+        }) {
+            "alert"
+        } else {
+            savings_status(rolling_saved, rolling_events, rolling_events_total)
+        };
     let mut rolling_card = card_with_rows(
         "Экономия токенов за рабочее окно",
         format_signed_count(rolling_saved),
         rolling_note,
-        savings_status(rolling_saved, rolling_events, rolling_events_total),
+        rolling_status,
         None,
         Some(format!(
             "Эта карточка показывает не одну сессию, а текущее скользящее рабочее окно профиля {}. Окно может захватывать несколько заходов работы подряд и нужно для недавнего тренда, а не только для последнего непрерывного сеанса. В главный итог здесь тоже попадают только те живые запросы, которые уже подтвердились как полезные без потери качества.",
@@ -3381,7 +3429,21 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         )),
         rolling_rows,
     );
-    if rolling_events_total > 0 && rolling_events == 0 {
+    if let Some((boundary_tokens, strict_tokens)) =
+        rolling_boundary_pressure.filter(|(boundary_tokens, strict_tokens)| {
+            continuity_boundary_pressure_is_alert(rolling_saved, *boundary_tokens, *strict_tokens)
+        })
+    {
+        rolling_card = with_status_label(rolling_card, "burn в continuity startup");
+        rolling_card = with_status_tooltip(
+            rolling_card,
+            &format!(
+                "Статус требует внимания по следующим причинам:\n- В рабочем окне savings-KPI пока не показывает положительную подтверждённую экономию.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит недавний live budget уходит главным образом в continuity restore, а не в retrieval/workflow effect.",
+                format_u64(Some(boundary_tokens)),
+                format_u64(Some(strict_tokens))
+            ),
+        );
+    } else if rolling_events_total > 0 && rolling_events == 0 {
         rolling_card = with_status_tooltip(
             rolling_card,
             "Статус пока не может считаться нормальным по следующим причинам:\n- В текущем рабочем окне уже есть живые запросы.\n- Но пока ни один случай ещё не подтвердился как полезный без потери качества.\n- Поэтому окно ещё копит подтверждённую выборку.",
@@ -6004,6 +6066,47 @@ fn savings_status(
     }
 }
 
+fn continuity_boundary_pressure(summary: &Value, alignment: &Value) -> Option<(u64, u64)> {
+    if alignment["explicit_boundary_surface"]["state"].as_str() != Some("amai_continuity_boundary")
+    {
+        return None;
+    }
+    let boundary_tokens = summary["observed_continuity_restore_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    if boundary_tokens == 0 {
+        return None;
+    }
+    let strict_tokens = alignment["strict_client_meter_slice"]["lower_bound_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    Some((boundary_tokens, strict_tokens))
+}
+
+fn continuity_boundary_pressure_sentence(boundary_tokens: u64, strict_tokens: u64) -> String {
+    if strict_tokens > 0 {
+        format!(
+            "Сейчас живой расход уже уходит в continuity startup: {} токенов continuity-restore против {} токенов strict same-meter slice по клиентскому запросу.",
+            format_u64(Some(boundary_tokens)),
+            format_u64(Some(strict_tokens))
+        )
+    } else {
+        format!(
+            "Сейчас живой расход уже уходит в continuity startup: {} токенов continuity-restore при нулевом strict same-meter slice по клиентскому запросу.",
+            format_u64(Some(boundary_tokens))
+        )
+    }
+}
+
+fn continuity_boundary_pressure_is_alert(
+    saved_tokens: Option<i64>,
+    boundary_tokens: u64,
+    strict_tokens: u64,
+) -> bool {
+    saved_tokens.unwrap_or_default() <= 0
+        && boundary_tokens >= strict_tokens.saturating_mul(4).max(256)
+}
+
 fn recovery_sentence(median_recovery_tokens: Option<f64>) -> String {
     match median_recovery_tokens {
         Some(value) if value > 0.0 => {
@@ -8279,6 +8382,144 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("lower bound части цикла")
+        );
+    }
+
+    #[test]
+    fn hero_cards_alert_when_continuity_startup_burn_dominates_live_window() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "events_total": 1,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 0,
+                        "verified_effective_savings_pct": 0.0,
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 0.0,
+                        "answer_like_counted_events": 0,
+                        "verified_answer_like_savings_pct": 0.0,
+                        "excluded_events_count": 0,
+                        "excluded_effective_saved_tokens": 0,
+                        "total_naive_tokens": 0,
+                        "total_context_tokens": 0,
+                        "effective_savings_pct": 0.0,
+                        "total_effective_saved_tokens": 0,
+                        "total_recovery_tokens": 0,
+                        "observed_continuity_restore_tokens": 817
+                    },
+                    "rolling_window": {
+                        "events_total": 1,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 0,
+                        "verified_effective_savings_pct": 0.0,
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 0.0,
+                        "answer_like_counted_events": 0,
+                        "verified_answer_like_savings_pct": 0.0,
+                        "observed_continuity_restore_tokens": 817
+                    },
+                    "lifetime": {
+                        "events_total": 1,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 0,
+                        "verified_effective_savings_pct": 0.0,
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 0.0,
+                        "answer_like_counted_events": 0,
+                        "verified_answer_like_savings_pct": 0.0
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "client_limit_meter_alignment": {
+                                "alignment_state": "whole_cycle_observed_explicit_boundary_not_meter_equivalent",
+                                "same_meter_as_client_limit": false,
+                                "live_events_count": 1,
+                                "non_live_events_count": 0,
+                                "blocking_reasons": ["same_meter_baseline_explicit_boundary"],
+                                "strict_client_meter_slice": {
+                                    "same_meter_equivalent_for_slice": true,
+                                    "lower_bound_tokens": 4,
+                                    "components": ["client_prompt"]
+                                },
+                                "explicit_boundary_surface": {
+                                    "state": "amai_continuity_boundary",
+                                    "components": ["continuity_restore_outside_retrieval"],
+                                    "note": "Continuity boundary."
+                                },
+                                "continuity_boundary_rollup": {
+                                    "state": "amai_continuity_boundary_observed",
+                                    "observed_tokens": 817
+                                },
+                                "baseline_equivalence": {
+                                    "state": "baseline_component_semantics_explicit_boundary",
+                                    "measured_baseline_components": ["client_prompt"],
+                                    "explicitly_unmodeled_baseline_components": ["continuity_restore_outside_retrieval"]
+                                }
+                            }
+                        },
+                        "rolling_window": {
+                            "client_limit_meter_alignment": {
+                                "alignment_state": "whole_cycle_observed_explicit_boundary_not_meter_equivalent",
+                                "same_meter_as_client_limit": false,
+                                "live_events_count": 1,
+                                "non_live_events_count": 0,
+                                "blocking_reasons": ["same_meter_baseline_explicit_boundary"],
+                                "strict_client_meter_slice": {
+                                    "same_meter_equivalent_for_slice": true,
+                                    "lower_bound_tokens": 4,
+                                    "components": ["client_prompt"]
+                                },
+                                "explicit_boundary_surface": {
+                                    "state": "amai_continuity_boundary",
+                                    "components": ["continuity_restore_outside_retrieval"],
+                                    "note": "Continuity boundary."
+                                },
+                                "continuity_boundary_rollup": {
+                                    "state": "amai_continuity_boundary_observed",
+                                    "observed_tokens": 817
+                                },
+                                "baseline_equivalence": {
+                                    "state": "baseline_component_semantics_explicit_boundary",
+                                    "measured_baseline_components": ["client_prompt"],
+                                    "explicitly_unmodeled_baseline_components": ["continuity_restore_outside_retrieval"]
+                                }
+                            }
+                        },
+                        "lifetime": {
+                            "client_limit_meter_alignment": {
+                                "alignment_state": "partial_lower_bound_not_meter_equivalent",
+                                "same_meter_as_client_limit": false,
+                                "live_events_count": 1,
+                                "non_live_events_count": 0,
+                                "blocking_reasons": ["client_prompt_unmeasured"]
+                            }
+                        }
+                    },
+                    "profile": {
+                        "display_name": "Обычная рабочая машина"
+                    }
+                }
+            }
+        });
+
+        let cards = build_hero_cards(&snapshot);
+        assert_eq!(cards[0]["status"].as_str(), Some("alert"));
+        assert_eq!(
+            cards[0]["status_label"].as_str(),
+            Some("burn в continuity startup")
+        );
+        assert!(
+            cards[0]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("живой расход уже уходит в continuity startup")
         );
     }
 
