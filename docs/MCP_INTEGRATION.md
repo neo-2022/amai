@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 02:49 MSK
-Ручная сверка guide/docs: 2026-03-26 02:49 MSK
+modified_at: 2026-03-26 03:03 MSK
+Ручная сверка guide/docs: 2026-03-26 03:03 MSK
 
 # MCP Integration
 
@@ -406,6 +406,9 @@ stack-а, но и какие deployment promises вообще честно до�
 - onboarding теперь materialize-ит и отдельный workspace JSON artifact:
   `.amai/onboarding/project-chat-startup-contract.json`;
   клиент может читать его как machine-readable source-of-truth вместо парсинга markdown/rule file.
+- тот же artifact теперь pinned через `startup_contract_sha256`;
+  managed startup instructions поднимают expected hash, чтобы client/runtime мог fail-closed
+  при contract drift, а не продолжал работу по устаревшему startup block.
 - сам `amai_continuity_startup` теперь перед чтением restore-state ещё и делает schema-sync;
   это важно затем, чтобы новый `ExecCtl` lease lane не рвал MCP startup после partial-upgrade
   на ошибке `relation ami.execctl_task_leases does not exist`.

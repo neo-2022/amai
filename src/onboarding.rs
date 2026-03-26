@@ -7,6 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use dirs::home_dir;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
@@ -37,6 +38,8 @@ struct InstallState {
     startup_contract_path: Option<String>,
     #[serde(default)]
     startup_contract_status: Option<String>,
+    #[serde(default)]
+    startup_contract_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +209,9 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
             startup_contract_status: startup_contract_summary
                 .as_ref()
                 .map(|summary| summary.status.clone()),
+            startup_contract_sha256: startup_contract_summary
+                .as_ref()
+                .map(|summary| summary.sha256.clone()),
         },
     )?;
 
@@ -288,6 +294,7 @@ pub async fn run(args: &BootstrapOnboardingArgs) -> Result<()> {
             "Где лежит startup contract по scope: {}",
             install_scope_status(&summary.install_scope)
         );
+        println!("Startup contract SHA-256: {}", summary.sha256);
         println!("Почему contract materialized: {}", summary.reason);
     }
     if let Some(summary) = &local_memory_bridge_summary {
@@ -1040,6 +1047,9 @@ pub async fn disconnect(args: &BootstrapDisconnectArgs) -> Result<()> {
         if let Some(startup_contract_status) = &state.startup_contract_status {
             println!("startup_contract_status: {}", startup_contract_status);
         }
+        if let Some(startup_contract_sha256) = &state.startup_contract_sha256 {
+            println!("startup_contract_sha256: {}", startup_contract_sha256);
+        }
     }
     if let Some(state) = &install_state_before {
         if let Some(memory_bridge_path) = &state.memory_bridge_path {
@@ -1268,6 +1278,7 @@ struct StartupContractInstallSummary {
     output_path: PathBuf,
     install_scope: String,
     reason: String,
+    sha256: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1618,7 +1629,7 @@ fn install_startup_contract_artifact(
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let content = render_startup_contract_artifact(repo_root)?;
+    let (content, sha256) = render_startup_contract_artifact(repo_root)?;
     fs::write(&output_path, content.as_bytes())
         .with_context(|| format!("failed to write {}", output_path.display()))?;
     Ok(Some(StartupContractInstallSummary {
@@ -1628,6 +1639,7 @@ fn install_startup_contract_artifact(
         reason:
             "supported clients now get a machine-readable startup source-of-truth alongside managed instructions"
                 .to_string(),
+        sha256,
     }))
 }
 
@@ -1718,6 +1730,7 @@ fn render_startup_instructions(
 fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     let contract = mcp::project_chat_startup_contract();
     let contract_path = startup_contract_artifact_path(repo_root);
+    let startup_contract_sha256 = startup_contract_sha256(&contract)?;
     let tool = contract["tool"]
         .as_str()
         .ok_or_else(|| anyhow!("project_chat_startup contract is missing tool"))?;
@@ -1807,9 +1820,10 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
         .unwrap_or(false);
 
     Ok(format!(
-        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала прочитай machine-readable startup contract `{}` и используй его как source-of-truth, а не этот markdown-блок.\n3. Затем вызови MCP tool `{tool}`.\n4. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n5. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n6. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n7. После restore обязательно подними поля: {required_summary_fields}.\n8. Верни в активную рабочую линию obligations: {restored_obligations}.\n9. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n10. `{startup_next_action_field}` считается первым обязательным действием после startup.\n11. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n12. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n13. Silent drop запрещён: {}.\n14. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
+        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала прочитай machine-readable startup contract `{}` и используй его как source-of-truth, а не этот markdown-блок.\n3. Проверь, что `startup_contract_sha256 = \"{}\"`; при drift fail-closed.\n4. Затем вызови MCP tool `{tool}`.\n5. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n6. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n7. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n8. После restore обязательно подними поля: {required_summary_fields}.\n9. Верни в активную рабочую линию obligations: {restored_obligations}.\n10. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n11. `{startup_next_action_field}` считается первым обязательным действием после startup.\n12. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n13. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n14. Silent drop запрещён: {}.\n15. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
         repo_root.display(),
         contract_path.display(),
+        startup_contract_sha256,
         repo_root.display(),
         "amai_context_pack",
         if must_resume_before_unrelated {
@@ -1830,8 +1844,9 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     ))
 }
 
-fn render_startup_contract_artifact(repo_root: &Path) -> Result<String> {
+fn render_startup_contract_artifact(repo_root: &Path) -> Result<(String, String)> {
     let contract = mcp::project_chat_startup_contract();
+    let startup_contract_sha256 = startup_contract_sha256(&contract)?;
     let tool = contract["tool"]
         .as_str()
         .ok_or_else(|| anyhow!("project_chat_startup contract is missing tool"))?;
@@ -1843,6 +1858,8 @@ fn render_startup_contract_artifact(repo_root: &Path) -> Result<String> {
         "contract_kind": "project_chat_startup",
         "repo_root": repo_root.display().to_string(),
         "default_namespace": namespace,
+        "startup_contract_sha256": startup_contract_sha256,
+        "startup_contract_sha256_scope": "startup_contract object only",
         "tool": tool,
         "recommended_startup_call": {
             "tool": tool,
@@ -1854,7 +1871,27 @@ fn render_startup_contract_artifact(repo_root: &Path) -> Result<String> {
         },
         "startup_contract": contract
     });
-    serde_json::to_string_pretty(&payload).context("failed to serialize startup contract artifact")
+    let content = serde_json::to_string_pretty(&payload)
+        .context("failed to serialize startup contract artifact")?;
+    Ok((content, startup_contract_sha256))
+}
+
+fn startup_contract_sha256(contract: &Value) -> Result<String> {
+    let bytes =
+        serde_json::to_vec(contract).context("failed to serialize project_chat_startup contract")?;
+    Ok(hex_sha256(&bytes))
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
 }
 
 fn install_scope_status(scope: &str) -> &'static str {
@@ -1949,6 +1986,7 @@ mod tests {
         detection_score, env_keys, expand_target_template, install_scope_status,
         merge_managed_startup_block, render_startup_contract_artifact, render_startup_instructions,
         resolve_client_target, resolve_output_path, startup_contract_artifact_path,
+        startup_contract_sha256,
         strip_managed_startup_block, working_state_reason_summary,
     };
     use serde_json::{Value, json};
@@ -2088,6 +2126,9 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             )
         );
         assert!(text.contains("machine-readable startup contract"));
+        let expected_sha = startup_contract_sha256(&mcp::project_chat_startup_contract())
+            .expect("startup contract hash");
+        assert!(text.contains(expected_sha.as_str()));
         assert!(text.contains("previous_session_owner_must_follow_startup_next_action = true"));
         assert!(text.contains("no_silent_drop = true"));
     }
@@ -2095,13 +2136,15 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
     #[test]
     fn renders_machine_readable_startup_contract_artifact() {
         let repo = Path::new("/tmp/amai");
-        let text = render_startup_contract_artifact(repo).expect("startup contract must render");
+        let (text, sha256) =
+            render_startup_contract_artifact(repo).expect("startup contract must render");
         let payload: Value = serde_json::from_str(&text).expect("startup contract json");
         assert_eq!(
             payload["artifact_version"],
             json!("workspace-startup-contract-v1")
         );
         assert_eq!(payload["repo_root"], json!("/tmp/amai"));
+        assert_eq!(payload["startup_contract_sha256"], json!(sha256));
         assert_eq!(
             payload["recommended_startup_call"]["arguments"]["repo_root"],
             json!("/tmp/amai")

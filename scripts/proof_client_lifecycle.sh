@@ -15,6 +15,7 @@ grep -q '\[mcp_servers.amai\]' "${temp_home}/.codex/config.toml"
 test -f AGENTS.md
 test -f .amai/onboarding/project-chat-startup-contract.json
 grep -q '"artifact_version": "workspace-startup-contract-v1"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"startup_contract_sha256": "' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"required_action_kind_when_resume_required": "resume_required_return_task"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"project_task_tree"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"project_task_ledger"' .amai/onboarding/project-chat-startup-contract.json
@@ -46,6 +47,7 @@ test -f "${temp_home}/.cursor/mcp.json"
 grep -q '"amai"' "${temp_home}/.cursor/mcp.json"
 test -f .amai/onboarding/project-chat-startup-contract.json
 grep -q '"artifact_version": "workspace-startup-contract-v1"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"startup_contract_sha256": "' .amai/onboarding/project-chat-startup-contract.json
 test -f .cursor/rules/amai-continuity-startup.mdc
 grep -q 'amai_continuity_startup' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'execctl_resume_contract_summary' .cursor/rules/amai-continuity-startup.mdc
@@ -74,6 +76,7 @@ test -f .mcp.json
 grep -q '"amai"' .mcp.json
 test -f .amai/onboarding/project-chat-startup-contract.json
 grep -q '"artifact_version": "workspace-startup-contract-v1"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"startup_contract_sha256": "' .amai/onboarding/project-chat-startup-contract.json
 test -f CLAUDE.md
 grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' CLAUDE.md
 grep -q 'amai_continuity_startup' CLAUDE.md

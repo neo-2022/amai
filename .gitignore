@@ -1,5 +1,6 @@
 .env
 .env.local
+.amai/
 .fastembed_cache/
 .mcp.json
 

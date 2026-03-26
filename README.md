@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 02:49 MSK
-Ручная сверка guide/docs: 2026-03-26 02:49 MSK
+modified_at: 2026-03-26 03:03 MSK
+Ручная сверка guide/docs: 2026-03-26 03:03 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1209,6 +1209,8 @@ preview, а не только raw count.
 - `Claude Code` теперь получает managed append-block в project `CLAUDE.md`;
 - все эти клиенты теперь получают и общий workspace-level machine-readable startup contract
   `.amai/onboarding/project-chat-startup-contract.json`;
+  в нём теперь отдельно pinned `startup_contract_sha256`, чтобы client/runtime видел expected
+  contract hash и мог fail-closed при drift;
 - `Claude Desktop` и `Generic` пока всё ещё получают только manual startup snippets.
 
 Это важно читать строго:

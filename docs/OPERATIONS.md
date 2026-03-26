@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 02:49 MSK
-Ручная сверка guide/docs: 2026-03-26 02:49 MSK
+modified_at: 2026-03-26 03:03 MSK
+Ручная сверка guide/docs: 2026-03-26 03:03 MSK
 
 # Operations
 
@@ -829,6 +829,9 @@ cargo run -- mcp serve
   `.amai/onboarding/project-chat-startup-contract.json`;
   это нужно затем, чтобы supported clients имели machine-readable startup source-of-truth и не
   зависели только от парсинга managed markdown/rule block.
+- тот же artifact теперь несёт `startup_contract_sha256`, а managed instructions поднимают тот же
+  expected hash; при drift client/runtime должен fail-closed, а не quietly continue на старом
+  startup contract.
 - тот же `amai_protocol_manifest` теперь несёт `error_contracts`, а `tools/call`
   и JSON-RPC errors отдают machine-readable taxonomy вместо голого текста:
   `invalid_json_rpc_payload`, `invalid_request`, `method_not_found`,
