@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 04:59 MSK
-Ручная сверка guide/docs: 2026-03-26 04:59 MSK
+modified_at: 2026-03-26 05:00 MSK
+Ручная сверка guide/docs: 2026-03-26 05:00 MSK
 
 # MCP Integration
 
@@ -434,6 +434,8 @@ stack-а, но и какие deployment promises вообще честно до�
   installation-time law, но и фактический live return contour:
   `startup_execution_gate`, `startup_next_action`, `required_return_task`, `execctl_active_lease`,
   `project_task_tree`, `project_task_ledger`.
+- тот же `startup_execution_gate` теперь идёт и прямо в `continuity_startup_summary`, а не только
+  в runtime artifact/fallback path.
 - `amai status` теперь читает и этот runtime artifact; если он не materialized, status честно
   показывает `startup_runtime_state: not_materialized`, а если он потерял hash или required fields —
   `startup_runtime_state: startup_runtime_state_drift`.

@@ -27,6 +27,7 @@ grep -q '"required_action_kind_when_resume_required": "resume_required_return_ta
 grep -q '".amai/continuity/project-chat-startup-state.json"' "${startup_contract}"
 grep -q '"startup_execution_gate_field": "startup_execution_gate"' "${startup_contract}"
 grep -q '"command": "continuity startup-state"' "${startup_contract}"
+grep -q '"startup_execution_gate"' "${startup_contract}"
 grep -q '"project_task_tree"' "${startup_contract}"
 grep -q '"project_task_ledger"' "${startup_contract}"
 grep -q 'amai_continuity_startup' "${startup_output}"

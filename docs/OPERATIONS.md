@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 04:59 MSK
-Ручная сверка guide/docs: 2026-03-26 04:59 MSK
+modified_at: 2026-03-26 05:00 MSK
+Ручная сверка guide/docs: 2026-03-26 05:00 MSK
 
 # Operations
 
@@ -884,6 +884,8 @@ cargo run -- mcp serve
 - `startup_execution_gate` считается immediate operator/client gate:
   он machine-readable фиксирует `must_follow_startup_next_action` и
   `unrelated_work_allowed`.
+- этот gate теперь обязателен не только в runtime artifact и fallback CLI, но и прямо в
+  `continuity_startup_summary`.
 - `amai status` теперь auditing-ит runtime artifact отдельной строкой `startup_runtime_state: ...`.
   Правильное чтение:
   - `ok` — живой startup-state materialized и return contour виден machine-readable;

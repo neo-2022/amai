@@ -108,6 +108,7 @@ pub(crate) struct StartupArtifactAudit {
     pub startup_contract_sha_matches_current_contract: Option<bool>,
     pub install_state_sha_matches_current_contract: Option<bool>,
     pub startup_contract_enforces_fail_closed: Option<bool>,
+    pub startup_contract_contains_startup_execution_gate_field: Option<bool>,
     pub startup_contract_contains_startup_next_action_field: Option<bool>,
     pub startup_contract_contains_required_return_task_field: Option<bool>,
     pub startup_contract_contains_resume_required_action_kind: Option<bool>,
@@ -608,6 +609,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
     let (
         startup_contract_sha_matches_current_contract,
         startup_contract_enforces_fail_closed,
+        startup_contract_contains_startup_execution_gate_field,
         startup_contract_contains_startup_next_action_field,
         startup_contract_contains_required_return_task_field,
         startup_contract_contains_resume_required_action_kind,
@@ -649,6 +651,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         (
                 Some(artifact_sha == Some(expected_contract_sha.as_str())),
                 Some(artifact_fail_closed),
+                Some(contains_required_summary_field("startup_execution_gate")),
                 Some(contains_required_summary_field("startup_next_action")),
                 Some(contains_required_summary_field("required_return_task")),
                 Some(
@@ -711,7 +714,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
                 ),
             )
     } else {
-        (None, None, None, None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, None, None, None, None)
     };
 
     let install_state_sha_matches_current_contract = state
@@ -739,6 +742,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
     } else if startup_contract_sha_matches_current_contract != Some(true)
         || install_state_sha_matches_current_contract != Some(true)
         || startup_contract_enforces_fail_closed != Some(true)
+        || startup_contract_contains_startup_execution_gate_field != Some(true)
         || startup_contract_contains_startup_next_action_field != Some(true)
         || startup_contract_contains_required_return_task_field != Some(true)
         || startup_contract_contains_resume_required_action_kind != Some(true)
@@ -775,6 +779,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_contract_sha_matches_current_contract,
         install_state_sha_matches_current_contract,
         startup_contract_enforces_fail_closed,
+        startup_contract_contains_startup_execution_gate_field,
         startup_contract_contains_startup_next_action_field,
         startup_contract_contains_required_return_task_field,
         startup_contract_contains_resume_required_action_kind,
@@ -2628,6 +2633,10 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(audit.install_state_sha_matches_current_contract, Some(true));
         assert_eq!(audit.startup_contract_enforces_fail_closed, Some(true));
+        assert_eq!(
+            audit.startup_contract_contains_startup_execution_gate_field,
+            Some(true)
+        );
         assert_eq!(
             audit.startup_contract_contains_startup_next_action_field,
             Some(true)

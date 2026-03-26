@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 04:59 MSK
-Ручная сверка guide/docs: 2026-03-26 04:59 MSK
+modified_at: 2026-03-26 05:00 MSK
+Ручная сверка guide/docs: 2026-03-26 05:00 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1251,6 +1251,8 @@ preview, а не только raw count.
   - `project_task_ledger`;
 - поверх этих полей runtime artifact теперь отдельно materialize-ит `startup_execution_gate`,
   чтобы клиент видел immediate auto-return decision уже единым machine-readable object-слоем;
+- тот же `startup_execution_gate` теперь обязателен и прямо в `continuity_startup_summary`,
+  чтобы client runtime мог enforce-ить return уже по самому MCP startup output;
 - `amai status` теперь auditing-ит и этот runtime artifact отдельной строкой
   `startup_runtime_state: ...`;
   truthful интерпретация там такая:

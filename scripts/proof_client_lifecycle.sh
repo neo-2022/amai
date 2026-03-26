@@ -22,6 +22,7 @@ grep -q '"required_action_kind_when_resume_required": "resume_required_return_ta
 grep -q '".amai/continuity/project-chat-startup-state.json"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"startup_execution_gate_field": "startup_execution_gate"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"command": "continuity startup-state"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"startup_execution_gate"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"project_task_tree"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"project_task_ledger"' .amai/onboarding/project-chat-startup-contract.json
 grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' AGENTS.md
@@ -64,6 +65,7 @@ grep -q '"missing_or_unreadable_fail_closed": true' .amai/onboarding/project-cha
 grep -q '".amai/continuity/project-chat-startup-state.json"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"startup_execution_gate_field": "startup_execution_gate"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"command": "continuity startup-state"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"startup_execution_gate"' .amai/onboarding/project-chat-startup-contract.json
 test -f .cursor/rules/amai-continuity-startup.mdc
 grep -q 'amai_continuity_startup' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'execctl_resume_contract_summary' .cursor/rules/amai-continuity-startup.mdc
@@ -104,6 +106,7 @@ grep -q '"missing_or_unreadable_fail_closed": true' .amai/onboarding/project-cha
 grep -q '".amai/continuity/project-chat-startup-state.json"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"startup_execution_gate_field": "startup_execution_gate"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"command": "continuity startup-state"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"startup_execution_gate"' .amai/onboarding/project-chat-startup-contract.json
 test -f CLAUDE.md
 grep -q 'AMAI MANAGED STARTUP INSTRUCTIONS v1' CLAUDE.md
 grep -q 'amai_continuity_startup' CLAUDE.md

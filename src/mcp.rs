@@ -652,6 +652,11 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP continuity startup did not surface startup_next_action"
         ));
     }
+    if !continuity_startup["continuity_startup_summary"]["startup_execution_gate"].is_object() {
+        return Err(anyhow!(
+            "MCP continuity startup did not surface startup_execution_gate"
+        ));
+    }
     if continuity_startup["continuity_startup_summary"]
         .get("required_return_task")
         .is_none()
@@ -1973,6 +1978,7 @@ struct ContinuityStartupSummary {
     pending_return_summary: Option<String>,
     execctl_resume_contract_summary: Option<String>,
     execctl_resume_obligation: Value,
+    startup_execution_gate: Value,
     startup_next_action: Value,
     startup_next_action_summary: Option<String>,
     execctl_active_lease: Value,
@@ -1984,6 +1990,54 @@ struct ContinuityStartupSummary {
     project_task_ledger_summary: Option<String>,
     included_reasons_summary: Option<String>,
     excluded_reasons_summary: Option<String>,
+}
+
+fn fallback_startup_execution_gate(payload: &Value) -> Value {
+    let contract = project_chat_startup_contract();
+    let resume_enforcement = &contract["resume_enforcement"];
+    let action_kind = payload["chat_start_restore"]["startup_next_action"]["action_kind"]
+        .as_str()
+        .unwrap_or("continue_active_workline");
+    let lease_owner_state = payload["chat_start_restore"]["execctl_active_lease"]["lease_owner_state"]
+        .as_str();
+    let previous_session_owner_value = resume_enforcement["previous_session_owner_value"]
+        .as_str()
+        .unwrap_or("previous_session_owner");
+    let must_resume_before_unrelated = resume_enforcement
+        ["must_resume_required_return_task_before_unrelated_work"]
+        .as_bool()
+        .unwrap_or(false);
+    let required_action_kind = resume_enforcement["required_action_kind_when_resume_required"]
+        .as_str()
+        .unwrap_or("resume_required_return_task");
+    let must_follow = (must_resume_before_unrelated && action_kind == required_action_kind)
+        || lease_owner_state == Some(previous_session_owner_value);
+
+    json!({
+        "gate_version": "startup-execution-gate-v1",
+        "action_kind": action_kind,
+        "blocking": payload["chat_start_restore"]["startup_next_action"]["blocking"]
+            .as_bool()
+            .unwrap_or(false),
+        "resume_state": payload["chat_start_restore"]["execctl_resume_state"]
+            .as_str()
+            .unwrap_or("clear"),
+        "required_return_task_present": payload["chat_start_restore"]["required_return_task"].is_object(),
+        "required_return_task_headline": payload["chat_start_restore"]["required_return_task"]["headline"]
+            .as_str(),
+        "required_return_task_next_step": payload["chat_start_restore"]["required_return_task"]["next_step"]
+            .as_str(),
+        "lease_owner_state": lease_owner_state,
+        "must_follow_startup_next_action": must_follow,
+        "unrelated_work_allowed": !must_follow,
+        "must_read_prompt_text_before_reply": payload["chat_start_restore"]["prompt_text"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty()),
+        "required_action_kind_when_resume_required": required_action_kind,
+        "no_silent_drop": resume_enforcement["no_silent_drop"]
+            .as_bool()
+            .unwrap_or(false),
+    })
 }
 
 fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
@@ -2042,6 +2096,11 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
                 "required_return_headline": Value::Null,
                 "required_return_next_step": Value::Null,
             })
+        },
+        startup_execution_gate: if payload["startup_execution_gate"].is_object() {
+            payload["startup_execution_gate"].clone()
+        } else {
+            fallback_startup_execution_gate(payload)
         },
         startup_next_action: if payload["chat_start_restore"]["startup_next_action"].is_object() {
             payload["chat_start_restore"]["startup_next_action"].clone()
@@ -2120,6 +2179,7 @@ pub(crate) fn continuity_startup_summary_json(payload: &Value) -> Value {
         "pending_return_summary": summary.pending_return_summary,
         "execctl_resume_contract_summary": summary.execctl_resume_contract_summary,
         "execctl_resume_obligation": summary.execctl_resume_obligation,
+        "startup_execution_gate": summary.startup_execution_gate,
         "startup_next_action": summary.startup_next_action,
         "startup_next_action_summary": summary.startup_next_action_summary,
         "execctl_active_lease": summary.execctl_active_lease,
@@ -2509,7 +2569,7 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v6",
+                "contract_version": "continuity-startup-contract-v7",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore before any substantive work in a new or resumed chat",
@@ -2560,6 +2620,7 @@ fn protocol_manifest() -> Value {
                     "execctl_resume_state",
                     "execctl_resume_contract_summary",
                     "execctl_resume_obligation",
+                    "startup_execution_gate",
                     "startup_next_action",
                     "startup_next_action_summary",
                     "execctl_active_lease",
@@ -2577,6 +2638,7 @@ fn protocol_manifest() -> Value {
                     "pending_return_summary",
                     "execctl_resume_contract_summary",
                     "execctl_resume_obligation",
+                    "startup_execution_gate",
                     "startup_next_action",
                     "execctl_active_lease_summary",
                     "required_return_task",
@@ -3024,7 +3086,7 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
                     "content": {
                         "type": "text",
                         "text": format!(
-                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
+                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_execution_gate, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. Treat startup_execution_gate as the immediate return-enforcement object. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
                         )
                     }
                 }]
@@ -4648,7 +4710,7 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v6")
+            Some("continuity-startup-contract-v7")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["must_call_before_substantive_work"].as_bool(),
@@ -4671,6 +4733,11 @@ mod tests {
             startup_required_fields
                 .iter()
                 .any(|field| field.as_str() == Some("execctl_resume_obligation"))
+        );
+        assert!(
+            startup_required_fields
+                .iter()
+                .any(|field| field.as_str() == Some("startup_execution_gate"))
         );
         assert!(
             startup_required_fields
@@ -4903,6 +4970,7 @@ mod tests {
         assert!(text.contains("pending_return_queue"));
         assert!(text.contains("execctl_resume_contract_summary"));
         assert!(text.contains("execctl_resume_obligation"));
+        assert!(text.contains("startup_execution_gate"));
         assert!(text.contains("startup_next_action"));
         assert!(text.contains("execctl_active_lease"));
         assert!(text.contains("execctl_active_lease_summary"));
@@ -4934,6 +5002,12 @@ mod tests {
                     "active_task_headline": "Continue runtime auto-start guarantees.",
                     "required_return_headline": "Same-meter spend control",
                     "required_return_next_step": "Materialize live assistant generation source."
+                },
+                "startup_execution_gate": {
+                    "gate_version": "startup-execution-gate-v1",
+                    "action_kind": "resume_required_return_task",
+                    "must_follow_startup_next_action": true,
+                    "unrelated_work_allowed": false
                 },
                 "startup_next_action": {
                     "action_kind": "resume_required_return_task",
@@ -4998,6 +5072,14 @@ mod tests {
         assert_eq!(
             summary.execctl_resume_obligation["required_return_headline"],
             json!("Same-meter spend control")
+        );
+        assert_eq!(
+            summary.startup_execution_gate["action_kind"],
+            json!("resume_required_return_task")
+        );
+        assert_eq!(
+            summary.startup_execution_gate["must_follow_startup_next_action"],
+            json!(true)
         );
         assert_eq!(
             summary.startup_next_action["action_kind"],
