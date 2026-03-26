@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:03 MSK
-Ручная сверка guide/docs: 2026-03-26 03:03 MSK
+modified_at: 2026-03-26 03:21 MSK
+Ручная сверка guide/docs: 2026-03-26 03:21 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1211,6 +1211,13 @@ preview, а не только raw count.
   `.amai/onboarding/project-chat-startup-contract.json`;
   в нём теперь отдельно pinned `startup_contract_sha256`, чтобы client/runtime видел expected
   contract hash и мог fail-closed при drift;
+- тот же JSON contract теперь несёт отдельный `artifact_enforcement` contour:
+  - `workspace_contract_required_before_tool_call = true`;
+  - `workspace_contract_relative_path = .amai/onboarding/project-chat-startup-contract.json`;
+  - `missing_or_unreadable_fail_closed = true`;
+  - `sha256_mismatch_fail_closed = true`;
+  это значит, что supported client не имеет права читать только markdown/rule block и продолжать
+  работу, если workspace contract artifact отсутствует, не читается или не совпадает по hash;
 - `Claude Desktop` и `Generic` пока всё ещё получают только manual startup snippets.
 
 Это важно читать строго:

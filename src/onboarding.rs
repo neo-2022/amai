@@ -1737,6 +1737,29 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     let namespace = contract["default_namespace"]
         .as_str()
         .ok_or_else(|| anyhow!("project_chat_startup contract is missing default_namespace"))?;
+    let artifact_enforcement = &contract["artifact_enforcement"];
+    let startup_contract_relative_path = artifact_enforcement["workspace_contract_relative_path"]
+        .as_str()
+        .ok_or_else(|| {
+            anyhow!(
+                "project_chat_startup contract is missing artifact_enforcement.workspace_contract_relative_path"
+            )
+        })?;
+    let startup_contract_required_before_tool_call = artifact_enforcement
+        ["workspace_contract_required_before_tool_call"]
+        .as_bool()
+        .unwrap_or(false);
+    let startup_contract_sha256_field = artifact_enforcement["workspace_contract_sha256_field"]
+        .as_str()
+        .unwrap_or("startup_contract_sha256");
+    let startup_contract_missing_or_unreadable_fail_closed = artifact_enforcement
+        ["missing_or_unreadable_fail_closed"]
+        .as_bool()
+        .unwrap_or(false);
+    let startup_contract_sha256_mismatch_fail_closed = artifact_enforcement
+        ["sha256_mismatch_fail_closed"]
+        .as_bool()
+        .unwrap_or(false);
     let fail_closed = contract["fail_closed_conditions"]
         .as_array()
         .ok_or_else(|| anyhow!("project_chat_startup contract is missing fail_closed_conditions"))?
@@ -1820,10 +1843,27 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
         .unwrap_or(false);
 
     Ok(format!(
-        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала прочитай machine-readable startup contract `{}` и используй его как source-of-truth, а не этот markdown-блок.\n3. Проверь, что `startup_contract_sha256 = \"{}\"`; при drift fail-closed.\n4. Затем вызови MCP tool `{tool}`.\n5. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n6. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n7. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n8. После restore обязательно подними поля: {required_summary_fields}.\n9. Верни в активную рабочую линию obligations: {restored_obligations}.\n10. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n11. `{startup_next_action_field}` считается первым обязательным действием после startup.\n12. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n13. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n14. Silent drop запрещён: {}.\n15. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
+        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала прочитай machine-readable startup contract `{}` (relative path `{}`) и используй его как source-of-truth, а не этот markdown-блок.\n3. Этот artifact обязан быть прочитан до MCP tool call: {}.\n4. Если startup contract artifact отсутствует или не читается, fail-closed: {}.\n5. Проверь, что {} = \"{}\"; при mismatch fail-closed: {}.\n6. Затем вызови MCP tool `{tool}`.\n7. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n8. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n9. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n10. После restore обязательно подними поля: {required_summary_fields}.\n11. Верни в активную рабочую линию obligations: {restored_obligations}.\n12. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n13. `{startup_next_action_field}` считается первым обязательным действием после startup.\n14. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n15. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n16. Silent drop запрещён: {}.\n17. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
         repo_root.display(),
         contract_path.display(),
+        startup_contract_relative_path,
+        if startup_contract_required_before_tool_call {
+            "workspace_contract_required_before_tool_call = true"
+        } else {
+            "workspace_contract_required_before_tool_call = false"
+        },
+        if startup_contract_missing_or_unreadable_fail_closed {
+            "missing_or_unreadable_fail_closed = true"
+        } else {
+            "missing_or_unreadable_fail_closed = false"
+        },
+        startup_contract_sha256_field,
         startup_contract_sha256,
+        if startup_contract_sha256_mismatch_fail_closed {
+            "sha256_mismatch_fail_closed = true"
+        } else {
+            "sha256_mismatch_fail_closed = false"
+        },
         repo_root.display(),
         "amai_context_pack",
         if must_resume_before_unrelated {
@@ -1982,6 +2022,7 @@ fn maybe_backup_user_global(path: &Path, install_scope: &str) -> Result<Option<P
 
 #[cfg(test)]
 mod tests {
+    use crate::mcp;
     use super::{
         detection_score, env_keys, expand_target_template, install_scope_status,
         merge_managed_startup_block, render_startup_contract_artifact, render_startup_instructions,
@@ -2126,6 +2167,9 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             )
         );
         assert!(text.contains("machine-readable startup contract"));
+        assert!(text.contains("workspace_contract_required_before_tool_call = true"));
+        assert!(text.contains("missing_or_unreadable_fail_closed = true"));
+        assert!(text.contains("sha256_mismatch_fail_closed = true"));
         let expected_sha = startup_contract_sha256(&mcp::project_chat_startup_contract())
             .expect("startup contract hash");
         assert!(text.contains(expected_sha.as_str()));
@@ -2145,6 +2189,15 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(payload["repo_root"], json!("/tmp/amai"));
         assert_eq!(payload["startup_contract_sha256"], json!(sha256));
+        assert_eq!(
+            payload["startup_contract"]["artifact_enforcement"]["workspace_contract_relative_path"],
+            json!(".amai/onboarding/project-chat-startup-contract.json")
+        );
+        assert_eq!(
+            payload["startup_contract"]["artifact_enforcement"]
+                ["missing_or_unreadable_fail_closed"],
+            json!(true)
+        );
         assert_eq!(
             payload["recommended_startup_call"]["arguments"]["repo_root"],
             json!("/tmp/amai")

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:03 MSK
-Ручная сверка guide/docs: 2026-03-26 03:03 MSK
+modified_at: 2026-03-26 03:21 MSK
+Ручная сверка guide/docs: 2026-03-26 03:21 MSK
 
 # Operations
 
@@ -832,6 +832,15 @@ cargo run -- mcp serve
 - тот же artifact теперь несёт `startup_contract_sha256`, а managed instructions поднимают тот же
   expected hash; при drift client/runtime должен fail-closed, а не quietly continue на старом
   startup contract.
+- рядом с этим теперь materialized и отдельный `artifact_enforcement` contour:
+  - `workspace_contract_required_before_tool_call = true`
+  - `workspace_contract_relative_path = .amai/onboarding/project-chat-startup-contract.json`
+  - `missing_or_unreadable_fail_closed = true`
+  - `sha256_mismatch_fail_closed = true`
+- operationally это значит буквально:
+  supported client не имеет права делать `amai_continuity_startup`, если workspace contract artifact
+  пропал, не читается или не совпадает по pinned hash; correct behavior здесь fail-closed stop, а
+  не fallback на старый markdown/rule block.
 - тот же `amai_protocol_manifest` теперь несёт `error_contracts`, а `tools/call`
   и JSON-RPC errors отдают machine-readable taxonomy вместо голого текста:
   `invalid_json_rpc_payload`, `invalid_request`, `method_not_found`,

@@ -373,6 +373,35 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract lost default continuity namespace"
         ));
     }
+    if startup_contract["artifact_enforcement"]["workspace_contract_relative_path"].as_str()
+        != Some(".amai/onboarding/project-chat-startup-contract.json")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost workspace startup artifact path"
+        ));
+    }
+    if startup_contract["artifact_enforcement"]["workspace_contract_required_before_tool_call"]
+        .as_bool()
+        != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract does not require workspace startup artifact before tool call"
+        ));
+    }
+    if startup_contract["artifact_enforcement"]["missing_or_unreadable_fail_closed"].as_bool()
+        != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract does not fail closed when startup artifact is missing or unreadable"
+        ));
+    }
+    if startup_contract["artifact_enforcement"]["sha256_mismatch_fail_closed"].as_bool()
+        != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract does not fail closed on startup artifact sha256 mismatch"
+        ));
+    }
     let required_summary_fields = startup_contract["required_summary_fields"]
         .as_array()
         .ok_or_else(|| anyhow!("MCP startup contract is missing required_summary_fields"))?;
@@ -2489,6 +2518,14 @@ fn protocol_manifest() -> Value {
                 ],
                 "project_binding_rule": "registered_project_fail_closed",
                 "default_namespace": "continuity",
+                "artifact_enforcement": {
+                    "workspace_contract_relative_path": ".amai/onboarding/project-chat-startup-contract.json",
+                    "workspace_contract_required_before_tool_call": true,
+                    "workspace_contract_source_of_truth": true,
+                    "workspace_contract_sha256_field": "startup_contract_sha256",
+                    "missing_or_unreadable_fail_closed": true,
+                    "sha256_mismatch_fail_closed": true
+                },
                 "required_arguments": ["project"],
                 "optional_arguments": ["repo_root", "namespace", "token_source_kind"],
                 "summary_field": "continuity_startup_summary",
@@ -4650,6 +4687,30 @@ mod tests {
             startup_required_fields
                 .iter()
                 .any(|field| field.as_str() == Some("project_task_ledger_summary"))
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["artifact_enforcement"]
+                ["workspace_contract_relative_path"]
+                .as_str(),
+            Some(".amai/onboarding/project-chat-startup-contract.json")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["artifact_enforcement"]
+                ["workspace_contract_required_before_tool_call"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["artifact_enforcement"]
+                ["missing_or_unreadable_fail_closed"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["artifact_enforcement"]
+                ["sha256_mismatch_fail_closed"]
+                .as_bool(),
+            Some(true)
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]

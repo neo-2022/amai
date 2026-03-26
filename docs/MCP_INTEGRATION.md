@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:03 MSK
-Ручная сверка guide/docs: 2026-03-26 03:03 MSK
+modified_at: 2026-03-26 03:21 MSK
+Ручная сверка guide/docs: 2026-03-26 03:21 MSK
 
 # MCP Integration
 
@@ -361,6 +361,13 @@ stack-а, но и какие deployment promises вообще честно до�
 - canonical startup tool: `amai_continuity_startup`;
 - canonical startup prompt: `amai-continuity-startup`;
 - default namespace: `continuity`;
+- machine-readable startup artifact:
+  `.amai/onboarding/project-chat-startup-contract.json`;
+- `artifact_enforcement` внутри этого contract теперь буквально фиксирует:
+  - `workspace_contract_required_before_tool_call = true`;
+  - `workspace_contract_relative_path = .amai/onboarding/project-chat-startup-contract.json`;
+  - `missing_or_unreadable_fail_closed = true`;
+  - `sha256_mismatch_fail_closed = true`;
 - before substantive work клиент обязан получить
   `continuity_startup_summary`, где уже surfaced:
   - `execctl_resume_state`;
@@ -386,6 +393,9 @@ stack-а, но и какие deployment promises вообще честно до�
   - `no_silent_drop = true`.
 
 Это нужно понимать буквально:
+- managed markdown/rule block больше не считается достаточным source-of-truth сам по себе;
+- если workspace startup contract artifact отсутствует, не читается или не проходит hash-check,
+  client runtime обязан fail-closed остановиться до tool call;
 - `execctl_resume_obligation` существует именно затем, чтобы клиент не парсил
   human summary строку ради `required_return_task`;
 - `required_return_task` теперь surfaced отдельно, чтобы client runtime видел сам return target
