@@ -378,10 +378,14 @@ fn plan_target_cleanup(
             continue;
         }
 
-        *remaining_limit -= 1;
-        plan.selected += 1;
         let reclaimable_bytes =
             planned_reclaimable_bytes(&entry.path, entry.size_bytes, entry_cleanup_strategy)?;
+        if reclaimable_bytes == 0 {
+            continue;
+        }
+
+        *remaining_limit -= 1;
+        plan.selected += 1;
         plan.selected_entries.push(PlannedCleanupEntry {
             path: entry.path,
             age_hours: age.as_secs_f64() / 3600.0,
@@ -712,7 +716,7 @@ fn windows_vm_lab_prunable_paths(run_root: &Path) -> Result<Vec<PathBuf>> {
         let removable = if metadata.is_dir() {
             matches!(
                 name.as_str(),
-                "winiso_noprompt" | "payload.mount" | "payload_probe" | "swtpm"
+                "winiso_noprompt" | "payload_probe" | "swtpm"
             )
         } else if metadata.is_file() {
             name == "system.qcow2"
