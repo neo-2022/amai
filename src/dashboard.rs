@@ -3679,13 +3679,24 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
     let kept_latest = cleanup["kept_latest"].as_u64().unwrap_or(0);
     let protected = cleanup["protected"].as_u64().unwrap_or(0);
     let targets_scanned = cleanup["targets_scanned"].as_u64().unwrap_or(0);
+    let repo_inventory = &cleanup["repo_inventory"];
+    let repo_total_bytes = repo_inventory["repo_total_bytes"].as_u64().unwrap_or(0);
+    let cleanup_scope_bytes = repo_inventory["cleanup_scope_bytes"].as_u64().unwrap_or(0);
+    let out_of_policy_bytes = repo_inventory["out_of_policy_bytes"].as_u64().unwrap_or(0);
+    let unreadable_paths_count = repo_inventory["unreadable_paths_count"].as_u64().unwrap_or(0);
+    let large_unmanaged_roots = repo_inventory["large_unmanaged_roots"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let last_apply = &cleanup["last_apply"];
     let last_reclaim_bytes = last_apply["reclaimed_bytes"].as_u64().unwrap_or(0);
     let last_deleted = last_apply["deleted"].as_u64().unwrap_or(0);
     let last_apply_mode = last_apply["mode"].as_str().unwrap_or("conservative");
     let last_apply_at = last_apply["captured_at_epoch_ms"].as_u64();
 
-    let value = if aggressive_reclaimable_bytes > 0 {
+    let value = if !large_unmanaged_roots.is_empty() && out_of_policy_bytes > 0 {
+        format!("{} вне policy", human_bytes(out_of_policy_bytes as f64))
+    } else if aggressive_reclaimable_bytes > 0 {
         format!(
             "{} preview",
             human_bytes(aggressive_reclaimable_bytes as f64)
@@ -3701,6 +3712,14 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
             .map(human_timestamp)
             .unwrap_or_else(|| "ещё нет данных".to_string())
     );
+    if let Some(root) = large_unmanaged_roots.first() {
+        let root_path = root["path"].as_str().unwrap_or("неизвестный root");
+        let root_unmanaged_bytes = root["unmanaged_bytes"].as_u64().unwrap_or(0);
+        note.push_str(&format!(
+            " Основной локальный вес сейчас лежит вне cleanup policy: {root_path} = {} unmanaged bytes.",
+            human_bytes(root_unmanaged_bytes as f64)
+        ));
+    }
     if last_reclaim_bytes > 0 {
         let last_apply_label = last_apply_at
             .map(human_timestamp)
@@ -3719,6 +3738,21 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
         Some("Источник: state/tooling/artifact_cleanup/latest.json".to_string()),
         Some("Это локальный hygiene contour для build/cache хвостов Amai. Он не удаляет state PostgreSQL, Qdrant, MinIO или NATS.".to_string()),
         vec![
+            metric_row(
+                "Repo footprint",
+                human_bytes(repo_total_bytes as f64),
+                Some("Сколько места сейчас занимает весь repo-root, включая то, что не входит в cleanup policy."),
+            ),
+            metric_row(
+                "Cleanup scope",
+                human_bytes(cleanup_scope_bytes as f64),
+                Some("Сколько места сейчас лежит внутри управляемых cleanup-target roots."),
+            ),
+            metric_row(
+                "Вне policy",
+                human_bytes(out_of_policy_bytes as f64),
+                Some("Сколько места сейчас лежит вне cleanup-target roots и поэтому не удаляется auto-retention path-ом."),
+            ),
             metric_row(
                 "Safe reclaim now",
                 human_bytes(safe_reclaimable_bytes as f64),
@@ -3757,6 +3791,23 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
                 Some("Сколько entries уже aged past TTL, даже если limit сейчас не даёт выбрать их все."),
             ),
             metric_row(
+                "Heavy unmanaged roots",
+                if large_unmanaged_roots.is_empty() {
+                    "нет".to_string()
+                } else {
+                    large_unmanaged_roots
+                        .iter()
+                        .map(|root| {
+                            let path = root["path"].as_str().unwrap_or("неизвестный root");
+                            let unmanaged_bytes = root["unmanaged_bytes"].as_u64().unwrap_or(0);
+                            format!("{path} ({})", human_bytes(unmanaged_bytes as f64))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                Some("Крупные директории вне cleanup policy. Они не попадают под TTL/keep-latest auto-path."),
+            ),
+            metric_row(
                 "Keep latest / protected",
                 format!("{kept_latest} / {protected}"),
                 Some("Что policy сейчас удерживает: недавние entries по keep-latest и активные защищённые paths."),
@@ -3765,6 +3816,11 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
                 "Targets scanned",
                 targets_scanned.to_string(),
                 Some("Сколько cleanup-target directories сейчас участвует в policy-driven контуре."),
+            ),
+            metric_row(
+                "Unreadable contents",
+                unreadable_paths_count.to_string(),
+                Some("Сколько путей inventory не смог прочитать. Repo footprint тогда считается как best-effort lower bound."),
             ),
         ],
     );
@@ -5955,9 +6011,7 @@ fn human_client_limit_component(code: &str) -> Option<&'static str> {
         "client_prompt" => Some("исходный запрос клиента"),
         "assistant_generation" => Some("генерация ответа моделью"),
         "tool_overhead_outside_retrieval" => Some("tool/orchestration overhead вне retrieval"),
-        "continuity_restore_outside_retrieval" => {
-            Some("continuity-restore overhead вне retrieval")
-        }
+        "continuity_restore_outside_retrieval" => Some("continuity-restore overhead вне retrieval"),
         _ => None,
     }
 }
@@ -6106,11 +6160,12 @@ fn client_limit_alignment_tooltip(alignment: &Value) -> Option<String> {
             }
         }
     }
-    if alignment["baseline_equivalence"]["state"].as_str() == Some("baseline_semantics_unmaterialized")
+    if alignment["baseline_equivalence"]["state"].as_str()
+        == Some("baseline_semantics_unmaterialized")
     {
-        if let Some(fully_observed) =
-            human_client_limit_components(&alignment["baseline_equivalence"]["fully_observed_components"])
-        {
+        if let Some(fully_observed) = human_client_limit_components(
+            &alignment["baseline_equivalence"]["fully_observed_components"],
+        ) {
             tooltip.push('\n');
             tooltip.push_str("- ");
             tooltip.push_str("applicable whole-cycle компоненты уже fully observed: ");
@@ -6157,9 +6212,9 @@ fn client_limit_alignment_tooltip(alignment: &Value) -> Option<String> {
     } else if alignment["baseline_equivalence"]["state"].as_str()
         == Some("whole_cycle_components_incomplete")
     {
-        if let Some(incomplete) =
-            human_client_limit_components(&alignment["baseline_equivalence"]["incomplete_components"])
-        {
+        if let Some(incomplete) = human_client_limit_components(
+            &alignment["baseline_equivalence"]["incomplete_components"],
+        ) {
             tooltip.push('\n');
             tooltip.push_str("- ");
             tooltip.push_str("whole-cycle coverage ещё incomplete по: ");
@@ -6248,6 +6303,8 @@ fn artifact_cleanup_status(snapshot: &Value) -> &'static str {
         "alert"
     } else if cleanup["aggressive_preview_selected"].as_u64().unwrap_or(0) > 0 {
         "alert"
+    } else if cleanup["repo_inventory"]["unmanaged_alert_triggered"].as_bool() == Some(true) {
+        "alert"
     } else {
         "pass"
     }
@@ -6272,6 +6329,23 @@ fn artifact_cleanup_warning(snapshot: &Value) -> Option<String> {
         return Some(format!(
             "Локальный rebuildable хвост ещё не дожил до TTL, но aggressive reclaim path уже мог бы вернуть {} без удаления live state. Safe policy сейчас специально ждёт возрастной запас.",
             human_bytes(aggressive_bytes as f64)
+        ));
+    }
+    let repo_inventory = &cleanup["repo_inventory"];
+    if repo_inventory["unmanaged_alert_triggered"].as_bool() == Some(true) {
+        let out_of_policy_bytes = repo_inventory["out_of_policy_bytes"].as_u64().unwrap_or(0);
+        let first_root = repo_inventory["large_unmanaged_roots"]
+            .as_array()
+            .and_then(|roots| roots.first())
+            .cloned()
+            .unwrap_or_default();
+        let root_path = first_root["path"].as_str().unwrap_or("неизвестный root");
+        let root_unmanaged_bytes = first_root["unmanaged_bytes"].as_u64().unwrap_or(0);
+        return Some(format!(
+            "Основной локальный вес сейчас вне cleanup policy: всего {} вне managed targets, крупнейший root {} = {}. Auto-retention это не трогает, пока путь не включён в policy отдельным contour-ом.",
+            human_bytes(out_of_policy_bytes as f64),
+            root_path,
+            human_bytes(root_unmanaged_bytes as f64)
         ));
     }
     None
@@ -6845,11 +6919,11 @@ fn human_elapsed_ms(value_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        benchmark_qdrant_live_card, browser_base_url, build_benchmark_cards,
-        build_continuity_correctness_card, build_degradation_model_card, build_hero_cards,
-        build_links, build_machine_cards, build_top_cards, format_ms, format_time_compare_pair,
-        human_elapsed_ms, live_latency_compare_card, monitoring_url, working_state_live_card,
-        worst_status,
+        artifact_cleanup_warning, benchmark_qdrant_live_card, browser_base_url,
+        build_benchmark_cards, build_continuity_correctness_card, build_degradation_model_card,
+        build_hero_cards, build_links, build_machine_cards, build_top_cards, format_ms,
+        format_time_compare_pair, human_elapsed_ms, live_latency_compare_card, monitoring_url,
+        working_state_live_card, worst_status,
     };
     use serde_json::json;
 
@@ -7250,15 +7324,15 @@ mod tests {
             card["metrics"][0]["label"].as_str(),
             Some("Текущий live поток")
         );
-        assert_eq!(
-            card["metrics"][0]["value"].as_str(),
-            Some("1.2 ms")
-        );
+        assert_eq!(card["metrics"][0]["value"].as_str(), Some("1.2 ms"));
         assert_eq!(
             card["metrics"][1]["label"].as_str(),
             Some("Последний запрос")
         );
-        assert_eq!(card["table"]["rows"].as_array().map(|rows| rows.len()), Some(1));
+        assert_eq!(
+            card["table"]["rows"].as_array().map(|rows| rows.len()),
+            Some(1)
+        );
         assert!(
             card["note"]
                 .as_str()
@@ -7830,7 +7904,12 @@ mod tests {
             strict_row["label"].as_str(),
             Some("Строгий same-meter срез")
         );
-        assert!(strict_row["value"].as_str().unwrap_or_default().contains("320"));
+        assert!(
+            strict_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("320")
+        );
         assert!(
             strict_row["value"]
                 .as_str()
@@ -7884,6 +7963,19 @@ mod tests {
                     "mode": "aggressive",
                     "deleted": 30,
                     "reclaimed_bytes": 50_424_092_586u64
+                },
+                "repo_inventory": {
+                    "repo_total_bytes": 230_200_000_000u64,
+                    "cleanup_scope_bytes": 29_960_520_424u64,
+                    "out_of_policy_bytes": 200_239_479_576u64,
+                    "unmanaged_alert_triggered": true,
+                    "large_unmanaged_roots": [
+                        {
+                            "path": "output/windows-vm-lab",
+                            "unmanaged_bytes": 199_715_979_264u64
+                        }
+                    ],
+                    "unreadable_paths_count": 1
                 }
             }
         });
@@ -7893,11 +7985,48 @@ mod tests {
             .find(|card| card["title"].as_str() == Some("Локальный мусор и retention"))
             .expect("cleanup card");
         assert_eq!(cleanup_card["status"].as_str(), Some("alert"));
-        assert_eq!(cleanup_card["rows"][1]["value"].as_str(), Some("33.16 GiB"));
+        assert_eq!(cleanup_card["value"].as_str(), Some("186.49 GiB вне policy"));
+        assert_eq!(cleanup_card["rows"][0]["value"].as_str(), Some("214.39 GiB"));
+        assert_eq!(cleanup_card["rows"][1]["value"].as_str(), Some("27.90 GiB"));
         assert_eq!(
             cleanup_card["rows"][2]["value"].as_str(),
+            Some("186.49 GiB")
+        );
+        assert_eq!(
+            cleanup_card["rows"][4]["value"].as_str(),
+            Some("33.16 GiB")
+        );
+        assert_eq!(
+            cleanup_card["rows"][5]["value"].as_str(),
             Some("46.96 GiB (30, aggressive)")
         );
+        assert_eq!(
+            cleanup_card["rows"][9]["value"].as_str(),
+            Some("output/windows-vm-lab (186.00 GiB)")
+        );
+    }
+
+    #[test]
+    fn artifact_cleanup_warning_surfaces_large_unmanaged_root() {
+        let snapshot = json!({
+            "artifact_cleanup": {
+                "selected_reclaimable_bytes": 0,
+                "aggressive_preview_reclaimable_bytes": 0,
+                "repo_inventory": {
+                    "out_of_policy_bytes": 200_239_479_576u64,
+                    "unmanaged_alert_triggered": true,
+                    "large_unmanaged_roots": [
+                        {
+                            "path": "output/windows-vm-lab",
+                            "unmanaged_bytes": 199_715_979_264u64
+                        }
+                    ]
+                }
+            }
+        });
+        let warning = artifact_cleanup_warning(&snapshot).expect("warning");
+        assert!(warning.contains("вне cleanup policy"));
+        assert!(warning.contains("output/windows-vm-lab"));
     }
 
     #[test]

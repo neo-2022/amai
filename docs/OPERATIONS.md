@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 12:15 MSK
-Ручная сверка guide/docs: 2026-03-26 12:15 MSK
+modified_at: 2026-03-26 13:36 MSK
+Ручная сверка guide/docs: 2026-03-26 13:36 MSK
 
 # Operations
 
@@ -2498,11 +2498,16 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
   - `.fastembed_cache`
   - `state/external-benchmarks/*`
 - live state (`state/postgres`, `state/qdrant`, `state/minio`, `state/nats`) сюда специально не входит;
+- тяжёлые output/evidence roots вроде `output/windows-vm-lab` тоже не входят в auto-retention по умолчанию;
 - список путей, TTL и `keep_latest` живут в [config/observability.toml](/home/art/agent-memory-index/config/observability.toml);
 - auto-path защищает текущий исполняемый бинарь от удаления;
 - `observe serve`, `observe snapshot` и `observe sla-check` сами запускают этот cleanup, поэтому локальный мусор должен уходить без ручного обхода.
 - `--aggressive` — это уже explicit reclaim path: он не ждёт TTL и не держит `keep_latest`, но всё равно не лезет в live state и защищает текущий исполняемый бинарь.
 - human dashboard теперь показывает отдельную карточку `Локальный мусор и retention`, чтобы оператор видел:
+  - общий repo footprint;
+  - сколько места сейчас покрывает managed cleanup policy;
+  - сколько веса сейчас уже лежит вне policy и поэтому не может исчезнуть auto-cleanup path-ом;
+  - какие крупные unmanaged roots сейчас формируют этот out-of-policy рост;
   - safe reclaim now;
   - aggressive preview;
   - last reclaim;

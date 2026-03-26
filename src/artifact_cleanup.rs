@@ -17,6 +17,10 @@ struct ArtifactCleanupDocument {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ArtifactCleanupProfile {
     pub sweep_interval_seconds: u64,
+    #[serde(default = "default_unmanaged_root_alert_bytes")]
+    pub unmanaged_root_alert_bytes: u64,
+    #[serde(default = "default_max_unmanaged_roots")]
+    pub max_unmanaged_roots: usize,
     pub targets: Vec<ArtifactCleanupTarget>,
 }
 
@@ -63,6 +67,14 @@ struct PlannedCleanupEntry {
     size_bytes: u64,
 }
 
+#[derive(Debug, Clone)]
+struct RootInventoryEntry {
+    relative_path: String,
+    total_bytes: u64,
+    managed_cleanup_scope_bytes: u64,
+    unmanaged_bytes: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 struct TargetCleanupPlan {
     scanned: u64,
@@ -71,6 +83,14 @@ struct TargetCleanupPlan {
     expired: u64,
     selected: u64,
     selected_entries: Vec<PlannedCleanupEntry>,
+}
+
+fn default_unmanaged_root_alert_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
+fn default_max_unmanaged_roots() -> usize {
+    3
 }
 
 pub fn load_profile() -> Result<ArtifactCleanupProfile> {
@@ -120,6 +140,7 @@ pub fn run_cleanup(
     let mut protected_total = 0_u64;
     let mut aggressive_preview_total = 0_u64;
     let mut aggressive_preview_reclaimed_bytes = 0_u64;
+    let mut managed_target_sizes = Vec::new();
 
     for target in profile
         .targets
@@ -151,6 +172,8 @@ pub fn run_cleanup(
         }
 
         let entries = immediate_entries(&root)?;
+        let target_total_bytes = entries.iter().map(|entry| entry.size_bytes).sum::<u64>();
+        managed_target_sizes.push((root.clone(), target_total_bytes));
         let active_plan = plan_target_cleanup(
             entries.clone(),
             now,
@@ -241,6 +264,12 @@ pub fn run_cleanup(
             "protected_paths": protected_paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
             "targets": targets_json,
             "candidates": selected_json,
+            "repo_inventory": collect_repo_inventory(
+                repo_root,
+                &managed_target_sizes,
+                profile.unmanaged_root_alert_bytes,
+                profile.max_unmanaged_roots,
+            )?,
         }
     }))
 }
@@ -377,6 +406,148 @@ fn path_size_bytes(path: &Path) -> Result<u64> {
     Ok(0)
 }
 
+fn collect_repo_inventory(
+    repo_root: &Path,
+    managed_target_sizes: &[(PathBuf, u64)],
+    unmanaged_root_alert_bytes: u64,
+    max_unmanaged_roots: usize,
+) -> Result<Value> {
+    let mut repo_total_bytes = 0_u64;
+    let cleanup_scope_bytes = managed_target_sizes
+        .iter()
+        .map(|(_, size_bytes)| *size_bytes)
+        .sum::<u64>();
+    let mut unreadable_paths_sample = Vec::new();
+    let mut unreadable_paths_count = 0_u64;
+    let mut roots = Vec::new();
+
+    for entry in
+        fs::read_dir(repo_root).with_context(|| format!("failed to read {}", repo_root.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to iterate {}", repo_root.display()))?;
+        let path = entry.path();
+        let total_bytes = path_size_bytes_lossy(
+            &path,
+            &mut unreadable_paths_count,
+            &mut unreadable_paths_sample,
+            max_unmanaged_roots.max(3),
+        );
+        repo_total_bytes = repo_total_bytes.saturating_add(total_bytes);
+        let managed_cleanup_scope_bytes = managed_target_sizes
+            .iter()
+            .filter(|(target_root, _)| target_root.starts_with(&path))
+            .map(|(_, size_bytes)| *size_bytes)
+            .sum::<u64>();
+        let unmanaged_bytes = total_bytes.saturating_sub(managed_cleanup_scope_bytes);
+        roots.push(RootInventoryEntry {
+            relative_path: relative_repo_path(repo_root, &path),
+            total_bytes,
+            managed_cleanup_scope_bytes,
+            unmanaged_bytes,
+        });
+    }
+
+    roots.sort_by_key(|entry| Reverse(entry.unmanaged_bytes));
+    let large_unmanaged_roots = roots
+        .iter()
+        .filter(|entry| entry.unmanaged_bytes >= unmanaged_root_alert_bytes)
+        .take(max_unmanaged_roots)
+        .map(|entry| {
+            json!({
+                "path": entry.relative_path,
+                "total_bytes": entry.total_bytes,
+                "managed_cleanup_scope_bytes": entry.managed_cleanup_scope_bytes,
+                "unmanaged_bytes": entry.unmanaged_bytes,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "repo_total_bytes": repo_total_bytes,
+        "cleanup_scope_bytes": cleanup_scope_bytes,
+        "out_of_policy_bytes": repo_total_bytes.saturating_sub(cleanup_scope_bytes),
+        "unmanaged_root_alert_bytes": unmanaged_root_alert_bytes,
+        "unmanaged_alert_triggered": !large_unmanaged_roots.is_empty(),
+        "large_unmanaged_roots": large_unmanaged_roots,
+        "unreadable_paths_count": unreadable_paths_count,
+        "unreadable_paths_sample": unreadable_paths_sample,
+    }))
+}
+
+fn path_size_bytes_lossy(
+    path: &Path,
+    unreadable_paths_count: &mut u64,
+    unreadable_paths_sample: &mut Vec<String>,
+    unreadable_sample_limit: usize,
+) -> u64 {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            record_unreadable_path(path, unreadable_paths_count, unreadable_paths_sample, unreadable_sample_limit);
+            return 0;
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return 0;
+    }
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if metadata.is_dir() {
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(_) => {
+                record_unreadable_path(path, unreadable_paths_count, unreadable_paths_sample, unreadable_sample_limit);
+                return 0;
+            }
+        };
+        let mut total = 0_u64;
+        for entry in entries {
+            match entry {
+                Ok(entry) => {
+                    total = total.saturating_add(path_size_bytes_lossy(
+                        &entry.path(),
+                        unreadable_paths_count,
+                        unreadable_paths_sample,
+                        unreadable_sample_limit,
+                    ));
+                }
+                Err(_) => {
+                    record_unreadable_path(
+                        path,
+                        unreadable_paths_count,
+                        unreadable_paths_sample,
+                        unreadable_sample_limit,
+                    );
+                }
+            }
+        }
+        return total;
+    }
+    0
+}
+
+fn record_unreadable_path(
+    path: &Path,
+    unreadable_paths_count: &mut u64,
+    unreadable_paths_sample: &mut Vec<String>,
+    unreadable_sample_limit: usize,
+) {
+    *unreadable_paths_count = unreadable_paths_count.saturating_add(1);
+    if unreadable_paths_sample.len() < unreadable_sample_limit {
+        unreadable_paths_sample.push(path.display().to_string());
+    }
+}
+
+fn relative_repo_path(repo_root: &Path, path: &Path) -> String {
+    path.strip_prefix(repo_root)
+        .ok()
+        .map(|relative| relative.display().to_string())
+        .filter(|relative| !relative.is_empty())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 fn delete_path(path: &Path) -> Result<()> {
     let metadata =
         fs::symlink_metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
@@ -422,7 +593,11 @@ fn summary_path(repo_root: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{CleanupEntry, CleanupMode, current_protected_paths, plan_target_cleanup};
+    use super::{
+        CleanupEntry, CleanupMode, collect_repo_inventory, current_protected_paths,
+        default_max_unmanaged_roots, default_unmanaged_root_alert_bytes, plan_target_cleanup,
+    };
+    use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
@@ -540,5 +715,47 @@ mod tests {
             plan.selected_entries[1].path,
             PathBuf::from("/tmp/not_old_enough")
         );
+    }
+
+    #[test]
+    fn repo_inventory_surfaces_large_unmanaged_roots() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "amai-artifact-cleanup-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&repo_root);
+        fs::create_dir_all(repo_root.join("target/debug")).expect("target/debug");
+        fs::create_dir_all(repo_root.join("output/windows-vm-lab")).expect("windows-vm-lab");
+        fs::write(repo_root.join("target/debug/amai"), vec![0_u8; 64]).expect("managed file");
+        fs::write(
+            repo_root.join("output/windows-vm-lab/system.qcow2"),
+            vec![0_u8; 128],
+        )
+        .expect("unmanaged file");
+
+        let inventory = collect_repo_inventory(
+            &repo_root,
+            &[(repo_root.join("target/debug"), 64)],
+            100,
+            default_max_unmanaged_roots(),
+        )
+        .expect("inventory");
+
+        assert_eq!(inventory["repo_total_bytes"].as_u64(), Some(192));
+        assert_eq!(inventory["cleanup_scope_bytes"].as_u64(), Some(64));
+        assert_eq!(inventory["out_of_policy_bytes"].as_u64(), Some(128));
+        assert_eq!(inventory["unmanaged_root_alert_bytes"].as_u64(), Some(100));
+        assert_eq!(inventory["unmanaged_alert_triggered"].as_bool(), Some(true));
+        assert_eq!(
+            inventory["large_unmanaged_roots"][0]["path"].as_str(),
+            Some("output")
+        );
+        assert_eq!(
+            inventory["large_unmanaged_roots"][0]["unmanaged_bytes"].as_u64(),
+            Some(128)
+        );
+
+        let _ = fs::remove_dir_all(&repo_root);
+        let _ = default_unmanaged_root_alert_bytes();
     }
 }

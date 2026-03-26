@@ -1,5 +1,5 @@
-modified_at = "2026-03-23 01:57 MSK"
-"Ручная сверка guide/docs" = "2026-03-23 01:57 MSK"
+modified_at = "2026-03-26 13:36 MSK"
+"Ручная сверка guide/docs" = "2026-03-26 13:36 MSK"
 
 [observability]
 schema_version = 2
@@ -34,6 +34,8 @@ nanoseconds_decimals = 0
 
 [artifact_cleanup]
 sweep_interval_seconds = 3600
+unmanaged_root_alert_bytes = 10737418240
+max_unmanaged_roots = 3
 
 [[artifact_cleanup.targets]]
 path = "target/debug"
