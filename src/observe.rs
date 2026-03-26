@@ -14,8 +14,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::future::Future;
 use std::fs;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -705,20 +705,18 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         postgres::latest_observability_snapshot(&db, "retrieval_accuracy"),
     )
     .await?;
-    let (latest_load_hot, latest_load_hot_raw) =
-        timed_future(
-            &mut observe_refresh_stage_ms,
-            "latest_retrieval_load_hot",
-            latest_clean_benchmark_snapshot(&db, "retrieval_load_hot", "load_verification"),
-        )
-        .await?;
-    let (latest_load_cold, latest_load_cold_raw) =
-        timed_future(
-            &mut observe_refresh_stage_ms,
-            "latest_retrieval_load_cold",
-            latest_clean_benchmark_snapshot(&db, "retrieval_load_cold", "load_verification"),
-        )
-        .await?;
+    let (latest_load_hot, latest_load_hot_raw) = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_retrieval_load_hot",
+        latest_clean_benchmark_snapshot(&db, "retrieval_load_hot", "load_verification"),
+    )
+    .await?;
+    let (latest_load_cold, latest_load_cold_raw) = timed_future(
+        &mut observe_refresh_stage_ms,
+        "latest_retrieval_load_cold",
+        latest_clean_benchmark_snapshot(&db, "retrieval_load_cold", "load_verification"),
+    )
+    .await?;
     let latest_token_benchmark = timed_future(
         &mut observe_refresh_stage_ms,
         "latest_token_benchmark",
@@ -787,13 +785,13 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         async { artifact_cleanup::read_latest_summary(&repo_root) },
     )
     .await?
-        .unwrap_or_else(|| {
-            json!({
-                "artifact_cleanup": {
-                    "status": "ещё нет данных"
-                }
-            })
-        });
+    .unwrap_or_else(|| {
+        json!({
+            "artifact_cleanup": {
+                "status": "ещё нет данных"
+            }
+        })
+    });
 
     let payload = json!({
         "captured_at_epoch_ms": captured_at_epoch_ms,
@@ -1264,11 +1262,9 @@ async fn latest_clean_benchmark_snapshot(
     snapshot_kind: &str,
     expected_root: &str,
 ) -> Result<(Option<Value>, Option<Value>)> {
-    let rows =
-        postgres::list_observability_snapshots_by_kinds(db, &[snapshot_kind], Some(32)).await?;
-    let payloads: Vec<Value> = rows.into_iter().map(|row| row.payload).collect();
-    let latest_raw = payloads.first().cloned();
-    let latest_clean = select_latest_clean_benchmark_snapshot(&payloads, expected_root);
+    let latest_raw = postgres::latest_observability_snapshot(db, snapshot_kind).await?;
+    let latest_clean =
+        postgres::latest_clean_benchmark_snapshot_payload(db, snapshot_kind, expected_root).await?;
     Ok((latest_clean, latest_raw))
 }
 
@@ -1282,6 +1278,7 @@ async fn latest_dashboard_cold_benchmark_snapshot(
     Ok(select_latest_dashboard_cold_benchmark_snapshot(&payloads))
 }
 
+#[cfg(test)]
 fn select_latest_clean_benchmark_snapshot(
     payloads: &[Value],
     expected_root: &str,
@@ -1854,7 +1851,8 @@ async fn refresh_observe_cache(
     }
     let started = Instant::now();
     let result = build_snapshot(&cfg, false).await.and_then(|snapshot| {
-        dashboard::build_payload(&cfg, &snapshot, &bind, refresh_ms).map(|payload| (snapshot, payload))
+        dashboard::build_payload(&cfg, &snapshot, &bind, refresh_ms)
+            .map(|payload| (snapshot, payload))
     });
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let completed_epoch_ms = now_epoch_ms();
@@ -1981,24 +1979,21 @@ fn observe_cache_meta(cache: &ObserveCache, refresh_ms: u64) -> Value {
 }
 
 fn cache_snapshot_age_ms(cache: &ObserveCache) -> Option<u64> {
-    cache.last_refresh_completed_epoch_ms.map(|completed_at| {
-        now_epoch_ms().saturating_sub(completed_at)
-    })
+    cache
+        .last_refresh_completed_epoch_ms
+        .map(|completed_at| now_epoch_ms().saturating_sub(completed_at))
 }
 
 fn observe_cache_stale(cache: &ObserveCache, refresh_ms: u64) -> bool {
     if cache.snapshot.is_none() {
         return true;
     }
-    let max_age_ms = refresh_ms
-        .max(1000)
-        .saturating_mul(3)
-        .max(
-            cache
-                .last_refresh_duration_ms
-                .unwrap_or_default()
-                .saturating_add(refresh_ms.max(1000).saturating_mul(2)),
-        );
+    let max_age_ms = refresh_ms.max(1000).saturating_mul(3).max(
+        cache
+            .last_refresh_duration_ms
+            .unwrap_or_default()
+            .saturating_add(refresh_ms.max(1000).saturating_mul(2)),
+    );
     cache_snapshot_age_ms(cache)
         .map(|age_ms| age_ms > max_age_ms)
         .unwrap_or(true)

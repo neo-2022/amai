@@ -2248,6 +2248,31 @@ pub async fn list_observability_snapshots_by_kinds(
         .collect())
 }
 
+pub async fn latest_clean_benchmark_snapshot_payload(
+    client: &Client,
+    snapshot_kind: &str,
+    payload_root: &str,
+) -> Result<Option<Value>> {
+    let row = client
+        .query_opt(
+            r#"
+            SELECT payload
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = $1
+              AND jsonb_typeof(payload -> $2) = 'object'
+              AND COALESCE((payload -> $2 ->> 'record_live_context')::boolean, false) = false
+              AND COALESCE((payload -> $2 ->> 'publish_benchmark_snapshot')::boolean, true) = true
+              AND COALESCE(payload -> '_observability' ->> 'source_class', 'benchmark') = 'benchmark'
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+            &[&snapshot_kind, &payload_root],
+        )
+        .await
+        .context("failed to fetch latest clean benchmark snapshot payload")?;
+    Ok(row.map(|row| row.get(0)))
+}
+
 pub async fn summarize_observability_snapshots_by_kinds(
     client: &Client,
     kinds: &[&str],
