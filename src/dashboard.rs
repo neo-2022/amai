@@ -6186,23 +6186,34 @@ fn client_limit_explicit_boundary_metric_row(alignment: &Value) -> Option<Value>
 }
 
 fn client_limit_boundary_tokens_metric_row(alignment: &Value) -> Option<Value> {
-    if alignment["explicit_boundary_surface"]["state"].as_str() != Some("amai_continuity_boundary")
+    let observed_tokens = if alignment["continuity_boundary_rollup"]["state"].as_str()
+        == Some("amai_continuity_boundary_observed")
     {
-        return None;
-    }
-    let boundary_components = alignment["explicit_boundary_surface"]["components"].as_array()?;
-    let observed_tokens = alignment["baseline_equivalence"]["component_semantics"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|item| {
-            item["code"]
-                .as_str()
-                .is_some_and(|code| boundary_components.iter().any(|component| component.as_str() == Some(code)))
-        })
-        .filter(|item| item["whole_cycle_observed_complete"].as_bool() == Some(true))
-        .filter_map(|item| item["observed_tokens"].as_u64())
-        .sum::<u64>();
+        alignment["continuity_boundary_rollup"]["observed_tokens"]
+            .as_u64()
+            .unwrap_or(0)
+    } else {
+        if alignment["explicit_boundary_surface"]["state"].as_str()
+            != Some("amai_continuity_boundary")
+        {
+            return None;
+        }
+        let boundary_components = alignment["explicit_boundary_surface"]["components"].as_array()?;
+        alignment["baseline_equivalence"]["component_semantics"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| {
+                item["code"].as_str().is_some_and(|code| {
+                    boundary_components
+                        .iter()
+                        .any(|component| component.as_str() == Some(code))
+                })
+            })
+            .filter(|item| item["whole_cycle_observed_complete"].as_bool() == Some(true))
+            .filter_map(|item| item["observed_tokens"].as_u64())
+            .sum::<u64>()
+    };
     if observed_tokens == 0 {
         return None;
     }

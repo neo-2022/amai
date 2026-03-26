@@ -1,5 +1,5 @@
-modified_at = "2026-03-26 15:03 MSK"
-"Ручная сверка guide/docs" = "2026-03-26 15:03 MSK"
+modified_at = "2026-03-26 15:12 MSK"
+"Ручная сверка guide/docs" = "2026-03-26 15:12 MSK"
 
 default_profile = "local_default"
 
@@ -26,6 +26,7 @@ client_limit_meter_alignment_version = "client-limit-meter-alignment-v9"
 client_limit_baseline_equivalence_version = "client-limit-baseline-equivalence-v3"
 client_limit_strict_meter_slice_version = "client-limit-strict-meter-slice-v1"
 client_limit_explicit_boundary_surface_version = "client-limit-explicit-boundary-surface-v1"
+client_limit_continuity_boundary_rollup_version = "client-limit-continuity-boundary-rollup-v1"
 excluded_taxonomy_version = "token-excluded-usage-v1"
 dedup_contract_version = "event-id-source-kind-v1"
 backfill_policy_version = "report-only-backfill-v1"

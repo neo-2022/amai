@@ -104,6 +104,8 @@ struct TokenBudgetContractConfig {
     client_limit_strict_meter_slice_version: String,
     #[serde(default = "default_client_limit_explicit_boundary_surface_version")]
     client_limit_explicit_boundary_surface_version: String,
+    #[serde(default = "default_client_limit_continuity_boundary_rollup_version")]
+    client_limit_continuity_boundary_rollup_version: String,
     #[serde(default = "default_excluded_taxonomy_version")]
     excluded_taxonomy_version: String,
     #[serde(default = "default_dedup_contract_version")]
@@ -189,6 +191,8 @@ impl Default for TokenBudgetContractConfig {
                 default_client_limit_strict_meter_slice_version(),
             client_limit_explicit_boundary_surface_version:
                 default_client_limit_explicit_boundary_surface_version(),
+            client_limit_continuity_boundary_rollup_version:
+                default_client_limit_continuity_boundary_rollup_version(),
             excluded_taxonomy_version: default_excluded_taxonomy_version(),
             dedup_contract_version: default_dedup_contract_version(),
             backfill_policy_version: default_backfill_policy_version(),
@@ -665,6 +669,10 @@ fn default_client_limit_explicit_boundary_surface_version() -> String {
     "client-limit-explicit-boundary-surface-v1".to_string()
 }
 
+fn default_client_limit_continuity_boundary_rollup_version() -> String {
+    "client-limit-continuity-boundary-rollup-v1".to_string()
+}
+
 fn default_excluded_taxonomy_version() -> String {
     "token-excluded-usage-v1".to_string()
 }
@@ -813,6 +821,9 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
             .clone(),
         "client_limit_explicit_boundary_surface_version": contract
             .client_limit_explicit_boundary_surface_version
+            .clone(),
+        "client_limit_continuity_boundary_rollup_version": contract
+            .client_limit_continuity_boundary_rollup_version
             .clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
@@ -12309,6 +12320,66 @@ fn build_client_limit_explicit_boundary_surface(
     })
 }
 
+fn build_client_limit_continuity_boundary_rollup(
+    contract: &TokenBudgetContractConfig,
+    baseline_equivalence: &Value,
+    explicit_boundary_surface: &Value,
+) -> Value {
+    if explicit_boundary_surface["state"].as_str() != Some("amai_continuity_boundary") {
+        return json!({
+            "model_version": contract.client_limit_continuity_boundary_rollup_version.clone(),
+            "state": "no_amai_continuity_boundary",
+            "component_count": 0,
+            "components": [],
+            "observed_tokens": 0,
+            "observed_live_events": 0,
+            "note": "В этом scope сейчас нет explicit Amai continuity boundary rollup."
+        });
+    }
+
+    let boundary_components = explicit_boundary_surface["components"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut observed_tokens = 0_u64;
+    let mut observed_live_events = 0_u64;
+    for item in baseline_equivalence["component_semantics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let Some(code) = item["code"].as_str() else {
+            continue;
+        };
+        if !boundary_components
+            .iter()
+            .any(|component| component.as_str() == Some(code))
+        {
+            continue;
+        }
+        if item["whole_cycle_observed_complete"].as_bool() != Some(true) {
+            continue;
+        }
+        observed_tokens = observed_tokens.saturating_add(item["observed_tokens"].as_u64().unwrap_or(0));
+        observed_live_events = observed_live_events
+            .saturating_add(item["observed_live_events"].as_u64().unwrap_or(0));
+    }
+
+    json!({
+        "model_version": contract.client_limit_continuity_boundary_rollup_version.clone(),
+        "state": if observed_tokens > 0 {
+            "amai_continuity_boundary_observed"
+        } else {
+            "amai_continuity_boundary_present_without_tokens"
+        },
+        "component_count": boundary_components.len(),
+        "components": boundary_components,
+        "observed_tokens": observed_tokens,
+        "observed_live_events": observed_live_events,
+        "note": "Этот rollup показывает observed token weight для Amai-specific continuity boundary. Он нужен отдельно от strict client-meter slice, потому что continuity restore пока не имеет truthful pre-Amai baseline-equivalent модели."
+    })
+}
+
 fn build_client_limit_meter_alignment(
     contract: &TokenBudgetContractConfig,
     surface_kind: &str,
@@ -12358,6 +12429,11 @@ fn build_client_limit_meter_alignment(
         build_client_limit_strict_meter_slice(contract, &baseline_equivalence);
     let explicit_boundary_surface =
         build_client_limit_explicit_boundary_surface(contract, &baseline_equivalence);
+    let continuity_boundary_rollup = build_client_limit_continuity_boundary_rollup(
+        contract,
+        &baseline_equivalence,
+        &explicit_boundary_surface,
+    );
     let mut blocking_reasons =
         client_limit_meter_alignment_blocking_reasons(summary, events, assistant_scope);
     match assistant_generation_observation_source["state"]
@@ -12411,6 +12487,7 @@ fn build_client_limit_meter_alignment(
         "baseline_equivalence": baseline_equivalence,
         "strict_client_meter_slice": strict_client_meter_slice,
         "explicit_boundary_surface": explicit_boundary_surface,
+        "continuity_boundary_rollup": continuity_boundary_rollup,
         "note": "Этот слой честно показывает, что текущие savings пока считаются как lower-bound части агентного цикла. Whole-cycle observed components могут постепенно materialize-иться, но same meter с клиентским лимитом нельзя объявлять раньше, чем появится и полное observed покрытие, и baseline-equivalent semantics."
     })
 }
@@ -12446,6 +12523,9 @@ fn build_agent_cycle_economics(
                     .clone(),
                 "explicit_boundary_surface_model_version": contract
                     .client_limit_explicit_boundary_surface_version
+                    .clone(),
+                "continuity_boundary_rollup_model_version": contract
+                    .client_limit_continuity_boundary_rollup_version
                     .clone(),
                 "alignment_state": "partial_lower_bound_not_meter_equivalent",
                 "same_meter_as_client_limit": false,
@@ -15898,6 +15978,10 @@ effective_to_epoch_ms = 2000
             "client-limit-explicit-boundary-surface-v1"
         );
         assert_eq!(
+            preview["client_limit_meter_alignment"]["continuity_boundary_rollup"]["model_version"],
+            "client-limit-continuity-boundary-rollup-v1"
+        );
+        assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
             "statement_preview"
         );
@@ -18524,6 +18608,10 @@ effective_to_epoch_ms = 2000
             "client-limit-explicit-boundary-surface-v1"
         );
         assert_eq!(
+            economics["contract"]["client_limit_meter_alignment"]["continuity_boundary_rollup_model_version"],
+            "client-limit-continuity-boundary-rollup-v1"
+        );
+        assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]
                 ["lower_bound_tokens"],
             45
@@ -18700,6 +18788,14 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             alignment["explicit_boundary_surface"]["components"],
             json!(["continuity_restore_outside_retrieval"])
+        );
+        assert_eq!(
+            alignment["continuity_boundary_rollup"]["state"],
+            "amai_continuity_boundary_observed"
+        );
+        assert_eq!(
+            alignment["continuity_boundary_rollup"]["observed_tokens"],
+            7
         );
         assert!(
             alignment["blocking_reasons"]

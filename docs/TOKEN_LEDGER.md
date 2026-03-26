@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 15:09 MSK
-Ручная сверка guide/docs: 2026-03-26 15:09 MSK
+modified_at: 2026-03-26 15:12 MSK
+Ручная сверка guide/docs: 2026-03-26 15:12 MSK
 
 # Token Ledger
 
@@ -484,6 +484,7 @@ Ledger обязан различать:
 - `measured_baseline_tokens_lower_bound`
 - `strict_client_meter_slice`
 - `explicit_boundary_surface`
+- `continuity_boundary_rollup`
 - `whole_cycle_components_fully_observed`
 
 Это нужно затем, чтобы `same_meter_baseline_unmeasured /
@@ -520,6 +521,15 @@ tokens для этого компонента уже есть.
 
 Он нужен затем, чтобы Amai-specific continuity boundary была видна не только как причина
 non-equivalent state, но и как отдельный non-client-meter token rollup.
+
+Этот rollup теперь должен жить не только в dashboard derivation-логике, но и как
+machine-readable object `continuity_boundary_rollup` внутри `client_limit_meter_alignment`:
+- `model_version = client-limit-continuity-boundary-rollup-v1`
+- `state`
+- `components`
+- `observed_tokens`
+- `observed_live_events`
+- `note`
 
 `component_event_coverage` теперь обязан быть `target-aware`, а не делить каждый
 whole-cycle компонент на одинаковое число всех live events.
@@ -1328,6 +1338,7 @@ Hashes по line items нужны затем, чтобы:
 - `client-limit-baseline-equivalence-v3`
 - `client-limit-strict-meter-slice-v1`
 - `client-limit-explicit-boundary-surface-v1`
+- `client-limit-continuity-boundary-rollup-v1`
 - `adjustment-activation-governance-v1`
 
 Теперь те же customer-facing surface-ы ещё несут `adjustment_activation_governance`.

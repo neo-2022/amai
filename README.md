@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 15:09 MSK
-Ручная сверка guide/docs: 2026-03-26 15:09 MSK
+modified_at: 2026-03-26 15:12 MSK
+Ручная сверка guide/docs: 2026-03-26 15:12 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1562,6 +1562,7 @@ preview, а не только raw count.
     - `baseline_equivalence`
     - `strict_client_meter_slice`
     - `explicit_boundary_surface`
+    - `continuity_boundary_rollup`
   Это нужно затем, чтобы lower-bound savings не выглядели как уже эквивалентные
   тому же самому метру, которым клиент считает живой лимит `5h`.
   - тот же слой теперь ещё честно различает:
@@ -1602,9 +1603,9 @@ preview, а не только raw count.
       даже когда `continuity_restore` остаётся explicit boundary;
     - и рядом поднимают `explicit_boundary_surface`, чтобы Amai-specific continuity
       boundary была first-class surfaced отдельно от общего baseline-gap;
-    - и теперь отдельно поднимают observed row `Токены continuity boundary`, чтобы вес
-      Amai-specific continuity boundary был виден не только как blocker state, но и как
-      отдельный non-client-meter token rollup;
+    - и теперь отдельно поднимают `continuity_boundary_rollup`, чтобы observed token weight
+      для Amai-specific continuity boundary жил как first-class machine-readable object, а
+      dashboard мог surface-ить его отдельным row `Токены continuity boundary`;
     - и отдельно объясняют, что even confirmed lower bound всё ещё не обязан
       двигаться вместе с внешней шкалой клиентского лимита.
   - preview, settlement report preview и evidence pack теперь ещё несут общий
@@ -1840,9 +1841,10 @@ preview, а не только raw count.
   - `client_limit_baseline_equivalence_version = client-limit-baseline-equivalence-v3`
   - `client_limit_strict_meter_slice_version = client-limit-strict-meter-slice-v1`
   - `client_limit_explicit_boundary_surface_version = client-limit-explicit-boundary-surface-v1`
+  - `client_limit_continuity_boundary_rollup_version = client-limit-continuity-boundary-rollup-v1`
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
-  - начиная с `v8/v3` слой ещё и честно поднимает `baseline_equivalence` как отдельный
+  - начиная с `v9/v3` слой ещё и честно поднимает `baseline_equivalence` как отдельный
     machine-readable contour; теперь он умеет различать не только
     `baseline_semantics_unmaterialized`, `baseline_component_semantics_partial`, но и
     `baseline_component_semantics_explicit_boundary`, когда часть remaining gap должна
