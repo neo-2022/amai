@@ -3,6 +3,7 @@ use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary, collect_mach
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::cmp::Reverse;
 use std::env;
 use std::fs;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -3706,6 +3707,7 @@ fn artifact_cleanup_card(snapshot: &Value, machine: Option<&MachineSummary>) -> 
         .as_array()
         .cloned()
         .unwrap_or_default();
+    let operator_reclaim_hints = artifact_cleanup_operator_reclaim_hints(cleanup);
     let last_apply = &cleanup["last_apply"];
     let last_reclaim_bytes = last_apply["reclaimed_bytes"].as_u64().unwrap_or(0);
     let last_deleted = last_apply["deleted"].as_u64().unwrap_or(0);
@@ -3759,6 +3761,17 @@ fn artifact_cleanup_card(snapshot: &Value, machine: Option<&MachineSummary>) -> 
         note.push_str(&format!(
             " Сейчас основной policy-covered hot storage удерживается возрастным запасом и keep-latest: {target_path} = {}. Это не unmanaged drift и не сломанный cleanup, а осознанный retention hold.",
             human_bytes(target_bytes as f64)
+        ));
+    }
+    if let Some(hint) = operator_reclaim_hints.first() {
+        let target_path = hint["path"].as_str().unwrap_or("неизвестный target");
+        let reclaimable_bytes = hint["reclaimable_bytes"].as_u64().unwrap_or(0);
+        let command = hint["recommended_command"]
+            .as_str()
+            .unwrap_or("observe cleanup-artifacts --help");
+        note.push_str(&format!(
+            " Если место нужно вернуть раньше, ближайший operator reclaim path уже materialized: {target_path} = {} через `{command}`.",
+            human_bytes(reclaimable_bytes as f64)
         ));
     }
     if last_reclaim_bytes > 0 {
@@ -3922,6 +3935,19 @@ fn artifact_cleanup_card(snapshot: &Value, machine: Option<&MachineSummary>) -> 
                         .join(", ")
                 },
                 Some("Manual-only cleanup contours, где reclaim уже доступен, но auto-retention этот path не трогает."),
+            ),
+            metric_row(
+                "Operator reclaim next",
+                if operator_reclaim_hints.is_empty() {
+                    "нет".to_string()
+                } else {
+                    operator_reclaim_hints
+                        .iter()
+                        .map(artifact_cleanup_reclaim_hint_summary)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                },
+                Some("Точные команды для самых тяжёлых reclaim-кандидатов, если место нужно вернуть раньше TTL/keep-latest."),
             ),
             metric_row(
                 "Keep latest / protected",
@@ -6437,6 +6463,78 @@ fn artifact_cleanup_pressure_state(
     }
 }
 
+fn artifact_cleanup_operator_reclaim_hints(cleanup: &Value) -> Vec<Value> {
+    if let Some(hints) = cleanup["operator_reclaim_hints"].as_array() {
+        if !hints.is_empty() {
+            return hints.clone();
+        }
+    }
+
+    let mut hints = Vec::new();
+    if let Some(targets) = cleanup["manual_only_reclaimable_targets"].as_array() {
+        for target in targets {
+            if let Some(hint) = artifact_cleanup_operator_reclaim_hint_from_target(
+                target,
+                "manual_only_cleanup",
+            ) {
+                hints.push(hint);
+            }
+        }
+    }
+    if let Some(targets) = cleanup["policy_retained_targets"].as_array() {
+        for target in targets {
+            if let Some(hint) = artifact_cleanup_operator_reclaim_hint_from_target(
+                target,
+                "policy_retained_hot_storage",
+            ) {
+                hints.push(hint);
+            }
+        }
+    }
+    hints.sort_by_key(|hint| Reverse(hint["reclaimable_bytes"].as_u64().unwrap_or(0)));
+    hints.truncate(3);
+    hints
+}
+
+fn artifact_cleanup_operator_reclaim_hint_from_target(
+    target: &Value,
+    reason: &str,
+) -> Option<Value> {
+    let path = target["path"].as_str()?;
+    let selected_reclaimable_bytes = target["selected_reclaimable_bytes"].as_u64().unwrap_or(0);
+    let aggressive_preview_reclaimable_bytes = target["aggressive_preview_reclaimable_bytes"]
+        .as_u64()
+        .unwrap_or(0);
+    let use_aggressive = selected_reclaimable_bytes == 0;
+    let reclaimable_bytes = if use_aggressive {
+        aggressive_preview_reclaimable_bytes
+    } else {
+        selected_reclaimable_bytes
+    };
+    Some(json!({
+        "path": path,
+        "reason": reason,
+        "reclaimable_bytes": reclaimable_bytes,
+        "recommended_command": if use_aggressive {
+            format!("observe cleanup-artifacts --target {path} --aggressive --apply")
+        } else {
+            format!("observe cleanup-artifacts --target {path} --apply")
+        }
+    }))
+}
+
+fn artifact_cleanup_reclaim_hint_summary(hint: &Value) -> String {
+    let path = hint["path"].as_str().unwrap_or("неизвестный target");
+    let reclaimable_bytes = hint["reclaimable_bytes"].as_u64().unwrap_or(0);
+    let command = hint["recommended_command"]
+        .as_str()
+        .unwrap_or("observe cleanup-artifacts --help");
+    format!(
+        "{path} -> {command} ({})",
+        human_bytes(reclaimable_bytes as f64)
+    )
+}
+
 fn artifact_cleanup_status(snapshot: &Value, machine: Option<&MachineSummary>) -> &'static str {
     let cleanup = &snapshot["artifact_cleanup"];
     if !cleanup.is_object() || cleanup["status"].as_str().is_some() {
@@ -6503,9 +6601,16 @@ fn artifact_cleanup_warning(snapshot: &Value, machine: Option<&MachineSummary>) 
     }
     let manual_only_bytes = cleanup["manual_only_reclaimable_bytes"].as_u64().unwrap_or(0);
     if manual_only_bytes > 0 {
+        let operator_hint = artifact_cleanup_operator_reclaim_hints(cleanup)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let command = operator_hint["recommended_command"]
+            .as_str()
+            .unwrap_or("observe cleanup-artifacts --apply");
         return Some(format!(
-            "Сейчас уже есть {} reclaimable веса на manual-only cleanup contour. Auto-retention этот путь специально не трогает, поэтому нужен explicit operator run.",
-            human_bytes(manual_only_bytes as f64)
+            "Сейчас уже есть {} reclaimable веса на manual-only cleanup contour. Auto-retention этот путь специально не трогает, поэтому нужен explicit operator run: `{command}`.",
+            human_bytes(manual_only_bytes as f64),
         ));
     }
     let policy_retained_bytes = cleanup["policy_retained_reclaimable_bytes"]
@@ -6513,15 +6618,15 @@ fn artifact_cleanup_warning(snapshot: &Value, machine: Option<&MachineSummary>) 
         .unwrap_or(0);
     if policy_retained_bytes > 0 {
         let pressure_state = artifact_cleanup_pressure_state(cleanup, machine).unwrap_or("waiting");
-        let first_target = cleanup["policy_retained_targets"]
-            .as_array()
-            .and_then(|targets| targets.first())
-            .cloned()
+        let first_hint = artifact_cleanup_operator_reclaim_hints(cleanup)
+            .into_iter()
+            .next()
             .unwrap_or_default();
-        let target_path = first_target["path"].as_str().unwrap_or("policy target");
-        let target_bytes = first_target["aggressive_preview_reclaimable_bytes"]
-            .as_u64()
-            .unwrap_or(0);
+        let target_path = first_hint["path"].as_str().unwrap_or("policy target");
+        let target_bytes = first_hint["reclaimable_bytes"].as_u64().unwrap_or(0);
+        let command = first_hint["recommended_command"]
+            .as_str()
+            .unwrap_or("observe cleanup-artifacts --aggressive --apply");
         return Some(match pressure_state {
             "critical" | "alert" => {
                 let used = machine
@@ -6532,14 +6637,15 @@ fn artifact_cleanup_warning(snapshot: &Value, machine: Option<&MachineSummary>) 
                     .map(|summary| format!("{:.2} GiB", summary.disk_available_gib))
                     .unwrap_or_else(|| "неизвестно".to_string());
                 format!(
-                    "На диске уже есть давление: used {used}, свободно {available}. При этом {} policy-covered hot storage всё ещё удерживается TTL/keep-latest. Следующий manual reclaim кандидат: {target_path} = {} через `observe cleanup-artifacts --target {target_path} --aggressive --apply`.",
+                    "На диске уже есть давление: used {used}, свободно {available}. При этом {} policy-covered hot storage всё ещё удерживается TTL/keep-latest. Следующий manual reclaim кандидат: {target_path} = {} через `{command}`.",
                     human_bytes(policy_retained_bytes as f64),
                     human_bytes(target_bytes as f64)
                 )
             }
             _ => format!(
-                "Сейчас {} rebuildable веса уже policy-covered, но intentionally удерживается TTL/keep-latest. Cleanup не сломан: это hot storage, которое auto-path уберёт позже, а aggressive path может снять раньше.",
-                human_bytes(policy_retained_bytes as f64)
+                "Сейчас {} rebuildable веса уже policy-covered, но intentionally удерживается TTL/keep-latest. Cleanup не сломан: это hot storage, которое auto-path уберёт позже. Если место нужно раньше, ближайший reclaim path уже готов: `{command}` для {target_path} = {}.",
+                human_bytes(policy_retained_bytes as f64),
+                human_bytes(target_bytes as f64)
             ),
         });
     }
@@ -8345,9 +8451,23 @@ mod tests {
             .expect("cleanup card");
         assert_eq!(cleanup_card["status"].as_str(), Some("waiting"));
         assert_eq!(cleanup_card["value"].as_str(), Some("17.19 GiB ждёт TTL"));
+        let operator_row = cleanup_card["rows"]
+            .as_array()
+            .expect("cleanup rows")
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Operator reclaim next"))
+            .expect("operator reclaim row");
+        assert!(
+            operator_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("observe cleanup-artifacts --target target/debug --aggressive --apply")
+        );
         let warning = artifact_cleanup_warning(&snapshot, None).expect("warning");
         assert!(warning.contains("policy-covered"));
         assert!(warning.contains("TTL/keep-latest"));
+        assert!(warning.contains("target/debug"));
+        assert!(warning.contains("--aggressive --apply"));
     }
 
     #[test]

@@ -178,6 +178,7 @@ pub fn run_cleanup(
     let mut managed_target_sizes = Vec::new();
     let mut policy_retained_targets_json = Vec::new();
     let mut manual_only_reclaimable_targets_json = Vec::new();
+    let mut operator_reclaim_hints_json = Vec::new();
     let mut target_matched = target.is_none();
 
     for target in profile
@@ -250,6 +251,7 @@ pub fn run_cleanup(
         kept_latest_total += active_plan.kept_latest;
         protected_total += active_plan.protected;
         aggressive_preview_total += aggressive_preview.selected;
+        let selected_reclaimable_now = selected_reclaimable_bytes(&active_plan);
         let aggressive_preview_reclaimable_bytes = selected_reclaimable_bytes(&aggressive_preview);
         aggressive_preview_reclaimed_bytes += aggressive_preview_reclaimable_bytes;
 
@@ -260,9 +262,17 @@ pub fn run_cleanup(
                 "description": target.description,
                 "ttl_hours": target.ttl_hours,
                 "keep_latest": target.keep_latest,
+                "selected": active_plan.selected,
+                "selected_reclaimable_bytes": selected_reclaimable_now,
                 "aggressive_preview_selected": aggressive_preview.selected,
                 "aggressive_preview_reclaimable_bytes": aggressive_preview_reclaimable_bytes,
             }));
+            operator_reclaim_hints_json.push(build_operator_reclaim_hint(
+                target,
+                "policy_retained_hot_storage",
+                selected_reclaimable_now,
+                aggressive_preview_reclaimable_bytes,
+            ));
         }
         if !target.auto_apply && aggressive_preview.selected > 0 {
             manual_only_reclaimable_bytes_total += aggressive_preview_reclaimable_bytes;
@@ -271,9 +281,17 @@ pub fn run_cleanup(
                 "description": target.description,
                 "ttl_hours": target.ttl_hours,
                 "keep_latest": target.keep_latest,
+                "selected": active_plan.selected,
+                "selected_reclaimable_bytes": selected_reclaimable_now,
                 "aggressive_preview_selected": aggressive_preview.selected,
                 "aggressive_preview_reclaimable_bytes": aggressive_preview_reclaimable_bytes,
             }));
+            operator_reclaim_hints_json.push(build_operator_reclaim_hint(
+                target,
+                "manual_only_cleanup",
+                selected_reclaimable_now,
+                aggressive_preview_reclaimable_bytes,
+            ));
         }
 
         let mut deleted = 0_u64;
@@ -308,13 +326,13 @@ pub fn run_cleanup(
             "entries_scanned": active_plan.scanned,
             "expired": active_plan.expired,
             "selected": active_plan.selected,
-            "selected_reclaimable_bytes": selected_reclaimable_bytes(&active_plan),
+            "selected_reclaimable_bytes": selected_reclaimable_now,
             "deleted": deleted,
             "reclaimed_bytes": reclaimed_bytes,
             "kept_latest": active_plan.kept_latest,
             "protected": active_plan.protected,
             "aggressive_preview_selected": aggressive_preview.selected,
-            "aggressive_preview_reclaimable_bytes": selected_reclaimable_bytes(&aggressive_preview),
+            "aggressive_preview_reclaimable_bytes": aggressive_preview_reclaimable_bytes,
         }));
     }
 
@@ -324,6 +342,11 @@ pub fn run_cleanup(
             target.unwrap_or_default()
         ));
     }
+
+    operator_reclaim_hints_json.sort_by_key(|hint| {
+        Reverse(hint["reclaimable_bytes"].as_u64().unwrap_or(0))
+    });
+    operator_reclaim_hints_json.truncate(3);
 
     Ok(json!({
         "artifact_cleanup": {
@@ -339,6 +362,7 @@ pub fn run_cleanup(
             "policy_retained_targets": policy_retained_targets_json,
             "manual_only_reclaimable_bytes": manual_only_reclaimable_bytes_total,
             "manual_only_reclaimable_targets": manual_only_reclaimable_targets_json,
+            "operator_reclaim_hints": operator_reclaim_hints_json,
             "disk_pressure_thresholds": {
                 "alert_used_percent": profile.disk_pressure_alert_used_percent,
                 "critical_used_percent": profile.disk_pressure_critical_used_percent,
@@ -808,6 +832,44 @@ fn current_protected_paths() -> Vec<PathBuf> {
         .and_then(|path| path.canonicalize().ok())
         .into_iter()
         .collect()
+}
+
+fn cleanup_command(target_path: &str, aggressive: bool, apply: bool) -> String {
+    let mut command = format!("observe cleanup-artifacts --target {target_path}");
+    if aggressive {
+        command.push_str(" --aggressive");
+    }
+    if apply {
+        command.push_str(" --apply");
+    }
+    command
+}
+
+fn build_operator_reclaim_hint(
+    target: &ArtifactCleanupTarget,
+    reason: &str,
+    selected_reclaimable_bytes: u64,
+    aggressive_preview_reclaimable_bytes: u64,
+) -> Value {
+    let use_aggressive = selected_reclaimable_bytes == 0;
+    let reclaimable_bytes = if use_aggressive {
+        aggressive_preview_reclaimable_bytes
+    } else {
+        selected_reclaimable_bytes
+    };
+    json!({
+        "path": target.path,
+        "description": target.description,
+        "reason": reason,
+        "ttl_hours": target.ttl_hours,
+        "keep_latest": target.keep_latest,
+        "selected_reclaimable_bytes": selected_reclaimable_bytes,
+        "aggressive_preview_reclaimable_bytes": aggressive_preview_reclaimable_bytes,
+        "reclaimable_bytes": reclaimable_bytes,
+        "recommended_mode": if use_aggressive { "aggressive_apply" } else { "apply" },
+        "preview_command": cleanup_command(&target.path, use_aggressive, false),
+        "recommended_command": cleanup_command(&target.path, use_aggressive, true),
+    })
 }
 
 fn profile_path() -> PathBuf {

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 14:44 MSK
-Ручная сверка guide/docs: 2026-03-26 14:44 MSK
+modified_at: 2026-03-26 14:53 MSK
+Ручная сверка guide/docs: 2026-03-26 14:53 MSK
 
 # Operations
 
@@ -2522,10 +2522,12 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
   - safe reclaim now;
   - aggressive preview;
   - policy-retained hot storage, который уже covered cleanup policy, но ещё удерживается TTL/keep_latest;
+  - exact operator reclaim commands для самых тяжёлых target-ов, если место нужно вернуть раньше auto-retention;
   - last reclaim;
   - почему объём проекта может ещё не уменьшаться, даже если aggressive preview уже большой.
 - если объём уже policy-covered и удерживается только возрастным запасом/`keep_latest`, карточка должна surfac-ить это как `waiting`, а не как broken unmanaged growth.
 - если основной диск уже упёрся в cleanup pressure thresholds, тот же policy-held объём должен эскалироваться в `alert/critical` и давать operator hint на target-specific aggressive reclaim вместо пассивного `waiting`.
+- даже без disk pressure warning теперь обязан показывать ближайший exact reclaim command для крупнейшего retained target, чтобы оператор мог вернуть место раньше TTL осознанным manual run-ом.
 - после любого `--apply` summary сразу пересчитывается повторным dry-run, поэтому карточка и warning не должны продолжать показывать уже удалённый хвост как будто он всё ещё лежит на диске.
 
 После `reverify` live event теперь должен нести richer fields:
