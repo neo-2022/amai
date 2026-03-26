@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 15:20 MSK
-Ручная сверка guide/docs: 2026-03-26 15:20 MSK
+modified_at: 2026-03-26 15:27 MSK
+Ручная сверка guide/docs: 2026-03-26 15:27 MSK
 
 # Token Ledger
 
@@ -1333,7 +1333,7 @@ Hashes по line items нужны затем, чтобы:
 Текущие surface versions для этого слоя:
 - `contractual-statement-export-v20`
 - `settlement-report-preview-v11`
-- `contractual-evidence-pack-v19`
+- `contractual-evidence-pack-v20`
 - `client-limit-meter-alignment-v9`
 - `client-limit-baseline-equivalence-v3`
 - `client-limit-strict-meter-slice-v1`
@@ -1345,6 +1345,7 @@ Hashes по line items нужны затем, чтобы:
 `continuity boundary` только внутри dashboard:
 - `statement_export_preview`
 - `settlement_report_preview`
+- `contractual_evidence_pack`
 
 теперь отдельно несут compact `client_limit_boundary_semantics`, где есть:
 - `strict_client_meter_slice`

@@ -778,7 +778,7 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v19".to_string()
+    "contractual-evidence-pack-v20".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
@@ -6242,6 +6242,7 @@ fn build_contractual_evidence_pack(
         "unready_required_sources_for_margin_truth": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["unready_required_sources_for_margin_truth"].clone(),
         "margin_readiness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["margin_readiness_state"].clone(),
         "external_truth_manifest": report["token_budget_report"]["external_truth_manifest"].clone(),
+        "client_limit_boundary_semantics": statement_export_preview["client_limit_boundary_semantics"].clone(),
         "settlement_report_preview": settlement_report_preview,
         "customer_contractual_boundary": customer_contractual_boundary,
         "settlement_activation_governance": statement_export_preview["settlement_activation_governance"].clone(),
@@ -6256,6 +6257,7 @@ fn build_contractual_evidence_pack(
                 "truth_guardrail",
                 "contract_versions",
                 "external_truth_manifest",
+                "client_limit_boundary_semantics",
                 "settlement_report_preview",
                 "statement_preview",
                 "reconciliation_preview",
@@ -15465,7 +15467,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v19"
+            "contractual-evidence-pack-v20"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -18104,6 +18106,12 @@ effective_to_epoch_ms = 2000
                 },
                 "statement_export_previews": {
                     "lifetime": {
+                        "client_limit_boundary_semantics": {
+                            "review_state": "strict_slice_plus_observed_amai_continuity_boundary",
+                            "continuity_boundary_rollup": {
+                                "observed_tokens": 50329
+                            }
+                        },
                         "settlement_report_preview": {
                             "model_version": "settlement-report-preview-v11",
                             "settlement_report_id": "preview-hash"
@@ -18205,7 +18213,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v19");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v20");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -18352,6 +18360,14 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             payload["settlement_report_preview"]["model_version"],
             "settlement-report-preview-v11"
+        );
+        assert_eq!(
+            payload["client_limit_boundary_semantics"]["review_state"],
+            "strict_slice_plus_observed_amai_continuity_boundary"
+        );
+        assert_eq!(
+            payload["client_limit_boundary_semantics"]["continuity_boundary_rollup"]["observed_tokens"],
+            50329
         );
         assert_eq!(
             payload["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],
