@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 13:36 MSK
-Ручная сверка guide/docs: 2026-03-26 13:36 MSK
+modified_at: 2026-03-26 13:52 MSK
+Ручная сверка guide/docs: 2026-03-26 13:52 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -2133,11 +2133,17 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
   - `target/release`
   - `.fastembed_cache`
   - `state/external-benchmarks/*`
+- отдельный manual-only cleanup contour теперь заведен для:
+  - `output/windows-vm-lab`
 - live state вроде `state/postgres`, `state/qdrant`, `state/minio`, `state/nats` этот контур не удаляет;
-- тяжёлые output/evidence roots вроде `output/windows-vm-lab` тоже не входят в auto-retention по умолчанию; их нужно либо чистить отдельным explicit path-ом, либо добавлять в policy отдельным contour-ом;
+- тяжёлые output/evidence roots вроде `output/windows-vm-lab` по-прежнему не попадают под auto-retention по умолчанию; их теперь можно чистить explicit cleanup path-ом, но auto-path их не трогает;
 - `observe serve`, `observe snapshot` и `observe sla-check` теперь сами запускают auto-cleanup по TTL, поэтому старый локальный мусор не должен копиться бесконечно;
 - текущий запущенный бинарь защищён от удаления, даже если его директория уже попала под TTL.
 - `--aggressive` выключает возрастной запас и `keep_latest` только для rebuildable хвоста, поэтому это уже explicit reclaim path, а не обычный auto-retention;
+- для `output/windows-vm-lab` это означает отдельный explicit/manual contour:
+  - обычный `observe cleanup-artifacts --apply` может убрать старые proof-run directories по TTL;
+  - auto-path этого не сделает;
+  - symlink `output/windows-vm-lab/latest` теперь не считается cleanup-entry и не съедает `keep_latest`;
 - в human dashboard теперь есть отдельная карточка `Локальный мусор и retention`, где явно видны:
   - общий repo footprint;
   - сколько места входит в managed cleanup scope;

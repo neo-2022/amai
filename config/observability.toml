@@ -1,5 +1,5 @@
-modified_at = "2026-03-26 13:36 MSK"
-"Ручная сверка guide/docs" = "2026-03-26 13:36 MSK"
+modified_at = "2026-03-26 13:52 MSK"
+"Ручная сверка guide/docs" = "2026-03-26 13:52 MSK"
 
 [observability]
 schema_version = 2
@@ -85,6 +85,13 @@ description = "stale external benchmark run outputs"
 ttl_hours = 168
 keep_latest = 2
 auto_apply = true
+
+[[artifact_cleanup.targets]]
+path = "output/windows-vm-lab"
+description = "stale Windows VM lab proof runs"
+ttl_hours = 168
+keep_latest = 2
+auto_apply = false
 
 [postgres]
 target_connection_usage_ratio = 0.80

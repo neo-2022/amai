@@ -371,6 +371,9 @@ fn immediate_entries(root: &Path) -> Result<Vec<CleanupEntry>> {
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path)
             .with_context(|| format!("failed to stat cleanup entry {}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
         let modified = metadata
             .modified()
             .with_context(|| format!("failed to read mtime for {}", path.display()))?;
@@ -595,7 +598,8 @@ fn summary_path(repo_root: &Path) -> PathBuf {
 mod tests {
     use super::{
         CleanupEntry, CleanupMode, collect_repo_inventory, current_protected_paths,
-        default_max_unmanaged_roots, default_unmanaged_root_alert_bytes, plan_target_cleanup,
+        default_max_unmanaged_roots, default_unmanaged_root_alert_bytes, immediate_entries,
+        plan_target_cleanup,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -757,5 +761,29 @@ mod tests {
 
         let _ = fs::remove_dir_all(&repo_root);
         let _ = default_unmanaged_root_alert_bytes();
+    }
+
+    #[test]
+    fn immediate_entries_skip_symlinks() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "amai-artifact-cleanup-symlink-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&repo_root);
+        fs::create_dir_all(&repo_root).expect("repo root");
+        fs::create_dir_all(repo_root.join("20260325-proof")).expect("proof dir");
+        fs::write(repo_root.join("20260325-proof/serial.log"), b"log").expect("log file");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            repo_root.join("20260325-proof"),
+            repo_root.join("latest"),
+        )
+        .expect("latest symlink");
+
+        let entries = immediate_entries(&repo_root).expect("entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, repo_root.join("20260325-proof"));
+
+        let _ = fs::remove_dir_all(&repo_root);
     }
 }
