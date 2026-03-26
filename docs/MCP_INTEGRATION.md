@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 04:18 MSK
-Ручная сверка guide/docs: 2026-03-26 04:18 MSK
+modified_at: 2026-03-26 04:26 MSK
+Ручная сверка guide/docs: 2026-03-26 04:26 MSK
 
 # MCP Integration
 
@@ -425,6 +425,10 @@ stack-а, но и какие deployment promises вообще честно до�
 - кроме static onboarding contract, сам startup теперь materialize-ит и dynamic runtime artifact
   `.amai/continuity/project-chat-startup-state.json`;
   там лежит последняя `continuity_startup_summary` и компактный `chat_start_restore.prompt_text`.
+- static startup contract теперь прямо несёт `runtime_state_artifact`, чтобы client/runtime видел:
+  - какой file path ожидать;
+  - какой tool его пишет;
+  - какое summary field там является source-of-truth.
 - это нужно затем, чтобы supported clients и operator tooling могли проверить не только
   installation-time law, но и фактический live return contour:
   `startup_next_action`, `required_return_task`, `execctl_active_lease`,

@@ -62,7 +62,7 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
     match onboarding::inspect_startup_artifacts(&repo_root) {
         Ok(Some(audit)) => {
             println!(
-                "startup_artifacts: {} (instruction_present={}, instruction_sha_match={}, instruction_requires_pre_tool_read={}, instruction_missing_fail_closed={}, instruction_sha_mismatch_fail_closed={}, instruction_has_startup_next_action={}, instruction_has_required_return_task={}, instruction_has_resume_required_action_kind={}, instruction_has_previous_session_owner_follow={}, instruction_has_no_silent_drop={}, contract_present={}, contract_sha_match={}, install_state_sha_match={}, contract_fail_closed={}, contract_has_startup_next_action_field={}, contract_has_required_return_task_field={}, contract_has_resume_required_action_kind={}, contract_has_previous_session_owner_follow={}, contract_has_no_silent_drop={}, instruction_path={}, contract_path={})",
+                "startup_artifacts: {} (instruction_present={}, instruction_sha_match={}, instruction_requires_pre_tool_read={}, instruction_missing_fail_closed={}, instruction_sha_mismatch_fail_closed={}, instruction_has_startup_next_action={}, instruction_has_required_return_task={}, instruction_has_resume_required_action_kind={}, instruction_has_previous_session_owner_follow={}, instruction_has_no_silent_drop={}, instruction_has_runtime_state_artifact={}, contract_present={}, contract_sha_match={}, install_state_sha_match={}, contract_fail_closed={}, contract_has_startup_next_action_field={}, contract_has_required_return_task_field={}, contract_has_resume_required_action_kind={}, contract_has_previous_session_owner_follow={}, contract_has_no_silent_drop={}, contract_has_runtime_state_artifact={}, instruction_path={}, contract_path={})",
                 audit.status,
                 audit.startup_instruction_exists,
                 audit
@@ -92,6 +92,9 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
                 audit
                     .startup_instruction_contains_no_silent_drop
                     .unwrap_or(false),
+                audit
+                    .startup_instruction_contains_runtime_state_artifact
+                    .unwrap_or(false),
                 audit.startup_contract_exists,
                 audit
                     .startup_contract_sha_matches_current_contract
@@ -114,6 +117,9 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
                     .unwrap_or(false),
                 audit
                     .startup_contract_contains_no_silent_drop
+                    .unwrap_or(false),
+                audit
+                    .startup_contract_contains_runtime_state_artifact
                     .unwrap_or(false),
                 audit
                     .startup_instruction_path

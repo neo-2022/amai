@@ -2509,7 +2509,7 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v3",
+                "contract_version": "continuity-startup-contract-v4",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore before any substantive work in a new or resumed chat",
@@ -2531,6 +2531,12 @@ fn protocol_manifest() -> Value {
                     "workspace_contract_sha256_field": "startup_contract_sha256",
                     "missing_or_unreadable_fail_closed": true,
                     "sha256_mismatch_fail_closed": true
+                },
+                "runtime_state_artifact": {
+                    "workspace_runtime_state_relative_path": ".amai/continuity/project-chat-startup-state.json",
+                    "written_by_tool": "amai_continuity_startup",
+                    "source_summary_field": "continuity_startup_summary",
+                    "contains_prompt_text": true
                 },
                 "required_arguments": ["project"],
                 "optional_arguments": ["repo_root", "namespace", "token_source_kind"],
@@ -4717,6 +4723,24 @@ mod tests {
                 ["sha256_mismatch_fail_closed"]
                 .as_bool(),
             Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
+                ["workspace_runtime_state_relative_path"]
+                .as_str(),
+            Some(".amai/continuity/project-chat-startup-state.json")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
+                ["written_by_tool"]
+                .as_str(),
+            Some("amai_continuity_startup")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
+                ["source_summary_field"]
+                .as_str(),
+            Some("continuity_startup_summary")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]

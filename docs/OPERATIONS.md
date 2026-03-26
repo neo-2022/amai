@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 04:18 MSK
-Ручная сверка guide/docs: 2026-03-26 04:18 MSK
+modified_at: 2026-03-26 04:26 MSK
+Ручная сверка guide/docs: 2026-03-26 04:26 MSK
 
 # Operations
 
@@ -868,6 +868,10 @@ cargo run -- mcp serve
   `.amai/continuity/project-chat-startup-state.json`;
   operationally это уже не onboarding contract, а последний реально поднятый startup-state для
   текущего workspace.
+- тот же static startup contract теперь обязан не терять этот path:
+  `runtime_state_artifact.workspace_runtime_state_relative_path =
+  .amai/continuity/project-chat-startup-state.json`;
+  иначе managed startup instructions считаются drifted.
 - в этом runtime artifact должны лежать:
   - `continuity_startup_summary`;
   - `chat_start_restore.prompt_text`;
