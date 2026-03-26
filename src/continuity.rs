@@ -6,6 +6,7 @@ use crate::cli::{
 use crate::codex_threads;
 use crate::config::AppConfig;
 use crate::eval_verdict::{self, EvalPattern, EvalSignals};
+use crate::mcp;
 use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, ProjectRecord};
 use crate::retrieval_science;
 use crate::s3;
@@ -86,6 +87,24 @@ struct ContinuityStartupContext {
     restore: Option<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StartupRuntimeStateAudit {
+    pub status: String,
+    pub output_path: PathBuf,
+    pub artifact_exists: bool,
+    pub startup_contract_sha_matches_current_contract: Option<bool>,
+    pub source_summary_field_matches: Option<bool>,
+    pub prompt_text_present: Option<bool>,
+    pub startup_next_action_present: Option<bool>,
+    pub required_return_task_field_present: Option<bool>,
+    pub execctl_active_lease_field_present: Option<bool>,
+    pub project_task_tree_field_present: Option<bool>,
+    pub project_task_ledger_field_present: Option<bool>,
+    pub resume_state: Option<String>,
+    pub action_kind: Option<String>,
+    pub lease_owner_state: Option<String>,
+}
+
 #[derive(Debug)]
 struct ContinuityEvalProbe {
     name: &'static str,
@@ -99,6 +118,113 @@ async fn connect_bootstrapped_admin(cfg: &AppConfig) -> Result<Client> {
     let db = postgres::connect_admin(cfg).await?;
     postgres::bootstrap_schema(&db, cfg).await?;
     Ok(db)
+}
+
+pub(crate) fn startup_runtime_state_artifact_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".amai/continuity/project-chat-startup-state.json")
+}
+
+pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupRuntimeStateAudit> {
+    let output_path = startup_runtime_state_artifact_path(repo_root);
+    if !output_path.is_file() {
+        return Ok(StartupRuntimeStateAudit {
+            status: "not_materialized".to_string(),
+            output_path,
+            artifact_exists: false,
+            startup_contract_sha_matches_current_contract: None,
+            source_summary_field_matches: None,
+            prompt_text_present: None,
+            startup_next_action_present: None,
+            required_return_task_field_present: None,
+            execctl_active_lease_field_present: None,
+            project_task_tree_field_present: None,
+            project_task_ledger_field_present: None,
+            resume_state: None,
+            action_kind: None,
+            lease_owner_state: None,
+        });
+    }
+
+    let content = fs::read_to_string(&output_path)
+        .with_context(|| format!("failed to read {}", output_path.display()))?;
+    let payload: Value = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", output_path.display()))?;
+    let expected_contract_sha =
+        hex_sha256(&serde_json::to_vec(&mcp::project_chat_startup_contract())?);
+    let summary = &payload["continuity_startup_summary"];
+    let startup_contract_sha_matches_current_contract =
+        Some(payload["startup_contract_sha256"].as_str() == Some(expected_contract_sha.as_str()));
+    let source_summary_field_matches =
+        Some(payload["source_summary_field"].as_str() == Some("continuity_startup_summary"));
+    let prompt_text_present = Some(
+        payload["chat_start_restore"]["prompt_text"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty()),
+    );
+    let startup_next_action_present = Some(summary["startup_next_action"].is_object());
+    let required_return_task_field_present = Some(
+        summary
+            .as_object()
+            .is_some_and(|object| object.contains_key("required_return_task")),
+    );
+    let execctl_active_lease_field_present = Some(
+        summary
+            .as_object()
+            .is_some_and(|object| object.contains_key("execctl_active_lease")),
+    );
+    let project_task_tree_field_present = Some(
+        summary
+            .as_object()
+            .is_some_and(|object| object.contains_key("project_task_tree")),
+    );
+    let project_task_ledger_field_present = Some(
+        summary
+            .as_object()
+            .is_some_and(|object| object.contains_key("project_task_ledger")),
+    );
+    let resume_state = summary["execctl_resume_state"]
+        .as_str()
+        .map(ToOwned::to_owned);
+    let action_kind = summary["startup_next_action"]["action_kind"]
+        .as_str()
+        .map(ToOwned::to_owned);
+    let lease_owner_state = summary["execctl_active_lease"]["lease_owner_state"]
+        .as_str()
+        .map(ToOwned::to_owned);
+
+    let status = if payload["artifact_version"].as_str()
+        != Some("workspace-startup-runtime-state-v1")
+        || payload["source_tool"].as_str() != Some("amai_continuity_startup")
+        || startup_contract_sha_matches_current_contract != Some(true)
+        || source_summary_field_matches != Some(true)
+        || prompt_text_present != Some(true)
+        || startup_next_action_present != Some(true)
+        || required_return_task_field_present != Some(true)
+        || execctl_active_lease_field_present != Some(true)
+        || project_task_tree_field_present != Some(true)
+        || project_task_ledger_field_present != Some(true)
+    {
+        "startup_runtime_state_drift".to_string()
+    } else {
+        "ok".to_string()
+    };
+
+    Ok(StartupRuntimeStateAudit {
+        status,
+        output_path,
+        artifact_exists: true,
+        startup_contract_sha_matches_current_contract,
+        source_summary_field_matches,
+        prompt_text_present,
+        startup_next_action_present,
+        required_return_task_field_present,
+        execctl_active_lease_field_present,
+        project_task_tree_field_present,
+        project_task_ledger_field_present,
+        resume_state,
+        action_kind,
+        lease_owner_state,
+    })
 }
 
 pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<()> {
@@ -506,6 +632,11 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
         &args.token_source_kind,
     )
     .await?;
+    let startup_payload = build_continuity_startup_payload(&context, &chat_start_restore)?;
+    persist_startup_runtime_state_artifact(
+        Path::new(&context.project.repo_root),
+        &startup_payload,
+    )?;
     println!("Amai continuity startup");
     println!();
     println!(
@@ -632,7 +763,52 @@ async fn startup_payload_with_context(
         &args.token_source_kind,
     )
     .await?;
-    build_continuity_startup_payload(context, &chat_start_restore)
+    let payload = build_continuity_startup_payload(context, &chat_start_restore)?;
+    persist_startup_runtime_state_artifact(Path::new(&context.project.repo_root), &payload)?;
+    Ok(payload)
+}
+
+fn build_startup_runtime_state_artifact(
+    repo_root: &Path,
+    payload: &Value,
+    generated_at_epoch_ms: u64,
+) -> Result<Value> {
+    let startup_contract_sha256 =
+        hex_sha256(&serde_json::to_vec(&mcp::project_chat_startup_contract())?);
+    Ok(json!({
+        "artifact_version": "workspace-startup-runtime-state-v1",
+        "repo_root": repo_root.display().to_string(),
+        "generated_at_epoch_ms": generated_at_epoch_ms,
+        "source_tool": "amai_continuity_startup",
+        "source_summary_field": "continuity_startup_summary",
+        "startup_contract_sha256": startup_contract_sha256,
+        "continuity_startup_summary": mcp::continuity_startup_summary_json(payload),
+        "chat_start_restore": {
+            "headline": payload["chat_start_restore"]["headline"].clone(),
+            "next_step": payload["chat_start_restore"]["next_step"].clone(),
+            "restore_confidence": payload["chat_start_restore"]["restore_confidence"].clone(),
+            "prompt_text": payload["chat_start_restore"]["prompt_text"].clone(),
+        },
+        "working_state_restore_lineage": if payload["working_state_restore"]["state_lineage"].is_object() {
+            payload["working_state_restore"]["state_lineage"].clone()
+        } else {
+            Value::Null
+        }
+    }))
+}
+
+fn persist_startup_runtime_state_artifact(repo_root: &Path, payload: &Value) -> Result<()> {
+    let output_path = startup_runtime_state_artifact_path(repo_root);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let artifact = build_startup_runtime_state_artifact(repo_root, payload, now_epoch_ms()?)?;
+    let content = serde_json::to_string_pretty(&artifact)
+        .context("failed to serialize startup runtime state artifact")?;
+    fs::write(&output_path, content)
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    Ok(())
 }
 
 pub async fn print_restore(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<()> {
@@ -3451,18 +3627,19 @@ mod tests {
     use super::{
         ContinuityStartupContext, build_chat_start_restore, build_continuity_answer_payload,
         build_continuity_canonical_eval, build_continuity_restore_payload,
-        build_continuity_startup_payload, continuity_replay_guard_probes,
-        continuity_snapshot_semantic_epoch_ms, continuity_temporal_lookup_probes,
-        degradation_proof_scenarios, enrich_thread_index_file, extract_next_step_from_text,
-        fake_continuity_handoff_snapshot, fake_continuity_import_snapshot,
-        is_meta_continuity_handoff, latest_scoped_snapshot, parse_chat_reference_spec,
-        render_direct_answer, resolve_answer_intent,
+        build_continuity_startup_payload, build_startup_runtime_state_artifact,
+        continuity_replay_guard_probes, continuity_snapshot_semantic_epoch_ms,
+        continuity_temporal_lookup_probes, degradation_proof_scenarios, enrich_thread_index_file,
+        extract_next_step_from_text, fake_continuity_handoff_snapshot,
+        fake_continuity_import_snapshot, is_meta_continuity_handoff, latest_scoped_snapshot,
+        parse_chat_reference_spec, render_direct_answer, resolve_answer_intent,
     };
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
     use crate::postgres::{NamespaceRecord, ProjectRecord};
     use serde_json::json;
     use std::fs;
+    use std::path::Path;
 
     #[test]
     fn render_direct_answer_prefers_concise_restore_bundle() {
@@ -4406,10 +4583,7 @@ mod tests {
             node["required_return_task"]["headline"],
             json!("Same-meter spend control")
         );
-        assert_eq!(
-            node["project_task_tree"]["open_tasks_count"],
-            json!(2)
-        );
+        assert_eq!(node["project_task_tree"]["open_tasks_count"], json!(2));
         assert_eq!(
             node["project_task_ledger"]["historical_handoffs_count"],
             json!(3)
@@ -4417,6 +4591,86 @@ mod tests {
         assert_eq!(
             node["execctl_active_lease"]["storage_lane"],
             json!("ami.execctl_task_leases")
+        );
+    }
+
+    #[test]
+    fn startup_runtime_state_artifact_surfaces_machine_readable_return_fields() {
+        let payload = json!({
+            "continuity_startup": {
+                "project": {
+                    "code": "art",
+                    "display_name": "Art",
+                    "repo_root": "/tmp/amai-art"
+                },
+                "namespace": {
+                    "code": "continuity",
+                    "display_name": "Continuity"
+                }
+            },
+            "chat_start_restore": {
+                "headline": "Current active line",
+                "next_step": "Ship runtime return enforcement.",
+                "restore_confidence": "high",
+                "prompt_text": "CHAT_START_RESTORE\nCurrent active line",
+                "execctl_resume_state": "pending_return_queue_present",
+                "startup_next_action": {
+                    "action_kind": "resume_required_return_task",
+                    "blocking": true,
+                    "headline": "Pending line",
+                    "next_step": "Close same-meter live gap."
+                },
+                "required_return_task": {
+                    "headline": "Pending line",
+                    "next_step": "Close same-meter live gap."
+                },
+                "execctl_active_lease": {
+                    "lease_owner_state": "previous_session_owner",
+                    "headline": "Current active line"
+                },
+                "project_task_tree": {
+                    "open_tasks_count": 2
+                },
+                "project_task_ledger": {
+                    "open_tasks_count": 2
+                }
+            },
+            "working_state_restore": {
+                "state_lineage": {
+                    "authoritative_event_id": "evt_123",
+                    "session_id": "sess_123"
+                }
+            }
+        });
+
+        let artifact =
+            build_startup_runtime_state_artifact(Path::new("/tmp/amai-art"), &payload, 42)
+                .expect("startup runtime state artifact");
+
+        assert_eq!(
+            artifact["artifact_version"],
+            json!("workspace-startup-runtime-state-v1")
+        );
+        assert_eq!(artifact["source_tool"], json!("amai_continuity_startup"));
+        assert_eq!(
+            artifact["source_summary_field"],
+            json!("continuity_startup_summary")
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["startup_next_action"]["action_kind"],
+            json!("resume_required_return_task")
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["required_return_task"]["headline"],
+            json!("Pending line")
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["execctl_active_lease"]["lease_owner_state"],
+            json!("previous_session_owner")
+        );
+        assert_eq!(
+            artifact["working_state_restore_lineage"]["authoritative_event_id"],
+            json!("evt_123")
         );
     }
 

@@ -1,4 +1,6 @@
-use crate::{compatibility, config, config::AppConfig, nats, onboarding, postgres, qdrant, s3};
+use crate::{
+    compatibility, config, config::AppConfig, continuity, nats, onboarding, postgres, qdrant, s3,
+};
 use anyhow::{Context, Result};
 use reqwest::StatusCode;
 use std::time::Duration;
@@ -63,22 +65,40 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
                 "startup_artifacts: {} (instruction_present={}, instruction_sha_match={}, instruction_requires_pre_tool_read={}, instruction_missing_fail_closed={}, instruction_sha_mismatch_fail_closed={}, instruction_has_startup_next_action={}, instruction_has_required_return_task={}, instruction_has_resume_required_action_kind={}, instruction_has_previous_session_owner_follow={}, instruction_has_no_silent_drop={}, contract_present={}, contract_sha_match={}, install_state_sha_match={}, contract_fail_closed={}, contract_has_startup_next_action_field={}, contract_has_required_return_task_field={}, contract_has_resume_required_action_kind={}, contract_has_previous_session_owner_follow={}, contract_has_no_silent_drop={}, instruction_path={}, contract_path={})",
                 audit.status,
                 audit.startup_instruction_exists,
-                audit.startup_instruction_contains_expected_sha.unwrap_or(false),
-                audit.startup_instruction_contains_required_before_tool_call.unwrap_or(false),
-                audit.startup_instruction_contains_missing_fail_closed.unwrap_or(false),
-                audit.startup_instruction_contains_sha_mismatch_fail_closed.unwrap_or(false),
-                audit.startup_instruction_contains_startup_next_action.unwrap_or(false),
-                audit.startup_instruction_contains_required_return_task.unwrap_or(false),
+                audit
+                    .startup_instruction_contains_expected_sha
+                    .unwrap_or(false),
+                audit
+                    .startup_instruction_contains_required_before_tool_call
+                    .unwrap_or(false),
+                audit
+                    .startup_instruction_contains_missing_fail_closed
+                    .unwrap_or(false),
+                audit
+                    .startup_instruction_contains_sha_mismatch_fail_closed
+                    .unwrap_or(false),
+                audit
+                    .startup_instruction_contains_startup_next_action
+                    .unwrap_or(false),
+                audit
+                    .startup_instruction_contains_required_return_task
+                    .unwrap_or(false),
                 audit
                     .startup_instruction_contains_resume_required_action_kind
                     .unwrap_or(false),
                 audit
                     .startup_instruction_contains_previous_session_owner_follow
                     .unwrap_or(false),
-                audit.startup_instruction_contains_no_silent_drop.unwrap_or(false),
+                audit
+                    .startup_instruction_contains_no_silent_drop
+                    .unwrap_or(false),
                 audit.startup_contract_exists,
-                audit.startup_contract_sha_matches_current_contract.unwrap_or(false),
-                audit.install_state_sha_matches_current_contract.unwrap_or(false),
+                audit
+                    .startup_contract_sha_matches_current_contract
+                    .unwrap_or(false),
+                audit
+                    .install_state_sha_matches_current_contract
+                    .unwrap_or(false),
                 audit.startup_contract_enforces_fail_closed.unwrap_or(false),
                 audit
                     .startup_contract_contains_startup_next_action_field
@@ -92,12 +112,16 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
                 audit
                     .startup_contract_contains_previous_session_owner_follow
                     .unwrap_or(false),
-                audit.startup_contract_contains_no_silent_drop.unwrap_or(false),
-                audit.startup_instruction_path
+                audit
+                    .startup_contract_contains_no_silent_drop
+                    .unwrap_or(false),
+                audit
+                    .startup_instruction_path
                     .as_ref()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| "n/a".to_string()),
-                audit.startup_contract_path
+                audit
+                    .startup_contract_path
                     .as_ref()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| "n/a".to_string())
@@ -116,6 +140,36 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
             );
         }
         Err(error) => println!("startup_artifacts: error ({error:#})"),
+    }
+    match continuity::inspect_startup_runtime_state(&repo_root) {
+        Ok(audit) => {
+            println!(
+                "startup_runtime_state: {} (artifact_present={}, contract_sha_match={}, source_summary_field_match={}, prompt_text_present={}, startup_next_action_present={}, required_return_task_field_present={}, execctl_active_lease_field_present={}, project_task_tree_field_present={}, project_task_ledger_field_present={}, resume_state={}, action_kind={}, lease_owner_state={}, path={})",
+                audit.status,
+                audit.artifact_exists,
+                audit
+                    .startup_contract_sha_matches_current_contract
+                    .unwrap_or(false),
+                audit.source_summary_field_matches.unwrap_or(false),
+                audit.prompt_text_present.unwrap_or(false),
+                audit.startup_next_action_present.unwrap_or(false),
+                audit.required_return_task_field_present.unwrap_or(false),
+                audit.execctl_active_lease_field_present.unwrap_or(false),
+                audit.project_task_tree_field_present.unwrap_or(false),
+                audit.project_task_ledger_field_present.unwrap_or(false),
+                audit.resume_state.as_deref().unwrap_or("n/a"),
+                audit.action_kind.as_deref().unwrap_or("n/a"),
+                audit.lease_owner_state.as_deref().unwrap_or("n/a"),
+                audit.output_path.display(),
+            );
+            if audit.status != "ok" {
+                println!(
+                    "startup_runtime_state_repair: rerun cargo run -- continuity startup --repo-root {} --namespace continuity --json >/dev/null",
+                    repo_root.display()
+                );
+            }
+        }
+        Err(error) => println!("startup_runtime_state: error ({error:#})"),
     }
     Ok(())
 }

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:46 MSK
-Ручная сверка guide/docs: 2026-03-26 03:46 MSK
+modified_at: 2026-03-26 04:11 MSK
+Ручная сверка guide/docs: 2026-03-26 04:11 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1235,6 +1235,27 @@ preview, а не только raw count.
     `startup_artifacts_repair: rerun ./scripts/onboard_local.sh --client ... --yes`
   - без install state:
     `startup_artifacts_repair: run ./scripts/onboard_local.sh --client <client> --yes ...`
+- отдельно startup теперь materialize-ит и dynamic runtime artifact
+  `.amai/continuity/project-chat-startup-state.json`;
+  это уже не static onboarding contract, а последняя реально поднятая `continuity_startup_summary`
+  вместе с `chat_start_restore.prompt_text`;
+- тот же runtime artifact теперь нужен затем, чтобы supported clients и operator tools видели не
+  только static startup law, но и живой первый обязательный ход:
+  - `startup_next_action`;
+  - `required_return_task`;
+  - `execctl_active_lease`;
+  - `project_task_tree`;
+  - `project_task_ledger`;
+- `amai status` теперь auditing-ит и этот runtime artifact отдельной строкой
+  `startup_runtime_state: ...`;
+  truthful интерпретация там такая:
+  - `ok` — последний startup уже materialized и machine-readable return contour на месте;
+  - `not_materialized` — onboarding/contract есть, но startup в этом workspace ещё не был
+    выполнен или runtime artifact снят;
+  - `startup_runtime_state_drift` — artifact жив, но потерял contract-hash, prompt или обязательные
+    machine-readable поля resume/return;
+- рядом status теперь печатает и runtime repair path:
+  `startup_runtime_state_repair: rerun cargo run -- continuity startup --repo-root ... --namespace continuity --json >/dev/null`
 
 Это важно читать строго:
 - `startup contract` уже общий и machine-readable;

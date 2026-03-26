@@ -1388,6 +1388,7 @@ async fn tool_continuity_startup(
 ) -> Result<Value> {
     let payload = continuity::startup_payload(cfg, &args.to_cli_args()).await?;
     let summary = continuity_startup_summary(&payload);
+    let summary_json = continuity_startup_summary_json(&payload);
     Ok(tool_result(
         format!(
             "continuity startup :: {}::{} headline={} next_step={} execctl={} pending_return={}",
@@ -1407,30 +1408,7 @@ async fn tool_continuity_startup(
             "working_state_restore": payload["working_state_restore"].clone(),
             "retrieval_science": payload["retrieval_science"].clone(),
             "degradation_policy": payload["degradation_policy"].clone(),
-            "continuity_startup_summary": {
-                "project_code": summary.project_code,
-                "namespace_code": summary.namespace_code,
-                "headline": summary.headline,
-                "next_step": summary.next_step,
-                "restore_confidence": summary.restore_confidence,
-                "thread_count": summary.thread_count,
-                "prompt_text_present": summary.prompt_text_present,
-                "execctl_resume_state": summary.execctl_resume_state,
-                "pending_return_summary": summary.pending_return_summary,
-                "execctl_resume_contract_summary": summary.execctl_resume_contract_summary,
-                "execctl_resume_obligation": summary.execctl_resume_obligation,
-                "startup_next_action": summary.startup_next_action,
-                "startup_next_action_summary": summary.startup_next_action_summary,
-                "execctl_active_lease": summary.execctl_active_lease,
-                "execctl_active_lease_summary": summary.execctl_active_lease_summary,
-                "required_return_task": summary.required_return_task,
-                "project_task_tree": summary.project_task_tree,
-                "project_task_tree_summary": summary.project_task_tree_summary,
-                "project_task_ledger": summary.project_task_ledger,
-                "project_task_ledger_summary": summary.project_task_ledger_summary,
-                "included_reasons_summary": summary.included_reasons_summary,
-                "excluded_reasons_summary": summary.excluded_reasons_summary,
-            }
+            "continuity_startup_summary": summary_json
         }),
     ))
 }
@@ -2126,6 +2104,34 @@ fn continuity_startup_summary(payload: &Value) -> ContinuityStartupSummary {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
     }
+}
+
+pub(crate) fn continuity_startup_summary_json(payload: &Value) -> Value {
+    let summary = continuity_startup_summary(payload);
+    json!({
+        "project_code": summary.project_code,
+        "namespace_code": summary.namespace_code,
+        "headline": summary.headline,
+        "next_step": summary.next_step,
+        "restore_confidence": summary.restore_confidence,
+        "thread_count": summary.thread_count,
+        "prompt_text_present": summary.prompt_text_present,
+        "execctl_resume_state": summary.execctl_resume_state,
+        "pending_return_summary": summary.pending_return_summary,
+        "execctl_resume_contract_summary": summary.execctl_resume_contract_summary,
+        "execctl_resume_obligation": summary.execctl_resume_obligation,
+        "startup_next_action": summary.startup_next_action,
+        "startup_next_action_summary": summary.startup_next_action_summary,
+        "execctl_active_lease": summary.execctl_active_lease,
+        "execctl_active_lease_summary": summary.execctl_active_lease_summary,
+        "required_return_task": summary.required_return_task,
+        "project_task_tree": summary.project_task_tree,
+        "project_task_tree_summary": summary.project_task_tree_summary,
+        "project_task_ledger": summary.project_task_ledger,
+        "project_task_ledger_summary": summary.project_task_ledger_summary,
+        "included_reasons_summary": summary.included_reasons_summary,
+        "excluded_reasons_summary": summary.excluded_reasons_summary,
+    })
 }
 
 fn memory_matrix_summary(payload: &Value) -> MemoryMatrixSummary {
@@ -4957,10 +4963,7 @@ mod tests {
             summary.required_return_task["headline"],
             json!("Same-meter spend control")
         );
-        assert_eq!(
-            summary.project_task_tree["open_tasks_count"],
-            json!(2)
-        );
+        assert_eq!(summary.project_task_tree["open_tasks_count"], json!(2));
         assert!(
             summary
                 .project_task_tree_summary

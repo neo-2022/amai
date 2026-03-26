@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:46 MSK
-Ручная сверка guide/docs: 2026-03-26 03:46 MSK
+modified_at: 2026-03-26 04:11 MSK
+Ручная сверка guide/docs: 2026-03-26 04:11 MSK
 
 # Operations
 
@@ -864,6 +864,26 @@ cargo run -- mcp serve
     `startup_artifacts_repair: rerun ./scripts/onboard_local.sh --client ... --yes`
   - без install state:
     `startup_artifacts_repair: run ./scripts/onboard_local.sh --client <client> --yes ...`
+- отдельно `amai continuity startup` теперь materialize-ит и dynamic runtime artifact
+  `.amai/continuity/project-chat-startup-state.json`;
+  operationally это уже не onboarding contract, а последний реально поднятый startup-state для
+  текущего workspace.
+- в этом runtime artifact должны лежать:
+  - `continuity_startup_summary`;
+  - `chat_start_restore.prompt_text`;
+  - `startup_next_action`;
+  - `required_return_task`;
+  - `execctl_active_lease`;
+  - `project_task_tree`;
+  - `project_task_ledger`.
+- `amai status` теперь auditing-ит runtime artifact отдельной строкой `startup_runtime_state: ...`.
+  Правильное чтение:
+  - `ok` — живой startup-state materialized и return contour виден machine-readable;
+  - `not_materialized` — клиент/оператор ещё не поднимал startup в этом workspace;
+  - `startup_runtime_state_drift` — artifact есть, но он потерял expected contract hash,
+    `prompt_text` или обязательные machine-readable return поля.
+- repair path для такого drift теперь честный и bounded:
+  `startup_runtime_state_repair: rerun cargo run -- continuity startup --repo-root ... --namespace continuity --json >/dev/null`
 - тот же `amai_protocol_manifest` теперь несёт `error_contracts`, а `tools/call`
   и JSON-RPC errors отдают machine-readable taxonomy вместо голого текста:
   `invalid_json_rpc_payload`, `invalid_request`, `method_not_found`,
