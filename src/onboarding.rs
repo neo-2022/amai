@@ -126,6 +126,8 @@ pub(crate) struct StartupArtifactAudit {
     pub startup_contract_contains_startup_next_action_field: Option<bool>,
     pub startup_contract_contains_required_return_task_field: Option<bool>,
     pub startup_contract_contains_resume_required_action_kind: Option<bool>,
+    pub startup_contract_contains_active_lease_owner_state_field: Option<bool>,
+    pub startup_contract_contains_previous_session_owner_value: Option<bool>,
     pub startup_contract_contains_previous_session_owner_follow: Option<bool>,
     pub startup_contract_contains_no_silent_drop: Option<bool>,
     pub startup_contract_contains_runtime_state_artifact: Option<bool>,
@@ -656,7 +658,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         )
     } else {
         (
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None,
         )
     };
 
@@ -672,6 +675,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_contract_contains_startup_next_action_field,
         startup_contract_contains_required_return_task_field,
         startup_contract_contains_resume_required_action_kind,
+        startup_contract_contains_active_lease_owner_state_field,
+        startup_contract_contains_previous_session_owner_value,
         startup_contract_contains_previous_session_owner_follow,
         startup_contract_contains_no_silent_drop,
         startup_contract_contains_runtime_state_artifact,
@@ -724,6 +729,18 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
                         ["required_action_kind_when_resume_required"]
                         .as_str()
                         == Some("resume_required_return_task"),
+                ),
+                Some(
+                    payload["startup_contract"]["resume_enforcement"]
+                        ["active_lease_owner_state_field"]
+                        .as_str()
+                        == Some("lease_owner_state"),
+                ),
+                Some(
+                    payload["startup_contract"]["resume_enforcement"]
+                        ["previous_session_owner_value"]
+                        .as_str()
+                        == Some("previous_session_owner"),
                 ),
                 Some(
                     payload["startup_contract"]["resume_enforcement"]
@@ -843,7 +860,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             )
     } else {
         (
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None,
         )
     };
 
@@ -890,6 +908,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         || startup_contract_contains_startup_next_action_field != Some(true)
         || startup_contract_contains_required_return_task_field != Some(true)
         || startup_contract_contains_resume_required_action_kind != Some(true)
+        || startup_contract_contains_active_lease_owner_state_field != Some(true)
+        || startup_contract_contains_previous_session_owner_value != Some(true)
         || startup_contract_contains_previous_session_owner_follow != Some(true)
         || startup_contract_contains_no_silent_drop != Some(true)
         || startup_contract_contains_runtime_state_artifact != Some(true)
@@ -946,6 +966,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_contract_contains_startup_next_action_field,
         startup_contract_contains_required_return_task_field,
         startup_contract_contains_resume_required_action_kind,
+        startup_contract_contains_active_lease_owner_state_field,
+        startup_contract_contains_previous_session_owner_value,
         startup_contract_contains_previous_session_owner_follow,
         startup_contract_contains_no_silent_drop,
         startup_contract_contains_runtime_state_artifact,
@@ -2206,10 +2228,10 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
         runtime_state_artifact["workspace_runtime_state_relative_path"]
             .as_str()
             .unwrap_or(".amai/continuity/project-chat-startup-state.json");
-    let runtime_state_artifact_version = runtime_state_artifact
-        ["workspace_runtime_state_artifact_version"]
-        .as_str()
-        .unwrap_or("workspace-startup-runtime-state-v3");
+    let runtime_state_artifact_version =
+        runtime_state_artifact["workspace_runtime_state_artifact_version"]
+            .as_str()
+            .unwrap_or("workspace-startup-runtime-state-v3");
     let runtime_state_written_by_tool = runtime_state_artifact["written_by_tool"]
         .as_str()
         .unwrap_or("amai_continuity_startup");
@@ -2227,10 +2249,10 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
         startup_execution_gate_enforcement["unrelated_work_allowed_field"]
             .as_str()
             .unwrap_or("unrelated_work_allowed");
-    let gate_prompt_read_field = startup_execution_gate_enforcement
-        ["must_read_prompt_text_before_reply_field"]
-        .as_str()
-        .unwrap_or("must_read_prompt_text_before_reply");
+    let gate_prompt_read_field =
+        startup_execution_gate_enforcement["must_read_prompt_text_before_reply_field"]
+            .as_str()
+            .unwrap_or("must_read_prompt_text_before_reply");
     let gate_required_action_kind_field =
         startup_execution_gate_enforcement["required_action_kind_field"]
             .as_str()
@@ -2241,10 +2263,10 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     let gate_semantics_consistent_field = runtime_state_artifact["gate_semantics_consistent_field"]
         .as_str()
         .unwrap_or("gate_semantics_consistent");
-    let gate_semantics_consistent_true_required = runtime_state_artifact
-        ["gate_semantics_consistent_true_required"]
-        .as_bool()
-        .unwrap_or(false);
+    let gate_semantics_consistent_true_required =
+        runtime_state_artifact["gate_semantics_consistent_true_required"]
+            .as_bool()
+            .unwrap_or(false);
     let startup_state_fallback_cli = runtime_state_artifact["inspection_fallback_cli"]["command"]
         .as_str()
         .unwrap_or("continuity startup-state");
@@ -2681,9 +2703,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("startup_execution_gate"));
         assert!(text.contains("startup_execution_gate.must_follow_startup_next_action = true"));
         assert!(text.contains("startup_execution_gate.unrelated_work_allowed = false"));
-        assert!(text.contains(
-            "startup_execution_gate.must_read_prompt_text_before_reply = true"
-        ));
+        assert!(text.contains("startup_execution_gate.must_read_prompt_text_before_reply = true"));
         assert!(text.contains(
             "startup_execution_gate.required_action_kind_when_resume_required = \"resume_required_return_task\""
         ));
@@ -2968,6 +2988,14 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             audit.startup_contract_contains_resume_required_action_kind,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_contract_contains_active_lease_owner_state_field,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_contract_contains_previous_session_owner_value,
             Some(true)
         );
         assert_eq!(
