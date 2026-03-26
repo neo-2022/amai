@@ -5505,9 +5505,15 @@ fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Valu
     let continuity_boundary_rollup = alignment["continuity_boundary_rollup"].clone();
     let strict_client_meter_slice = alignment["strict_client_meter_slice"].clone();
     let review_state = match (
-        continuity_boundary_rollup["state"].as_str().unwrap_or("unknown"),
-        explicit_boundary_surface["state"].as_str().unwrap_or("unknown"),
-        strict_client_meter_slice["state"].as_str().unwrap_or("unknown"),
+        continuity_boundary_rollup["state"]
+            .as_str()
+            .unwrap_or("unknown"),
+        explicit_boundary_surface["state"]
+            .as_str()
+            .unwrap_or("unknown"),
+        strict_client_meter_slice["state"]
+            .as_str()
+            .unwrap_or("unknown"),
     ) {
         ("amai_continuity_boundary_observed", "amai_continuity_boundary", _) => {
             "strict_slice_plus_observed_amai_continuity_boundary"
@@ -6139,17 +6145,13 @@ fn build_statement_export_preview(
         "reconciliation_preview": reconciliation_preview,
         "margin_scope": margin_scope,
     });
-    let client_limit_boundary_semantics = if contractual_summary["client_limit_boundary_semantics"]
-        .is_null()
-    {
-        build_client_limit_boundary_review_surface(&line_item_surfaces["statement_preview"])
-    } else {
-        contractual_summary["client_limit_boundary_semantics"].clone()
-    };
-    insert(
-        "line_item_surfaces",
-        line_item_surfaces,
-    );
+    let client_limit_boundary_semantics =
+        if contractual_summary["client_limit_boundary_semantics"].is_null() {
+            build_client_limit_boundary_review_surface(&line_item_surfaces["statement_preview"])
+        } else {
+            contractual_summary["client_limit_boundary_semantics"].clone()
+        };
+    insert("line_item_surfaces", line_item_surfaces);
     insert(
         "client_limit_boundary_semantics",
         client_limit_boundary_semantics,
@@ -7132,13 +7134,56 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     };
     let lifetime_summary =
         summarize_events(&events, now_epoch_ms, &config.measurement, &config.contract);
+    let current_session_statement_preview = build_dashboard_statement_preview(
+        "current_session",
+        "текущая сессия",
+        &current_session_summary,
+        &session_events,
+        &config.contract,
+        &rollout_observations,
+        Some(&current_session_assistant_scope),
+    );
+    let rolling_window_statement_preview = if profile.rolling_window_hours.is_some() {
+        build_dashboard_statement_preview(
+            "rolling_window",
+            &format!("окно {}", profile.display_name),
+            &rolling_window_summary,
+            &rolling_window_events,
+            &config.contract,
+            &rollout_observations,
+            rolling_window_assistant_scope.as_ref(),
+        )
+    } else {
+        Value::Null
+    };
+    let lifetime_statement_preview = build_dashboard_statement_preview(
+        "lifetime",
+        "всё время записи",
+        &lifetime_summary,
+        &events,
+        &config.contract,
+        &rollout_observations,
+        Some(&lifetime_assistant_scope),
+    );
+    let rolling_window_headline_boundary = if profile.rolling_window_hours.is_some() {
+        build_client_limit_boundary_review_surface(&rolling_window_statement_preview)
+    } else {
+        Value::Null
+    };
+    let lifetime_headline_boundary =
+        build_client_limit_boundary_review_surface(&lifetime_statement_preview);
     let headline_summary = if profile.rolling_window_hours.is_some() {
         build_product_headline(
             &rolling_window_summary,
             &format!("окно {}", profile.display_name),
+            Some(&rolling_window_headline_boundary),
         )
     } else {
-        build_product_headline(&lifetime_summary, "всё время записи")
+        build_product_headline(
+            &lifetime_summary,
+            "всё время записи",
+            Some(&lifetime_headline_boundary),
+        )
     };
     let mut report = json!({
         "token_budget_report": {
@@ -7158,37 +7203,13 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
             "rolling_window": rolling_window_summary,
             "lifetime": lifetime_summary,
             "statement_previews": {
-                "current_session": build_dashboard_statement_preview(
-                    "current_session",
-                    "текущая сессия",
-                    &current_session_summary,
-                    &session_events,
-                    &config.contract,
-                    &rollout_observations,
-                    Some(&current_session_assistant_scope),
-                ),
+                "current_session": current_session_statement_preview,
                 "rolling_window": if profile.rolling_window_hours.is_some() {
-                    build_dashboard_statement_preview(
-                        "rolling_window",
-                        &format!("окно {}", profile.display_name),
-                        &rolling_window_summary,
-                        &rolling_window_events,
-                        &config.contract,
-                        &rollout_observations,
-                        rolling_window_assistant_scope.as_ref(),
-                    )
+                    rolling_window_statement_preview
                 } else {
                     Value::Null
                 },
-                "lifetime": build_dashboard_statement_preview(
-                    "lifetime",
-                    "всё время записи",
-                    &lifetime_summary,
-                    &events,
-                    &config.contract,
-                    &rollout_observations,
-                    Some(&lifetime_assistant_scope),
-                ),
+                "lifetime": lifetime_statement_preview,
             },
             "cache_debug": cache_debug,
             "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups и client-limit alignment, не разворачивает полный contractual/export contour, но делает ограниченный quiet same-meter sync/write-back только для active live scope текущей сессии и рабочего окна. Sync write-back может материализоваться в этом тике, а обновлённые token events подхватываются следующим refresh, чтобы текущий pass не делал лишний full reload.",
@@ -9058,14 +9079,6 @@ async fn collect_report(
     };
     let lifetime_summary =
         summarize_events(&events, now_epoch_ms, &config.measurement, &config.contract);
-    let headline_summary = if profile.rolling_window_hours.is_some() {
-        build_product_headline(
-            &rolling_window_summary,
-            &format!("окно {}", profile.display_name),
-        )
-    } else {
-        build_product_headline(&lifetime_summary, "всё время записи")
-    };
     let agent_cycle_economics = build_agent_cycle_economics(
         &config.measurement,
         &config.contract,
@@ -9366,6 +9379,19 @@ async fn collect_report(
     };
     let lifetime_settlement_report_preview =
         lifetime_statement_export["settlement_report_preview"].clone();
+    let headline_summary = if profile.rolling_window_hours.is_some() {
+        build_product_headline(
+            &rolling_window_summary,
+            &format!("окно {}", profile.display_name),
+            Some(&rolling_window_contractual_summary["client_limit_boundary_semantics"]),
+        )
+    } else {
+        build_product_headline(
+            &lifetime_summary,
+            "всё время записи",
+            Some(&lifetime_contractual_summary["client_limit_boundary_semantics"]),
+        )
+    };
 
     Ok(json!({
         "token_budget_report": {
@@ -11656,7 +11682,11 @@ fn excluded_event_label(code: &str) -> &'static str {
     }
 }
 
-fn build_product_headline(summary: &Value, scope_label: &str) -> Value {
+fn build_product_headline(
+    summary: &Value,
+    scope_label: &str,
+    client_limit_boundary_semantics: Option<&Value>,
+) -> Value {
     let events_total = summary["events_total"].as_u64().unwrap_or(0);
     let counted_events = summary["counted_events"].as_u64().unwrap_or(0);
     let legacy_unverified_events = summary["legacy_unverified_events"].as_u64().unwrap_or(0);
@@ -11673,6 +11703,38 @@ fn build_product_headline(summary: &Value, scope_label: &str) -> Value {
         .unwrap_or(0);
     let quality_ok_rate = summary["quality_ok_rate"].as_f64().unwrap_or(0.0);
     let fallback_rate = summary["fallback_rate"].as_f64().unwrap_or(0.0);
+    let client_limit_boundary_semantics =
+        client_limit_boundary_semantics.cloned().unwrap_or_else(|| {
+            if summary["client_limit_meter_alignment"].is_object() {
+                build_client_limit_boundary_review_surface(summary)
+            } else {
+                Value::Null
+            }
+        });
+    let boundary_note = match client_limit_boundary_semantics["review_state"]
+        .as_str()
+        .unwrap_or("client_limit_boundary_review_unknown")
+    {
+        "strict_slice_plus_observed_amai_continuity_boundary" => Some(
+            "При этом headline не равен клиентскому лимиту: measured strict slice уже materialized, а observed Amai continuity boundary вынесена отдельно.",
+        ),
+        "strict_slice_plus_empty_amai_continuity_boundary" => Some(
+            "При этом headline не равен клиентскому лимиту: explicit Amai continuity boundary уже объявлена отдельно, но в текущем scope у неё ещё нет observed token weight.",
+        ),
+        "amai_continuity_boundary_present" => Some(
+            "При этом headline не равен клиентскому лимиту: в scope остаётся explicit Amai continuity boundary вне strict client-meter slice.",
+        ),
+        "strict_slice_partial_without_explicit_boundary" => Some(
+            "При этом headline не должен читаться как полный client-limit meter: strict same-meter slice пока покрывает только часть applicable components.",
+        ),
+        _ => None,
+    };
+    let annotate_note = |base: &str| -> String {
+        match boundary_note {
+            Some(extra) => format!("{base} {extra}"),
+            None => base.to_string(),
+        }
+    };
 
     if counted_events > 0 {
         json!({
@@ -11687,11 +11749,12 @@ fn build_product_headline(summary: &Value, scope_label: &str) -> Value {
             "counted_events": counted_events,
             "quality_ok_rate": quality_ok_rate,
             "fallback_rate": fallback_rate,
-            "note": if preliminary {
+            "client_limit_boundary_semantics": client_limit_boundary_semantics,
+            "note": annotate_note(if preliminary {
                 "Это уже quality-gated метрика, но выборка пока ещё маленькая."
             } else {
                 "Это главный честный KPI: live-only, quality-gated и с учётом recovery."
-            },
+            }),
         })
     } else if events_total > 0 {
         json!({
@@ -11706,11 +11769,12 @@ fn build_product_headline(summary: &Value, scope_label: &str) -> Value {
             "counted_events": counted_events,
             "quality_ok_rate": quality_ok_rate,
             "fallback_rate": fallback_rate,
-            "note": if legacy_unverified_events > 0 {
+            "client_limit_boundary_semantics": client_limit_boundary_semantics,
+            "note": annotate_note(if legacy_unverified_events > 0 {
                 "Проверенная выборка ещё не набрана: часть исторических live-событий была записана старым форматом без quality-блока, поэтому пока показывается общая реальная экономия."
             } else {
                 "Проверенная выборка ещё не набрана, поэтому временно показывается общая реальная экономия по live-событиям."
-            },
+            }),
         })
     } else {
         json!({
@@ -11725,7 +11789,8 @@ fn build_product_headline(summary: &Value, scope_label: &str) -> Value {
             "counted_events": 0,
             "quality_ok_rate": 0.0,
             "fallback_rate": 0.0,
-            "note": "Amai ещё не накопил live-события для этой метрики.",
+            "client_limit_boundary_semantics": client_limit_boundary_semantics,
+            "note": annotate_note("Amai ещё не накопил live-события для этой метрики."),
         })
     }
 }
@@ -12437,9 +12502,10 @@ fn build_client_limit_continuity_boundary_rollup(
         if item["whole_cycle_observed_complete"].as_bool() != Some(true) {
             continue;
         }
-        observed_tokens = observed_tokens.saturating_add(item["observed_tokens"].as_u64().unwrap_or(0));
-        observed_live_events = observed_live_events
-            .saturating_add(item["observed_live_events"].as_u64().unwrap_or(0));
+        observed_tokens =
+            observed_tokens.saturating_add(item["observed_tokens"].as_u64().unwrap_or(0));
+        observed_live_events =
+            observed_live_events.saturating_add(item["observed_live_events"].as_u64().unwrap_or(0));
     }
 
     json!({
@@ -18006,7 +18072,8 @@ effective_to_epoch_ms = 2000
             "settlement-report-preview-v11"
         );
         assert_eq!(
-            preview["settlement_report_preview"]["client_limit_boundary_semantics"]["continuity_boundary_rollup"]["observed_tokens"],
+            preview["settlement_report_preview"]["client_limit_boundary_semantics"]["continuity_boundary_rollup"]
+                ["observed_tokens"],
             50329
         );
         assert_eq!(
@@ -18544,14 +18611,46 @@ effective_to_epoch_ms = 2000
                 "verified_effective_saved_tokens": 184220,
                 "total_effective_saved_tokens": 200000,
                 "quality_ok_rate": 96.1,
-                "fallback_rate": 3.8
+                "fallback_rate": 3.8,
+                "client_limit_meter_alignment": {
+                    "alignment_state": "whole_cycle_observed_explicit_boundary_not_meter_equivalent",
+                    "baseline_equivalence": {
+                        "state": "baseline_component_semantics_explicit_boundary"
+                    },
+                    "strict_client_meter_slice": {
+                        "state": "strict_slice_partial_lower_bound",
+                        "lower_bound_tokens": 320
+                    },
+                    "explicit_boundary_surface": {
+                        "state": "amai_continuity_boundary"
+                    },
+                    "continuity_boundary_rollup": {
+                        "state": "amai_continuity_boundary_observed",
+                        "observed_tokens": 50329
+                    }
+                }
             }),
             "окно Codex 5 часов",
+            None,
         );
         assert_eq!(headline["metric_code"], "verified_effective_savings_pct");
         assert_eq!(headline["value_percent"], 28.4);
         assert_eq!(headline["saved_tokens"], 184220);
         assert_eq!(headline["status"], "pass");
+        assert_eq!(
+            headline["client_limit_boundary_semantics"]["review_state"],
+            "strict_slice_plus_observed_amai_continuity_boundary"
+        );
+        assert_eq!(
+            headline["client_limit_boundary_semantics"]["continuity_boundary_rollup"]["observed_tokens"],
+            50329
+        );
+        assert!(
+            headline["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("headline не равен клиентскому лимиту")
+        );
     }
 
     #[test]
@@ -18570,6 +18669,7 @@ effective_to_epoch_ms = 2000
                 "fallback_rate": 0.0
             }),
             "окно Codex 5 часов",
+            None,
         );
         assert_eq!(headline["metric_code"], "effective_savings_pct_preliminary");
         assert_eq!(headline["value_percent"], 44.0);

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 15:32 MSK
-Ручная сверка guide/docs: 2026-03-26 15:32 MSK
+modified_at: 2026-03-26 16:03 MSK
+Ручная сверка guide/docs: 2026-03-26 16:03 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1849,6 +1849,10 @@ preview, а не только raw count.
     - measured `strict_client_meter_slice`
     - explicit `continuity_boundary_rollup`
     - без притворства, что этот boundary уже эквивалентен full client-limit meter
+  - тот же compact surface теперь поднимается и в top-level `headline` token-report'а;
+    headline остаётся savings-KPI, но если в scope есть explicit continuity boundary или
+    only-partial strict slice, его `note` теперь прямо говорит, что headline нельзя читать
+    как эквивалент клиентской шкалы лимита.
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
   - начиная с `v9/v3` слой ещё и честно поднимает `baseline_equivalence` как отдельный

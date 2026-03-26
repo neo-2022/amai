@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 15:32 MSK
-Ручная сверка guide/docs: 2026-03-26 15:32 MSK
+modified_at: 2026-03-26 16:03 MSK
+Ручная сверка guide/docs: 2026-03-26 16:03 MSK
 
 # Token Ledger
 
@@ -1347,6 +1347,7 @@ Hashes по line items нужны затем, чтобы:
 - `statement_export_preview`
 - `settlement_report_preview`
 - `contractual_evidence_pack`
+- top-level `headline` в token report
 
 теперь отдельно несут compact `client_limit_boundary_semantics`, где есть:
 - `strict_client_meter_slice`
@@ -1356,6 +1357,12 @@ Hashes по line items нужны затем, чтобы:
 Это нужно затем, чтобы customer/audit preview видел честную границу между:
 - measured strict same-meter lower bound;
 - и Amai-specific continuity boundary вне strict client-meter slice.
+
+Для `headline` это не меняет сам KPI:
+- headline всё ещё показывает savings-метрику;
+- но его `note` теперь обязан прямо сказать, если в scope остаётся
+  `Amai continuity boundary` или только partial strict slice,
+  чтобы пользователь не считал headline эквивалентом клиентской шкалы лимита.
 
 Теперь те же customer-facing surface-ы ещё несут `adjustment_activation_governance`.
 Это отдельный report-only governance слой, который показывает:
