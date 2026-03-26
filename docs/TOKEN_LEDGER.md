@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 15:27 MSK
-Ручная сверка guide/docs: 2026-03-26 15:27 MSK
+modified_at: 2026-03-26 15:32 MSK
+Ручная сверка guide/docs: 2026-03-26 15:32 MSK
 
 # Token Ledger
 
@@ -1343,6 +1343,7 @@ Hashes по line items нужны затем, чтобы:
 
 Начиная с этих версий customer-facing export/report surface больше не держит
 `continuity boundary` только внутри dashboard:
+- `contractual_statement_summary`
 - `statement_export_preview`
 - `settlement_report_preview`
 - `contractual_evidence_pack`

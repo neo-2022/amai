@@ -5309,6 +5309,10 @@ fn build_contractual_statement_summary(
         statement_preview["currency_profile"].clone(),
     );
     insert(
+        "client_limit_boundary_semantics",
+        build_client_limit_boundary_review_surface(statement_preview),
+    );
+    insert(
         "note",
         json!(if settlement_stage == "measured_review_ready_report_only" {
             "Это короткий customer-facing summary поверх statement/reconciliation/margin/freshness previews. Он уже review-ready, но всё ещё остаётся report-only и не является invoice."
@@ -6135,8 +6139,13 @@ fn build_statement_export_preview(
         "reconciliation_preview": reconciliation_preview,
         "margin_scope": margin_scope,
     });
-    let client_limit_boundary_semantics =
-        build_client_limit_boundary_review_surface(&line_item_surfaces["statement_preview"]);
+    let client_limit_boundary_semantics = if contractual_summary["client_limit_boundary_semantics"]
+        .is_null()
+    {
+        build_client_limit_boundary_review_surface(&line_item_surfaces["statement_preview"])
+    } else {
+        contractual_summary["client_limit_boundary_semantics"].clone()
+    };
     insert(
         "line_item_surfaces",
         line_item_surfaces,
@@ -17358,6 +17367,27 @@ effective_to_epoch_ms = 2000
                     "applied_entries_count": 0,
                     "disputed_entries_count": 0
                 },
+                "client_limit_meter_alignment": {
+                    "alignment_state": "whole_cycle_observed_explicit_boundary_not_meter_equivalent",
+                    "baseline_equivalence": {
+                        "state": "baseline_component_semantics_explicit_boundary"
+                    },
+                    "strict_client_meter_slice": {
+                        "state": "strict_slice_partial_lower_bound",
+                        "same_meter_equivalent_for_slice": true,
+                        "lower_bound_tokens": 320,
+                        "components": ["client_prompt"]
+                    },
+                    "explicit_boundary_surface": {
+                        "state": "amai_continuity_boundary",
+                        "components": ["continuity_restore_outside_retrieval"]
+                    },
+                    "continuity_boundary_rollup": {
+                        "state": "amai_continuity_boundary_observed",
+                        "observed_tokens": 50329,
+                        "observed_live_events": 80
+                    }
+                },
                 "currency_profile": "USD",
                 "close_barriers": ["billing_mode_report_only"]
             }),
@@ -17505,6 +17535,14 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(summary["external_provider_usage_tokens"], 500);
         assert_eq!(summary["drift_tokens"], -44);
+        assert_eq!(
+            summary["client_limit_boundary_semantics"]["review_state"],
+            "strict_slice_plus_observed_amai_continuity_boundary"
+        );
+        assert_eq!(
+            summary["client_limit_boundary_semantics"]["continuity_boundary_rollup"]["observed_tokens"],
+            50329
+        );
         assert_eq!(
             summary["reconciliation_state"],
             "external_usage_and_invoice_bound_report_only"
