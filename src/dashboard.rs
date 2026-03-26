@@ -3295,6 +3295,12 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if let Some(row) = client_limit_alignment_metric_row(current_session_alignment) {
         session_rows.push(row);
     }
+    if let Some(row) = client_limit_strict_slice_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
+    if let Some(row) = client_limit_explicit_boundary_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
     let mut session_card = card_with_rows(
         "Экономия токенов за текущую сессию",
         format_signed_count(session_saved),
@@ -3348,6 +3354,12 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     }
     let mut rolling_rows = Vec::new();
     if let Some(row) = client_limit_alignment_metric_row(rolling_window_alignment) {
+        rolling_rows.push(row);
+    }
+    if let Some(row) = client_limit_strict_slice_metric_row(rolling_window_alignment) {
+        rolling_rows.push(row);
+    }
+    if let Some(row) = client_limit_explicit_boundary_metric_row(rolling_window_alignment) {
         rolling_rows.push(row);
     }
     let mut rolling_card = card_with_rows(
@@ -3405,6 +3417,12 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     }
     let mut lifetime_rows = Vec::new();
     if let Some(row) = client_limit_alignment_metric_row(lifetime_alignment) {
+        lifetime_rows.push(row);
+    }
+    if let Some(row) = client_limit_strict_slice_metric_row(lifetime_alignment) {
+        lifetime_rows.push(row);
+    }
+    if let Some(row) = client_limit_explicit_boundary_metric_row(lifetime_alignment) {
         lifetime_rows.push(row);
     }
     let mut lifetime_card = card_with_rows(
@@ -5824,6 +5842,56 @@ fn client_limit_alignment_metric_row(alignment: &Value) -> Option<Value> {
     ))
 }
 
+fn client_limit_strict_slice_metric_row(alignment: &Value) -> Option<Value> {
+    if alignment["strict_client_meter_slice"]["same_meter_equivalent_for_slice"].as_bool()
+        != Some(true)
+    {
+        return None;
+    }
+    let lower_bound = alignment["strict_client_meter_slice"]["lower_bound_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    if lower_bound == 0 {
+        return None;
+    }
+    let value = if let Some(components) =
+        human_client_limit_components(&alignment["strict_client_meter_slice"]["components"])
+    {
+        format!("{lower_bound} токенов: {components}")
+    } else {
+        format!("{lower_bound} токенов")
+    };
+    Some(metric_row(
+        "Строгий same-meter срез",
+        value,
+        Some(
+            "Этот ряд показывает уже materialized strict same-meter lower bound: часть клиентского лимитного метра, где baseline-equivalent semantics уже честно доказаны и не зависят от guessed continuity baseline.",
+        ),
+    ))
+}
+
+fn client_limit_explicit_boundary_metric_row(alignment: &Value) -> Option<Value> {
+    if alignment["explicit_boundary_surface"]["blocks_full_same_meter_equivalence"].as_bool()
+        != Some(true)
+    {
+        return None;
+    }
+    let components =
+        human_client_limit_components(&alignment["explicit_boundary_surface"]["components"])?;
+    let label = if alignment["explicit_boundary_surface"]["state"].as_str()
+        == Some("amai_continuity_boundary")
+    {
+        "Граница continuity"
+    } else {
+        "Явная baseline-граница"
+    };
+    Some(metric_row(
+        label,
+        components,
+        alignment["explicit_boundary_surface"]["note"].as_str(),
+    ))
+}
+
 fn human_client_limit_component(code: &str) -> Option<&'static str> {
     match code {
         "client_prompt" => Some("исходный запрос клиента"),
@@ -7550,7 +7618,8 @@ mod tests {
         let session_alignment = cards[0]["rows"]
             .as_array()
             .expect("session rows")
-            .last()
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Связь с лимитом клиента"))
             .expect("session alignment row");
         assert_eq!(
             session_alignment["label"].as_str(),
@@ -7612,6 +7681,47 @@ mod tests {
         let note = super::client_limit_alignment_note_sentence(&alignment)
             .expect("baseline equivalence note");
         assert!(note.contains("explicit truth-boundary"));
+    }
+
+    #[test]
+    fn client_limit_extra_rows_surface_strict_slice_and_continuity_boundary() {
+        let alignment = json!({
+            "strict_client_meter_slice": {
+                "same_meter_equivalent_for_slice": true,
+                "lower_bound_tokens": 320,
+                "components": ["client_prompt"]
+            },
+            "explicit_boundary_surface": {
+                "state": "amai_continuity_boundary",
+                "blocks_full_same_meter_equivalence": true,
+                "components": ["continuity_restore_outside_retrieval"],
+                "note": "Continuity boundary."
+            }
+        });
+
+        let strict_row =
+            super::client_limit_strict_slice_metric_row(&alignment).expect("strict row");
+        assert_eq!(
+            strict_row["label"].as_str(),
+            Some("Строгий same-meter срез")
+        );
+        assert!(strict_row["value"].as_str().unwrap_or_default().contains("320"));
+        assert!(
+            strict_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("исходный запрос клиента")
+        );
+
+        let boundary_row =
+            super::client_limit_explicit_boundary_metric_row(&alignment).expect("boundary row");
+        assert_eq!(boundary_row["label"].as_str(), Some("Граница continuity"));
+        assert!(
+            boundary_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("continuity-restore overhead вне retrieval")
+        );
     }
 
     #[test]

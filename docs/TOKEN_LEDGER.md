@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 10:00 MSK
-Ручная сверка guide/docs: 2026-03-26 10:00 MSK
+modified_at: 2026-03-26 10:11 MSK
+Ручная сверка guide/docs: 2026-03-26 10:11 MSK
 
 # Token Ledger
 
@@ -456,7 +456,7 @@ Ledger обязан различать:
 - частично наблюдаемые whole-cycle компоненты;
 - whole-cycle observed компоненты при всё ещё partial baseline.
 
-Начиная с `client-limit-meter-alignment-v7` `client_prompt` считается observed component
+Начиная с `client-limit-meter-alignment-v8` `client_prompt` считается observed component
 не только если он явно пришёл в `whole_cycle_observed`, но и как derived fallback из
 уже записанных `query + tokenizer`. Это нужно затем, чтобы progress к client-limit meter
 был виден честно даже на исторических live events, где старый payload ещё не нёс
@@ -482,6 +482,7 @@ Ledger обязан различать:
 - `measured_baseline_components / explicitly_unmodeled_baseline_components / missing_baseline_components`
 - `measured_baseline_tokens_lower_bound`
 - `strict_client_meter_slice`
+- `explicit_boundary_surface`
 - `whole_cycle_components_fully_observed`
 
 Это нужно затем, чтобы `same_meter_baseline_unmeasured /
@@ -502,6 +503,15 @@ truthful/measured contour:
 Он нужен затем, чтобы already-measured same-meter-equivalent lower bound не терялся внутри
 общего non-equivalent state. Если `client_prompt` уже truthful passthrough, operator должен
 видеть этот strict slice отдельно, даже когда полный contour ещё заблокирован.
+
+Рядом с ним теперь обязан жить и отдельный versioned explicit boundary surface:
+- `model_version = client-limit-explicit-boundary-surface-v1`
+- `state`
+- `components`
+- `note`
+
+Он нужен затем, чтобы explicit continuity boundary не терялась внутри общего
+`baseline_equivalence` и не выглядела как обычный missing implementation gap.
 
 `component_event_coverage` теперь обязан быть `target-aware`, а не делить каждый
 whole-cycle компонент на одинаковое число всех live events.
@@ -1305,9 +1315,10 @@ Hashes по line items нужны затем, чтобы:
 - `contractual-statement-export-v19`
 - `settlement-report-preview-v10`
 - `contractual-evidence-pack-v19`
-- `client-limit-meter-alignment-v7`
+- `client-limit-meter-alignment-v8`
 - `client-limit-baseline-equivalence-v3`
 - `client-limit-strict-meter-slice-v1`
+- `client-limit-explicit-boundary-surface-v1`
 - `adjustment-activation-governance-v1`
 
 Теперь те же customer-facing surface-ы ещё несут `adjustment_activation_governance`.

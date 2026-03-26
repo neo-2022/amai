@@ -84,6 +84,8 @@ struct TokenBudgetContractConfig {
     client_limit_baseline_equivalence_version: String,
     #[serde(default = "default_client_limit_strict_meter_slice_version")]
     client_limit_strict_meter_slice_version: String,
+    #[serde(default = "default_client_limit_explicit_boundary_surface_version")]
+    client_limit_explicit_boundary_surface_version: String,
     #[serde(default = "default_excluded_taxonomy_version")]
     excluded_taxonomy_version: String,
     #[serde(default = "default_dedup_contract_version")]
@@ -167,6 +169,8 @@ impl Default for TokenBudgetContractConfig {
                 default_client_limit_baseline_equivalence_version(),
             client_limit_strict_meter_slice_version:
                 default_client_limit_strict_meter_slice_version(),
+            client_limit_explicit_boundary_surface_version:
+                default_client_limit_explicit_boundary_surface_version(),
             excluded_taxonomy_version: default_excluded_taxonomy_version(),
             dedup_contract_version: default_dedup_contract_version(),
             backfill_policy_version: default_backfill_policy_version(),
@@ -549,7 +553,7 @@ fn default_agent_cycle_model_version() -> String {
 }
 
 fn default_client_limit_meter_alignment_version() -> String {
-    "client-limit-meter-alignment-v7".to_string()
+    "client-limit-meter-alignment-v8".to_string()
 }
 
 fn default_client_limit_baseline_equivalence_version() -> String {
@@ -558,6 +562,10 @@ fn default_client_limit_baseline_equivalence_version() -> String {
 
 fn default_client_limit_strict_meter_slice_version() -> String {
     "client-limit-strict-meter-slice-v1".to_string()
+}
+
+fn default_client_limit_explicit_boundary_surface_version() -> String {
+    "client-limit-explicit-boundary-surface-v1".to_string()
 }
 
 fn default_excluded_taxonomy_version() -> String {
@@ -706,6 +714,9 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "client_limit_strict_meter_slice_version": contract
             .client_limit_strict_meter_slice_version
             .clone(),
+        "client_limit_explicit_boundary_surface_version": contract
+            .client_limit_explicit_boundary_surface_version
+            .clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
         "backfill_policy_version": contract.backfill_policy_version.clone(),
@@ -763,6 +774,9 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
             .clone(),
         "client_limit_strict_meter_slice_version": contract
             .client_limit_strict_meter_slice_version
+            .clone(),
+        "client_limit_explicit_boundary_surface_version": contract
+            .client_limit_explicit_boundary_surface_version
             .clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
@@ -11034,6 +11048,52 @@ fn build_client_limit_strict_meter_slice(
     })
 }
 
+fn build_client_limit_explicit_boundary_surface(
+    contract: &TokenBudgetContractConfig,
+    baseline_equivalence: &Value,
+) -> Value {
+    let explicit_boundary_components = baseline_equivalence
+        ["explicitly_unmodeled_baseline_components"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let measured_components = baseline_equivalence["measured_baseline_components"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let state = if explicit_boundary_components.is_empty() {
+        "no_explicit_boundary"
+    } else if explicit_boundary_components
+        .iter()
+        .all(|item| item.as_str() == Some("continuity_restore_outside_retrieval"))
+    {
+        "amai_continuity_boundary"
+    } else {
+        "explicit_boundary_present"
+    };
+    let note = match state {
+        "no_explicit_boundary" => {
+            "В этом scope сейчас нет explicit baseline-boundary: remaining gap не упирается в truth-boundary."
+        }
+        "amai_continuity_boundary" => {
+            "Этот boundary оставлен сознательно: Amai-specific continuity restore пока не имеет truthful pre-Amai baseline-equivalent модели и не должен подменяться guessed baseline."
+        }
+        _ => {
+            "В этом scope есть explicit baseline-boundary: часть contour намеренно не выдаётся за same-meter без truthful baseline source."
+        }
+    };
+    json!({
+        "model_version": contract.client_limit_explicit_boundary_surface_version.clone(),
+        "state": state,
+        "blocks_full_same_meter_equivalence": !explicit_boundary_components.is_empty(),
+        "component_count": explicit_boundary_components.len(),
+        "components": explicit_boundary_components,
+        "measured_strict_component_count": measured_components.len(),
+        "measured_strict_components": measured_components,
+        "note": note,
+    })
+}
+
 fn build_client_limit_meter_alignment(
     contract: &TokenBudgetContractConfig,
     surface_kind: &str,
@@ -11081,6 +11141,8 @@ fn build_client_limit_meter_alignment(
         build_client_limit_baseline_equivalence(contract, summary, events, assistant_scope);
     let strict_client_meter_slice =
         build_client_limit_strict_meter_slice(contract, &baseline_equivalence);
+    let explicit_boundary_surface =
+        build_client_limit_explicit_boundary_surface(contract, &baseline_equivalence);
     let mut blocking_reasons =
         client_limit_meter_alignment_blocking_reasons(summary, events, assistant_scope);
     match assistant_generation_observation_source["state"]
@@ -11128,6 +11190,7 @@ fn build_client_limit_meter_alignment(
         "assistant_generation_observation_source": assistant_generation_observation_source,
         "baseline_equivalence": baseline_equivalence,
         "strict_client_meter_slice": strict_client_meter_slice,
+        "explicit_boundary_surface": explicit_boundary_surface,
         "note": "Этот слой честно показывает, что текущие savings пока считаются как lower-bound части агентного цикла. Whole-cycle observed components могут постепенно materialize-иться, но same meter с клиентским лимитом нельзя объявлять раньше, чем появится и полное observed покрытие, и baseline-equivalent semantics."
     })
 }
@@ -11160,6 +11223,9 @@ fn build_agent_cycle_economics(
                     .clone(),
                 "strict_meter_slice_model_version": contract
                     .client_limit_strict_meter_slice_version
+                    .clone(),
+                "explicit_boundary_surface_model_version": contract
+                    .client_limit_explicit_boundary_surface_version
                     .clone(),
                 "alignment_state": "partial_lower_bound_not_meter_equivalent",
                 "same_meter_as_client_limit": false,
@@ -13988,7 +14054,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_meter_alignment_version"],
-            "client-limit-meter-alignment-v7"
+            "client-limit-meter-alignment-v8"
         );
         assert_eq!(
             token_event["contract"]["client_limit_baseline_equivalence_version"],
@@ -14593,7 +14659,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v7"
+            "client-limit-meter-alignment-v8"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["baseline_equivalence"]["model_version"],
@@ -14602,6 +14668,10 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             preview["client_limit_meter_alignment"]["strict_client_meter_slice"]["model_version"],
             "client-limit-strict-meter-slice-v1"
+        );
+        assert_eq!(
+            preview["client_limit_meter_alignment"]["explicit_boundary_surface"]["model_version"],
+            "client-limit-explicit-boundary-surface-v1"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -17215,7 +17285,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v7"
+            "client-limit-meter-alignment-v8"
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["baseline_equivalence_model_version"],
@@ -17224,6 +17294,10 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["strict_meter_slice_model_version"],
             "client-limit-strict-meter-slice-v1"
+        );
+        assert_eq!(
+            economics["contract"]["client_limit_meter_alignment"]["explicit_boundary_surface_model_version"],
+            "client-limit-explicit-boundary-surface-v1"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]["lower_bound_tokens"],
@@ -17256,6 +17330,10 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["baseline_equivalence"]["missing_baseline_components"],
             json!(["tool_overhead_outside_retrieval"])
+        );
+        assert_eq!(
+            economics["current_session"]["client_limit_meter_alignment"]["explicit_boundary_surface"]["state"],
+            "no_explicit_boundary"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["baseline_equivalence"]["measured_baseline_tokens_lower_bound"],
@@ -17385,6 +17463,14 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             alignment["baseline_equivalence"]["missing_baseline_components"],
             json!([])
+        );
+        assert_eq!(
+            alignment["explicit_boundary_surface"]["state"],
+            "amai_continuity_boundary"
+        );
+        assert_eq!(
+            alignment["explicit_boundary_surface"]["components"],
+            json!(["continuity_restore_outside_retrieval"])
         );
         assert!(
             alignment["blocking_reasons"]
