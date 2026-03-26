@@ -82,6 +82,8 @@ struct TokenBudgetContractConfig {
     client_limit_meter_alignment_version: String,
     #[serde(default = "default_client_limit_baseline_equivalence_version")]
     client_limit_baseline_equivalence_version: String,
+    #[serde(default = "default_client_limit_strict_meter_slice_version")]
+    client_limit_strict_meter_slice_version: String,
     #[serde(default = "default_excluded_taxonomy_version")]
     excluded_taxonomy_version: String,
     #[serde(default = "default_dedup_contract_version")]
@@ -163,6 +165,8 @@ impl Default for TokenBudgetContractConfig {
             client_limit_meter_alignment_version: default_client_limit_meter_alignment_version(),
             client_limit_baseline_equivalence_version:
                 default_client_limit_baseline_equivalence_version(),
+            client_limit_strict_meter_slice_version:
+                default_client_limit_strict_meter_slice_version(),
             excluded_taxonomy_version: default_excluded_taxonomy_version(),
             dedup_contract_version: default_dedup_contract_version(),
             backfill_policy_version: default_backfill_policy_version(),
@@ -552,6 +556,10 @@ fn default_client_limit_baseline_equivalence_version() -> String {
     "client-limit-baseline-equivalence-v3".to_string()
 }
 
+fn default_client_limit_strict_meter_slice_version() -> String {
+    "client-limit-strict-meter-slice-v1".to_string()
+}
+
 fn default_excluded_taxonomy_version() -> String {
     "token-excluded-usage-v1".to_string()
 }
@@ -695,6 +703,9 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "client_limit_baseline_equivalence_version": contract
             .client_limit_baseline_equivalence_version
             .clone(),
+        "client_limit_strict_meter_slice_version": contract
+            .client_limit_strict_meter_slice_version
+            .clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
         "backfill_policy_version": contract.backfill_policy_version.clone(),
@@ -749,6 +760,9 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
         "client_limit_meter_alignment_version": contract.client_limit_meter_alignment_version.clone(),
         "client_limit_baseline_equivalence_version": contract
             .client_limit_baseline_equivalence_version
+            .clone(),
+        "client_limit_strict_meter_slice_version": contract
+            .client_limit_strict_meter_slice_version
             .clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
@@ -10967,6 +10981,59 @@ fn build_client_limit_baseline_equivalence(
     })
 }
 
+fn build_client_limit_strict_meter_slice(
+    contract: &TokenBudgetContractConfig,
+    baseline_equivalence: &Value,
+) -> Value {
+    let measured_components = baseline_equivalence["measured_baseline_components"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let explicitly_unmodeled_components = baseline_equivalence
+        ["explicitly_unmodeled_baseline_components"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let missing_components = baseline_equivalence["missing_baseline_components"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let lower_bound_tokens = baseline_equivalence["measured_baseline_tokens_lower_bound"]
+        .as_u64()
+        .unwrap_or(0);
+    let state = if measured_components.is_empty() || lower_bound_tokens == 0 {
+        "no_strict_slice_measured"
+    } else if explicitly_unmodeled_components.is_empty() && missing_components.is_empty() {
+        "strict_slice_covers_all_applicable_components"
+    } else {
+        "strict_slice_partial_lower_bound"
+    };
+    let note = match state {
+        "no_strict_slice_measured" => {
+            "В этом scope ещё нет measured strict same-meter lower bound для клиентского лимита."
+        }
+        "strict_slice_covers_all_applicable_components" => {
+            "Applicable whole-cycle components уже дают strict same-meter lower bound без remaining boundary-gap."
+        }
+        _ => {
+            "Часть client-limit meter уже имеет strict same-meter lower bound, но рядом остаётся remaining boundary или unmaterialized contour."
+        }
+    };
+    json!({
+        "model_version": contract.client_limit_strict_meter_slice_version.clone(),
+        "state": state,
+        "same_meter_equivalent_for_slice": !measured_components.is_empty() && lower_bound_tokens > 0,
+        "lower_bound_tokens": lower_bound_tokens,
+        "component_count": measured_components.len(),
+        "components": measured_components,
+        "explicit_boundary_component_count": explicitly_unmodeled_components.len(),
+        "explicit_boundary_components": explicitly_unmodeled_components,
+        "missing_component_count": missing_components.len(),
+        "missing_components": missing_components,
+        "note": note,
+    })
+}
+
 fn build_client_limit_meter_alignment(
     contract: &TokenBudgetContractConfig,
     surface_kind: &str,
@@ -11012,6 +11079,8 @@ fn build_client_limit_meter_alignment(
     );
     let baseline_equivalence =
         build_client_limit_baseline_equivalence(contract, summary, events, assistant_scope);
+    let strict_client_meter_slice =
+        build_client_limit_strict_meter_slice(contract, &baseline_equivalence);
     let mut blocking_reasons =
         client_limit_meter_alignment_blocking_reasons(summary, events, assistant_scope);
     match assistant_generation_observation_source["state"]
@@ -11058,6 +11127,7 @@ fn build_client_limit_meter_alignment(
         "blocking_reasons": blocking_reasons,
         "assistant_generation_observation_source": assistant_generation_observation_source,
         "baseline_equivalence": baseline_equivalence,
+        "strict_client_meter_slice": strict_client_meter_slice,
         "note": "Этот слой честно показывает, что текущие savings пока считаются как lower-bound части агентного цикла. Whole-cycle observed components могут постепенно materialize-иться, но same meter с клиентским лимитом нельзя объявлять раньше, чем появится и полное observed покрытие, и baseline-equivalent semantics."
     })
 }
@@ -11087,6 +11157,9 @@ fn build_agent_cycle_economics(
                 "model_version": contract.client_limit_meter_alignment_version.clone(),
                 "baseline_equivalence_model_version": contract
                     .client_limit_baseline_equivalence_version
+                    .clone(),
+                "strict_meter_slice_model_version": contract
+                    .client_limit_strict_meter_slice_version
                     .clone(),
                 "alignment_state": "partial_lower_bound_not_meter_equivalent",
                 "same_meter_as_client_limit": false,
@@ -13922,6 +13995,10 @@ mod tests {
             "client-limit-baseline-equivalence-v3"
         );
         assert_eq!(
+            token_event["contract"]["client_limit_strict_meter_slice_version"],
+            "client-limit-strict-meter-slice-v1"
+        );
+        assert_eq!(
             token_event["whole_cycle_observed"]["client_prompt_tokens"],
             30
         );
@@ -14521,6 +14598,10 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             preview["client_limit_meter_alignment"]["baseline_equivalence"]["model_version"],
             "client-limit-baseline-equivalence-v3"
+        );
+        assert_eq!(
+            preview["client_limit_meter_alignment"]["strict_client_meter_slice"]["model_version"],
+            "client-limit-strict-meter-slice-v1"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -17139,6 +17220,18 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["baseline_equivalence_model_version"],
             "client-limit-baseline-equivalence-v3"
+        );
+        assert_eq!(
+            economics["contract"]["client_limit_meter_alignment"]["strict_meter_slice_model_version"],
+            "client-limit-strict-meter-slice-v1"
+        );
+        assert_eq!(
+            economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]["lower_bound_tokens"],
+            45
+        );
+        assert_eq!(
+            economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]["components"],
+            json!(["client_prompt"])
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["surface_kind"],

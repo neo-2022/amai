@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 09:43 MSK
-Ручная сверка guide/docs: 2026-03-26 09:43 MSK
+modified_at: 2026-03-26 10:00 MSK
+Ручная сверка guide/docs: 2026-03-26 10:00 MSK
 
 # Operations
 
@@ -2346,6 +2346,7 @@ same_meter_baseline_explicit_boundary`, operator обязан смотреть �
 - `client_limit_meter_alignment.baseline_equivalence.explicitly_unmodeled_baseline_components`
 - `client_limit_meter_alignment.baseline_equivalence.missing_baseline_components`
 - `client_limit_meter_alignment.baseline_equivalence.measured_baseline_tokens_lower_bound`
+- `client_limit_meter_alignment.strict_client_meter_slice`
 
 Это нужно затем, чтобы baseline-gap был machine-readable и не зависел только от human tooltip
 в dashboard или одной blocker-строки.
@@ -2357,6 +2358,15 @@ Dashboard/operator contour теперь обязан это поднимать �
   `measured_baseline_components`, `explicitly_unmodeled_baseline_components` и
   `missing_baseline_components`, если baseline-gap уже свёлся не к missing component
   coverage, а именно к partially materialized same-meter contour с explicit truth-boundary.
+
+Отдельно operator теперь обязан смотреть `strict_client_meter_slice`:
+- `strict_client_meter_slice.state`
+- `strict_client_meter_slice.lower_bound_tokens`
+- `strict_client_meter_slice.components`
+- `strict_client_meter_slice.explicit_boundary_components`
+
+Это нужно затем, чтобы already-measured strict same-meter lower bound не терялся внутри
+общего `same_meter_as_client_limit = false`.
 
 Customer-facing contractual export surface теперь тоже обязан поднимать
 `adjustment_activation_governance`, чтобы future adjustment path был виден отдельно от

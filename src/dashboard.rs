@@ -5960,6 +5960,26 @@ fn client_limit_alignment_tooltip(alignment: &Value) -> Option<String> {
     tooltip.push('\n');
     tooltip.push_str("- ");
     tooltip.push_str(state_note);
+    if alignment["strict_client_meter_slice"]["same_meter_equivalent_for_slice"].as_bool()
+        == Some(true)
+    {
+        let lower_bound = alignment["strict_client_meter_slice"]["lower_bound_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+        let components =
+            human_client_limit_components(&alignment["strict_client_meter_slice"]["components"]);
+        if lower_bound > 0 {
+            tooltip.push('\n');
+            tooltip.push_str("- ");
+            tooltip.push_str("strict same-meter lower bound уже materialized: ");
+            tooltip.push_str(&lower_bound.to_string());
+            tooltip.push_str(" токенов");
+            if let Some(components) = components {
+                tooltip.push_str(" по компонентам ");
+                tooltip.push_str(&components);
+            }
+        }
+    }
     if alignment["baseline_equivalence"]["state"].as_str() == Some("baseline_semantics_unmaterialized")
     {
         if let Some(fully_observed) =
@@ -7561,6 +7581,11 @@ mod tests {
             "same_meter_as_client_limit": false,
             "live_events_count": 79,
             "non_live_events_count": 0,
+            "strict_client_meter_slice": {
+                "same_meter_equivalent_for_slice": true,
+                "lower_bound_tokens": 316,
+                "components": ["client_prompt"]
+            },
             "blocking_reasons": [
                 "same_meter_baseline_explicit_boundary"
             ],
@@ -7581,6 +7606,8 @@ mod tests {
         assert!(tooltip.contains("исходный запрос клиента"));
         assert!(tooltip.contains("continuity-restore overhead вне retrieval"));
         assert!(tooltip.contains("explicit truth-boundary"));
+        assert!(tooltip.contains("strict same-meter lower bound уже materialized"));
+        assert!(tooltip.contains("316 токенов"));
 
         let note = super::client_limit_alignment_note_sentence(&alignment)
             .expect("baseline equivalence note");

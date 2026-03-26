@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 09:43 MSK
-Ручная сверка guide/docs: 2026-03-26 09:43 MSK
+modified_at: 2026-03-26 10:00 MSK
+Ручная сверка guide/docs: 2026-03-26 10:00 MSK
 
 # Token Ledger
 
@@ -481,6 +481,7 @@ Ledger обязан различать:
 - `applicable_components / fully_observed_components / incomplete_components`
 - `measured_baseline_components / explicitly_unmodeled_baseline_components / missing_baseline_components`
 - `measured_baseline_tokens_lower_bound`
+- `strict_client_meter_slice`
 - `whole_cycle_components_fully_observed`
 
 Это нужно затем, чтобы `same_meter_baseline_unmeasured /
@@ -490,6 +491,17 @@ truthful/measured contour:
 что whole-cycle observed слой уже дотянулся до applicable components, какие из них уже
 получили baseline-equivalent semantics, а какие обязаны оставаться явной truth-boundary
 без guessed pre-Amai baseline.
+
+Рядом с этим обязан жить отдельный versioned strict same-meter slice:
+- `model_version = client-limit-strict-meter-slice-v1`
+- `state`
+- `lower_bound_tokens`
+- `components`
+- `explicit_boundary_components / missing_components`
+
+Он нужен затем, чтобы already-measured same-meter-equivalent lower bound не терялся внутри
+общего non-equivalent state. Если `client_prompt` уже truthful passthrough, operator должен
+видеть этот strict slice отдельно, даже когда полный contour ещё заблокирован.
 
 `component_event_coverage` теперь обязан быть `target-aware`, а не делить каждый
 whole-cycle компонент на одинаковое число всех live events.
@@ -1295,6 +1307,7 @@ Hashes по line items нужны затем, чтобы:
 - `contractual-evidence-pack-v19`
 - `client-limit-meter-alignment-v7`
 - `client-limit-baseline-equivalence-v3`
+- `client-limit-strict-meter-slice-v1`
 - `adjustment-activation-governance-v1`
 
 Теперь те же customer-facing surface-ы ещё несут `adjustment_activation_governance`.
