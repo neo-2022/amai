@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:30 MSK
-Ручная сверка guide/docs: 2026-03-26 03:30 MSK
+modified_at: 2026-03-26 03:34 MSK
+Ручная сверка guide/docs: 2026-03-26 03:34 MSK
 
 # Operations
 
@@ -851,6 +851,11 @@ cargo run -- mcp serve
     снят или пропал;
   - `startup_instruction_drift` или `startup_contract_drift` — artifact жив, но уже не совпадает с
     текущим contract/enforcement baseline.
+- рядом тот же status теперь обязан печатать и repair path:
+  - для известного client binding:
+    `startup_artifacts_repair: rerun ./scripts/onboard_local.sh --client ... --yes`
+  - без install state:
+    `startup_artifacts_repair: run ./scripts/onboard_local.sh --client <client> --yes ...`
 - тот же `amai_protocol_manifest` теперь несёт `error_contracts`, а `tools/call`
   и JSON-RPC errors отдают machine-readable taxonomy вместо голого текста:
   `invalid_json_rpc_payload`, `invalid_request`, `method_not_found`,

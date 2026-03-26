@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:30 MSK
-Ручная сверка guide/docs: 2026-03-26 03:30 MSK
+modified_at: 2026-03-26 03:34 MSK
+Ручная сверка guide/docs: 2026-03-26 03:34 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1225,6 +1225,11 @@ preview, а не только raw count.
 - truthful пример:
   если после `disconnect` managed startup block снят, `amai status` должен честно показать
   `startup_artifacts: missing_startup_instruction`, а не делать вид, что startup всё ещё готов.
+- рядом status теперь печатает и repair path:
+  - при drift/missing для известного клиента:
+    `startup_artifacts_repair: rerun ./scripts/onboard_local.sh --client ... --yes`
+  - без install state:
+    `startup_artifacts_repair: run ./scripts/onboard_local.sh --client <client> --yes ...`
 
 Это важно читать строго:
 - `startup contract` уже общий и machine-readable;

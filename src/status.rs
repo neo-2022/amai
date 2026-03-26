@@ -80,8 +80,19 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| "n/a".to_string())
             );
+            if audit.status != "ok" {
+                println!(
+                    "startup_artifacts_repair: rerun ./scripts/onboard_local.sh --client {} --yes",
+                    audit.client_key
+                );
+            }
         }
-        Ok(None) => println!("startup_artifacts: no_install_state"),
+        Ok(None) => {
+            println!("startup_artifacts: no_install_state");
+            println!(
+                "startup_artifacts_repair: run ./scripts/onboard_local.sh --client <client> --yes to materialize a startup artifact"
+            );
+        }
         Err(error) => println!("startup_artifacts: error ({error:#})"),
     }
     Ok(())

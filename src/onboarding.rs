@@ -88,6 +88,7 @@ struct InstallMetricsSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StartupArtifactAudit {
     pub status: String,
+    pub client_key: String,
     pub startup_instruction_path: Option<PathBuf>,
     pub startup_instruction_exists: bool,
     pub startup_instruction_contains_expected_sha: Option<bool>,
@@ -625,6 +626,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
 
     Ok(Some(StartupArtifactAudit {
         status,
+        client_key: state.client_key,
         startup_instruction_path,
         startup_instruction_exists,
         startup_instruction_contains_expected_sha,
