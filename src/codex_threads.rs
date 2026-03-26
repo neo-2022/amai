@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use time::OffsetDateTime;
@@ -91,10 +92,19 @@ struct RolloutTurnObservation {
     approved_context_pack_calls: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RolloutTurnParseState {
+    finalized_turns: Vec<RolloutTurnObservation>,
+    current_turn: Option<RolloutTurnObservation>,
+    approved_context_pack_calls: HashMap<String, bool>,
+}
+
 #[derive(Debug, Clone)]
 struct CachedRolloutTurnObservations {
     file_signature: String,
-    turns: Vec<RolloutTurnObservation>,
+    size_bytes: u64,
+    modified_epoch_ms: u64,
+    parse_state: RolloutTurnParseState,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1697,10 +1707,14 @@ fn load_rollout_turn_observations(rollout_path: &Path) -> Result<Vec<RolloutTurn
     if let Some(turns) = cached_rollout_turn_observations(rollout_path, &file_signature) {
         return Ok(turns);
     }
+    if let Some(turns) = extend_cached_rollout_turn_observations(rollout_path, &file_signature)? {
+        return Ok(turns);
+    }
     let text = fs::read_to_string(rollout_path)
         .with_context(|| format!("failed to read {}", rollout_path.display()))?;
-    let turns = collect_rollout_turn_observations(&text)?;
-    store_cached_rollout_turn_observations(rollout_path, &file_signature, &turns);
+    let parse_state = collect_rollout_turn_observations_state(&text)?;
+    let turns = snapshot_rollout_turn_observations(&parse_state);
+    store_cached_rollout_turn_observations(rollout_path, &file_signature, &parse_state);
     Ok(turns)
 }
 
@@ -1713,128 +1727,210 @@ fn cached_rollout_turn_observations(
     let key = canonical_rollout_path(rollout_path);
     let entry = guard.get(&key)?;
     if entry.file_signature == file_signature {
-        Some(entry.turns.clone())
+        Some(snapshot_rollout_turn_observations(&entry.parse_state))
     } else {
         None
     }
 }
 
+fn cached_rollout_turn_observation_entry(
+    rollout_path: &Path,
+) -> Option<CachedRolloutTurnObservations> {
+    let cache = ROLLOUT_TURN_OBSERVATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = cache.lock().ok()?;
+    let key = canonical_rollout_path(rollout_path);
+    guard.get(&key).cloned()
+}
+
 fn store_cached_rollout_turn_observations(
     rollout_path: &Path,
     file_signature: &str,
-    turns: &[RolloutTurnObservation],
+    parse_state: &RolloutTurnParseState,
 ) {
     let cache = ROLLOUT_TURN_OBSERVATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let Some(mut guard) = cache.lock().ok() else {
         return;
     };
+    let (size_bytes, modified_epoch_ms) = rollout_file_version(rollout_path);
     guard.insert(
         canonical_rollout_path(rollout_path),
         CachedRolloutTurnObservations {
             file_signature: file_signature.to_string(),
-            turns: turns.to_vec(),
+            size_bytes,
+            modified_epoch_ms,
+            parse_state: parse_state.clone(),
         },
     );
 }
 
-fn collect_rollout_turn_observations(text: &str) -> Result<Vec<RolloutTurnObservation>> {
-    let mut observations = Vec::new();
-    let mut current = None::<RolloutTurnObservation>;
-    let mut approved_context_pack_calls = std::collections::HashMap::<String, bool>::new();
+fn extend_cached_rollout_turn_observations(
+    rollout_path: &Path,
+    file_signature: &str,
+) -> Result<Option<Vec<RolloutTurnObservation>>> {
+    let Some(entry) = cached_rollout_turn_observation_entry(rollout_path) else {
+        return Ok(None);
+    };
+    let (size_bytes, modified_epoch_ms) = rollout_file_version(rollout_path);
+    if size_bytes < entry.size_bytes || modified_epoch_ms < entry.modified_epoch_ms {
+        return Ok(None);
+    }
+    if size_bytes == entry.size_bytes {
+        return Ok(None);
+    }
+    let tail_text = read_rollout_tail_from_offset(rollout_path, entry.size_bytes)?;
+    if tail_text.is_empty() {
+        return Ok(None);
+    }
+    let mut parse_state = entry.parse_state.clone();
+    extend_rollout_turn_observations_state(&mut parse_state, &tail_text)?;
+    let turns = snapshot_rollout_turn_observations(&parse_state);
+    store_cached_rollout_turn_observations(rollout_path, file_signature, &parse_state);
+    Ok(Some(turns))
+}
+
+fn collect_rollout_turn_observations_state(text: &str) -> Result<RolloutTurnParseState> {
+    let mut state = RolloutTurnParseState::default();
+    extend_rollout_turn_observations_state(&mut state, text)?;
+    Ok(state)
+}
+
+fn extend_rollout_turn_observations_state(
+    state: &mut RolloutTurnParseState,
+    text: &str,
+) -> Result<()> {
     for line in text.lines() {
-        let row: Value =
-            serde_json::from_str(line).context("failed to parse rollout jsonl line")?;
-        let row_type = row["type"].as_str().unwrap_or_default();
-        let payload = &row["payload"];
-        let timestamp_epoch_ms = row["timestamp"]
-            .as_str()
-            .and_then(|value| parse_rfc3339_epoch_s(value).ok())
-            .map(|value| value.saturating_mul(1000))
-            .unwrap_or_default();
-        match (row_type, payload["type"].as_str().unwrap_or_default()) {
-            ("event_msg", "task_started") => {
-                if let Some(turn) = current.take() {
-                    observations.push(turn);
-                }
-                current = Some(RolloutTurnObservation {
-                    turn_id: payload["turn_id"].as_str().unwrap_or_default().to_string(),
-                    started_at_epoch_ms: timestamp_epoch_ms,
-                    ended_at_epoch_ms: timestamp_epoch_ms,
-                    ..RolloutTurnObservation::default()
-                });
+        process_rollout_turn_observation_line(state, line)?;
+    }
+    Ok(())
+}
+
+fn snapshot_rollout_turn_observations(
+    state: &RolloutTurnParseState,
+) -> Vec<RolloutTurnObservation> {
+    let mut observations = state.finalized_turns.clone();
+    if let Some(turn) = state.current_turn.clone() {
+        observations.push(turn);
+    }
+    observations
+}
+
+fn process_rollout_turn_observation_line(
+    state: &mut RolloutTurnParseState,
+    line: &str,
+) -> Result<()> {
+    let row: Value = serde_json::from_str(line).context("failed to parse rollout jsonl line")?;
+    let row_type = row["type"].as_str().unwrap_or_default();
+    let payload = &row["payload"];
+    let timestamp_epoch_ms = row["timestamp"]
+        .as_str()
+        .and_then(|value| parse_rfc3339_epoch_s(value).ok())
+        .map(|value| value.saturating_mul(1000))
+        .unwrap_or_default();
+    match (row_type, payload["type"].as_str().unwrap_or_default()) {
+        ("event_msg", "task_started") => {
+            if let Some(turn) = state.current_turn.take() {
+                state.finalized_turns.push(turn);
             }
-            ("event_msg", "task_complete") => {
-                if let Some(mut turn) = current.take() {
-                    turn.ended_at_epoch_ms = timestamp_epoch_ms;
-                    observations.push(turn);
-                }
+            state.current_turn = Some(RolloutTurnObservation {
+                turn_id: payload["turn_id"].as_str().unwrap_or_default().to_string(),
+                started_at_epoch_ms: timestamp_epoch_ms,
+                ended_at_epoch_ms: timestamp_epoch_ms,
+                ..RolloutTurnObservation::default()
+            });
+        }
+        ("event_msg", "task_complete") => {
+            if let Some(mut turn) = state.current_turn.take() {
+                turn.ended_at_epoch_ms = timestamp_epoch_ms;
+                state.finalized_turns.push(turn);
             }
-            ("event_msg", "token_count") => {
-                if let Some(turn) = current.as_mut() {
-                    turn.ended_at_epoch_ms = timestamp_epoch_ms;
-                    let output_tokens = payload["info"]["last_token_usage"]["output_tokens"]
-                        .as_u64()
-                        .unwrap_or_default();
-                    if output_tokens > 0 {
-                        turn.assistant_generation_tokens = turn
-                            .assistant_generation_tokens
-                            .saturating_add(output_tokens);
-                        turn.token_count_events += 1;
-                    }
-                }
-            }
-            ("response_item", "function_call") => {
-                let call_id = payload["call_id"].as_str().unwrap_or_default();
-                if !call_id.is_empty() {
-                    approved_context_pack_calls.insert(
-                        call_id.to_string(),
-                        rollout_function_call_is_context_pack(
-                            payload["name"].as_str().unwrap_or_default(),
-                            payload["arguments"].as_str().unwrap_or_default(),
-                        ),
-                    );
-                }
-                if let Some(turn) = current.as_mut() {
-                    turn.ended_at_epoch_ms = timestamp_epoch_ms;
-                    if !call_id.is_empty()
-                        && approved_context_pack_calls
-                            .get(call_id)
-                            .copied()
-                            .unwrap_or(false)
-                    {
-                        turn.approved_context_pack_calls += 1;
-                    }
-                }
-            }
-            ("response_item", "function_call_output") => {
-                if let Some(turn) = current.as_mut() {
-                    turn.ended_at_epoch_ms = timestamp_epoch_ms;
-                    let call_id = payload["call_id"].as_str().unwrap_or_default();
-                    if call_id.is_empty()
-                        || !approved_context_pack_calls
-                            .get(call_id)
-                            .copied()
-                            .unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    collect_context_pack_ids_from_rollout_output(
-                        &payload["output"],
-                        &mut turn.context_pack_ids,
-                    );
-                }
-            }
-            _ => {
-                if let Some(turn) = current.as_mut() {
-                    turn.ended_at_epoch_ms = timestamp_epoch_ms;
+        }
+        ("event_msg", "token_count") => {
+            if let Some(turn) = state.current_turn.as_mut() {
+                turn.ended_at_epoch_ms = timestamp_epoch_ms;
+                let output_tokens = payload["info"]["last_token_usage"]["output_tokens"]
+                    .as_u64()
+                    .unwrap_or_default();
+                if output_tokens > 0 {
+                    turn.assistant_generation_tokens = turn
+                        .assistant_generation_tokens
+                        .saturating_add(output_tokens);
+                    turn.token_count_events += 1;
                 }
             }
         }
+        ("response_item", "function_call") => {
+            let call_id = payload["call_id"].as_str().unwrap_or_default();
+            if !call_id.is_empty() {
+                state.approved_context_pack_calls.insert(
+                    call_id.to_string(),
+                    rollout_function_call_is_context_pack(
+                        payload["name"].as_str().unwrap_or_default(),
+                        payload["arguments"].as_str().unwrap_or_default(),
+                    ),
+                );
+            }
+            if let Some(turn) = state.current_turn.as_mut() {
+                turn.ended_at_epoch_ms = timestamp_epoch_ms;
+                if !call_id.is_empty()
+                    && state
+                        .approved_context_pack_calls
+                        .get(call_id)
+                        .copied()
+                        .unwrap_or(false)
+                {
+                    turn.approved_context_pack_calls += 1;
+                }
+            }
+        }
+        ("response_item", "function_call_output") => {
+            if let Some(turn) = state.current_turn.as_mut() {
+                turn.ended_at_epoch_ms = timestamp_epoch_ms;
+                let call_id = payload["call_id"].as_str().unwrap_or_default();
+                if call_id.is_empty()
+                    || !state
+                        .approved_context_pack_calls
+                        .get(call_id)
+                        .copied()
+                        .unwrap_or(false)
+                {
+                    return Ok(());
+                }
+                collect_context_pack_ids_from_rollout_output(
+                    &payload["output"],
+                    &mut turn.context_pack_ids,
+                );
+            }
+        }
+        _ => {
+            if let Some(turn) = state.current_turn.as_mut() {
+                turn.ended_at_epoch_ms = timestamp_epoch_ms;
+            }
+        }
     }
-    if let Some(turn) = current.take() {
-        observations.push(turn);
-    }
-    Ok(observations)
+    Ok(())
+}
+
+fn rollout_file_version(rollout_path: &Path) -> (u64, u64) {
+    let canonical_path = canonical_rollout_path(rollout_path);
+    let metadata = fs::metadata(&canonical_path).ok();
+    let size_bytes = metadata.as_ref().map(|item| item.len()).unwrap_or_default();
+    let modified_epoch_ms = metadata
+        .and_then(|item| item.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default();
+    (size_bytes, modified_epoch_ms)
+}
+
+fn read_rollout_tail_from_offset(rollout_path: &Path, offset: u64) -> Result<String> {
+    let mut file = fs::File::open(rollout_path)
+        .with_context(|| format!("failed to open {}", rollout_path.display()))?;
+    file.seek(SeekFrom::Start(offset))
+        .with_context(|| format!("failed to seek {}", rollout_path.display()))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read tail {}", rollout_path.display()))?;
+    String::from_utf8(bytes).context("failed to decode rollout tail as utf-8")
 }
 
 fn rollout_function_call_is_context_pack(name: &str, arguments: &str) -> bool {
@@ -2770,6 +2866,7 @@ mod tests {
     use proptest::prelude::*;
     use serde_json::json;
     use std::fs;
+    use std::io::Write;
     use uuid::Uuid;
 
     #[test]
@@ -2945,6 +3042,89 @@ mod tests {
         let _ = fs::remove_file(&rollout_path);
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn load_rollout_turn_observations_extends_cache_on_append() {
+        let rollout_path =
+            std::env::temp_dir().join(format!("amai-rollout-append-{}.jsonl", Uuid::new_v4()));
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-03-25T10:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-1","arguments":"{\"cmd\":\"cargo run --quiet -- context pack --project amai --namespace default --query 'x'\"}"}}
+{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"{\"context_pack_id\":\"ctx-pack-1\"}"}}
+{"timestamp":"2026-03-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":17}}}}
+{"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+"#,
+        )
+        .expect("write rollout");
+        let first = super::load_rollout_turn_observations(&rollout_path).expect("first parse");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].turn_id, "turn-1");
+        assert_eq!(first[0].assistant_generation_tokens, 17);
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout_path)
+            .expect("append rollout");
+        file.write_all(
+            br#"{"timestamp":"2026-03-25T10:00:04Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-2","arguments":"{\"cmd\":\"cargo run --quiet -- context pack --project amai --namespace default --query 'y'\"}"}}
+{"timestamp":"2026-03-25T10:00:05Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-2","output":"{\"context_pack_id\":\"ctx-pack-2\"}"}}
+{"timestamp":"2026-03-25T10:00:06Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":23}}}}
+{"timestamp":"2026-03-25T10:00:07Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2"}}
+"#,
+        )
+        .expect("write append");
+
+        let second = super::load_rollout_turn_observations(&rollout_path).expect("second parse");
+        let _ = fs::remove_file(&rollout_path);
+
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].turn_id, "turn-1");
+        assert_eq!(second[0].assistant_generation_tokens, 17);
+        assert_eq!(second[1].turn_id, "turn-2");
+        assert_eq!(second[1].assistant_generation_tokens, 23);
+        assert_eq!(second[1].approved_context_pack_calls, 1);
+    }
+
+    #[test]
+    fn load_rollout_turn_observations_extends_open_turn_on_append() {
+        let rollout_path =
+            std::env::temp_dir().join(format!("amai-rollout-open-turn-{}.jsonl", Uuid::new_v4()));
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-03-25T10:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-1","arguments":"{\"cmd\":\"cargo run --quiet -- context pack --project amai --namespace default --query 'x'\"}"}}
+{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"{\"context_pack_id\":\"ctx-pack-1\"}"}}
+{"timestamp":"2026-03-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":17}}}}
+"#,
+        )
+        .expect("write rollout");
+        let first = super::load_rollout_turn_observations(&rollout_path).expect("first parse");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].turn_id, "turn-1");
+        assert_eq!(first[0].assistant_generation_tokens, 17);
+        assert_eq!(first[0].approved_context_pack_calls, 1);
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout_path)
+            .expect("append rollout");
+        file.write_all(
+            br#"{"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":23}}}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+"#,
+        )
+        .expect("write append");
+
+        let second = super::load_rollout_turn_observations(&rollout_path).expect("second parse");
+        let _ = fs::remove_file(&rollout_path);
+
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].turn_id, "turn-1");
+        assert_eq!(second[0].assistant_generation_tokens, 40);
+        assert_eq!(second[0].approved_context_pack_calls, 1);
     }
 
     #[test]
