@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:34 MSK
-Ручная сверка guide/docs: 2026-03-26 03:34 MSK
+modified_at: 2026-03-26 03:42 MSK
+Ручная сверка guide/docs: 2026-03-26 03:42 MSK
 
 # Operations
 
@@ -845,6 +845,9 @@ cargo run -- mcp serve
   строка `startup_artifacts: ...` показывает, есть ли managed startup instruction, совпадает ли
   текущий workspace contract с pinned hash из install state и не потерялись ли literal
   fail-closed flags в artifact/instruction layer.
+- тот же status теперь auditing-ит и return-enforcement literals внутри managed startup block:
+  `startup_next_action`, `required_return_task`, `resume_required_return_task`,
+  `previous_session_owner_must_follow_startup_next_action = true`, `no_silent_drop = true`.
 - truthful интерпретация status такая:
   - `ok` — managed startup artifact на месте и contract drift не обнаружен;
   - `missing_startup_instruction` — onboarding когда-то materialized startup artifact, но сейчас он

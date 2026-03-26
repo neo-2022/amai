@@ -95,6 +95,11 @@ pub(crate) struct StartupArtifactAudit {
     pub startup_instruction_contains_required_before_tool_call: Option<bool>,
     pub startup_instruction_contains_missing_fail_closed: Option<bool>,
     pub startup_instruction_contains_sha_mismatch_fail_closed: Option<bool>,
+    pub startup_instruction_contains_startup_next_action: Option<bool>,
+    pub startup_instruction_contains_required_return_task: Option<bool>,
+    pub startup_instruction_contains_resume_required_action_kind: Option<bool>,
+    pub startup_instruction_contains_previous_session_owner_follow: Option<bool>,
+    pub startup_instruction_contains_no_silent_drop: Option<bool>,
     pub startup_contract_path: Option<PathBuf>,
     pub startup_contract_exists: bool,
     pub startup_contract_sha_matches_current_contract: Option<bool>,
@@ -550,6 +555,11 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_required_before_tool_call,
         startup_instruction_contains_missing_fail_closed,
         startup_instruction_contains_sha_mismatch_fail_closed,
+        startup_instruction_contains_startup_next_action,
+        startup_instruction_contains_required_return_task,
+        startup_instruction_contains_resume_required_action_kind,
+        startup_instruction_contains_previous_session_owner_follow,
+        startup_instruction_contains_no_silent_drop,
     ) = if startup_instruction_exists {
         let path = startup_instruction_path
             .as_ref()
@@ -563,9 +573,16 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             Some(content.contains("workspace_contract_required_before_tool_call = true")),
             Some(content.contains("missing_or_unreadable_fail_closed = true")),
             Some(content.contains("sha256_mismatch_fail_closed = true")),
+            Some(content.contains("startup_next_action")),
+            Some(content.contains("required_return_task")),
+            Some(content.contains("resume_required_return_task")),
+            Some(
+                content.contains("previous_session_owner_must_follow_startup_next_action = true"),
+            ),
+            Some(content.contains("no_silent_drop = true")),
         )
     } else {
-        (None, None, None, None)
+        (None, None, None, None, None, None, None, None, None)
     };
 
     let startup_contract_path = state.startup_contract_path.as_ref().map(PathBuf::from);
@@ -613,6 +630,11 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         || startup_instruction_contains_required_before_tool_call != Some(true)
         || startup_instruction_contains_missing_fail_closed != Some(true)
         || startup_instruction_contains_sha_mismatch_fail_closed != Some(true)
+        || startup_instruction_contains_startup_next_action != Some(true)
+        || startup_instruction_contains_required_return_task != Some(true)
+        || startup_instruction_contains_resume_required_action_kind != Some(true)
+        || startup_instruction_contains_previous_session_owner_follow != Some(true)
+        || startup_instruction_contains_no_silent_drop != Some(true)
     {
         "startup_instruction_drift".to_string()
     } else if startup_contract_sha_matches_current_contract != Some(true)
@@ -633,6 +655,11 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_required_before_tool_call,
         startup_instruction_contains_missing_fail_closed,
         startup_instruction_contains_sha_mismatch_fail_closed,
+        startup_instruction_contains_startup_next_action,
+        startup_instruction_contains_required_return_task,
+        startup_instruction_contains_resume_required_action_kind,
+        startup_instruction_contains_previous_session_owner_follow,
+        startup_instruction_contains_no_silent_drop,
         startup_contract_path,
         startup_contract_exists,
         startup_contract_sha_matches_current_contract,
@@ -2400,6 +2427,23 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             audit.startup_instruction_contains_sha_mismatch_fail_closed,
             Some(true)
         );
+        assert_eq!(
+            audit.startup_instruction_contains_startup_next_action,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_required_return_task,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_resume_required_action_kind,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_previous_session_owner_follow,
+            Some(true)
+        );
+        assert_eq!(audit.startup_instruction_contains_no_silent_drop, Some(true));
         assert_eq!(audit.startup_contract_sha_matches_current_contract, Some(true));
         assert_eq!(audit.install_state_sha_matches_current_contract, Some(true));
         assert_eq!(audit.startup_contract_enforces_fail_closed, Some(true));

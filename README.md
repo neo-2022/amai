@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:34 MSK
-Ручная сверка guide/docs: 2026-03-26 03:34 MSK
+modified_at: 2026-03-26 03:42 MSK
+Ручная сверка guide/docs: 2026-03-26 03:42 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1221,7 +1221,8 @@ preview, а не только raw count.
 - `Claude Desktop` и `Generic` пока всё ещё получают только manual startup snippets.
 - теперь этот contour можно проверить не только proof-скриптами, но и обычным
   `amai status`: строка `startup_artifacts: ...` показывает, жив ли managed startup artifact,
-  совпадает ли workspace contract с текущим pinned hash и остались ли fail-closed поля на месте;
+  совпадает ли workspace contract с текущим pinned hash, остались ли fail-closed поля на месте и
+  не потерялись ли `startup_next_action / required_return_task / no_silent_drop` в managed startup block;
 - truthful пример:
   если после `disconnect` managed startup block снят, `amai status` должен честно показать
   `startup_artifacts: missing_startup_instruction`, а не делать вид, что startup всё ещё готов.
