@@ -1027,19 +1027,6 @@ pub fn rollout_assistant_generation_turn_observations_for_thread(
     parse_rollout_assistant_generation_turn_observations(thread_id, &rollout_path)
 }
 
-pub fn rollout_source_signature_for_thread(thread_id: &str) -> Result<Option<String>> {
-    let Some(record) = thread_record_by_id(thread_id)? else {
-        return Ok(None);
-    };
-    if record.rollout_path.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(rollout_source_signature(
-        thread_id,
-        &PathBuf::from(record.rollout_path),
-    )))
-}
-
 fn rollout_thread_id_from_path(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     let candidate = stem.chars().rev().take(36).collect::<String>();

@@ -7209,13 +7209,15 @@ fn rollout_assistant_generation_observations_for_repo(
 fn dashboard_rollout_assistant_generation_observations_for_repo(
     repo_root: &Path,
 ) -> Result<(String, Vec<codex_threads::RolloutAssistantGenerationObservation>)> {
-    let signature = dashboard_rollout_observation_source_signature(repo_root)?;
-    if let Some(observations) = cached_dashboard_rollout_observations(repo_root, &signature) {
-        return Ok((signature, observations));
+    let source_signature = dashboard_rollout_observation_source_signature(repo_root)?;
+    if let Some(observations) = cached_dashboard_rollout_observations(repo_root, &source_signature) {
+        let semantic_signature = dashboard_rollout_observation_signature(&observations);
+        return Ok((semantic_signature, observations));
     }
     let observations = rollout_assistant_generation_observations_for_repo(repo_root)?;
-    store_dashboard_rollout_observations(repo_root, &signature, &observations);
-    Ok((signature, observations))
+    store_dashboard_rollout_observations(repo_root, &source_signature, &observations);
+    let semantic_signature = dashboard_rollout_observation_signature(&observations);
+    Ok((semantic_signature, observations))
 }
 
 fn cached_dashboard_rollout_observations(
@@ -7238,6 +7240,28 @@ fn dashboard_rollout_observation_source_signature(repo_root: &Path) -> Result<St
     };
     Ok(codex_threads::current_rollout_source_signature(repo_root_str)?
         .unwrap_or_else(|| "no_current_rollout_source".to_string()))
+}
+
+fn dashboard_rollout_observation_signature(
+    observations: &[codex_threads::RolloutAssistantGenerationObservation],
+) -> String {
+    let payload = observations
+        .iter()
+        .map(|item| {
+            json!({
+                "thread_id": item.thread_id,
+                "turn_id": item.turn_id,
+                "context_pack_id": item.context_pack_id,
+                "assistant_generation_tokens": item.assistant_generation_tokens,
+                "token_count_events": item.token_count_events,
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = Value::Array(payload);
+    hex_sha256(
+        &serde_json::to_vec(&payload)
+            .unwrap_or_else(|_| payload.to_string().into_bytes()),
+    )
 }
 
 fn store_dashboard_rollout_observations(
@@ -7794,24 +7818,23 @@ async fn derive_dashboard_rollout_assistant_generation_scopes(
         .values()
         .map(|item| item.thread_id.clone())
         .collect::<BTreeSet<_>>();
+    let mut turns_by_thread =
+        BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
+    for thread_id in &thread_ids {
+        let turns =
+            codex_threads::rollout_assistant_generation_turn_observations_for_thread(thread_id)?;
+        if !turns.is_empty() {
+            turns_by_thread.insert(thread_id.clone(), turns);
+        }
+    }
     let signature = dashboard_assistant_scope_signature(
         &target_sets,
         &direct_turns,
         &metadata,
-        &thread_ids,
-    )?;
+        &turns_by_thread,
+    );
     if let Some(scopes) = cached_dashboard_assistant_generation_scopes(repo_root, &signature) {
         return Ok(scopes);
-    }
-
-    let mut turns_by_thread =
-        BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
-    for thread_id in thread_ids {
-        let turns =
-            codex_threads::rollout_assistant_generation_turn_observations_for_thread(&thread_id)?;
-        if !turns.is_empty() {
-            turns_by_thread.insert(thread_id, turns);
-        }
     }
     let scopes = target_sets
         .iter()
@@ -7832,8 +7855,11 @@ fn dashboard_assistant_scope_signature(
     target_sets: &[BTreeSet<String>],
     direct_turns: &[AssistantGenerationTurnObservedSnapshot],
     metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
-    thread_ids: &BTreeSet<String>,
-) -> Result<String> {
+    turns_by_thread: &BTreeMap<
+        String,
+        Vec<codex_threads::RolloutAssistantGenerationTurnObservation>,
+    >,
+) -> String {
     let target_sets = target_sets
         .iter()
         .map(|set| set.iter().cloned().collect::<Vec<_>>())
@@ -7859,24 +7885,39 @@ fn dashboard_assistant_scope_signature(
             })
         })
         .collect::<Vec<_>>();
-    let mut thread_rollout_signatures = BTreeMap::<String, String>::new();
-    for thread_id in thread_ids {
-        thread_rollout_signatures.insert(
-            thread_id.clone(),
-            codex_threads::rollout_source_signature_for_thread(thread_id)?
-                .unwrap_or_else(|| "no_rollout_source".to_string()),
-        );
-    }
+    let turns_by_thread = turns_by_thread
+        .iter()
+        .map(|(thread_id, turns)| {
+            let turns = turns
+                .iter()
+                .map(|turn| {
+                    json!({
+                        "thread_id": turn.thread_id,
+                        "turn_id": turn.turn_id,
+                        "started_at_epoch_ms": turn.started_at_epoch_ms,
+                        "ended_at_epoch_ms": turn.ended_at_epoch_ms,
+                        "assistant_generation_tokens": turn.assistant_generation_tokens,
+                        "token_count_events": turn.token_count_events,
+                        "approved_context_pack_calls": turn.approved_context_pack_calls,
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "thread_id": thread_id,
+                "turns": turns,
+            })
+        })
+        .collect::<Vec<_>>();
     let payload = json!({
         "target_sets": target_sets,
         "direct_turns": direct_turns,
         "metadata": metadata,
-        "thread_rollout_signatures": thread_rollout_signatures,
+        "turns_by_thread": turns_by_thread,
     });
-    Ok(hex_sha256(
+    hex_sha256(
         &serde_json::to_vec(&payload)
             .unwrap_or_else(|_| payload.to_string().into_bytes()),
-    ))
+    )
 }
 
 fn cached_dashboard_assistant_generation_scopes(

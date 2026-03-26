@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 11:19 MSK
-Ручная сверка guide/docs: 2026-03-26 11:19 MSK
+modified_at: 2026-03-26 11:24 MSK
+Ручная сверка guide/docs: 2026-03-26 11:24 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -724,15 +724,18 @@ http://127.0.0.1:9464/
     scope не изменился;
   - для human dashboard этот assist contour теперь инвалидируется не по таймеру, а по фактическим
     входам:
-    - current rollout observations reuse-ятся, пока не меняется rollout source signature
-      текущего thread;
+    - current rollout observations reuse-ятся по file signature rollout JSONL, но downstream
+      invalidation завязана уже не на raw file churn, а на semantic signature самих parsed
+      observations;
     - parsed rollout turn observations теперь тоже reuse-ятся по file signature, чтобы один и тот
       же active rollout не перечитывался и не разбирался повторно несколько раз внутри одного
       dashboard refresh;
     - derived assistant scopes reuse-ятся, пока не меняются missing target sets, direct-turn
-      snapshots, working-state meta или rollout source signatures задействованных thread-ов;
+      snapshots, working-state meta или semantic contents parsed turn observations задействованных
+      thread-ов;
     - quiet same-meter sync/write-back повторяется только если реально изменился набор missing
-      `assistant_generation/tool_overhead` targets или сам rollout source.
+      `assistant_generation/tool_overhead` targets или semantic contents current rollout
+      observations.
   - если ускорителей нет вообще, карточка не исчезает, а показывает `не обнаружено`;
   - `Установленный клиент` и `Сборка`
     - теперь живут как компактные карточки рядом друг с другом, а не занимают место hardware-card первого ряда;

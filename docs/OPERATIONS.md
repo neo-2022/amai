@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 11:19 MSK
-Ручная сверка guide/docs: 2026-03-26 11:19 MSK
+modified_at: 2026-03-26 11:24 MSK
+Ручная сверка guide/docs: 2026-03-26 11:24 MSK
 
 # Operations
 
@@ -2872,13 +2872,15 @@ Grafana login берётся из `.env`:
     - parsed rollout turn observations теперь reuse-ятся по file signature rollout-файла;
     - это должно снимать лишний двойной parse active rollout даже тогда, когда input-driven
       invalidation уже действительно произошёл;
-  - repo rollout observations теперь reuse-ятся по rollout source signature текущего thread-а, а не
-    по blind `10s` TTL;
+  - repo rollout observations теперь reuse-ятся по file signature текущего thread rollout, но
+    downstream invalidation должен смотреть уже на semantic contents parsed observations, а не на
+    любой raw file churn;
   - derived assistant scopes reuse-ятся по combined input signature:
-    missing target sets + direct-turn snapshots + working-state meta + rollout source signatures
-    задействованных thread-ов;
+    missing target sets + direct-turn snapshots + working-state meta + semantic contents parsed
+    turn observations задействованных thread-ов;
   - quiet same-meter sync/write-back для dashboard повторяется только если меняется набор missing
-    `assistant_generation/tool_overhead` context_pack_ids или rollout source signature;
+    `assistant_generation/tool_overhead` context_pack_ids или semantic contents current rollout
+    observations;
   - truthful semantics остаётся fail-closed: как только меняется любой из этих inputs, cache обязан
     invalidated, а dashboard — снова пересчитать assist contour честно.
   - для повторного запроса сейчас целевой набор такой:
