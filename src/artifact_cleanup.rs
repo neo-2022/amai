@@ -266,6 +266,7 @@ pub fn run_cleanup(
             "candidates": selected_json,
             "repo_inventory": collect_repo_inventory(
                 repo_root,
+                &profile.targets,
                 &managed_target_sizes,
                 profile.unmanaged_root_alert_bytes,
                 profile.max_unmanaged_roots,
@@ -411,6 +412,7 @@ fn path_size_bytes(path: &Path) -> Result<u64> {
 
 fn collect_repo_inventory(
     repo_root: &Path,
+    targets: &[ArtifactCleanupTarget],
     managed_target_sizes: &[(PathBuf, u64)],
     unmanaged_root_alert_bytes: u64,
     max_unmanaged_roots: usize,
@@ -465,6 +467,32 @@ fn collect_repo_inventory(
             })
         })
         .collect::<Vec<_>>();
+    let manual_only_targets = targets
+        .iter()
+        .filter(|target| !target.auto_apply)
+        .map(|target| {
+            let target_root = repo_root.join(&target.path);
+            let present = target_root.exists();
+            let total_bytes = if present {
+                path_size_bytes_lossy(
+                    &target_root,
+                    &mut unreadable_paths_count,
+                    &mut unreadable_paths_sample,
+                    max_unmanaged_roots.max(3),
+                )
+            } else {
+                0
+            };
+            json!({
+                "path": target.path,
+                "description": target.description,
+                "ttl_hours": target.ttl_hours,
+                "keep_latest": target.keep_latest,
+                "present": present,
+                "total_bytes": total_bytes,
+            })
+        })
+        .collect::<Vec<_>>();
 
     Ok(json!({
         "repo_total_bytes": repo_total_bytes,
@@ -473,6 +501,7 @@ fn collect_repo_inventory(
         "unmanaged_root_alert_bytes": unmanaged_root_alert_bytes,
         "unmanaged_alert_triggered": !large_unmanaged_roots.is_empty(),
         "large_unmanaged_roots": large_unmanaged_roots,
+        "manual_only_targets": manual_only_targets,
         "unreadable_paths_count": unreadable_paths_count,
         "unreadable_paths_sample": unreadable_paths_sample,
     }))
@@ -739,6 +768,7 @@ mod tests {
 
         let inventory = collect_repo_inventory(
             &repo_root,
+            &[],
             &[(repo_root.join("target/debug"), 64)],
             100,
             default_max_unmanaged_roots(),

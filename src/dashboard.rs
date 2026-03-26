@@ -3688,6 +3688,10 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
         .as_array()
         .cloned()
         .unwrap_or_default();
+    let manual_only_targets = repo_inventory["manual_only_targets"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let last_apply = &cleanup["last_apply"];
     let last_reclaim_bytes = last_apply["reclaimed_bytes"].as_u64().unwrap_or(0);
     let last_deleted = last_apply["deleted"].as_u64().unwrap_or(0);
@@ -3718,6 +3722,12 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
         note.push_str(&format!(
             " Основной локальный вес сейчас лежит вне cleanup policy: {root_path} = {} unmanaged bytes.",
             human_bytes(root_unmanaged_bytes as f64)
+        ));
+    }
+    if let Some(target) = manual_only_targets.first() {
+        let target_path = target["path"].as_str().unwrap_or("неизвестный target");
+        note.push_str(&format!(
+            " Для {target_path} уже есть explicit manual-only cleanup contour: используйте `observe cleanup-artifacts --apply` или `--aggressive --apply`, auto-retention этот путь не трогает."
         ));
     }
     if last_reclaim_bytes > 0 {
@@ -3806,6 +3816,28 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
                         .join(", ")
                 },
                 Some("Крупные директории вне cleanup policy. Они не попадают под TTL/keep-latest auto-path."),
+            ),
+            metric_row(
+                "Manual-only contours",
+                if manual_only_targets.is_empty() {
+                    "нет".to_string()
+                } else {
+                    manual_only_targets
+                        .iter()
+                        .map(|target| {
+                            let path = target["path"].as_str().unwrap_or("неизвестный target");
+                            let ttl_hours = target["ttl_hours"].as_u64().unwrap_or(0);
+                            let keep_latest = target["keep_latest"].as_u64().unwrap_or(0);
+                            let total_bytes = target["total_bytes"].as_u64().unwrap_or(0);
+                            format!(
+                                "{path} ({}, ttl {ttl_hours}h, keep_latest {keep_latest})",
+                                human_bytes(total_bytes as f64)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                Some("Пути, которые уже заведены в cleanup policy, но остаются только на explicit/manual path и не удаляются auto-retention-ом."),
             ),
             metric_row(
                 "Keep latest / protected",
@@ -6341,11 +6373,23 @@ fn artifact_cleanup_warning(snapshot: &Value) -> Option<String> {
             .unwrap_or_default();
         let root_path = first_root["path"].as_str().unwrap_or("неизвестный root");
         let root_unmanaged_bytes = first_root["unmanaged_bytes"].as_u64().unwrap_or(0);
+        let manual_only_target = repo_inventory["manual_only_targets"]
+            .as_array()
+            .and_then(|targets| targets.first())
+            .cloned()
+            .unwrap_or_default();
+        let manual_only_path = manual_only_target["path"].as_str();
+        let manual_hint = manual_only_path.map(|path| {
+            format!(
+                " Для {path} уже есть explicit manual cleanup contour: `observe cleanup-artifacts --apply` или `--aggressive --apply`."
+            )
+        }).unwrap_or_default();
         return Some(format!(
-            "Основной локальный вес сейчас вне cleanup policy: всего {} вне managed targets, крупнейший root {} = {}. Auto-retention это не трогает, пока путь не включён в policy отдельным contour-ом.",
+            "Основной локальный вес сейчас вне cleanup policy: всего {} вне managed targets, крупнейший root {} = {}. Auto-retention это не трогает, пока путь не включён в policy отдельным contour-ом.{}",
             human_bytes(out_of_policy_bytes as f64),
             root_path,
-            human_bytes(root_unmanaged_bytes as f64)
+            human_bytes(root_unmanaged_bytes as f64),
+            manual_hint
         ));
     }
     None
@@ -7975,6 +8019,14 @@ mod tests {
                             "unmanaged_bytes": 199_715_979_264u64
                         }
                     ],
+                    "manual_only_targets": [
+                        {
+                            "path": "output/windows-vm-lab",
+                            "ttl_hours": 168,
+                            "keep_latest": 2,
+                            "total_bytes": 199_715_979_264u64
+                        }
+                    ],
                     "unreadable_paths_count": 1
                 }
             }
@@ -8004,6 +8056,10 @@ mod tests {
             cleanup_card["rows"][9]["value"].as_str(),
             Some("output/windows-vm-lab (186.00 GiB)")
         );
+        assert_eq!(
+            cleanup_card["rows"][10]["value"].as_str(),
+            Some("output/windows-vm-lab (186.00 GiB, ttl 168h, keep_latest 2)")
+        );
     }
 
     #[test]
@@ -8020,6 +8076,11 @@ mod tests {
                             "path": "output/windows-vm-lab",
                             "unmanaged_bytes": 199_715_979_264u64
                         }
+                    ],
+                    "manual_only_targets": [
+                        {
+                            "path": "output/windows-vm-lab"
+                        }
                     ]
                 }
             }
@@ -8027,6 +8088,7 @@ mod tests {
         let warning = artifact_cleanup_warning(&snapshot).expect("warning");
         assert!(warning.contains("вне cleanup policy"));
         assert!(warning.contains("output/windows-vm-lab"));
+        assert!(warning.contains("observe cleanup-artifacts --apply"));
     }
 
     #[test]

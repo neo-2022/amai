@@ -2149,6 +2149,7 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
   - сколько места входит в managed cleanup scope;
   - сколько веса уже лежит вне policy и therefore не будет убрано auto-retention path-ом;
   - какие крупные unmanaged roots сейчас дают основной рост;
+  - какие manual-only cleanup contours уже есть и каким explicit command их reclaim-ить;
   - сколько можно убрать безопасно прямо сейчас;
   - сколько можно убрать explicit aggressive path-ом;
   - сколько вернул последний apply-run;

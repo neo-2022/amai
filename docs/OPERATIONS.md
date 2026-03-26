@@ -2514,6 +2514,7 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
   - сколько места сейчас покрывает managed cleanup policy;
   - сколько веса сейчас уже лежит вне policy и поэтому не может исчезнуть auto-cleanup path-ом;
   - какие крупные unmanaged roots сейчас формируют этот out-of-policy рост;
+  - какие manual-only contours уже заведены и каким explicit cleanup command их reclaim-ить;
   - safe reclaim now;
   - aggressive preview;
   - last reclaim;
