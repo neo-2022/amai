@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 14:00 MSK
-Ручная сверка guide/docs: 2026-03-26 14:00 MSK
+modified_at: 2026-03-26 14:12 MSK
+Ручная сверка guide/docs: 2026-03-26 14:12 MSK
 
 # Operations
 
@@ -2506,10 +2506,11 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
 - `observe serve`, `observe snapshot` и `observe sla-check` сами запускают этот cleanup, поэтому локальный мусор должен уходить без ручного обхода.
 - `--aggressive` — это уже explicit reclaim path: он не ждёт TTL и не держит `keep_latest`, но всё равно не лезет в live state и защищает текущий исполняемый бинарь.
 - для `output/windows-vm-lab` cleanup остаётся explicit/manual:
-  - `observe cleanup-artifacts --target output/windows-vm-lab --apply` теперь может срезать старые proof-run directories по TTL и `keep_latest`;
-  - `observe cleanup-artifacts --target output/windows-vm-lab --aggressive --apply` режет этот target без ожидания TTL;
+  - `observe cleanup-artifacts --target output/windows-vm-lab --apply` теперь режет только тяжёлый rebuildable VM-хвост внутри proof-run старше `24h`, сохраняет `keep_latest = 2` и не трогает evidence/log артефакты;
+  - `observe cleanup-artifacts --target output/windows-vm-lab --aggressive --apply` режет тот же rebuildable VM-хвост без ожидания TTL и без `keep_latest`, но всё равно сохраняет evidence/log артефакты;
   - auto-path их не удаляет;
-  - symlink `output/windows-vm-lab/latest` игнорируется cleanup-сканером и не вмешивается в `keep_latest`.
+  - symlink `output/windows-vm-lab/latest` игнорируется cleanup-сканером и не вмешивается в `keep_latest`;
+  - после apply рядом с run-root пишется `windows_vm_lab_cleanup_manifest.json`, чтобы было видно, какие тяжёлые пути реально срезаны и сколько места вернулось.
 - human dashboard теперь показывает отдельную карточку `Локальный мусор и retention`, чтобы оператор видел:
   - общий repo footprint;
   - сколько места сейчас покрывает managed cleanup policy;

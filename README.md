@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 14:00 MSK
-Ручная сверка guide/docs: 2026-03-26 14:00 MSK
+modified_at: 2026-03-26 14:12 MSK
+Ручная сверка guide/docs: 2026-03-26 14:12 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -2141,10 +2141,11 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
 - текущий запущенный бинарь защищён от удаления, даже если его директория уже попала под TTL.
 - `--aggressive` выключает возрастной запас и `keep_latest` только для rebuildable хвоста, поэтому это уже explicit reclaim path, а не обычный auto-retention;
 - для `output/windows-vm-lab` это означает отдельный explicit/manual contour:
-  - `observe cleanup-artifacts --target output/windows-vm-lab --apply` может убрать старые proof-run directories по TTL;
-  - `observe cleanup-artifacts --target output/windows-vm-lab --aggressive --apply` принудительно срежет rebuildable хвост внутри этого target;
+  - `observe cleanup-artifacts --target output/windows-vm-lab --apply` теперь режет только тяжёлый rebuildable VM-хвост внутри proof-run старше `24h`, сохраняет `keep_latest = 2` и не трогает evidence/log артефакты;
+  - `observe cleanup-artifacts --target output/windows-vm-lab --aggressive --apply` режет тот же rebuildable VM-хвост во всём target без ожидания TTL и без `keep_latest`, но всё равно сохраняет evidence/log артефакты;
   - auto-path этого не сделает;
   - symlink `output/windows-vm-lab/latest` теперь не считается cleanup-entry и не съедает `keep_latest`;
+  - после prune-run рядом остаётся `windows_vm_lab_cleanup_manifest.json` с перечнем реально удалённых тяжёлых путей и суммой reclaimed bytes;
 - в human dashboard теперь есть отдельная карточка `Локальный мусор и retention`, где явно видны:
   - общий repo footprint;
   - сколько места входит в managed cleanup scope;

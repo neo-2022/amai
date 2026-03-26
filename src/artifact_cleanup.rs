@@ -32,6 +32,8 @@ pub struct ArtifactCleanupTarget {
     pub keep_latest: usize,
     #[serde(default)]
     pub auto_apply: bool,
+    #[serde(default = "default_entry_cleanup_strategy")]
+    pub entry_cleanup_strategy: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +67,7 @@ struct PlannedCleanupEntry {
     path: PathBuf,
     age_hours: f64,
     size_bytes: u64,
+    reclaimable_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +94,10 @@ fn default_unmanaged_root_alert_bytes() -> u64 {
 
 fn default_max_unmanaged_roots() -> usize {
     3
+}
+
+fn default_entry_cleanup_strategy() -> String {
+    "delete_entry".to_string()
 }
 
 pub fn load_profile() -> Result<ArtifactCleanupProfile> {
@@ -164,6 +171,7 @@ pub fn run_cleanup(
                 "ttl_hours": target.ttl_hours,
                 "keep_latest": target.keep_latest,
                 "auto_apply": target.auto_apply,
+                "entry_cleanup_strategy": target.entry_cleanup_strategy,
                 "missing": true,
                 "entries_scanned": 0,
                 "expired": 0,
@@ -187,6 +195,7 @@ pub fn run_cleanup(
             now,
             target.ttl_hours,
             target.keep_latest,
+            &target.entry_cleanup_strategy,
             &protected_paths,
             &mut remaining_limit,
             mode,
@@ -199,6 +208,7 @@ pub fn run_cleanup(
                 now,
                 target.ttl_hours,
                 target.keep_latest,
+                &target.entry_cleanup_strategy,
                 &protected_paths,
                 &mut preview_limit,
                 CleanupMode::Aggressive,
@@ -222,11 +232,12 @@ pub fn run_cleanup(
                 "path": selected.path.display().to_string(),
                 "age_hours": format!("{:.2}", selected.age_hours),
                 "size_bytes": selected.size_bytes,
+                "reclaimable_bytes": selected.reclaimable_bytes,
             }));
             if apply {
-                delete_path(&selected.path)?;
+                reclaimed_bytes +=
+                    apply_cleanup_entry(&selected.path, &target.entry_cleanup_strategy)?;
                 deleted += 1;
-                reclaimed_bytes += selected.size_bytes;
             }
         }
 
@@ -239,6 +250,7 @@ pub fn run_cleanup(
             "ttl_hours": target.ttl_hours,
             "keep_latest": target.keep_latest,
             "auto_apply": target.auto_apply,
+            "entry_cleanup_strategy": target.entry_cleanup_strategy,
             "missing": false,
             "entries_scanned": active_plan.scanned,
             "expired": active_plan.expired,
@@ -321,6 +333,7 @@ fn plan_target_cleanup(
     now: SystemTime,
     ttl_hours: u64,
     keep_latest: usize,
+    entry_cleanup_strategy: &str,
     protected_paths: &[PathBuf],
     remaining_limit: &mut usize,
     mode: CleanupMode,
@@ -367,10 +380,13 @@ fn plan_target_cleanup(
 
         *remaining_limit -= 1;
         plan.selected += 1;
+        let reclaimable_bytes =
+            planned_reclaimable_bytes(&entry.path, entry.size_bytes, entry_cleanup_strategy)?;
         plan.selected_entries.push(PlannedCleanupEntry {
             path: entry.path,
             age_hours: age.as_secs_f64() / 3600.0,
             size_bytes: entry.size_bytes,
+            reclaimable_bytes,
         });
     }
 
@@ -611,8 +627,106 @@ fn delete_path(path: &Path) -> Result<()> {
 fn selected_reclaimable_bytes(plan: &TargetCleanupPlan) -> u64 {
     plan.selected_entries
         .iter()
-        .map(|entry| entry.size_bytes)
+        .map(|entry| entry.reclaimable_bytes)
         .sum::<u64>()
+}
+
+fn planned_reclaimable_bytes(
+    path: &Path,
+    size_bytes: u64,
+    entry_cleanup_strategy: &str,
+) -> Result<u64> {
+    match entry_cleanup_strategy {
+        "delete_entry" => Ok(size_bytes),
+        "windows_vm_lab_preserve_evidence" => windows_vm_lab_reclaimable_bytes(path),
+        other => Err(anyhow!(
+            "unknown artifact cleanup strategy in active policy: {other}"
+        )),
+    }
+}
+
+fn apply_cleanup_entry(path: &Path, entry_cleanup_strategy: &str) -> Result<u64> {
+    match entry_cleanup_strategy {
+        "delete_entry" => {
+            let reclaimable_bytes = path_size_bytes(path)?;
+            delete_path(path)?;
+            Ok(reclaimable_bytes)
+        }
+        "windows_vm_lab_preserve_evidence" => apply_windows_vm_lab_preserve_evidence(path),
+        other => Err(anyhow!(
+            "unknown artifact cleanup strategy in active policy: {other}"
+        )),
+    }
+}
+
+fn windows_vm_lab_reclaimable_bytes(run_root: &Path) -> Result<u64> {
+    Ok(windows_vm_lab_prunable_paths(run_root)?
+        .iter()
+        .map(|path| path_size_bytes(path).unwrap_or(0))
+        .sum::<u64>())
+}
+
+fn apply_windows_vm_lab_preserve_evidence(run_root: &Path) -> Result<u64> {
+    let prunable_paths = windows_vm_lab_prunable_paths(run_root)?;
+    let mut reclaimed_bytes = 0_u64;
+    let mut removed_paths = Vec::new();
+    for path in prunable_paths {
+        reclaimed_bytes = reclaimed_bytes.saturating_add(path_size_bytes(&path)?);
+        delete_path(&path)?;
+        removed_paths.push(relative_repo_path(run_root, &path));
+    }
+    if !removed_paths.is_empty() {
+        let captured_at_epoch_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock before unix epoch")?
+            .as_millis() as u64;
+        let manifest_path = run_root.join("windows_vm_lab_cleanup_manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&json!({
+                "cleanup_strategy": "windows_vm_lab_preserve_evidence",
+                "captured_at_epoch_ms": captured_at_epoch_ms,
+                "reclaimed_bytes": reclaimed_bytes,
+                "removed_paths": removed_paths,
+            }))?,
+        )
+        .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+    }
+    Ok(reclaimed_bytes)
+}
+
+fn windows_vm_lab_prunable_paths(run_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(run_root)
+        .with_context(|| format!("failed to read Windows VM lab run {}", run_root.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to iterate Windows VM lab run {}", run_root.display()))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to stat Windows VM lab artifact {}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let removable = if metadata.is_dir() {
+            matches!(
+                name.as_str(),
+                "winiso_noprompt" | "payload.mount" | "payload_probe" | "swtpm"
+            )
+        } else if metadata.is_file() {
+            name == "system.qcow2"
+                || name == "OVMF_VARS.fd"
+                || name.ends_with(".iso")
+                || matches!(name.as_str(), "qemu.pid" | "qemu-monitor.sock" | "swtpm.pid" | "swtpm.sock")
+        } else {
+            false
+        };
+        if removable {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
 }
 
 fn current_protected_paths() -> Vec<PathBuf> {
@@ -641,9 +755,10 @@ fn summary_path(repo_root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        CleanupEntry, CleanupMode, collect_repo_inventory, current_protected_paths,
-        default_max_unmanaged_roots, default_unmanaged_root_alert_bytes, immediate_entries,
-        plan_target_cleanup,
+        CleanupEntry, CleanupMode, apply_windows_vm_lab_preserve_evidence, collect_repo_inventory,
+        current_protected_paths, default_max_unmanaged_roots,
+        default_unmanaged_root_alert_bytes, immediate_entries, plan_target_cleanup,
+        windows_vm_lab_reclaimable_bytes,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -675,6 +790,7 @@ mod tests {
             now,
             24,
             1,
+            "delete_entry",
             &[],
             &mut limit,
             CleanupMode::Conservative,
@@ -716,6 +832,7 @@ mod tests {
             now,
             24,
             0,
+            "delete_entry",
             &protected,
             &mut limit,
             CleanupMode::Conservative,
@@ -750,6 +867,7 @@ mod tests {
             now,
             24,
             1,
+            "delete_entry",
             &[],
             &mut limit,
             CleanupMode::Aggressive,
@@ -830,5 +948,46 @@ mod tests {
         assert_eq!(entries[0].path, repo_root.join("20260325-proof"));
 
         let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn windows_vm_lab_preserve_evidence_prunes_only_heavy_artifacts() {
+        let run_root = std::env::temp_dir().join(format!(
+            "amai-windows-vm-lab-prune-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&run_root);
+        fs::create_dir_all(run_root.join("winiso_noprompt")).expect("winiso_noprompt");
+        fs::create_dir_all(run_root.join("payload_extract/evidence")).expect("payload_extract");
+        fs::write(run_root.join("system.qcow2"), vec![0_u8; 64]).expect("system.qcow2");
+        fs::write(run_root.join("ru_windows_11_noprompt.iso"), vec![0_u8; 32]).expect("iso");
+        fs::write(run_root.join("OVMF_VARS.fd"), vec![0_u8; 16]).expect("ovmf vars");
+        fs::write(
+            run_root.join("winiso_noprompt/install.esd"),
+            vec![0_u8; 24],
+        )
+        .expect("install.esd");
+        fs::write(
+            run_root.join("payload_extract/evidence/result.txt"),
+            b"result=PASS",
+        )
+        .expect("result");
+        fs::write(run_root.join("serial.log"), b"log").expect("serial");
+
+        assert_eq!(
+            windows_vm_lab_reclaimable_bytes(&run_root).expect("reclaimable bytes"),
+            136
+        );
+        let reclaimed = apply_windows_vm_lab_preserve_evidence(&run_root).expect("apply prune");
+        assert_eq!(reclaimed, 136);
+        assert!(!run_root.join("system.qcow2").exists());
+        assert!(!run_root.join("ru_windows_11_noprompt.iso").exists());
+        assert!(!run_root.join("OVMF_VARS.fd").exists());
+        assert!(!run_root.join("winiso_noprompt").exists());
+        assert!(run_root.join("payload_extract/evidence/result.txt").exists());
+        assert!(run_root.join("serial.log").exists());
+        assert!(run_root.join("windows_vm_lab_cleanup_manifest.json").exists());
+
+        let _ = fs::remove_dir_all(&run_root);
     }
 }

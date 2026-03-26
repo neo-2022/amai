@@ -1,5 +1,5 @@
-modified_at = "2026-03-26 13:52 MSK"
-"Ручная сверка guide/docs" = "2026-03-26 13:52 MSK"
+modified_at = "2026-03-26 14:12 MSK"
+"Ручная сверка guide/docs" = "2026-03-26 14:12 MSK"
 
 [observability]
 schema_version = 2
@@ -89,9 +89,10 @@ auto_apply = true
 [[artifact_cleanup.targets]]
 path = "output/windows-vm-lab"
 description = "stale Windows VM lab proof runs"
-ttl_hours = 168
+ttl_hours = 24
 keep_latest = 2
 auto_apply = false
+entry_cleanup_strategy = "windows_vm_lab_preserve_evidence"
 
 [postgres]
 target_connection_usage_ratio = 0.80
