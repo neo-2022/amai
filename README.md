@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 11:10 MSK
-Ручная сверка guide/docs: 2026-03-26 11:10 MSK
+modified_at: 2026-03-26 11:19 MSK
+Ручная сверка guide/docs: 2026-03-26 11:19 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -726,6 +726,9 @@ http://127.0.0.1:9464/
     входам:
     - current rollout observations reuse-ятся, пока не меняется rollout source signature
       текущего thread;
+    - parsed rollout turn observations теперь тоже reuse-ятся по file signature, чтобы один и тот
+      же active rollout не перечитывался и не разбирался повторно несколько раз внутри одного
+      dashboard refresh;
     - derived assistant scopes reuse-ятся, пока не меняются missing target sets, direct-turn
       snapshots, working-state meta или rollout source signatures задействованных thread-ов;
     - quiet same-meter sync/write-back повторяется только если реально изменился набор missing

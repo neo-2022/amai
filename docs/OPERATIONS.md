@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 11:10 MSK
-Ручная сверка guide/docs: 2026-03-26 11:10 MSK
+modified_at: 2026-03-26 11:19 MSK
+Ручная сверка guide/docs: 2026-03-26 11:19 MSK
 
 # Operations
 
@@ -2867,6 +2867,11 @@ Grafana login берётся из `.env`:
     весь live refresh.
 - same-meter assist contour для human dashboard тоже не должен повторять одну и ту же тяжёлую
   работу каждую секунду, если active live scope не менялся:
+  - внутри одного refresh нельзя повторно перечитывать и парсить тот же rollout JSONL ради
+    rollout observations и turn observations:
+    - parsed rollout turn observations теперь reuse-ятся по file signature rollout-файла;
+    - это должно снимать лишний двойной parse active rollout даже тогда, когда input-driven
+      invalidation уже действительно произошёл;
   - repo rollout observations теперь reuse-ятся по rollout source signature текущего thread-а, а не
     по blind `10s` TTL;
   - derived assistant scopes reuse-ятся по combined input signature:

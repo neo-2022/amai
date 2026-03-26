@@ -3,10 +3,11 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -90,6 +91,12 @@ struct RolloutTurnObservation {
     approved_context_pack_calls: usize,
 }
 
+#[derive(Debug, Clone)]
+struct CachedRolloutTurnObservations {
+    file_signature: String,
+    turns: Vec<RolloutTurnObservation>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThreadIndexSummary {
     #[serde(default)]
@@ -169,6 +176,9 @@ struct ThreadIndexEntry {
 const SYNTHETIC_AGENTS_PREFIX: &str = "# AGENTS.md instructions for ";
 const SYNTHETIC_INSTRUCTIONS_MARKER: &str = "<INSTRUCTIONS>";
 const EXACT_TIME_MAX_SLICE_DRIFT_S: i64 = 3 * 60 * 60;
+static ROLLOUT_TURN_OBSERVATION_CACHE: OnceLock<
+    Mutex<HashMap<PathBuf, CachedRolloutTurnObservations>>,
+> = OnceLock::new();
 
 pub fn current_thread_id() -> Option<String> {
     env::var("CODEX_THREAD_ID")
@@ -1042,9 +1052,11 @@ fn rollout_thread_id_from_path(path: &Path) -> Option<String> {
 }
 
 fn rollout_source_signature(thread_id: &str, rollout_path: &Path) -> String {
-    let canonical_path = rollout_path
-        .canonicalize()
-        .unwrap_or_else(|_| rollout_path.to_path_buf());
+    format!("{thread_id}:{}", rollout_file_signature(rollout_path))
+}
+
+fn rollout_file_signature(rollout_path: &Path) -> String {
+    let canonical_path = canonical_rollout_path(rollout_path);
     let path_label = canonical_path.display().to_string();
     let metadata = fs::metadata(&canonical_path).ok();
     let size_bytes = metadata.as_ref().map(|item| item.len()).unwrap_or_default();
@@ -1053,7 +1065,11 @@ fn rollout_source_signature(thread_id: &str, rollout_path: &Path) -> String {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default();
-    format!("{thread_id}:{path_label}:{size_bytes}:{modified_epoch_ms}")
+    format!("{path_label}:{size_bytes}:{modified_epoch_ms}")
+}
+
+fn canonical_rollout_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn load_thread_record(conn: &Connection, thread_id: &str) -> Result<Option<ThreadRecord>> {
@@ -1630,9 +1646,7 @@ fn parse_rollout_assistant_generation_observations(
     thread_id: &str,
     rollout_path: &Path,
 ) -> Result<Vec<RolloutAssistantGenerationObservation>> {
-    let text = fs::read_to_string(rollout_path)
-        .with_context(|| format!("failed to read {}", rollout_path.display()))?;
-    let turns = collect_rollout_turn_observations(&text)?;
+    let turns = load_rollout_turn_observations(rollout_path)?;
     Ok(turns
         .into_iter()
         .filter(|turn| turn.assistant_generation_tokens > 0 && turn.context_pack_ids.len() == 1)
@@ -1658,9 +1672,7 @@ fn parse_rollout_assistant_generation_turn_observations(
     thread_id: &str,
     rollout_path: &Path,
 ) -> Result<Vec<RolloutAssistantGenerationTurnObservation>> {
-    let text = fs::read_to_string(rollout_path)
-        .with_context(|| format!("failed to read {}", rollout_path.display()))?;
-    Ok(collect_rollout_turn_observations(&text)?
+    Ok(load_rollout_turn_observations(rollout_path)?
         .into_iter()
         .filter(|turn| turn.assistant_generation_tokens > 0 && turn.approved_context_pack_calls > 0)
         .map(|turn| RolloutAssistantGenerationTurnObservation {
@@ -1675,6 +1687,51 @@ fn parse_rollout_assistant_generation_turn_observations(
             observation_source: "codex_rollout_turn_timeline_v1".to_string(),
         })
         .collect())
+}
+
+fn load_rollout_turn_observations(rollout_path: &Path) -> Result<Vec<RolloutTurnObservation>> {
+    let file_signature = rollout_file_signature(rollout_path);
+    if let Some(turns) = cached_rollout_turn_observations(rollout_path, &file_signature) {
+        return Ok(turns);
+    }
+    let text = fs::read_to_string(rollout_path)
+        .with_context(|| format!("failed to read {}", rollout_path.display()))?;
+    let turns = collect_rollout_turn_observations(&text)?;
+    store_cached_rollout_turn_observations(rollout_path, &file_signature, &turns);
+    Ok(turns)
+}
+
+fn cached_rollout_turn_observations(
+    rollout_path: &Path,
+    file_signature: &str,
+) -> Option<Vec<RolloutTurnObservation>> {
+    let cache = ROLLOUT_TURN_OBSERVATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = cache.lock().ok()?;
+    let key = canonical_rollout_path(rollout_path);
+    let entry = guard.get(&key)?;
+    if entry.file_signature == file_signature {
+        Some(entry.turns.clone())
+    } else {
+        None
+    }
+}
+
+fn store_cached_rollout_turn_observations(
+    rollout_path: &Path,
+    file_signature: &str,
+    turns: &[RolloutTurnObservation],
+) {
+    let cache = ROLLOUT_TURN_OBSERVATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let Some(mut guard) = cache.lock().ok() else {
+        return;
+    };
+    guard.insert(
+        canonical_rollout_path(rollout_path),
+        CachedRolloutTurnObservations {
+            file_signature: file_signature.to_string(),
+            turns: turns.to_vec(),
+        },
+    );
 }
 
 fn collect_rollout_turn_observations(text: &str) -> Result<Vec<RolloutTurnObservation>> {
