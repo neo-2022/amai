@@ -102,6 +102,8 @@ pub(crate) struct StartupArtifactAudit {
     pub startup_instruction_contains_no_silent_drop: Option<bool>,
     pub startup_instruction_contains_runtime_state_artifact: Option<bool>,
     pub startup_instruction_contains_runtime_state_artifact_version: Option<bool>,
+    pub startup_instruction_contains_runtime_state_written_by_tool: Option<bool>,
+    pub startup_instruction_contains_runtime_state_source_summary_field: Option<bool>,
     pub startup_instruction_contains_startup_execution_gate: Option<bool>,
     pub startup_instruction_contains_startup_state_fallback_cli: Option<bool>,
     pub startup_instruction_contains_gate_field_enforcement: Option<bool>,
@@ -582,6 +584,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_no_silent_drop,
         startup_instruction_contains_runtime_state_artifact,
         startup_instruction_contains_runtime_state_artifact_version,
+        startup_instruction_contains_runtime_state_written_by_tool,
+        startup_instruction_contains_runtime_state_source_summary_field,
         startup_instruction_contains_startup_execution_gate,
         startup_instruction_contains_startup_state_fallback_cli,
         startup_instruction_contains_gate_field_enforcement,
@@ -606,6 +610,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             Some(content.contains("no_silent_drop = true")),
             Some(content.contains(".amai/continuity/project-chat-startup-state.json")),
             Some(content.contains("workspace_runtime_state_artifact_version = \"workspace-startup-runtime-state-v3\"")),
+            Some(content.contains("его пишет `amai_continuity_startup`")),
+            Some(content.contains("он должен нести `continuity_startup_summary`")),
             Some(content.contains("startup_execution_gate")),
             Some(content.contains("continuity startup-state --repo-root")),
             Some(
@@ -623,7 +629,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         )
     } else {
         (
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         )
     };
 
@@ -833,6 +839,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         || startup_instruction_contains_no_silent_drop != Some(true)
         || startup_instruction_contains_runtime_state_artifact != Some(true)
         || startup_instruction_contains_runtime_state_artifact_version != Some(true)
+        || startup_instruction_contains_runtime_state_written_by_tool != Some(true)
+        || startup_instruction_contains_runtime_state_source_summary_field != Some(true)
         || startup_instruction_contains_startup_execution_gate != Some(true)
         || startup_instruction_contains_startup_state_fallback_cli != Some(true)
         || startup_instruction_contains_gate_field_enforcement != Some(true)
@@ -878,6 +886,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_no_silent_drop,
         startup_instruction_contains_runtime_state_artifact,
         startup_instruction_contains_runtime_state_artifact_version,
+        startup_instruction_contains_runtime_state_written_by_tool,
+        startup_instruction_contains_runtime_state_source_summary_field,
         startup_instruction_contains_startup_execution_gate,
         startup_instruction_contains_startup_state_fallback_cli,
         startup_instruction_contains_gate_field_enforcement,
@@ -2619,6 +2629,8 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains(
             "workspace_runtime_state_artifact_version = \"workspace-startup-runtime-state-v3\""
         ));
+        assert!(text.contains("его пишет `amai_continuity_startup`"));
+        assert!(text.contains("он должен нести `continuity_startup_summary`"));
         assert!(text.contains("startup_execution_gate"));
         assert!(text.contains("startup_execution_gate.must_follow_startup_next_action = true"));
         assert!(text.contains("startup_execution_gate.unrelated_work_allowed = false"));
@@ -2827,6 +2839,14 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             audit.startup_instruction_contains_runtime_state_artifact_version,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_runtime_state_written_by_tool,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_runtime_state_source_summary_field,
             Some(true)
         );
         assert_eq!(
