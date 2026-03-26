@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 16:03 MSK
-Ручная сверка guide/docs: 2026-03-26 16:03 MSK
+modified_at: 2026-03-26 16:19 MSK
+Ручная сверка guide/docs: 2026-03-26 16:19 MSK
 
 # Token Ledger
 
@@ -1369,6 +1369,19 @@ Hashes по line items нужны затем, чтобы:
 - готов ли future adjustment path;
 - чем он заблокирован;
 - и какие correction/credit/dispute semantics уже materialized в preview.
+
+Начиная с `client-limit-explicit-boundary-surface-v2` и
+`client-limit-continuity-boundary-rollup-v2` boundary contour ещё и machine-readable
+фиксирует правило разрешения:
+- `resolution_state`
+- `guessed_baseline_prohibited`
+- `equivalence_resume_condition`
+
+Для `continuity_restore_outside_retrieval` это теперь значит буквально:
+- guessed baseline запрещён;
+- boundary остаётся explicit;
+- full same-meter equivalence можно возобновить только если появится
+  truthful `pre-Amai baseline source`.
 
 ## Preliminary vs stable
 

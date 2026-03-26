@@ -666,11 +666,11 @@ fn default_client_limit_strict_meter_slice_version() -> String {
 }
 
 fn default_client_limit_explicit_boundary_surface_version() -> String {
-    "client-limit-explicit-boundary-surface-v1".to_string()
+    "client-limit-explicit-boundary-surface-v2".to_string()
 }
 
 fn default_client_limit_continuity_boundary_rollup_version() -> String {
-    "client-limit-continuity-boundary-rollup-v1".to_string()
+    "client-limit-continuity-boundary-rollup-v2".to_string()
 }
 
 fn default_excluded_taxonomy_version() -> String {
@@ -12439,6 +12439,20 @@ fn build_client_limit_explicit_boundary_surface(
     } else {
         "explicit_boundary_present"
     };
+    let (resolution_state, guessed_baseline_prohibited, equivalence_resume_condition) = match state
+    {
+        "no_explicit_boundary" => ("not_applicable", false, Value::Null),
+        "amai_continuity_boundary" => (
+            "truthful_pre_amai_baseline_required",
+            true,
+            json!("truthful_pre_amai_baseline_source"),
+        ),
+        _ => (
+            "truthful_baseline_source_required",
+            true,
+            json!("truthful_baseline_source"),
+        ),
+    };
     let note = match state {
         "no_explicit_boundary" => {
             "В этом scope сейчас нет explicit baseline-boundary: remaining gap не упирается в truth-boundary."
@@ -12458,6 +12472,9 @@ fn build_client_limit_explicit_boundary_surface(
         "components": explicit_boundary_components,
         "measured_strict_component_count": measured_components.len(),
         "measured_strict_components": measured_components,
+        "resolution_state": resolution_state,
+        "guessed_baseline_prohibited": guessed_baseline_prohibited,
+        "equivalence_resume_condition": equivalence_resume_condition,
         "note": note,
     })
 }
@@ -12475,6 +12492,9 @@ fn build_client_limit_continuity_boundary_rollup(
             "components": [],
             "observed_tokens": 0,
             "observed_live_events": 0,
+            "resolution_state": "not_applicable",
+            "guessed_baseline_prohibited": false,
+            "equivalence_resume_condition": Value::Null,
             "note": "В этом scope сейчас нет explicit Amai continuity boundary rollup."
         });
     }
@@ -12519,6 +12539,9 @@ fn build_client_limit_continuity_boundary_rollup(
         "components": boundary_components,
         "observed_tokens": observed_tokens,
         "observed_live_events": observed_live_events,
+        "resolution_state": "observed_boundary_only_not_client_meter",
+        "guessed_baseline_prohibited": true,
+        "equivalence_resume_condition": "truthful_pre_amai_baseline_source",
         "note": "Этот rollup показывает observed token weight для Amai-specific continuity boundary. Он нужен отдельно от strict client-meter slice, потому что continuity restore пока не имеет truthful pre-Amai baseline-equivalent модели."
     })
 }
@@ -16118,11 +16141,11 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["explicit_boundary_surface"]["model_version"],
-            "client-limit-explicit-boundary-surface-v1"
+            "client-limit-explicit-boundary-surface-v2"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["continuity_boundary_rollup"]["model_version"],
-            "client-limit-continuity-boundary-rollup-v1"
+            "client-limit-continuity-boundary-rollup-v2"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -18864,11 +18887,11 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["explicit_boundary_surface_model_version"],
-            "client-limit-explicit-boundary-surface-v1"
+            "client-limit-explicit-boundary-surface-v2"
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["continuity_boundary_rollup_model_version"],
-            "client-limit-continuity-boundary-rollup-v1"
+            "client-limit-continuity-boundary-rollup-v2"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]
@@ -19049,12 +19072,36 @@ effective_to_epoch_ms = 2000
             json!(["continuity_restore_outside_retrieval"])
         );
         assert_eq!(
+            alignment["explicit_boundary_surface"]["resolution_state"],
+            "truthful_pre_amai_baseline_required"
+        );
+        assert_eq!(
+            alignment["explicit_boundary_surface"]["guessed_baseline_prohibited"],
+            json!(true)
+        );
+        assert_eq!(
+            alignment["explicit_boundary_surface"]["equivalence_resume_condition"],
+            "truthful_pre_amai_baseline_source"
+        );
+        assert_eq!(
             alignment["continuity_boundary_rollup"]["state"],
             "amai_continuity_boundary_observed"
         );
         assert_eq!(
             alignment["continuity_boundary_rollup"]["observed_tokens"],
             7
+        );
+        assert_eq!(
+            alignment["continuity_boundary_rollup"]["resolution_state"],
+            "observed_boundary_only_not_client_meter"
+        );
+        assert_eq!(
+            alignment["continuity_boundary_rollup"]["guessed_baseline_prohibited"],
+            json!(true)
+        );
+        assert_eq!(
+            alignment["continuity_boundary_rollup"]["equivalence_resume_condition"],
+            "truthful_pre_amai_baseline_source"
         );
         assert!(
             alignment["blocking_reasons"]

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 16:03 MSK
-Ручная сверка guide/docs: 2026-03-26 16:03 MSK
+modified_at: 2026-03-26 16:19 MSK
+Ручная сверка guide/docs: 2026-03-26 16:19 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1840,8 +1840,8 @@ preview, а не только raw count.
   - `client_limit_meter_alignment_version = client-limit-meter-alignment-v9`
   - `client_limit_baseline_equivalence_version = client-limit-baseline-equivalence-v3`
   - `client_limit_strict_meter_slice_version = client-limit-strict-meter-slice-v1`
-  - `client_limit_explicit_boundary_surface_version = client-limit-explicit-boundary-surface-v1`
-  - `client_limit_continuity_boundary_rollup_version = client-limit-continuity-boundary-rollup-v1`
+  - `client_limit_explicit_boundary_surface_version = client-limit-explicit-boundary-surface-v2`
+  - `client_limit_continuity_boundary_rollup_version = client-limit-continuity-boundary-rollup-v2`
   - `contractual_statement_summary`, `statement_export_preview.json`,
     `settlement_report_preview.json` и
     `contractual_evidence_pack.json` теперь отдельно несут
@@ -1853,6 +1853,13 @@ preview, а не только raw count.
     headline остаётся savings-KPI, но если в scope есть explicit continuity boundary или
     only-partial strict slice, его `note` теперь прямо говорит, что headline нельзя читать
     как эквивалент клиентской шкалы лимита.
+  - начиная с `v2/v2`, `explicit_boundary_surface` и `continuity_boundary_rollup`
+    теперь ещё machine-readable фиксируют resolution-law:
+    - `resolution_state`
+    - `guessed_baseline_prohibited`
+    - `equivalence_resume_condition`
+    Это нужно затем, чтобы rule `не подменять continuity boundary guessed baseline-ом`
+    жил не только в prose-note, а в явном contract surface.
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
   - начиная с `v9/v3` слой ещё и честно поднимает `baseline_equivalence` как отдельный
