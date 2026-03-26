@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 09:32 MSK
-Ручная сверка guide/docs: 2026-03-26 09:32 MSK
+modified_at: 2026-03-26 09:43 MSK
+Ручная сверка guide/docs: 2026-03-26 09:43 MSK
 
 # Token Ledger
 
@@ -475,20 +475,21 @@ Ledger обязан различать:
 ложного переключения `same_meter_as_client_limit=true` раньше времени.
 
 `baseline_equivalence` теперь обязан быть versioned и machine-readable:
-- `model_version = client-limit-baseline-equivalence-v2`
+- `model_version = client-limit-baseline-equivalence-v3`
 - `state`
 - `remaining_gap_reason`
 - `applicable_components / fully_observed_components / incomplete_components`
-- `measured_baseline_components / missing_baseline_components`
+- `measured_baseline_components / explicitly_unmodeled_baseline_components / missing_baseline_components`
 - `measured_baseline_tokens_lower_bound`
 - `whole_cycle_components_fully_observed`
 
 Это нужно затем, чтобы `same_meter_baseline_unmeasured /
-same_meter_baseline_partially_measured` не оставались только строками в
-`blocking_reasons`, а baseline-gap был отдельным truthful/measured contour:
+same_meter_baseline_partially_measured / same_meter_baseline_explicit_boundary`
+не оставались только строками в `blocking_reasons`, а baseline-gap был отдельным
+truthful/measured contour:
 что whole-cycle observed слой уже дотянулся до applicable components, какие из них уже
-получили baseline-equivalent semantics, и сколько baseline tokens уже честно можно
-посчитать как lower bound.
+получили baseline-equivalent semantics, а какие обязаны оставаться явной truth-boundary
+без guessed pre-Amai baseline.
 
 `component_event_coverage` теперь обязан быть `target-aware`, а не делить каждый
 whole-cycle компонент на одинаковое число всех live events.
@@ -1293,7 +1294,7 @@ Hashes по line items нужны затем, чтобы:
 - `settlement-report-preview-v10`
 - `contractual-evidence-pack-v19`
 - `client-limit-meter-alignment-v7`
-- `client-limit-baseline-equivalence-v2`
+- `client-limit-baseline-equivalence-v3`
 - `adjustment-activation-governance-v1`
 
 Теперь те же customer-facing surface-ы ещё несут `adjustment_activation_governance`.

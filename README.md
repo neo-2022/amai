@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 09:32 MSK
-Ручная сверка guide/docs: 2026-03-26 09:32 MSK
+modified_at: 2026-03-26 09:43 MSK
+Ручная сверка guide/docs: 2026-03-26 09:43 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1512,20 +1512,23 @@ preview, а не только raw count.
     - `state`
     - `remaining_gap_reason`
     - `applicable_components / fully_observed_components / incomplete_components`
-    - `measured_baseline_components / missing_baseline_components`
+    - `measured_baseline_components / explicitly_unmodeled_baseline_components / missing_baseline_components`
     - `measured_baseline_tokens_lower_bound`
     - `whole_cycle_components_fully_observed`
   Это нужно затем, чтобы `same_meter_baseline_unmeasured /
-  same_meter_baseline_partially_measured` перестали жить только как строки-blockers и стали
+  same_meter_baseline_partially_measured / same_meter_baseline_explicit_boundary`
+  перестали жить только как строки-blockers и стали
   отдельным truthful/measured object про незавершённый baseline-equivalent слой.
   - dashboard token-cards теперь поднимают этот же слой в user-facing surface:
     - добавляют строку `Связь с лимитом клиента`;
     - прямо показывают, когда текущий scope содержит только `non-live` активность;
     - для `whole_cycle_observed_baseline_partial` tooltip/note теперь ещё поднимают
       `baseline_equivalence.fully_observed_components /
-      measured_baseline_components / missing_baseline_components`, чтобы operator видел,
-      какие applicable whole-cycle компоненты уже дотянуты, по каким baseline-equivalent
-      semantics уже materialized, а какой baseline-gap ещё остался;
+      measured_baseline_components / explicitly_unmodeled_baseline_components /
+      missing_baseline_components`, чтобы operator видел, какие applicable whole-cycle
+      компоненты уже дотянуты, по каким baseline-equivalent semantics уже materialized,
+      а какой remaining gap является не просто missing implementation, а explicit
+      truth-boundary без guessed baseline;
     - и отдельно объясняют, что even confirmed lower bound всё ещё не обязан
       двигаться вместе с внешней шкалой клиентского лимита.
   - preview, settlement report preview и evidence pack теперь ещё несут общий
@@ -1758,14 +1761,15 @@ preview, а не только raw count.
     по каждому retrieval event без дублирования токенов.
   - operational metering contract теперь ещё несёт:
   - `client_limit_meter_alignment_version = client-limit-meter-alignment-v7`
-  - `client_limit_baseline_equivalence_version = client-limit-baseline-equivalence-v2`
+  - `client_limit_baseline_equivalence_version = client-limit-baseline-equivalence-v3`
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
-  - начиная с `v7/v2` слой ещё и честно поднимает `baseline_equivalence` как отдельный
+  - начиная с `v7/v3` слой ещё и честно поднимает `baseline_equivalence` как отдельный
     machine-readable contour; теперь он умеет различать не только
-    `baseline_semantics_unmaterialized`, но и
-    `baseline_component_semantics_partial`, когда baseline-equivalent semantics уже
-    materialized хотя бы для части applicable components, например для `client_prompt`.
+    `baseline_semantics_unmaterialized`, `baseline_component_semantics_partial`, но и
+    `baseline_component_semantics_explicit_boundary`, когда часть remaining gap должна
+    остаться явной truth-boundary без guessed pre-Amai baseline, например для
+    `continuity_restore_outside_retrieval`.
   - и тот же `v7` продолжает честно поднимать `client_prompt` как observed component
     из уже записанных `query + tokenizer`, даже если старое событие не несло
     отдельный `whole_cycle_observed.client_prompt_tokens`.

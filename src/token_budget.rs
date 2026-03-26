@@ -549,7 +549,7 @@ fn default_client_limit_meter_alignment_version() -> String {
 }
 
 fn default_client_limit_baseline_equivalence_version() -> String {
-    "client-limit-baseline-equivalence-v2".to_string()
+    "client-limit-baseline-equivalence-v3".to_string()
 }
 
 fn default_excluded_taxonomy_version() -> String {
@@ -10811,6 +10811,11 @@ fn client_limit_baseline_component_semantics(
                             Some(observed_tokens),
                             "Для client_prompt baseline-equivalent tokens совпадают с реально observed tokens: исходный пользовательский запрос к клиенту не меняется из-за Amai.",
                         ),
+                        "continuity_restore_outside_retrieval" => (
+                            "baseline_semantics_explicitly_unmodeled",
+                            None,
+                            "Continuity restore payload строится самим Amai continuity contour и сейчас не имеет truthful pre-Amai baseline-equivalent модели; этот gap должен оставаться явной границей, а не guessed baseline.",
+                        ),
                         _ => (
                             "baseline_semantics_unmaterialized",
                             None,
@@ -10861,10 +10866,21 @@ fn build_client_limit_baseline_equivalence(
         .filter(|item| item["baseline_measured_tokens"].is_u64())
         .filter_map(|item| item["code"].as_str().map(str::to_string))
         .collect::<Vec<_>>();
+    let explicitly_unmodeled_baseline_components = component_semantics
+        .iter()
+        .filter(|item| {
+            item["whole_cycle_observed_complete"].as_bool() == Some(true)
+                && item["baseline_semantics_state"].as_str()
+                    == Some("baseline_semantics_explicitly_unmodeled")
+        })
+        .filter_map(|item| item["code"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
     let missing_baseline_components = component_semantics
         .iter()
         .filter(|item| {
             item["whole_cycle_observed_complete"].as_bool() == Some(true)
+                && item["baseline_semantics_state"].as_str()
+                    != Some("baseline_semantics_explicitly_unmodeled")
                 && !item["baseline_measured_tokens"].is_u64()
         })
         .filter_map(|item| item["code"].as_str().map(str::to_string))
@@ -10893,11 +10909,21 @@ fn build_client_limit_baseline_equivalence(
             "whole_cycle_components_incomplete",
             "Whole-cycle observed компоненты ещё покрывают не весь applicable live scope, поэтому baseline-equivalent semantics пока преждевременны.",
         )
-    } else if missing_baseline_components.is_empty() {
+    } else if missing_baseline_components.is_empty()
+        && explicitly_unmodeled_baseline_components.is_empty()
+    {
         (
             "baseline_semantics_materialized",
             "none",
             "Applicable whole-cycle components уже и fully observed, и baseline-equivalent measured в текущем scope.",
+        )
+    } else if missing_baseline_components.is_empty()
+        && !explicitly_unmodeled_baseline_components.is_empty()
+    {
+        (
+            "baseline_component_semantics_explicit_boundary",
+            "same_meter_baseline_explicit_boundary",
+            "Applicable whole-cycle components уже полностью observed, но часть same-meter baseline contour оставлена как explicit truth-boundary без guessed pre-Amai baseline.",
         )
     } else if measured_baseline_components.is_empty() {
         (
@@ -10916,6 +10942,7 @@ fn build_client_limit_baseline_equivalence(
         "model_version": contract.client_limit_baseline_equivalence_version.clone(),
         "state": state,
         "same_meter_baseline_measured": missing_baseline_components.is_empty()
+            && explicitly_unmodeled_baseline_components.is_empty()
             && whole_cycle_components_fully_observed
             && counted_events > 0,
         "baseline_equivalent_to_client_limit": false,
@@ -10924,11 +10951,13 @@ fn build_client_limit_baseline_equivalence(
         "applicable_component_count": applicable_components.len(),
         "fully_observed_component_count": fully_observed_components.len(),
         "measured_baseline_component_count": measured_baseline_components.len(),
+        "explicitly_unmodeled_baseline_component_count": explicitly_unmodeled_baseline_components.len(),
         "missing_baseline_component_count": missing_baseline_components.len(),
         "applicable_components": applicable_components,
         "fully_observed_components": fully_observed_components,
         "incomplete_components": incomplete_components,
         "measured_baseline_components": measured_baseline_components,
+        "explicitly_unmodeled_baseline_components": explicitly_unmodeled_baseline_components,
         "missing_baseline_components": missing_baseline_components,
         "measured_baseline_tokens_lower_bound": measured_baseline_tokens_lower_bound,
         "whole_cycle_components_fully_observed": whole_cycle_components_fully_observed,
@@ -11003,6 +11032,9 @@ fn build_client_limit_meter_alignment(
     match baseline_equivalence["state"].as_str().unwrap_or_default() {
         "baseline_semantics_unmaterialized" => {
             blocking_reasons.push("same_meter_baseline_unmeasured".to_string());
+        }
+        "baseline_component_semantics_explicit_boundary" => {
+            blocking_reasons.push("same_meter_baseline_explicit_boundary".to_string());
         }
         "baseline_component_semantics_partial" => {
             blocking_reasons.push("same_meter_baseline_partially_measured".to_string());
@@ -13887,7 +13919,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_baseline_equivalence_version"],
-            "client-limit-baseline-equivalence-v2"
+            "client-limit-baseline-equivalence-v3"
         );
         assert_eq!(
             token_event["whole_cycle_observed"]["client_prompt_tokens"],
@@ -14488,7 +14520,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["baseline_equivalence"]["model_version"],
-            "client-limit-baseline-equivalence-v2"
+            "client-limit-baseline-equivalence-v3"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -17106,7 +17138,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["baseline_equivalence_model_version"],
-            "client-limit-baseline-equivalence-v2"
+            "client-limit-baseline-equivalence-v3"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["surface_kind"],
@@ -17204,6 +17236,71 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             alignment["baseline_equivalence"]["state"],
             "whole_cycle_components_incomplete"
+        );
+    }
+
+    #[test]
+    fn client_limit_meter_alignment_marks_explicit_baseline_boundary_for_continuity_restore() {
+        let summary = json!({
+            "events_total": 1,
+            "live_events_count": 1,
+            "non_live_events_count": 0,
+            "counted_events": 1,
+            "observed_client_prompt_tokens": 30,
+            "observed_assistant_generation_tokens": 0,
+            "observed_tool_overhead_tokens": 0,
+            "observed_continuity_restore_tokens": 7,
+            "observed_client_prompt_live_events": 1,
+            "observed_assistant_generation_live_events": 0,
+            "observed_tool_overhead_live_events": 0,
+            "observed_continuity_restore_live_events": 1
+        });
+        let events = vec![
+            token_event! {
+                event_id: "event-1".to_string(),
+                correlation_id: "event-1".to_string(),
+                measurement_scope: "whole_cycle_observed_lower_bound".to_string(),
+                query_type: "continuity_restore".to_string(),
+                target_kind: "continuity_restore".to_string(),
+                traffic_class: "live".to_string(),
+                client_prompt_tokens: Some(30),
+                continuity_restore_tokens: Some(7),
+            },
+        ];
+
+        let alignment = super::build_client_limit_meter_alignment(
+            &contract_fixture(),
+            "statement_preview",
+            &summary,
+            Some(&events),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            alignment["baseline_equivalence"]["state"],
+            "baseline_component_semantics_explicit_boundary"
+        );
+        assert_eq!(
+            alignment["baseline_equivalence"]["explicitly_unmodeled_baseline_components"],
+            json!(["continuity_restore_outside_retrieval"])
+        );
+        assert_eq!(
+            alignment["baseline_equivalence"]["same_meter_baseline_measured"],
+            json!(false)
+        );
+        assert_eq!(
+            alignment["baseline_equivalence"]["missing_baseline_components"],
+            json!([])
+        );
+        assert!(
+            alignment["blocking_reasons"]
+                .as_array()
+                .is_some_and(|reasons| {
+                    reasons
+                        .iter()
+                        .any(|reason| reason == "same_meter_baseline_explicit_boundary")
+                })
         );
     }
 
