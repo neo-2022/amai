@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 11:50 MSK
-Ручная сверка guide/docs: 2026-03-26 11:50 MSK
+modified_at: 2026-03-26 12:03 MSK
+Ручная сверка guide/docs: 2026-03-26 12:03 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -639,7 +639,8 @@ scripts\human_dashboard_down.cmd
 - `/api/dashboard`, `/api/snapshot`, `/metrics` и `/healthz` читают уже готовый последний снимок;
 - в summary панели теперь прямо видны `refresh`, `возраст` и состояние кэша, чтобы было ясно, страница ждёт браузер или сам snapshot-builder;
 - там же теперь выводится и самый дорогой stage последнего snapshot-refresh, чтобы operator сразу видел узкое место без отдельного raw JSON разбора.
-- сами карточки при этом больше не тянут полный contractual `observe token-report`: для `observe serve` они используют отдельный `dashboard_read_only` token report без quiet sync/write-back и без разворачивания export/settlement contours на каждый refresh.
+- сами карточки при этом больше не тянут полный contractual `observe token-report`: для `observe serve` они используют отдельный `dashboard_read_only` token report без full contractual/export path на каждый refresh;
+- этот dashboard contour при этом разрешает только ограниченный quiet same-meter sync/write-back для active live scope текущей сессии и рабочего окна, а не полный write-side settlement/export контур.
 
 После запуска откройте в браузере:
 
@@ -726,6 +727,8 @@ http://127.0.0.1:9464/
   - отдельный token-events слой для dashboard теперь тоже переиспользуется по лёгкой DB summary,
     а не заново читает и парсит весь `token_budget_event` ledger на каждом refresh:
     - signature строится по `count + latest_created_at` для `token_budget_event / token_benchmark`;
+    - если summary изменилась только append-only хвостом, runtime дозагружает только небольшой delta-tail,
+      а не перечитывает сразу весь lifetime ledger;
     - это снимает repeated cold parse даже при большом lifetime ledger.
   - machine summary теперь переиспользуется как cache до `60` секунд, чтобы human dashboard не
     зависал на `dmidecode/sysinfo`-хвосте и не раздувал long-lived `observe serve`.
@@ -751,6 +754,11 @@ http://127.0.0.1:9464/
     - quiet same-meter sync/write-back повторяется только если реально изменился набор missing
       `assistant_generation/tool_overhead` targets или semantic contents current rollout
       observations.
+    - после такого quiet sync текущий refresh больше не обязан сразу делать ещё один full reload
+      token events в тот же pass:
+      - write-back материализуется в этом тике;
+      - обновлённые token events подхватываются уже следующим refresh, чтобы post-live contour не
+        раздувался лишним same-pass reload.
   - если ускорителей нет вообще, карточка не исчезает, а показывает `не обнаружено`;
   - `Установленный клиент` и `Сборка`
     - теперь живут как компактные карточки рядом друг с другом, а не занимают место hardware-card первого ряда;

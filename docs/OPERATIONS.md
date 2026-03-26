@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 11:50 MSK
-Ручная сверка guide/docs: 2026-03-26 11:50 MSK
+modified_at: 2026-03-26 12:03 MSK
+Ручная сверка guide/docs: 2026-03-26 12:03 MSK
 
 # Operations
 
@@ -2798,7 +2798,7 @@ Grafana login берётся из `.env`:
   - из-за этого даже если очередной snapshot дорогой, страница должна отдавать последний готовый слой быстро, а не висеть на полном probe-contour;
   - summary панели теперь обязана поднимать `refresh`, `возраст` и stale-state этого process-local cache;
   - туда же теперь выводится самый дорогой stage последнего snapshot-refresh, чтобы operator видел реальное узкое место (`token_budget_report`, `collect_nats_live` и т.п.) без отдельного forensic-разбора raw snapshot;
-  - hero-карты и token-rows внутри `observe serve` теперь строятся через отдельный `dashboard_read_only` token report; он сохраняет live/current/rolling/lifetime rollups и `client_limit_meter_alignment`, но не имеет права тащить full contractual/export path и quiet sync/write-back в browser refresh contour;
+  - hero-карты и token-rows внутри `observe serve` теперь строятся через отдельный `dashboard_read_only` token report; он сохраняет live/current/rolling/lifetime rollups и `client_limit_meter_alignment`, не имеет права тащить full contractual/export path в browser refresh contour и допускает только ограниченный quiet same-meter sync/write-back для active live scope текущей сессии и рабочего окна;
 - верхние hero-карты human dashboard теперь intentionally живут только на real live ledger:
   - текущая сессия;
   - текущее рабочее окно профиля;
@@ -2870,6 +2870,8 @@ Grafana login берётся из `.env`:
       `token_budget_event / token_benchmark`;
     - если `count + latest_created_at` не изменились, cached parsed events должны
       переиспользоваться без нового полного ledger parse;
+    - если summary изменилась только append-only хвостом, runtime обязан дозагрузить только
+      ограниченный delta-tail вместо немедленного full reload всего lifetime ledger;
   - long-lived `observe serve` теперь обязан переиспользовать machine summary cache до `60` секунд;
   - static memory inventory provider chain (`sudo dmidecode`, `dmidecode`, `lshw`, `inxi`) теперь
     должен жить отдельно от минутного live cache:
@@ -2896,6 +2898,11 @@ Grafana login берётся из `.env`:
   - quiet same-meter sync/write-back для dashboard повторяется только если меняется набор missing
     `assistant_generation/tool_overhead` context_pack_ids или semantic contents current rollout
     observations;
+  - если такой quiet sync что-то дописал, тот же refresh больше не обязан сразу перечитывать весь
+    token-event слой:
+    - write-back materialize-ится в текущем тике;
+    - token events подтягиваются следующим refresh, чтобы свежая live-активность не вносила
+      лишний same-pass full reload в post-live contour;
   - truthful semantics остаётся fail-closed: как только меняется любой из этих inputs, cache обязан
     invalidated, а dashboard — снова пересчитать assist contour честно.
   - для повторного запроса сейчас целевой набор такой:

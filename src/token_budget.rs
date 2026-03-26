@@ -485,8 +485,8 @@ struct DashboardReportCache {
 struct DashboardTokenEventsCache {
     repo_root: PathBuf,
     signature: String,
-    include_verify_events: bool,
-    events: Vec<TokenBudgetEvent>,
+    summary: Vec<postgres::ObservabilitySnapshotKindSummary>,
+    raw_events: Vec<TokenBudgetEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -6853,15 +6853,15 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         dashboard_rollout_assistant_generation_observations_for_repo(&repo_root)?;
     let mut events = load_dashboard_token_events(db, &repo_root, include_verify_events).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
-    let mut events =
+    let events =
         reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
     let now_epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
         .as_millis() as i64;
     let session_gap_ms = profile.session_gap_minutes.saturating_mul(60_000) as i64;
-    let mut session_events = current_session_events(&events, session_gap_ms);
-    let mut rolling_window_events = profile
+    let session_events = current_session_events(&events, session_gap_ms);
+    let rolling_window_events = profile
         .rolling_window_hours
         .map(|hours| {
             let lower_bound = now_epoch_ms.saturating_sub((hours as i64).saturating_mul(3_600_000));
@@ -6877,7 +6877,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         &sync_scope_events,
         &rollout_observation_signature,
     );
-    let (tool_overhead_changed, assistant_generation_changed) =
+    let (_tool_overhead_changed, _assistant_generation_changed) =
         if should_run_dashboard_same_meter_sync(&repo_root, &dashboard_sync_signature) {
             (
                 sync_context_pack_tool_overhead_for_events(db, &repo_root, &sync_scope_events)
@@ -6892,25 +6892,6 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         } else {
             (false, false)
         };
-    if tool_overhead_changed || assistant_generation_changed {
-        let mut refreshed = load_dashboard_token_events(db, &repo_root, include_verify_events).await?;
-        refreshed.sort_by_key(|event| event.created_at_epoch_ms);
-        events =
-            reconcile_followup_recovery(&refreshed, profile.session_gap_minutes as i64 * 60_000);
-        session_events = current_session_events(&events, session_gap_ms);
-        rolling_window_events = profile
-            .rolling_window_hours
-            .map(|hours| {
-                let lower_bound =
-                    now_epoch_ms.saturating_sub((hours as i64).saturating_mul(3_600_000));
-                events
-                    .iter()
-                    .filter(|event| event.created_at_epoch_ms >= lower_bound)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-    }
     let scope_events = if profile.rolling_window_hours.is_some() {
         vec![
             session_events.as_slice(),
@@ -7027,7 +7008,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                     Some(&lifetime_assistant_scope),
                 ),
             },
-            "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups и client-limit alignment, не разворачивает полный contractual/export contour, но делает ограниченный quiet same-meter sync/write-back только для active live scope текущей сессии и рабочего окна.",
+            "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups и client-limit alignment, не разворачивает полный contractual/export contour, но делает ограниченный quiet same-meter sync/write-back только для active live scope текущей сессии и рабочего окна. Sync write-back может материализоваться в этом тике, а обновлённые token events подхватываются следующим refresh, чтобы текущий pass не делал лишний full reload.",
         }
     });
     store_dashboard_report(&repo_root, &report_signature, &report);
@@ -9125,6 +9106,11 @@ async fn load_events(
     include_verify_events: bool,
     limit: Option<i64>,
 ) -> Result<Vec<TokenBudgetEvent>> {
+    let events = load_raw_events(db, limit).await?;
+    Ok(filter_dashboard_token_events(events, include_verify_events))
+}
+
+async fn load_raw_events(db: &Client, limit: Option<i64>) -> Result<Vec<TokenBudgetEvent>> {
     let rows = postgres::list_observability_snapshots_by_kinds(
         db,
         &["token_budget_event", "token_benchmark"],
@@ -9137,11 +9123,18 @@ async fn load_events(
             events.push(event);
         }
     }
-    let events = suppress_shadowed_live_events(events);
-    Ok(events
+    Ok(events)
+}
+
+fn filter_dashboard_token_events(
+    raw_events: Vec<TokenBudgetEvent>,
+    include_verify_events: bool,
+) -> Vec<TokenBudgetEvent> {
+    let events = suppress_shadowed_live_events(raw_events);
+    events
         .into_iter()
         .filter(|event| include_traffic_class_in_report(&event.traffic_class, include_verify_events))
-        .collect())
+        .collect()
 }
 
 async fn load_dashboard_token_events(
@@ -9149,36 +9142,43 @@ async fn load_dashboard_token_events(
     repo_root: &Path,
     include_verify_events: bool,
 ) -> Result<Vec<TokenBudgetEvent>> {
-    let signature = dashboard_token_events_signature(db, include_verify_events).await?;
-    if let Some(events) =
-        cached_dashboard_token_events(repo_root, &signature, include_verify_events)
-    {
-        return Ok(events);
-    }
-    let events = load_events(db, include_verify_events, None).await?;
-    store_dashboard_token_events(repo_root, &signature, include_verify_events, &events);
-    Ok(events)
-}
-
-async fn dashboard_token_events_signature(
-    db: &Client,
-    include_verify_events: bool,
-) -> Result<String> {
     let summary =
         postgres::summarize_observability_snapshots_by_kinds(db, &["token_budget_event", "token_benchmark"])
             .await?;
-    Ok(dashboard_token_events_signature_from_summary(
-        &summary,
-        include_verify_events,
-    ))
+    let signature = dashboard_token_events_signature_from_summary(&summary);
+    if let Some(raw_events) = cached_dashboard_token_events(repo_root, &signature) {
+        return Ok(filter_dashboard_token_events(raw_events, include_verify_events));
+    }
+    if let Some((previous_summary, previous_raw_events)) =
+        cached_dashboard_token_events_entry(repo_root)
+    {
+        if let Some(delta_limit) =
+            dashboard_token_events_delta_limit(&previous_summary, &summary, 32)
+        {
+            let delta_events = load_raw_events(db, Some(delta_limit)).await?;
+            let mut merged = previous_raw_events;
+            let existing_event_ids = merged
+                .iter()
+                .map(|event| event.event_id.clone())
+                .collect::<BTreeSet<_>>();
+            merged.extend(
+                delta_events
+                    .into_iter()
+                    .filter(|event| !existing_event_ids.contains(&event.event_id)),
+            );
+            store_dashboard_token_events(repo_root, &signature, &summary, &merged);
+            return Ok(filter_dashboard_token_events(merged, include_verify_events));
+        }
+    }
+    let raw_events = load_raw_events(db, None).await?;
+    store_dashboard_token_events(repo_root, &signature, &summary, &raw_events);
+    Ok(filter_dashboard_token_events(raw_events, include_verify_events))
 }
 
 fn dashboard_token_events_signature_from_summary(
     summary: &[postgres::ObservabilitySnapshotKindSummary],
-    include_verify_events: bool,
 ) -> String {
     let payload = json!({
-        "include_verify_events": include_verify_events,
         "summary": summary
             .iter()
             .map(|item| {
@@ -9199,16 +9199,25 @@ fn dashboard_token_events_signature_from_summary(
 fn cached_dashboard_token_events(
     repo_root: &Path,
     signature: &str,
-    include_verify_events: bool,
 ) -> Option<Vec<TokenBudgetEvent>> {
     let cache = DASHBOARD_TOKEN_EVENTS_CACHE.get_or_init(|| Mutex::new(None));
     let guard = cache.lock().ok()?;
     let entry = guard.as_ref()?;
-    if canonical_repo_root(repo_root) == entry.repo_root
-        && entry.signature == signature
-        && entry.include_verify_events == include_verify_events
-    {
-        Some(entry.events.clone())
+    if canonical_repo_root(repo_root) == entry.repo_root && entry.signature == signature {
+        Some(entry.raw_events.clone())
+    } else {
+        None
+    }
+}
+
+fn cached_dashboard_token_events_entry(
+    repo_root: &Path,
+) -> Option<(Vec<postgres::ObservabilitySnapshotKindSummary>, Vec<TokenBudgetEvent>)> {
+    let cache = DASHBOARD_TOKEN_EVENTS_CACHE.get_or_init(|| Mutex::new(None));
+    let guard = cache.lock().ok()?;
+    let entry = guard.as_ref()?;
+    if canonical_repo_root(repo_root) == entry.repo_root {
+        Some((entry.summary.clone(), entry.raw_events.clone()))
     } else {
         None
     }
@@ -9217,8 +9226,8 @@ fn cached_dashboard_token_events(
 fn store_dashboard_token_events(
     repo_root: &Path,
     signature: &str,
-    include_verify_events: bool,
-    events: &[TokenBudgetEvent],
+    summary: &[postgres::ObservabilitySnapshotKindSummary],
+    raw_events: &[TokenBudgetEvent],
 ) {
     let cache = DASHBOARD_TOKEN_EVENTS_CACHE.get_or_init(|| Mutex::new(None));
     let Some(mut guard) = cache.lock().ok() else {
@@ -9227,9 +9236,50 @@ fn store_dashboard_token_events(
     *guard = Some(DashboardTokenEventsCache {
         repo_root: canonical_repo_root(repo_root),
         signature: signature.to_string(),
-        include_verify_events,
-        events: events.to_vec(),
+        summary: summary.to_vec(),
+        raw_events: raw_events.to_vec(),
     });
+}
+
+fn dashboard_token_events_delta_limit(
+    previous: &[postgres::ObservabilitySnapshotKindSummary],
+    current: &[postgres::ObservabilitySnapshotKindSummary],
+    max_delta: i64,
+) -> Option<i64> {
+    let previous = previous
+        .iter()
+        .map(|item| (item.snapshot_kind.clone(), item))
+        .collect::<BTreeMap<_, _>>();
+    let current = current
+        .iter()
+        .map(|item| (item.snapshot_kind.clone(), item))
+        .collect::<BTreeMap<_, _>>();
+    let kinds = previous
+        .keys()
+        .chain(current.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut delta_total = 0_i64;
+    for kind in kinds {
+        let previous_item = previous.get(&kind);
+        let current_item = current.get(&kind);
+        let previous_count = previous_item.map(|item| item.snapshots_count).unwrap_or(0);
+        let current_count = current_item.map(|item| item.snapshots_count).unwrap_or(0);
+        if current_count < previous_count {
+            return None;
+        }
+        let previous_latest = previous_item.and_then(|item| item.latest_created_at_epoch_ms);
+        let current_latest = current_item.and_then(|item| item.latest_created_at_epoch_ms);
+        if current_latest < previous_latest {
+            return None;
+        }
+        delta_total = delta_total.saturating_add(current_count.saturating_sub(previous_count));
+    }
+    if delta_total == 0 || delta_total > max_delta {
+        None
+    } else {
+        Some(delta_total)
+    }
 }
 
 fn can_shadow_live_report_event(event: &TokenBudgetEvent) -> bool {
@@ -14116,7 +14166,8 @@ mod tests {
         configured_provider_usage_source, contractual_line_item_json,
         count_cli_context_pack_output_overhead_tokens, count_tool_overhead_tokens,
         current_session_events, dashboard_report_signature,
-        dashboard_same_meter_sync_signature, dashboard_token_events_signature_from_summary,
+        dashboard_same_meter_sync_signature, dashboard_token_events_delta_limit,
+        dashboard_token_events_signature_from_summary,
         default_adjustment_preview_model_version,
         default_adjustment_registry_version, default_adjustment_request_schema_version,
         default_backfill_policy_version, default_baseline_method_version, default_billing_mode,
@@ -19355,18 +19406,65 @@ effective_to_epoch_ms = 2000
             latest_created_at_epoch_ms: Some(101),
         }];
 
-        let base_sig = dashboard_token_events_signature_from_summary(&base, false);
+        let base_sig = dashboard_token_events_signature_from_summary(&base);
         assert_ne!(
             base_sig,
-            dashboard_token_events_signature_from_summary(&changed_count, false)
+            dashboard_token_events_signature_from_summary(&changed_count)
         );
         assert_ne!(
             base_sig,
-            dashboard_token_events_signature_from_summary(&changed_latest, false)
+            dashboard_token_events_signature_from_summary(&changed_latest)
         );
         assert_ne!(
-            base_sig,
-            dashboard_token_events_signature_from_summary(&base, true)
+            dashboard_token_events_signature_from_summary(&base),
+            dashboard_token_events_signature_from_summary(&changed_count)
+        );
+    }
+
+    #[test]
+    fn dashboard_token_events_delta_limit_detects_small_append_only_tail() {
+        let previous = vec![ObservabilitySnapshotKindSummary {
+            snapshot_kind: "token_budget_event".to_string(),
+            snapshots_count: 10,
+            latest_created_at_epoch_ms: Some(100),
+        }];
+        let current = vec![ObservabilitySnapshotKindSummary {
+            snapshot_kind: "token_budget_event".to_string(),
+            snapshots_count: 12,
+            latest_created_at_epoch_ms: Some(120),
+        }];
+
+        assert_eq!(
+            dashboard_token_events_delta_limit(&previous, &current, 32),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn dashboard_token_events_delta_limit_rejects_non_append_changes() {
+        let previous = vec![ObservabilitySnapshotKindSummary {
+            snapshot_kind: "token_budget_event".to_string(),
+            snapshots_count: 10,
+            latest_created_at_epoch_ms: Some(100),
+        }];
+        let decreased = vec![ObservabilitySnapshotKindSummary {
+            snapshot_kind: "token_budget_event".to_string(),
+            snapshots_count: 9,
+            latest_created_at_epoch_ms: Some(100),
+        }];
+        let regressed_latest = vec![ObservabilitySnapshotKindSummary {
+            snapshot_kind: "token_budget_event".to_string(),
+            snapshots_count: 10,
+            latest_created_at_epoch_ms: Some(99),
+        }];
+
+        assert_eq!(
+            dashboard_token_events_delta_limit(&previous, &decreased, 32),
+            None
+        );
+        assert_eq!(
+            dashboard_token_events_delta_limit(&previous, &regressed_latest, 32),
+            None
         );
     }
 
