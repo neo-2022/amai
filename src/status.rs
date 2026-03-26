@@ -45,7 +45,7 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
     );
     println!("memory_embed_model: {}", cfg.memory_embed_model);
     println!("edge_cache: {}", cfg.edge_cache_path.display());
-    let compatibility = compatibility::check(cfg).await?;
+    let compatibility = compatibility::check_fresh(cfg).await?;
     println!(
         "compatibility: {} (profile={}, postgres={}, qdrant={}, nats={}, s3={})",
         if compatibility.compatible() {

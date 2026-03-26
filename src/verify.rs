@@ -1593,7 +1593,7 @@ async fn run_stack_meta_drift(cfg: &AppConfig) -> Result<serde_json::Value> {
     )
     .await?;
 
-    let report = compatibility::check(cfg).await?;
+    let report = compatibility::check_fresh(cfg).await?;
     if report.compatible() {
         return Err(anyhow!(
             "stack_meta drift probe failed: compatibility remained green after tampering"
@@ -1613,7 +1613,7 @@ async fn run_stack_meta_drift(cfg: &AppConfig) -> Result<serde_json::Value> {
 async fn run_service_loss_probe(cfg: &AppConfig, service: &str) -> Result<serde_json::Value> {
     docker_compose(&["stop", service]).await?;
 
-    let failed_closed = match compatibility::check(cfg).await {
+    let failed_closed = match compatibility::check_fresh(cfg).await {
         Ok(report) => !report.compatible(),
         Err(_) => true,
     };

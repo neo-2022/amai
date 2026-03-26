@@ -6,8 +6,22 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
+use std::time::Instant;
 use tokio_postgres::Client;
+
+const COMPATIBILITY_CACHE_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone)]
+struct CompatibilityCacheEntry {
+    signature: String,
+    cached_at: Instant,
+    report: CompatibilityReport,
+}
+
+static COMPATIBILITY_CHECK_CACHE: LazyLock<Mutex<Option<CompatibilityCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CompatibilityManifest {
@@ -51,7 +65,7 @@ pub struct ServiceCheck {
 }
 
 pub async fn print_report(cfg: &AppConfig) -> Result<()> {
-    let report = check(cfg).await?;
+    let report = check_fresh(cfg).await?;
     print_report_lines(&report);
     if !report.compatible() {
         return Err(anyhow!("compatibility check failed"));
@@ -60,7 +74,7 @@ pub async fn print_report(cfg: &AppConfig) -> Result<()> {
 }
 
 pub async fn assert_supported(cfg: &AppConfig) -> Result<()> {
-    let report = check(cfg).await?;
+    let report = check_fresh(cfg).await?;
     if !report.compatible() {
         print_report_lines(&report);
         return Err(anyhow!(
@@ -86,6 +100,27 @@ pub async fn bootstrap_meta(_cfg: &AppConfig, client: &Client) -> Result<()> {
 
 pub async fn check(cfg: &AppConfig) -> Result<CompatibilityReport> {
     let manifest = load_manifest()?;
+    let cache_signature = compatibility_cache_signature(cfg, &manifest);
+    if let Some(cached) = compatibility_cache_lookup(&cache_signature) {
+        return Ok(cached);
+    }
+    let report = check_with_manifest(cfg, &manifest).await?;
+    compatibility_cache_store(cache_signature, report.clone());
+    Ok(report)
+}
+
+pub async fn check_fresh(cfg: &AppConfig) -> Result<CompatibilityReport> {
+    let manifest = load_manifest()?;
+    let cache_signature = compatibility_cache_signature(cfg, &manifest);
+    let report = check_with_manifest(cfg, &manifest).await?;
+    compatibility_cache_store(cache_signature, report.clone());
+    Ok(report)
+}
+
+async fn check_with_manifest(
+    cfg: &AppConfig,
+    manifest: &CompatibilityManifest,
+) -> Result<CompatibilityReport> {
     let http = http_client()?;
 
     let db = postgres::connect_admin(cfg).await?;
@@ -167,7 +202,7 @@ pub async fn check(cfg: &AppConfig) -> Result<CompatibilityReport> {
     };
 
     Ok(CompatibilityReport {
-        profile: manifest.compatibility_profile,
+        profile: manifest.compatibility_profile.clone(),
         schema_version: manifest.schema_version,
         postgres,
         qdrant,
@@ -176,6 +211,45 @@ pub async fn check(cfg: &AppConfig) -> Result<CompatibilityReport> {
         schema_meta_ok,
         meta_reason,
     })
+}
+
+fn compatibility_cache_signature(cfg: &AppConfig, manifest: &CompatibilityManifest) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        manifest.schema_version,
+        manifest.compatibility_profile,
+        manifest.postgres.supported_major,
+        manifest.postgres.supported_minor.unwrap_or_default(),
+        manifest.qdrant.supported_major,
+        manifest.qdrant.supported_minor.unwrap_or_default(),
+        manifest.nats.supported_major,
+        manifest.nats.supported_minor.unwrap_or_default(),
+        cfg.postgres_dsn,
+        cfg.qdrant_http_url,
+        cfg.nats_http_url
+    ) + &format!("|{}", cfg.s3_endpoint)
+}
+
+fn compatibility_cache_lookup(signature: &str) -> Option<CompatibilityReport> {
+    let cache = COMPATIBILITY_CHECK_CACHE.lock().ok()?;
+    let entry = cache.as_ref()?;
+    if entry.signature != signature {
+        return None;
+    }
+    if entry.cached_at.elapsed() > COMPATIBILITY_CACHE_TTL {
+        return None;
+    }
+    Some(entry.report.clone())
+}
+
+fn compatibility_cache_store(signature: String, report: CompatibilityReport) {
+    if let Ok(mut cache) = COMPATIBILITY_CHECK_CACHE.lock() {
+        *cache = Some(CompatibilityCacheEntry {
+            signature,
+            cached_at: Instant::now(),
+            report,
+        });
+    }
 }
 
 impl CompatibilityReport {
