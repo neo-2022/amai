@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 14:53 MSK
-Ручная сверка guide/docs: 2026-03-26 14:53 MSK
+modified_at: 2026-03-26 14:57 MSK
+Ручная сверка guide/docs: 2026-03-26 14:57 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -2153,6 +2153,7 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
   - сколько места входит в managed cleanup scope;
   - сколько веса уже лежит вне policy и therefore не будет убрано auto-retention path-ом;
   - какие крупные unmanaged roots сейчас дают основной рост;
+  - какие unreadable live-state paths делают inventory best-effort lower bound, если полный repo-root нельзя честно дочитать;
   - какие manual-only cleanup contours уже есть и каким explicit command их reclaim-ить;
   - сколько можно убрать безопасно прямо сейчас;
   - сколько можно убрать explicit aggressive path-ом;

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 14:53 MSK
-Ручная сверка guide/docs: 2026-03-26 14:53 MSK
+modified_at: 2026-03-26 14:57 MSK
+Ручная сверка guide/docs: 2026-03-26 14:57 MSK
 
 # Operations
 
@@ -2518,6 +2518,7 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
   - сколько места сейчас покрывает managed cleanup policy;
   - сколько веса сейчас уже лежит вне policy и поэтому не может исчезнуть auto-cleanup path-ом;
   - какие крупные unmanaged roots сейчас формируют этот out-of-policy рост;
+  - какие unreadable live-state paths не дают inventory дочитать repo полностью и почему footprint тогда считается best-effort lower bound;
   - какие manual-only contours уже заведены и каким explicit cleanup command их reclaim-ить;
   - safe reclaim now;
   - aggressive preview;

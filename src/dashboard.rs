@@ -3691,6 +3691,10 @@ fn artifact_cleanup_card(snapshot: &Value, machine: Option<&MachineSummary>) -> 
     let cleanup_scope_bytes = repo_inventory["cleanup_scope_bytes"].as_u64().unwrap_or(0);
     let out_of_policy_bytes = repo_inventory["out_of_policy_bytes"].as_u64().unwrap_or(0);
     let unreadable_paths_count = repo_inventory["unreadable_paths_count"].as_u64().unwrap_or(0);
+    let unreadable_paths_sample = repo_inventory["unreadable_paths_sample"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let large_unmanaged_roots = repo_inventory["large_unmanaged_roots"]
         .as_array()
         .cloned()
@@ -3745,6 +3749,11 @@ fn artifact_cleanup_card(snapshot: &Value, machine: Option<&MachineSummary>) -> 
         note.push_str(&format!(
             " Основной локальный вес сейчас лежит вне cleanup policy: {root_path} = {} unmanaged bytes.",
             human_bytes(root_unmanaged_bytes as f64)
+        ));
+    } else if let Some(sample) = unreadable_paths_sample.first() {
+        let sample_path = sample.as_str().unwrap_or("неизвестный path");
+        note.push_str(&format!(
+            " Inventory читает repo как best-effort lower bound: один из unreadable live-state путей сейчас {sample_path}. Поэтому часть вне-policy веса может жить там и не является broken cleanup contour.",
         ));
     }
     if let Some(target) = manual_only_targets.first() {
@@ -3963,6 +3972,20 @@ fn artifact_cleanup_card(snapshot: &Value, machine: Option<&MachineSummary>) -> 
                 "Unreadable contents",
                 unreadable_paths_count.to_string(),
                 Some("Сколько путей inventory не смог прочитать. Repo footprint тогда считается как best-effort lower bound."),
+            ),
+            metric_row(
+                "Unreadable sample",
+                if unreadable_paths_sample.is_empty() {
+                    "нет".to_string()
+                } else {
+                    unreadable_paths_sample
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                Some("Примеры путей, которые inventory не смог прочитать и поэтому считает repo footprint только как best-effort lower bound."),
             ),
         ],
     );
@@ -8528,6 +8551,73 @@ mod tests {
         assert!(warning.contains("давление"));
         assert!(warning.contains("target/debug"));
         assert!(warning.contains("--aggressive --apply"));
+    }
+
+    #[test]
+    fn artifact_cleanup_card_surfaces_unreadable_samples_as_best_effort_note() {
+        let snapshot = json!({
+            "artifact_cleanup": {
+                "captured_at_epoch_ms": 42,
+                "selected": 0,
+                "selected_reclaimable_bytes": 0,
+                "policy_retained_reclaimable_bytes": 18_460_613_632u64,
+                "policy_retained_targets": [
+                    {
+                        "path": "target/debug",
+                        "ttl_hours": 168,
+                        "keep_latest": 3,
+                        "aggressive_preview_reclaimable_bytes": 16_254_702_590u64
+                    }
+                ],
+                "manual_only_reclaimable_bytes": 0,
+                "manual_only_reclaimable_targets": [],
+                "expired": 0,
+                "kept_latest": 13,
+                "protected": 0,
+                "targets_scanned": 8,
+                "aggressive_preview_selected": 19,
+                "aggressive_preview_reclaimable_bytes": 32_577_450_367u64,
+                "last_apply": {
+                    "captured_at_epoch_ms": 41,
+                    "mode": "aggressive",
+                    "deleted": 1,
+                    "reclaimed_bytes": 28_888_311_035u64
+                },
+                "repo_inventory": {
+                    "repo_total_bytes": 35_728_482_155u64,
+                    "cleanup_scope_bytes": 32_698_373_188u64,
+                    "out_of_policy_bytes": 3_030_108_967u64,
+                    "unmanaged_alert_triggered": false,
+                    "large_unmanaged_roots": [],
+                    "manual_only_targets": [],
+                    "unreadable_paths_count": 1,
+                    "unreadable_paths_sample": [
+                        "/home/art/agent-memory-index/state/postgres/pgdata"
+                    ]
+                }
+            }
+        });
+        let cards = build_machine_cards(&snapshot, None, None);
+        let cleanup_card = cards
+            .iter()
+            .find(|card| card["title"].as_str() == Some("Локальный мусор и retention"))
+            .expect("cleanup card");
+        assert!(
+            cleanup_card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("best-effort lower bound")
+        );
+        let unreadable_row = cleanup_card["rows"]
+            .as_array()
+            .expect("cleanup rows")
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Unreadable sample"))
+            .expect("unreadable sample row");
+        assert_eq!(
+            unreadable_row["value"].as_str(),
+            Some("/home/art/agent-memory-index/state/postgres/pgdata")
+        );
     }
 
     #[test]
