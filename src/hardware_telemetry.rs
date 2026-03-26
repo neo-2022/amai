@@ -107,6 +107,15 @@ struct CachedMachineSummary {
     summary: MachineSummary,
 }
 
+#[derive(Debug, Clone)]
+struct CachedMemoryCharacteristics {
+    platform: HostPlatform,
+    captured_at_ms: u64,
+    memory_type: String,
+    memory_speed_label: String,
+    provider: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostPlatform {
     Linux,
@@ -138,7 +147,10 @@ impl HostPlatform {
 static CPU_SYSTEM_CACHE: OnceLock<Mutex<System>> = OnceLock::new();
 static DISK_IO_CACHE: OnceLock<Mutex<Option<DiskIoSample>>> = OnceLock::new();
 static MACHINE_SUMMARY_CACHE: OnceLock<Mutex<Option<CachedMachineSummary>>> = OnceLock::new();
+static MEMORY_CHARACTERISTICS_CACHE: OnceLock<Mutex<Option<CachedMemoryCharacteristics>>> =
+    OnceLock::new();
 const MACHINE_SUMMARY_CACHE_TTL_MS: u64 = 60_000;
+const MEMORY_CHARACTERISTICS_CACHE_TTL_MS: u64 = 6 * 60 * 60 * 1000;
 
 pub fn collect_machine_summary(repo_root: &Path) -> Result<MachineSummary> {
     if let Some(summary) = cached_machine_summary(repo_root) {
@@ -212,10 +224,11 @@ fn collect_machine_summary_uncached(repo_root: &Path) -> Result<MachineSummary> 
         memory_type,
         memory_speed_label,
         memory_source_label: format!(
-            "Источник: {} auto-detect provider chain: {}. Dashboard reuses machine summary for up to {} s.",
+            "Источник: {} auto-detect provider chain: {}. Dashboard reuses live machine summary for up to {} s; static memory inventory is cached up to {} h.",
             platform.label(),
             memory_provider,
-            MACHINE_SUMMARY_CACHE_TTL_MS / 1000
+            MACHINE_SUMMARY_CACHE_TTL_MS / 1000,
+            MEMORY_CHARACTERISTICS_CACHE_TTL_MS / (60 * 60 * 1000)
         ),
         swap_total_gib,
         swap_used_gib,
@@ -314,7 +327,10 @@ fn detect_cpu_max_mhz(platform: HostPlatform, system: &System) -> (Option<f64>, 
 }
 
 fn detect_memory_characteristics(platform: HostPlatform) -> (String, String, String) {
-    match platform {
+    if let Some(cached) = cached_memory_characteristics(platform) {
+        return cached;
+    }
+    let detected = match platform {
         HostPlatform::Linux => detect_linux_memory_characteristics(),
         HostPlatform::Macos => detect_macos_memory_characteristics(),
         HostPlatform::Windows => detect_windows_memory_characteristics(),
@@ -323,7 +339,14 @@ fn detect_memory_characteristics(platform: HostPlatform) -> (String, String, Str
             "не удалось определить автоматически".to_string(),
             "неизвестная ОС".to_string(),
         ),
-    }
+    };
+    store_memory_characteristics_cache(
+        platform,
+        &detected.0,
+        &detected.1,
+        &detected.2,
+    );
+    detected
 }
 
 fn detect_linux_memory_characteristics() -> (String, String, String) {
@@ -1576,6 +1599,42 @@ fn store_machine_summary_cache(repo_root: &Path, summary: &MachineSummary) {
     });
 }
 
+fn cached_memory_characteristics(platform: HostPlatform) -> Option<(String, String, String)> {
+    let cache = MEMORY_CHARACTERISTICS_CACHE.get_or_init(|| Mutex::new(None));
+    let guard = cache.lock().ok()?;
+    let entry = guard.as_ref()?;
+    let now_ms = now_epoch_ms();
+    if should_reuse_cached_memory_characteristics(platform, entry.platform, entry.captured_at_ms, now_ms)
+    {
+        Some((
+            entry.memory_type.clone(),
+            entry.memory_speed_label.clone(),
+            entry.provider.clone(),
+        ))
+    } else {
+        None
+    }
+}
+
+fn store_memory_characteristics_cache(
+    platform: HostPlatform,
+    memory_type: &str,
+    memory_speed_label: &str,
+    provider: &str,
+) {
+    let cache = MEMORY_CHARACTERISTICS_CACHE.get_or_init(|| Mutex::new(None));
+    let Some(mut guard) = cache.lock().ok() else {
+        return;
+    };
+    *guard = Some(CachedMemoryCharacteristics {
+        platform,
+        captured_at_ms: now_epoch_ms(),
+        memory_type: memory_type.to_string(),
+        memory_speed_label: memory_speed_label.to_string(),
+        provider: provider.to_string(),
+    });
+}
+
 fn should_reuse_cached_machine_summary(
     requested_repo_root: &Path,
     cached_repo_root: &Path,
@@ -1585,6 +1644,16 @@ fn should_reuse_cached_machine_summary(
     let requested_repo_root = canonicalize_repo_root(requested_repo_root);
     requested_repo_root == cached_repo_root
         && now_ms.saturating_sub(captured_at_ms) <= MACHINE_SUMMARY_CACHE_TTL_MS
+}
+
+fn should_reuse_cached_memory_characteristics(
+    requested_platform: HostPlatform,
+    cached_platform: HostPlatform,
+    captured_at_ms: u64,
+    now_ms: u64,
+) -> bool {
+    requested_platform == cached_platform
+        && now_ms.saturating_sub(captured_at_ms) <= MEMORY_CHARACTERISTICS_CACHE_TTL_MS
 }
 
 fn canonicalize_repo_root(path: &Path) -> PathBuf {
@@ -1605,7 +1674,8 @@ mod tests {
         AcceleratorKind, classify_accelerator_kind, derive_gpu_backend_from_model,
         extract_first_number, map_windows_smbios_memory_type, normalize_linux_block_device_name,
         normalize_pci_bus_label, parse_capacity_to_gib, should_reuse_cached_machine_summary,
-        MACHINE_SUMMARY_CACHE_TTL_MS,
+        should_reuse_cached_memory_characteristics, HostPlatform, MACHINE_SUMMARY_CACHE_TTL_MS,
+        MEMORY_CHARACTERISTICS_CACHE_TTL_MS,
     };
     use std::path::Path;
 
@@ -1683,6 +1753,29 @@ mod tests {
             repo_root,
             repo_root,
             now_ms - MACHINE_SUMMARY_CACHE_TTL_MS - 1,
+            now_ms,
+        ));
+    }
+
+    #[test]
+    fn cached_memory_characteristics_reuse_requires_same_platform_and_fresh_age() {
+        let now_ms = MEMORY_CHARACTERISTICS_CACHE_TTL_MS + 1_000_000;
+        assert!(should_reuse_cached_memory_characteristics(
+            HostPlatform::Linux,
+            HostPlatform::Linux,
+            now_ms - MEMORY_CHARACTERISTICS_CACHE_TTL_MS,
+            now_ms,
+        ));
+        assert!(!should_reuse_cached_memory_characteristics(
+            HostPlatform::Macos,
+            HostPlatform::Linux,
+            now_ms - MEMORY_CHARACTERISTICS_CACHE_TTL_MS,
+            now_ms,
+        ));
+        assert!(!should_reuse_cached_memory_characteristics(
+            HostPlatform::Linux,
+            HostPlatform::Linux,
+            now_ms - MEMORY_CHARACTERISTICS_CACHE_TTL_MS - 1,
             now_ms,
         ));
     }

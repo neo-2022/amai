@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 10:49 MSK
-Ручная сверка guide/docs: 2026-03-26 10:49 MSK
+modified_at: 2026-03-26 10:59 MSK
+Ручная сверка guide/docs: 2026-03-26 10:59 MSK
 
 # Operations
 
@@ -2856,6 +2856,11 @@ Grafana login берётся из `.env`:
 - machine summary contour на human dashboard больше не имеет права дёргать privileged hardware
   probes на каждом секундном refresh:
   - long-lived `observe serve` теперь обязан переиспользовать machine summary cache до `60` секунд;
+  - static memory inventory provider chain (`sudo dmidecode`, `dmidecode`, `lshw`, `inxi`) теперь
+    должен жить отдельно от минутного live cache:
+    - memory type / speed разрешено держать как host-static cache до `6` часов;
+    - это убирает бессмысленный минутный `sudo dmidecode --type 17`, но не отменяет live usage
+      refresh по CPU/memory/disk telemetry;
   - CPU/memory refresh через `sysinfo` не должен индексировать процессы только ради machine cards;
   - если точные hardware details требуют тяжёлого provider chain, dashboard лучше покажет слегка
     устаревший machine summary, чем будет каждые секунды раздувать `/proc`-FD хвост и подвешивать
