@@ -207,7 +207,7 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
     match continuity::inspect_startup_runtime_state(&repo_root) {
         Ok(audit) => {
             println!(
-                "startup_runtime_state: {} (artifact_present={}, contract_sha_match={}, source_summary_field_match={}, prompt_text_present={}, startup_next_action_present={}, startup_execution_gate_present={}, required_return_task_field_present={}, execctl_active_lease_field_present={}, project_task_tree_field_present={}, project_task_ledger_field_present={}, resume_state={}, action_kind={}, lease_owner_state={}, must_follow_startup_next_action={}, unrelated_work_allowed={}, must_read_prompt_text_before_reply={}, required_action_kind_when_resume_required={}, no_silent_drop={}, artifact_gate_semantics_consistent_present={}, artifact_gate_semantics_consistent_matches_recomputed={}, gate_semantics_consistent={}, path={})",
+                "startup_runtime_state: {} (artifact_present={}, contract_sha_match={}, source_summary_field_match={}, prompt_text_present={}, startup_next_action_present={}, startup_execution_gate_present={}, required_return_task_field_present={}, execctl_active_lease_field_present={}, project_task_tree_field_present={}, project_task_tree_summary_field_present={}, project_task_ledger_field_present={}, project_task_ledger_summary_field_present={}, resume_state={}, action_kind={}, lease_owner_state={}, must_follow_startup_next_action={}, unrelated_work_allowed={}, must_read_prompt_text_before_reply={}, required_action_kind_when_resume_required={}, no_silent_drop={}, artifact_gate_semantics_consistent_present={}, artifact_gate_semantics_consistent_matches_recomputed={}, gate_semantics_consistent={}, path={})",
                 audit.status,
                 audit.artifact_exists,
                 audit
@@ -220,7 +220,13 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
                 audit.required_return_task_field_present.unwrap_or(false),
                 audit.execctl_active_lease_field_present.unwrap_or(false),
                 audit.project_task_tree_field_present.unwrap_or(false),
+                audit
+                    .project_task_tree_summary_field_present
+                    .unwrap_or(false),
                 audit.project_task_ledger_field_present.unwrap_or(false),
+                audit
+                    .project_task_ledger_summary_field_present
+                    .unwrap_or(false),
                 audit.resume_state.as_deref().unwrap_or("n/a"),
                 audit.action_kind.as_deref().unwrap_or("n/a"),
                 audit.lease_owner_state.as_deref().unwrap_or("n/a"),

@@ -100,7 +100,9 @@ pub(crate) struct StartupRuntimeStateAudit {
     pub required_return_task_field_present: Option<bool>,
     pub execctl_active_lease_field_present: Option<bool>,
     pub project_task_tree_field_present: Option<bool>,
+    pub project_task_tree_summary_field_present: Option<bool>,
     pub project_task_ledger_field_present: Option<bool>,
+    pub project_task_ledger_summary_field_present: Option<bool>,
     pub resume_state: Option<String>,
     pub action_kind: Option<String>,
     pub lease_owner_state: Option<String>,
@@ -270,7 +272,9 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             required_return_task_field_present: None,
             execctl_active_lease_field_present: None,
             project_task_tree_field_present: None,
+            project_task_tree_summary_field_present: None,
             project_task_ledger_field_present: None,
+            project_task_ledger_summary_field_present: None,
             resume_state: None,
             action_kind: None,
             lease_owner_state: None,
@@ -313,10 +317,20 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             .as_object()
             .is_some_and(|object| object.contains_key("project_task_tree")),
     );
+    let project_task_tree_summary_field_present = Some(
+        summary
+            .as_object()
+            .is_some_and(|object| object.contains_key("project_task_tree_summary")),
+    );
     let project_task_ledger_field_present = Some(
         summary
             .as_object()
             .is_some_and(|object| object.contains_key("project_task_ledger")),
+    );
+    let project_task_ledger_summary_field_present = Some(
+        summary
+            .as_object()
+            .is_some_and(|object| object.contains_key("project_task_ledger_summary")),
     );
     let resume_state = summary["execctl_resume_state"]
         .as_str()
@@ -363,7 +377,9 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         || required_return_task_field_present != Some(true)
         || execctl_active_lease_field_present != Some(true)
         || project_task_tree_field_present != Some(true)
+        || project_task_tree_summary_field_present != Some(true)
         || project_task_ledger_field_present != Some(true)
+        || project_task_ledger_summary_field_present != Some(true)
         || must_follow_startup_next_action.is_none()
         || unrelated_work_allowed.is_none()
         || must_read_prompt_text_before_reply.is_none()
@@ -390,7 +406,9 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         required_return_task_field_present,
         execctl_active_lease_field_present,
         project_task_tree_field_present,
+        project_task_tree_summary_field_present,
         project_task_ledger_field_present,
+        project_task_ledger_summary_field_present,
         resume_state,
         action_kind,
         lease_owner_state,
@@ -425,7 +443,9 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
                     "required_return_task_field_present": audit.required_return_task_field_present,
                     "execctl_active_lease_field_present": audit.execctl_active_lease_field_present,
                     "project_task_tree_field_present": audit.project_task_tree_field_present,
+                    "project_task_tree_summary_field_present": audit.project_task_tree_summary_field_present,
                     "project_task_ledger_field_present": audit.project_task_ledger_field_present,
+                    "project_task_ledger_summary_field_present": audit.project_task_ledger_summary_field_present,
                     "resume_state": audit.resume_state,
                     "action_kind": audit.action_kind,
                     "lease_owner_state": audit.lease_owner_state,
@@ -488,8 +508,16 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
         audit.project_task_tree_field_present.unwrap_or(false)
     );
     println!(
+        "project_task_tree_summary field present: {}",
+        audit.project_task_tree_summary_field_present.unwrap_or(false)
+    );
+    println!(
         "project_task_ledger field present: {}",
         audit.project_task_ledger_field_present.unwrap_or(false)
+    );
+    println!(
+        "project_task_ledger_summary field present: {}",
+        audit.project_task_ledger_summary_field_present.unwrap_or(false)
     );
     println!(
         "Resume state: {}",
@@ -5030,9 +5058,11 @@ mod tests {
                 "project_task_tree": {
                     "open_tasks_count": 2
                 },
+                "project_task_tree_summary": "active: Current active line; pending_return(1): Pending line",
                 "project_task_ledger": {
                     "open_tasks_count": 2
-                }
+                },
+                "project_task_ledger_summary": "active: Current active line; historical_handoffs(1)"
             },
             "working_state_restore": {
                 "state_lineage": {
@@ -5104,8 +5134,16 @@ mod tests {
             json!("Pending line")
         );
         assert_eq!(
+            artifact["continuity_startup_summary"]["project_task_tree_summary"],
+            json!("active: Current active line; pending_return(1): Pending line")
+        );
+        assert_eq!(
             artifact["continuity_startup_summary"]["execctl_active_lease"]["lease_owner_state"],
             json!("previous_session_owner")
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["project_task_ledger_summary"],
+            json!("active: Current active line; historical_handoffs(1)")
         );
         assert_eq!(
             artifact["working_state_restore_lineage"]["authoritative_event_id"],
@@ -5160,9 +5198,11 @@ mod tests {
                 "project_task_tree": {
                     "open_tasks_count": 2
                 },
+                "project_task_tree_summary": "active: Current active line; pending_return(1): Pending line",
                 "project_task_ledger": {
                     "open_tasks_count": 2
-                }
+                },
+                "project_task_ledger_summary": "active: Current active line; historical_handoffs(1)"
             },
             "working_state_restore": {
                 "state_lineage": {
@@ -5188,6 +5228,8 @@ mod tests {
             Some(true)
         );
         assert_eq!(audit.gate_semantics_consistent, Some(true));
+        assert_eq!(audit.project_task_tree_summary_field_present, Some(true));
+        assert_eq!(audit.project_task_ledger_summary_field_present, Some(true));
 
         fs::remove_dir_all(&repo).expect("cleanup temp repo");
     }
