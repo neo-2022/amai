@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 09:18 MSK
-Ручная сверка guide/docs: 2026-03-26 09:18 MSK
+modified_at: 2026-03-26 09:32 MSK
+Ручная сверка guide/docs: 2026-03-26 09:32 MSK
 
 # Operations
 
@@ -2332,14 +2332,18 @@ Operator contour обязан учитывать:
 где вообще не было live restore-event, и не завышать remaining gap искусственным
 denominator drift.
 
-Если remaining blocker сводится уже не к missing whole-cycle components, а только к
-`same_meter_baseline_unmeasured`, operator обязан смотреть не только `blocking_reasons`,
+Если remaining blocker сводится уже не к missing whole-cycle components, а к
+`same_meter_baseline_unmeasured / same_meter_baseline_partially_measured`, operator обязан
+смотреть не только `blocking_reasons`,
 но и отдельный versioned contour:
 - `client_limit_meter_alignment.baseline_equivalence.model_version`
 - `client_limit_meter_alignment.baseline_equivalence.state`
 - `client_limit_meter_alignment.baseline_equivalence.applicable_components`
 - `client_limit_meter_alignment.baseline_equivalence.fully_observed_components`
 - `client_limit_meter_alignment.baseline_equivalence.incomplete_components`
+- `client_limit_meter_alignment.baseline_equivalence.measured_baseline_components`
+- `client_limit_meter_alignment.baseline_equivalence.missing_baseline_components`
+- `client_limit_meter_alignment.baseline_equivalence.measured_baseline_tokens_lower_bound`
 
 Это нужно затем, чтобы baseline-gap был machine-readable и не зависел только от human tooltip
 в dashboard или одной blocker-строки.
@@ -2347,8 +2351,10 @@ denominator drift.
 Dashboard/operator contour теперь обязан это поднимать и user-facing:
 - в tooltip строки `Связь с лимитом клиента`;
 - в note для `whole_cycle_observed_baseline_partial`;
-- с human-readable перечислением `fully_observed_components`, если baseline-gap уже
-  свёлся не к missing component coverage, а именно к незавершённому baseline-equivalent слою.
+- с human-readable перечислением `fully_observed_components`,
+  `measured_baseline_components` и `missing_baseline_components`, если baseline-gap уже
+  свёлся не к missing component coverage, а именно к частично materialized
+  baseline-equivalent слою.
 
 Customer-facing contractual export surface теперь тоже обязан поднимать
 `adjustment_activation_governance`, чтобы future adjustment path был виден отдельно от

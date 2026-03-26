@@ -549,7 +549,7 @@ fn default_client_limit_meter_alignment_version() -> String {
 }
 
 fn default_client_limit_baseline_equivalence_version() -> String {
-    "client-limit-baseline-equivalence-v1".to_string()
+    "client-limit-baseline-equivalence-v2".to_string()
 }
 
 fn default_excluded_taxonomy_version() -> String {
@@ -10626,21 +10626,6 @@ fn client_limit_meter_alignment_blocking_reasons(
         if live_events_count > 0 && counted_events == 0 {
             reasons.push("no_confirmed_live_usage_in_scope".to_string());
         }
-        if live_events_count > 0
-            && client_limit_component_stats(summary, assistant_scope)
-                .into_iter()
-                .all(|(code, observed_live_events, _observed_tokens)| {
-                    let target_live_events = client_limit_component_target_live_events(
-                        code,
-                        events,
-                        live_events_count,
-                        assistant_scope,
-                    );
-                    target_live_events == 0 || observed_live_events == target_live_events
-                })
-        {
-            reasons.push("same_meter_baseline_unmeasured".to_string());
-        }
     }
     reasons
 }
@@ -10792,6 +10777,61 @@ fn assistant_generation_observation_source_status(
     })
 }
 
+fn client_limit_baseline_component_semantics(
+    summary: &Value,
+    events: Option<&[TokenBudgetEvent]>,
+    assistant_scope: Option<&AssistantGenerationScopeObservation>,
+) -> Vec<Value> {
+    let (_events_total, live_events_count, _non_live_events_count, _counted_events) =
+        client_limit_meter_alignment_counts(summary, events);
+    client_limit_component_stats(summary, assistant_scope)
+        .into_iter()
+        .filter_map(|(code, observed_live_events, observed_tokens)| {
+            let target_live_events = client_limit_component_target_live_events(
+                code,
+                events,
+                live_events_count,
+                assistant_scope,
+            );
+            if target_live_events == 0 {
+                return None;
+            }
+            let whole_cycle_observed_complete = observed_live_events == target_live_events;
+            let (baseline_semantics_state, baseline_measured_tokens, note) =
+                if !whole_cycle_observed_complete {
+                    (
+                        "whole_cycle_component_incomplete",
+                        None,
+                        "Observed whole-cycle coverage по этому компоненту ещё неполная, поэтому честный baseline-equivalent расчёт пока рано materialize-ить.",
+                    )
+                } else {
+                    match code {
+                        "client_prompt" => (
+                            "observed_tokens_passthrough",
+                            Some(observed_tokens),
+                            "Для client_prompt baseline-equivalent tokens совпадают с реально observed tokens: исходный пользовательский запрос к клиенту не меняется из-за Amai.",
+                        ),
+                        _ => (
+                            "baseline_semantics_unmaterialized",
+                            None,
+                            "Observed tokens уже есть, но baseline-equivalent semantics для этого компонента ещё не materialized.",
+                        ),
+                    }
+                };
+            Some(json!({
+                "code": code,
+                "observed_live_events": observed_live_events,
+                "target_live_events_count": target_live_events,
+                "whole_cycle_observed_complete": whole_cycle_observed_complete,
+                "observed_tokens": observed_tokens,
+                "baseline_semantics_state": baseline_semantics_state,
+                "baseline_measured_tokens": baseline_measured_tokens,
+                "note": note,
+            }))
+        })
+        .collect()
+}
+
 fn build_client_limit_baseline_equivalence(
     contract: &TokenBudgetContractConfig,
     summary: &Value,
@@ -10800,28 +10840,39 @@ fn build_client_limit_baseline_equivalence(
 ) -> Value {
     let (_events_total, live_events_count, _non_live_events_count, counted_events) =
         client_limit_meter_alignment_counts(summary, events);
-    let mut applicable_components = Vec::new();
-    let mut fully_observed_components = Vec::new();
-    let mut incomplete_components = Vec::new();
-    for (code, observed_live_events, _observed_tokens) in
-        client_limit_component_stats(summary, assistant_scope)
-    {
-        let target_live_events = client_limit_component_target_live_events(
-            code,
-            events,
-            live_events_count,
-            assistant_scope,
-        );
-        if target_live_events == 0 {
-            continue;
-        }
-        applicable_components.push(code.to_string());
-        if observed_live_events == target_live_events {
-            fully_observed_components.push(code.to_string());
-        } else {
-            incomplete_components.push(code.to_string());
-        }
-    }
+    let component_semantics =
+        client_limit_baseline_component_semantics(summary, events, assistant_scope);
+    let applicable_components = component_semantics
+        .iter()
+        .filter_map(|item| item["code"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    let fully_observed_components = component_semantics
+        .iter()
+        .filter(|item| item["whole_cycle_observed_complete"].as_bool() == Some(true))
+        .filter_map(|item| item["code"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    let incomplete_components = component_semantics
+        .iter()
+        .filter(|item| item["whole_cycle_observed_complete"].as_bool() != Some(true))
+        .filter_map(|item| item["code"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    let measured_baseline_components = component_semantics
+        .iter()
+        .filter(|item| item["baseline_measured_tokens"].is_u64())
+        .filter_map(|item| item["code"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    let missing_baseline_components = component_semantics
+        .iter()
+        .filter(|item| {
+            item["whole_cycle_observed_complete"].as_bool() == Some(true)
+                && !item["baseline_measured_tokens"].is_u64()
+        })
+        .filter_map(|item| item["code"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    let measured_baseline_tokens_lower_bound = component_semantics
+        .iter()
+        .filter_map(|item| item["baseline_measured_tokens"].as_u64())
+        .sum::<u64>();
     let whole_cycle_components_fully_observed =
         !applicable_components.is_empty() && incomplete_components.is_empty();
     let (state, remaining_gap_reason, note) = if live_events_count == 0 {
@@ -10842,26 +10893,46 @@ fn build_client_limit_baseline_equivalence(
             "whole_cycle_components_incomplete",
             "Whole-cycle observed компоненты ещё покрывают не весь applicable live scope, поэтому baseline-equivalent semantics пока преждевременны.",
         )
-    } else {
+    } else if missing_baseline_components.is_empty() {
+        (
+            "baseline_semantics_materialized",
+            "none",
+            "Applicable whole-cycle components уже и fully observed, и baseline-equivalent measured в текущем scope.",
+        )
+    } else if measured_baseline_components.is_empty() {
         (
             "baseline_semantics_unmaterialized",
             "same_meter_baseline_unmeasured",
             "Applicable whole-cycle components уже полностью observed, но отдельный baseline-equivalent слой для клиентского spend meter ещё не materialized.",
         )
+    } else {
+        (
+            "baseline_component_semantics_partial",
+            "same_meter_baseline_partially_measured",
+            "Applicable whole-cycle components уже полностью observed, но baseline-equivalent semantics materialized только для части компонентов.",
+        )
     };
     json!({
         "model_version": contract.client_limit_baseline_equivalence_version.clone(),
         "state": state,
-        "same_meter_baseline_measured": false,
+        "same_meter_baseline_measured": missing_baseline_components.is_empty()
+            && whole_cycle_components_fully_observed
+            && counted_events > 0,
         "baseline_equivalent_to_client_limit": false,
         "live_events_count": live_events_count,
         "counted_live_events": counted_events,
         "applicable_component_count": applicable_components.len(),
         "fully_observed_component_count": fully_observed_components.len(),
+        "measured_baseline_component_count": measured_baseline_components.len(),
+        "missing_baseline_component_count": missing_baseline_components.len(),
         "applicable_components": applicable_components,
         "fully_observed_components": fully_observed_components,
         "incomplete_components": incomplete_components,
+        "measured_baseline_components": measured_baseline_components,
+        "missing_baseline_components": missing_baseline_components,
+        "measured_baseline_tokens_lower_bound": measured_baseline_tokens_lower_bound,
         "whole_cycle_components_fully_observed": whole_cycle_components_fully_observed,
+        "component_semantics": component_semantics,
         "remaining_gap_reason": remaining_gap_reason,
         "note": note,
     })
@@ -10926,6 +10997,15 @@ fn build_client_limit_meter_alignment(
         }
         "assistant_generation_source_partial_scope_overlap" => {
             blocking_reasons.push("assistant_generation_source_partial_scope_overlap".to_string());
+        }
+        _ => {}
+    }
+    match baseline_equivalence["state"].as_str().unwrap_or_default() {
+        "baseline_semantics_unmaterialized" => {
+            blocking_reasons.push("same_meter_baseline_unmeasured".to_string());
+        }
+        "baseline_component_semantics_partial" => {
+            blocking_reasons.push("same_meter_baseline_partially_measured".to_string());
         }
         _ => {}
     }
@@ -13807,7 +13887,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_baseline_equivalence_version"],
-            "client-limit-baseline-equivalence-v1"
+            "client-limit-baseline-equivalence-v2"
         );
         assert_eq!(
             token_event["whole_cycle_observed"]["client_prompt_tokens"],
@@ -14408,7 +14488,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["baseline_equivalence"]["model_version"],
-            "client-limit-baseline-equivalence-v1"
+            "client-limit-baseline-equivalence-v2"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -17026,7 +17106,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["baseline_equivalence_model_version"],
-            "client-limit-baseline-equivalence-v1"
+            "client-limit-baseline-equivalence-v2"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["surface_kind"],
@@ -17042,7 +17122,19 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["baseline_equivalence"]["state"],
-            "baseline_semantics_unmaterialized"
+            "baseline_component_semantics_partial"
+        );
+        assert_eq!(
+            economics["current_session"]["client_limit_meter_alignment"]["baseline_equivalence"]["measured_baseline_components"],
+            json!(["client_prompt"])
+        );
+        assert_eq!(
+            economics["current_session"]["client_limit_meter_alignment"]["baseline_equivalence"]["missing_baseline_components"],
+            json!(["tool_overhead_outside_retrieval"])
+        );
+        assert_eq!(
+            economics["current_session"]["client_limit_meter_alignment"]["baseline_equivalence"]["measured_baseline_tokens_lower_bound"],
+            45
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["live_events_count"],
