@@ -491,6 +491,7 @@ struct DashboardSameMeterSyncCache {
 struct DashboardReportCache {
     repo_root: PathBuf,
     signature: String,
+    components: DashboardReportSignatureComponents,
     report: Value,
 }
 
@@ -514,6 +515,16 @@ struct AssistantGenerationTurnObservedSnapshot {
     turn_id: String,
     assistant_generation_tokens: u64,
     context_pack_ids: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardReportSignatureComponents {
+    current_session_events: String,
+    rolling_window_events: String,
+    lifetime_events: String,
+    current_session_assistant_scope: String,
+    rolling_window_assistant_scope: String,
+    lifetime_assistant_scope: String,
 }
 
 #[derive(Debug, Clone)]
@@ -6928,23 +6939,6 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         None
     };
     let lifetime_assistant_scope = scope_iter.next().unwrap_or_default();
-    let report_signature = dashboard_report_signature(
-        &session_events,
-        &rolling_window_events,
-        &events,
-        &current_session_assistant_scope,
-        rolling_window_assistant_scope.as_ref(),
-        &lifetime_assistant_scope,
-    );
-    if let Some(report) = cached_dashboard_report(&repo_root, &report_signature) {
-        return Ok(refresh_dashboard_report_live_ages(
-            report,
-            now_epoch_ms,
-            &session_events,
-            &rolling_window_events,
-            &events,
-        ));
-    }
     let current_session_summary = summarize_events(
         &session_events,
         now_epoch_ms,
@@ -6971,7 +6965,33 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     } else {
         build_product_headline(&lifetime_summary, "всё время записи")
     };
-    let report = json!({
+    let report_components = dashboard_report_signature_components(
+        &session_events,
+        &rolling_window_events,
+        &events,
+        &current_session_assistant_scope,
+        rolling_window_assistant_scope.as_ref(),
+        &lifetime_assistant_scope,
+    );
+    let report_signature = dashboard_report_signature(&report_components);
+    let cached_report_entry = cached_dashboard_report_entry(&repo_root);
+    if let Some(entry) = cached_report_entry.as_ref() {
+        if entry.signature == report_signature {
+            return Ok(refresh_dashboard_report_live_ages(
+                entry.report.clone(),
+                now_epoch_ms,
+                &session_events,
+                &rolling_window_events,
+                &events,
+            ));
+        }
+    }
+    let cache_debug = dashboard_report_cache_debug(
+        cached_report_entry.as_ref(),
+        &report_signature,
+        &report_components,
+    );
+    let mut report = json!({
         "token_budget_report": {
             "surface": "dashboard_read_only",
             "profile": {
@@ -7021,10 +7041,17 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                     Some(&lifetime_assistant_scope),
                 ),
             },
+            "cache_debug": cache_debug,
             "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups и client-limit alignment, не разворачивает полный contractual/export contour, но делает ограниченный quiet same-meter sync/write-back только для active live scope текущей сессии и рабочего окна. Sync write-back может материализоваться в этом тике, а обновлённые token events подхватываются следующим refresh, чтобы текущий pass не делал лишний full reload.",
         }
     });
-    store_dashboard_report(&repo_root, &report_signature, &report);
+    if let Some(node) = report["token_budget_report"]["cache_debug"].as_object_mut() {
+        node.insert(
+            "status".to_string(),
+            Value::from("miss"),
+        );
+    }
+    store_dashboard_report(&repo_root, &report_signature, &report_components, &report);
     Ok(report)
 }
 
@@ -8143,27 +8170,58 @@ fn store_dashboard_assistant_generation_scopes(
     });
 }
 
-fn dashboard_report_signature(
+fn dashboard_report_signature_components(
     current_session_events: &[TokenBudgetEvent],
     rolling_window_events: &[TokenBudgetEvent],
     lifetime_events: &[TokenBudgetEvent],
     current_session_assistant_scope: &AssistantGenerationScopeObservation,
     rolling_window_assistant_scope: Option<&AssistantGenerationScopeObservation>,
     lifetime_assistant_scope: &AssistantGenerationScopeObservation,
-) -> String {
+) -> DashboardReportSignatureComponents {
+    DashboardReportSignatureComponents {
+        current_session_events: hex_sha256(
+            &serde_json::to_vec(&dashboard_report_event_signature_payload(current_session_events))
+                .unwrap_or_else(|_| b"dashboard_current_session_events".to_vec()),
+        ),
+        rolling_window_events: hex_sha256(
+            &serde_json::to_vec(&dashboard_report_event_signature_payload(rolling_window_events))
+                .unwrap_or_else(|_| b"dashboard_rolling_window_events".to_vec()),
+        ),
+        lifetime_events: hex_sha256(
+            &serde_json::to_vec(&dashboard_report_event_signature_payload(lifetime_events))
+                .unwrap_or_else(|_| b"dashboard_lifetime_events".to_vec()),
+        ),
+        current_session_assistant_scope: hex_sha256(
+            &serde_json::to_vec(&dashboard_report_assistant_scope_signature_payload(
+                current_session_assistant_scope,
+            ))
+            .unwrap_or_else(|_| b"dashboard_current_session_scope".to_vec()),
+        ),
+        rolling_window_assistant_scope: hex_sha256(
+            &serde_json::to_vec(
+                &rolling_window_assistant_scope
+                    .map(dashboard_report_assistant_scope_signature_payload)
+                    .unwrap_or(Value::Null),
+            )
+            .unwrap_or_else(|_| b"dashboard_rolling_window_scope".to_vec()),
+        ),
+        lifetime_assistant_scope: hex_sha256(
+            &serde_json::to_vec(&dashboard_report_assistant_scope_signature_payload(
+                lifetime_assistant_scope,
+            ))
+            .unwrap_or_else(|_| b"dashboard_lifetime_scope".to_vec()),
+        ),
+    }
+}
+
+fn dashboard_report_signature(components: &DashboardReportSignatureComponents) -> String {
     let payload = json!({
-        "current_session_events": dashboard_report_event_signature_payload(current_session_events),
-        "rolling_window_events": dashboard_report_event_signature_payload(rolling_window_events),
-        "lifetime_events": dashboard_report_event_signature_payload(lifetime_events),
-        "current_session_assistant_scope": dashboard_report_assistant_scope_signature_payload(
-            current_session_assistant_scope,
-        ),
-        "rolling_window_assistant_scope": rolling_window_assistant_scope
-            .map(dashboard_report_assistant_scope_signature_payload)
-            .unwrap_or(Value::Null),
-        "lifetime_assistant_scope": dashboard_report_assistant_scope_signature_payload(
-            lifetime_assistant_scope,
-        ),
+        "current_session_events": components.current_session_events,
+        "rolling_window_events": components.rolling_window_events,
+        "lifetime_events": components.lifetime_events,
+        "current_session_assistant_scope": components.current_session_assistant_scope,
+        "rolling_window_assistant_scope": components.rolling_window_assistant_scope,
+        "lifetime_assistant_scope": components.lifetime_assistant_scope,
     });
     hex_sha256(
         &serde_json::to_vec(&payload)
@@ -8178,6 +8236,9 @@ fn refresh_dashboard_report_live_ages(
     rolling_window_events: &[TokenBudgetEvent],
     lifetime_events: &[TokenBudgetEvent],
 ) -> Value {
+    if let Some(node) = report["token_budget_report"]["cache_debug"].as_object_mut() {
+        node.insert("status".to_string(), Value::from("hit"));
+    }
     refresh_dashboard_report_scope_age(
         &mut report,
         "current_session",
@@ -8281,18 +8342,65 @@ fn dashboard_report_assistant_scope_signature_payload(
     })
 }
 
-fn cached_dashboard_report(repo_root: &Path, signature: &str) -> Option<Value> {
+fn dashboard_report_cache_debug(
+    previous_entry: Option<&DashboardReportCache>,
+    report_signature: &str,
+    components: &DashboardReportSignatureComponents,
+) -> Value {
+    let mut reasons = Vec::new();
+    let mut previous_signature = Value::Null;
+    if let Some(previous) = previous_entry {
+        previous_signature = Value::from(previous.signature.clone());
+        if previous.components.current_session_events != components.current_session_events {
+            reasons.push("current_session_events");
+        }
+        if previous.components.rolling_window_events != components.rolling_window_events {
+            reasons.push("rolling_window_events");
+        }
+        if previous.components.lifetime_events != components.lifetime_events {
+            reasons.push("lifetime_events");
+        }
+        if previous.components.current_session_assistant_scope
+            != components.current_session_assistant_scope
+        {
+            reasons.push("current_session_assistant_scope");
+        }
+        if previous.components.rolling_window_assistant_scope
+            != components.rolling_window_assistant_scope
+        {
+            reasons.push("rolling_window_assistant_scope");
+        }
+        if previous.components.lifetime_assistant_scope != components.lifetime_assistant_scope {
+            reasons.push("lifetime_assistant_scope");
+        }
+    } else {
+        reasons.push("cold_start");
+    }
+    json!({
+        "status": "miss",
+        "signature": report_signature,
+        "previous_signature": previous_signature,
+        "changed_components": reasons,
+    })
+}
+
+fn cached_dashboard_report_entry(repo_root: &Path) -> Option<DashboardReportCache> {
     let cache = DASHBOARD_REPORT_CACHE.get_or_init(|| Mutex::new(None));
     let guard = cache.lock().ok()?;
     let entry = guard.as_ref()?;
-    if canonical_repo_root(repo_root) == entry.repo_root && entry.signature == signature {
-        Some(entry.report.clone())
+    if canonical_repo_root(repo_root) == entry.repo_root {
+        Some(entry.clone())
     } else {
         None
     }
 }
 
-fn store_dashboard_report(repo_root: &Path, signature: &str, report: &Value) {
+fn store_dashboard_report(
+    repo_root: &Path,
+    signature: &str,
+    components: &DashboardReportSignatureComponents,
+    report: &Value,
+) {
     let cache = DASHBOARD_REPORT_CACHE.get_or_init(|| Mutex::new(None));
     let Some(mut guard) = cache.lock().ok() else {
         return;
@@ -8300,6 +8408,7 @@ fn store_dashboard_report(repo_root: &Path, signature: &str, report: &Value) {
     *guard = Some(DashboardReportCache {
         repo_root: canonical_repo_root(repo_root),
         signature: signature.to_string(),
+        components: components.clone(),
         report: report.clone(),
     });
 }
@@ -14341,6 +14450,7 @@ mod tests {
         configured_provider_usage_source, contractual_line_item_json,
         count_cli_context_pack_output_overhead_tokens, count_tool_overhead_tokens,
         current_session_events, dashboard_report_signature,
+        dashboard_report_signature_components,
         dashboard_assistant_scope_source_signature,
         dashboard_same_meter_sync_signature, dashboard_token_events_delta_limit,
         dashboard_token_events_signature_from_summary,
@@ -19470,22 +19580,22 @@ effective_to_epoch_ms = 2000
             deduped_token_count: 10,
         }];
         let scope = AssistantGenerationScopeObservation::default();
-        let left = dashboard_report_signature(
+        let left = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
             &events,
             &events,
             &scope,
             Some(&scope),
             &scope,
-        );
-        let right = dashboard_report_signature(
+        ));
+        let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
             &events,
             &events,
             &scope,
             Some(&scope),
             &scope,
-        );
+        ));
 
         assert_eq!(left, right);
     }
@@ -19545,22 +19655,22 @@ effective_to_epoch_ms = 2000
             matched_context_pack_ids: ["ctx-a".to_string()].into_iter().collect(),
             ..AssistantGenerationScopeObservation::default()
         };
-        let left = dashboard_report_signature(
+        let left = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
             &events,
             &events,
             &base_scope,
             Some(&base_scope),
             &base_scope,
-        );
-        let right = dashboard_report_signature(
+        ));
+        let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
             &events,
             &events,
             &changed_scope,
             Some(&base_scope),
             &base_scope,
-        );
+        ));
 
         assert_ne!(left, right);
     }
