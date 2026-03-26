@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 06:02 MSK
-Ручная сверка guide/docs: 2026-03-26 06:02 MSK
+modified_at: 2026-03-26 06:30 MSK
+Ручная сверка guide/docs: 2026-03-26 06:30 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1249,7 +1249,8 @@ preview, а не только raw count.
   вместе с `chat_start_restore.prompt_text`;
 - сам `startup contract` теперь machine-readable фиксирует и этот dynamic contour через
   `runtime_state_artifact`, чтобы managed startup instructions не теряли path к live
-  `project-chat-startup-state.json` и не сваливались обратно к одному markdown-only restore;
+  `project-chat-startup-state.json`, его pinned `artifact_version` и не сваливались обратно к
+  одному markdown-only restore;
 - тот же runtime artifact теперь нужен затем, чтобы supported clients и operator tools видели не
   только static startup law, но и живой первый обязательный ход:
   - `startup_next_action`;

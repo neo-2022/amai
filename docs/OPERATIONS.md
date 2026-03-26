@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 06:02 MSK
-Ручная сверка guide/docs: 2026-03-26 06:02 MSK
+modified_at: 2026-03-26 06:30 MSK
+Ручная сверка guide/docs: 2026-03-26 06:30 MSK
 
 # Operations
 
@@ -879,6 +879,10 @@ cargo run -- mcp serve
   `runtime_state_artifact.workspace_runtime_state_relative_path =
   .amai/continuity/project-chat-startup-state.json`;
   иначе managed startup instructions считаются drifted.
+- тот же contract теперь pin-ит и
+  `runtime_state_artifact.workspace_runtime_state_artifact_version =
+  workspace-startup-runtime-state-v3`;
+  supported client обязан проверять и этот literal перед доверием к runtime artifact.
 - в этом runtime artifact должны лежать:
   - `continuity_startup_summary`;
   - `chat_start_restore.prompt_text`;

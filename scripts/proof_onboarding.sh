@@ -47,6 +47,7 @@ grep -q 'workspace_contract_required_before_tool_call = true' "${startup_output}
 grep -q 'missing_or_unreadable_fail_closed = true' "${startup_output}"
 grep -q 'sha256_mismatch_fail_closed = true' "${startup_output}"
 grep -q '.amai/continuity/project-chat-startup-state.json' "${startup_output}"
+grep -q 'workspace_runtime_state_artifact_version = "workspace-startup-runtime-state-v3"' "${startup_output}"
 grep -q 'startup_execution_gate' "${startup_output}"
 grep -q 'startup_execution_gate.must_follow_startup_next_action = true' "${startup_output}"
 grep -q 'startup_execution_gate.unrelated_work_allowed = false' "${startup_output}"

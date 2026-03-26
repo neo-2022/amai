@@ -48,6 +48,7 @@ grep -q 'workspace_contract_required_before_tool_call = true' AGENTS.md
 grep -q 'missing_or_unreadable_fail_closed = true' AGENTS.md
 grep -q 'sha256_mismatch_fail_closed = true' AGENTS.md
 grep -q '.amai/continuity/project-chat-startup-state.json' AGENTS.md
+grep -q 'workspace_runtime_state_artifact_version = "workspace-startup-runtime-state-v3"' AGENTS.md
 grep -q 'startup_execution_gate' AGENTS.md
 grep -q 'startup_execution_gate.must_follow_startup_next_action = true' AGENTS.md
 grep -q 'startup_execution_gate.unrelated_work_allowed = false' AGENTS.md
@@ -104,6 +105,7 @@ grep -q 'workspace_contract_required_before_tool_call = true' .cursor/rules/amai
 grep -q 'missing_or_unreadable_fail_closed = true' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'sha256_mismatch_fail_closed = true' .cursor/rules/amai-continuity-startup.mdc
 grep -q '.amai/continuity/project-chat-startup-state.json' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'workspace_runtime_state_artifact_version = "workspace-startup-runtime-state-v3"' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'startup_execution_gate' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'startup_execution_gate.must_follow_startup_next_action = true' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'startup_execution_gate.unrelated_work_allowed = false' .cursor/rules/amai-continuity-startup.mdc
@@ -161,6 +163,7 @@ grep -q 'workspace_contract_required_before_tool_call = true' CLAUDE.md
 grep -q 'missing_or_unreadable_fail_closed = true' CLAUDE.md
 grep -q 'sha256_mismatch_fail_closed = true' CLAUDE.md
 grep -q '.amai/continuity/project-chat-startup-state.json' CLAUDE.md
+grep -q 'workspace_runtime_state_artifact_version = "workspace-startup-runtime-state-v3"' CLAUDE.md
 grep -q 'startup_execution_gate' CLAUDE.md
 grep -q 'startup_execution_gate.must_follow_startup_next_action = true' CLAUDE.md
 grep -q 'startup_execution_gate.unrelated_work_allowed = false' CLAUDE.md
