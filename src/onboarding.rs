@@ -101,6 +101,7 @@ pub(crate) struct StartupArtifactAudit {
     pub startup_instruction_contains_previous_session_owner_follow: Option<bool>,
     pub startup_instruction_contains_no_silent_drop: Option<bool>,
     pub startup_instruction_contains_runtime_state_artifact: Option<bool>,
+    pub startup_instruction_contains_startup_execution_gate: Option<bool>,
     pub startup_contract_path: Option<PathBuf>,
     pub startup_contract_exists: bool,
     pub startup_contract_sha_matches_current_contract: Option<bool>,
@@ -112,6 +113,7 @@ pub(crate) struct StartupArtifactAudit {
     pub startup_contract_contains_previous_session_owner_follow: Option<bool>,
     pub startup_contract_contains_no_silent_drop: Option<bool>,
     pub startup_contract_contains_runtime_state_artifact: Option<bool>,
+    pub startup_contract_contains_startup_execution_gate: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -568,6 +570,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_previous_session_owner_follow,
         startup_instruction_contains_no_silent_drop,
         startup_instruction_contains_runtime_state_artifact,
+        startup_instruction_contains_startup_execution_gate,
     ) = if startup_instruction_exists {
         let path = startup_instruction_path
             .as_ref()
@@ -587,9 +590,10 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             Some(content.contains("previous_session_owner_must_follow_startup_next_action = true")),
             Some(content.contains("no_silent_drop = true")),
             Some(content.contains(".amai/continuity/project-chat-startup-state.json")),
+            Some(content.contains("startup_execution_gate")),
         )
     } else {
-        (None, None, None, None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, None, None, None, None)
     };
 
     let startup_contract_path = state.startup_contract_path.as_ref().map(PathBuf::from);
@@ -606,6 +610,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_contract_contains_previous_session_owner_follow,
         startup_contract_contains_no_silent_drop,
         startup_contract_contains_runtime_state_artifact,
+        startup_contract_contains_startup_execution_gate,
     ) = if startup_contract_exists {
         let path = startup_contract_path
             .as_ref()
@@ -671,9 +676,19 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
                             .as_str()
                             == Some("continuity_startup_summary"),
                 ),
+                Some(
+                    payload["startup_contract"]["runtime_state_artifact"]
+                        ["startup_execution_gate_field"]
+                        .as_str()
+                        == Some("startup_execution_gate")
+                        && payload["startup_contract"]["runtime_state_artifact"]
+                            ["startup_execution_gate_version"]
+                            .as_str()
+                            == Some("startup-execution-gate-v1"),
+                ),
             )
     } else {
-        (None, None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, None, None)
     };
 
     let install_state_sha_matches_current_contract = state
@@ -694,6 +709,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         || startup_instruction_contains_previous_session_owner_follow != Some(true)
         || startup_instruction_contains_no_silent_drop != Some(true)
         || startup_instruction_contains_runtime_state_artifact != Some(true)
+        || startup_instruction_contains_startup_execution_gate != Some(true)
     {
         "startup_instruction_drift".to_string()
     } else if startup_contract_sha_matches_current_contract != Some(true)
@@ -705,6 +721,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         || startup_contract_contains_previous_session_owner_follow != Some(true)
         || startup_contract_contains_no_silent_drop != Some(true)
         || startup_contract_contains_runtime_state_artifact != Some(true)
+        || startup_contract_contains_startup_execution_gate != Some(true)
     {
         "startup_contract_drift".to_string()
     } else {
@@ -726,6 +743,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_previous_session_owner_follow,
         startup_instruction_contains_no_silent_drop,
         startup_instruction_contains_runtime_state_artifact,
+        startup_instruction_contains_startup_execution_gate,
         startup_contract_path,
         startup_contract_exists,
         startup_contract_sha_matches_current_contract,
@@ -737,6 +755,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_contract_contains_previous_session_owner_follow,
         startup_contract_contains_no_silent_drop,
         startup_contract_contains_runtime_state_artifact,
+        startup_contract_contains_startup_execution_gate,
     }))
 }
 
@@ -1993,6 +2012,9 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     let runtime_state_source_summary_field = runtime_state_artifact["source_summary_field"]
         .as_str()
         .unwrap_or("continuity_startup_summary");
+    let startup_execution_gate_field = runtime_state_artifact["startup_execution_gate_field"]
+        .as_str()
+        .unwrap_or("startup_execution_gate");
     let fail_closed = contract["fail_closed_conditions"]
         .as_array()
         .ok_or_else(|| anyhow!("project_chat_startup contract is missing fail_closed_conditions"))?
@@ -2076,7 +2098,7 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
         .unwrap_or(false);
 
     Ok(format!(
-        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала прочитай machine-readable startup contract `{}` (relative path `{}`) и используй его как source-of-truth, а не этот markdown-блок.\n3. Этот artifact обязан быть прочитан до MCP tool call: {}.\n4. Если startup contract artifact отсутствует или не читается, fail-closed: {}.\n5. Проверь, что {} = \"{}\"; при mismatch fail-closed: {}.\n6. Затем вызови MCP tool `{tool}`.\n7. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n8. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n9. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n10. После startup прочитай live runtime artifact `{}`; его пишет `{}` и он должен нести `{}`.\n11. После restore обязательно подними поля: {required_summary_fields}.\n12. Верни в активную рабочую линию obligations: {restored_obligations}.\n13. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n14. `{startup_next_action_field}` считается первым обязательным действием после startup.\n15. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n16. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n17. Silent drop запрещён: {}.\n18. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
+        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала прочитай machine-readable startup contract `{}` (relative path `{}`) и используй его как source-of-truth, а не этот markdown-блок.\n3. Этот artifact обязан быть прочитан до MCP tool call: {}.\n4. Если startup contract artifact отсутствует или не читается, fail-closed: {}.\n5. Проверь, что {} = \"{}\"; при mismatch fail-closed: {}.\n6. Затем вызови MCP tool `{tool}`.\n7. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n8. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n9. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n10. После startup прочитай live runtime artifact `{}`; его пишет `{}` и он должен нести `{}`.\n11. Из runtime artifact отдельно прочитай `{}` и используй его как immediate startup gate для auto-return.\n12. После restore обязательно подними поля: {required_summary_fields}.\n13. Верни в активную рабочую линию obligations: {restored_obligations}.\n14. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n15. `{startup_next_action_field}` считается первым обязательным действием после startup.\n16. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n17. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n18. Silent drop запрещён: {}.\n19. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
         repo_root.display(),
         contract_path.display(),
         startup_contract_relative_path,
@@ -2102,6 +2124,7 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
         runtime_state_relative_path,
         runtime_state_written_by_tool,
         runtime_state_source_summary_field,
+        startup_execution_gate_field,
         if must_resume_before_unrelated {
             "must_resume_required_return_task_before_unrelated_work = true"
         } else {
@@ -2408,6 +2431,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("missing_or_unreadable_fail_closed = true"));
         assert!(text.contains("sha256_mismatch_fail_closed = true"));
         assert!(text.contains(".amai/continuity/project-chat-startup-state.json"));
+        assert!(text.contains("startup_execution_gate"));
         let expected_sha = startup_contract_sha256(&mcp::project_chat_startup_contract())
             .expect("startup contract hash");
         assert!(text.contains(expected_sha.as_str()));
@@ -2450,6 +2474,10 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(
             payload["startup_contract"]["runtime_state_artifact"]["source_summary_field"],
             json!("continuity_startup_summary")
+        );
+        assert_eq!(
+            payload["startup_contract"]["runtime_state_artifact"]["startup_execution_gate_field"],
+            json!("startup_execution_gate")
         );
     }
 
@@ -2550,6 +2578,10 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             Some(true)
         );
         assert_eq!(
+            audit.startup_instruction_contains_startup_execution_gate,
+            Some(true)
+        );
+        assert_eq!(
             audit.startup_contract_sha_matches_current_contract,
             Some(true)
         );
@@ -2574,6 +2606,10 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(audit.startup_contract_contains_no_silent_drop, Some(true));
         assert_eq!(
             audit.startup_contract_contains_runtime_state_artifact,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_contract_contains_startup_execution_gate,
             Some(true)
         );
 

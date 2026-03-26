@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 04:26 MSK
-Ручная сверка guide/docs: 2026-03-26 04:26 MSK
+modified_at: 2026-03-26 04:47 MSK
+Ручная сверка guide/docs: 2026-03-26 04:47 MSK
 
 # Operations
 
@@ -875,11 +875,15 @@ cargo run -- mcp serve
 - в этом runtime artifact должны лежать:
   - `continuity_startup_summary`;
   - `chat_start_restore.prompt_text`;
+  - `startup_execution_gate`;
   - `startup_next_action`;
   - `required_return_task`;
   - `execctl_active_lease`;
   - `project_task_tree`;
   - `project_task_ledger`.
+- `startup_execution_gate` считается immediate operator/client gate:
+  он machine-readable фиксирует `must_follow_startup_next_action` и
+  `unrelated_work_allowed`.
 - `amai status` теперь auditing-ит runtime artifact отдельной строкой `startup_runtime_state: ...`.
   Правильное чтение:
   - `ok` — живой startup-state materialized и return contour виден machine-readable;

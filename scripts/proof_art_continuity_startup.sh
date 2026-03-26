@@ -21,9 +21,11 @@ printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.excluded_reasons_su
 printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.prompt_text | contains("Почему вошёл последний контекст:")' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.working_state_restore.state_lineage.authoritative_event_id != ""' >/dev/null
 test -f "${startup_state_artifact}"
-jq -e '.artifact_version == "workspace-startup-runtime-state-v1"' "${startup_state_artifact}" >/dev/null
+jq -e '.artifact_version == "workspace-startup-runtime-state-v2"' "${startup_state_artifact}" >/dev/null
 jq -e '.source_tool == "amai_continuity_startup"' "${startup_state_artifact}" >/dev/null
 jq -e '.source_summary_field == "continuity_startup_summary"' "${startup_state_artifact}" >/dev/null
+jq -e '.startup_execution_gate.gate_version == "startup-execution-gate-v1"' "${startup_state_artifact}" >/dev/null
+jq -e '.startup_execution_gate.no_silent_drop == true' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.prompt_text_present == true' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.startup_next_action.action_kind != null' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.required_return_task != null' "${startup_state_artifact}" >/dev/null
@@ -33,5 +35,6 @@ startup_state_output="$(./target/release/amai continuity startup-state --repo-ro
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.status == "ok"' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.prompt_text_present == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_next_action_present == true' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_execution_gate_present == true' >/dev/null
 
 echo "proof_art_continuity_startup: PASS"

@@ -96,6 +96,7 @@ pub(crate) struct StartupRuntimeStateAudit {
     pub source_summary_field_matches: Option<bool>,
     pub prompt_text_present: Option<bool>,
     pub startup_next_action_present: Option<bool>,
+    pub startup_execution_gate_present: Option<bool>,
     pub required_return_task_field_present: Option<bool>,
     pub execctl_active_lease_field_present: Option<bool>,
     pub project_task_tree_field_present: Option<bool>,
@@ -103,6 +104,8 @@ pub(crate) struct StartupRuntimeStateAudit {
     pub resume_state: Option<String>,
     pub action_kind: Option<String>,
     pub lease_owner_state: Option<String>,
+    pub must_follow_startup_next_action: Option<bool>,
+    pub unrelated_work_allowed: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -135,6 +138,7 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             source_summary_field_matches: None,
             prompt_text_present: None,
             startup_next_action_present: None,
+            startup_execution_gate_present: None,
             required_return_task_field_present: None,
             execctl_active_lease_field_present: None,
             project_task_tree_field_present: None,
@@ -142,6 +146,8 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             resume_state: None,
             action_kind: None,
             lease_owner_state: None,
+            must_follow_startup_next_action: None,
+            unrelated_work_allowed: None,
         });
     }
 
@@ -162,6 +168,7 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             .is_some_and(|value| !value.trim().is_empty()),
     );
     let startup_next_action_present = Some(summary["startup_next_action"].is_object());
+    let startup_execution_gate_present = Some(payload["startup_execution_gate"].is_object());
     let required_return_task_field_present = Some(
         summary
             .as_object()
@@ -191,18 +198,26 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
     let lease_owner_state = summary["execctl_active_lease"]["lease_owner_state"]
         .as_str()
         .map(ToOwned::to_owned);
+    let must_follow_startup_next_action = payload["startup_execution_gate"]
+        ["must_follow_startup_next_action"]
+        .as_bool();
+    let unrelated_work_allowed = payload["startup_execution_gate"]["unrelated_work_allowed"]
+        .as_bool();
 
     let status = if payload["artifact_version"].as_str()
-        != Some("workspace-startup-runtime-state-v1")
+        != Some("workspace-startup-runtime-state-v2")
         || payload["source_tool"].as_str() != Some("amai_continuity_startup")
         || startup_contract_sha_matches_current_contract != Some(true)
         || source_summary_field_matches != Some(true)
         || prompt_text_present != Some(true)
         || startup_next_action_present != Some(true)
+        || startup_execution_gate_present != Some(true)
         || required_return_task_field_present != Some(true)
         || execctl_active_lease_field_present != Some(true)
         || project_task_tree_field_present != Some(true)
         || project_task_ledger_field_present != Some(true)
+        || must_follow_startup_next_action.is_none()
+        || unrelated_work_allowed.is_none()
     {
         "startup_runtime_state_drift".to_string()
     } else {
@@ -217,6 +232,7 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         source_summary_field_matches,
         prompt_text_present,
         startup_next_action_present,
+        startup_execution_gate_present,
         required_return_task_field_present,
         execctl_active_lease_field_present,
         project_task_tree_field_present,
@@ -224,6 +240,8 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         resume_state,
         action_kind,
         lease_owner_state,
+        must_follow_startup_next_action,
+        unrelated_work_allowed,
     })
 }
 
@@ -242,6 +260,7 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
                     "source_summary_field_matches": audit.source_summary_field_matches,
                     "prompt_text_present": audit.prompt_text_present,
                     "startup_next_action_present": audit.startup_next_action_present,
+                    "startup_execution_gate_present": audit.startup_execution_gate_present,
                     "required_return_task_field_present": audit.required_return_task_field_present,
                     "execctl_active_lease_field_present": audit.execctl_active_lease_field_present,
                     "project_task_tree_field_present": audit.project_task_tree_field_present,
@@ -249,6 +268,8 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
                     "resume_state": audit.resume_state,
                     "action_kind": audit.action_kind,
                     "lease_owner_state": audit.lease_owner_state,
+                    "must_follow_startup_next_action": audit.must_follow_startup_next_action,
+                    "unrelated_work_allowed": audit.unrelated_work_allowed,
                 }
             }))?
         );
@@ -278,6 +299,10 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
         audit.startup_next_action_present.unwrap_or(false)
     );
     println!(
+        "startup_execution_gate present: {}",
+        audit.startup_execution_gate_present.unwrap_or(false)
+    );
+    println!(
         "required_return_task field present: {}",
         audit.required_return_task_field_present.unwrap_or(false)
     );
@@ -304,6 +329,14 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
     println!(
         "Lease owner state: {}",
         audit.lease_owner_state.as_deref().unwrap_or("n/a")
+    );
+    println!(
+        "Must follow startup_next_action: {}",
+        audit.must_follow_startup_next_action.unwrap_or(false)
+    );
+    println!(
+        "Unrelated work allowed: {}",
+        audit.unrelated_work_allowed.unwrap_or(false)
     );
     if audit.status != "ok" {
         println!(
@@ -862,14 +895,16 @@ fn build_startup_runtime_state_artifact(
 ) -> Result<Value> {
     let startup_contract_sha256 =
         hex_sha256(&serde_json::to_vec(&mcp::project_chat_startup_contract())?);
+    let startup_execution_gate = build_startup_execution_gate(payload);
     Ok(json!({
-        "artifact_version": "workspace-startup-runtime-state-v1",
+        "artifact_version": "workspace-startup-runtime-state-v2",
         "repo_root": repo_root.display().to_string(),
         "generated_at_epoch_ms": generated_at_epoch_ms,
         "source_tool": "amai_continuity_startup",
         "source_summary_field": "continuity_startup_summary",
         "startup_contract_sha256": startup_contract_sha256,
         "continuity_startup_summary": mcp::continuity_startup_summary_json(payload),
+        "startup_execution_gate": startup_execution_gate,
         "chat_start_restore": {
             "headline": payload["chat_start_restore"]["headline"].clone(),
             "next_step": payload["chat_start_restore"]["next_step"].clone(),
@@ -882,6 +917,54 @@ fn build_startup_runtime_state_artifact(
             Value::Null
         }
     }))
+}
+
+fn build_startup_execution_gate(payload: &Value) -> Value {
+    let contract = mcp::project_chat_startup_contract();
+    let resume_enforcement = &contract["resume_enforcement"];
+    let action_kind = payload["chat_start_restore"]["startup_next_action"]["action_kind"]
+        .as_str()
+        .unwrap_or("continue_active_workline");
+    let lease_owner_state = payload["chat_start_restore"]["execctl_active_lease"]["lease_owner_state"]
+        .as_str();
+    let previous_session_owner_value = resume_enforcement["previous_session_owner_value"]
+        .as_str()
+        .unwrap_or("previous_session_owner");
+    let must_resume_before_unrelated = resume_enforcement
+        ["must_resume_required_return_task_before_unrelated_work"]
+        .as_bool()
+        .unwrap_or(false);
+    let required_action_kind = resume_enforcement["required_action_kind_when_resume_required"]
+        .as_str()
+        .unwrap_or("resume_required_return_task");
+    let must_follow = (must_resume_before_unrelated && action_kind == required_action_kind)
+        || lease_owner_state == Some(previous_session_owner_value);
+
+    json!({
+        "gate_version": "startup-execution-gate-v1",
+        "action_kind": action_kind,
+        "blocking": payload["chat_start_restore"]["startup_next_action"]["blocking"]
+            .as_bool()
+            .unwrap_or(false),
+        "resume_state": payload["chat_start_restore"]["execctl_resume_state"]
+            .as_str()
+            .unwrap_or("clear"),
+        "required_return_task_present": payload["chat_start_restore"]["required_return_task"].is_object(),
+        "required_return_task_headline": payload["chat_start_restore"]["required_return_task"]["headline"]
+            .as_str(),
+        "required_return_task_next_step": payload["chat_start_restore"]["required_return_task"]["next_step"]
+            .as_str(),
+        "lease_owner_state": lease_owner_state,
+        "must_follow_startup_next_action": must_follow,
+        "unrelated_work_allowed": !must_follow,
+        "must_read_prompt_text_before_reply": payload["chat_start_restore"]["prompt_text"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty()),
+        "required_action_kind_when_resume_required": required_action_kind,
+        "no_silent_drop": resume_enforcement["no_silent_drop"]
+            .as_bool()
+            .unwrap_or(false),
+    })
 }
 
 fn persist_startup_runtime_state_artifact(repo_root: &Path, payload: &Value) -> Result<()> {
@@ -4736,12 +4819,24 @@ mod tests {
 
         assert_eq!(
             artifact["artifact_version"],
-            json!("workspace-startup-runtime-state-v1")
+            json!("workspace-startup-runtime-state-v2")
         );
         assert_eq!(artifact["source_tool"], json!("amai_continuity_startup"));
         assert_eq!(
             artifact["source_summary_field"],
             json!("continuity_startup_summary")
+        );
+        assert_eq!(
+            artifact["startup_execution_gate"]["gate_version"],
+            json!("startup-execution-gate-v1")
+        );
+        assert_eq!(
+            artifact["startup_execution_gate"]["must_follow_startup_next_action"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["startup_execution_gate"]["unrelated_work_allowed"],
+            json!(false)
         );
         assert_eq!(
             artifact["continuity_startup_summary"]["startup_next_action"]["action_kind"],

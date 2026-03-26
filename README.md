@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 04:26 MSK
-Ручная сверка guide/docs: 2026-03-26 04:26 MSK
+modified_at: 2026-03-26 04:47 MSK
+Ручная сверка guide/docs: 2026-03-26 04:47 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1249,6 +1249,8 @@ preview, а не только raw count.
   - `execctl_active_lease`;
   - `project_task_tree`;
   - `project_task_ledger`;
+- поверх этих полей runtime artifact теперь отдельно materialize-ит `startup_execution_gate`,
+  чтобы клиент видел immediate auto-return decision уже единым machine-readable object-слоем;
 - `amai status` теперь auditing-ит и этот runtime artifact отдельной строкой
   `startup_runtime_state: ...`;
   truthful интерпретация там такая:

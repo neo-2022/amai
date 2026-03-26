@@ -2509,7 +2509,7 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v4",
+                "contract_version": "continuity-startup-contract-v5",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore before any substantive work in a new or resumed chat",
@@ -2536,7 +2536,9 @@ fn protocol_manifest() -> Value {
                     "workspace_runtime_state_relative_path": ".amai/continuity/project-chat-startup-state.json",
                     "written_by_tool": "amai_continuity_startup",
                     "source_summary_field": "continuity_startup_summary",
-                    "contains_prompt_text": true
+                    "contains_prompt_text": true,
+                    "startup_execution_gate_field": "startup_execution_gate",
+                    "startup_execution_gate_version": "startup-execution-gate-v1"
                 },
                 "required_arguments": ["project"],
                 "optional_arguments": ["repo_root", "namespace", "token_source_kind"],
@@ -4639,6 +4641,10 @@ mod tests {
             Some("amai-continuity-startup")
         );
         assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
+            Some("continuity-startup-contract-v5")
+        );
+        assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["must_call_before_substantive_work"].as_bool(),
             Some(true)
         );
@@ -4699,6 +4705,18 @@ mod tests {
             startup_required_fields
                 .iter()
                 .any(|field| field.as_str() == Some("project_task_ledger_summary"))
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
+                ["startup_execution_gate_field"]
+                .as_str(),
+            Some("startup_execution_gate")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
+                ["startup_execution_gate_version"]
+                .as_str(),
+            Some("startup-execution-gate-v1")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["artifact_enforcement"]
