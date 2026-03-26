@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 10:59 MSK
-Ручная сверка guide/docs: 2026-03-26 10:59 MSK
+modified_at: 2026-03-26 11:10 MSK
+Ручная сверка guide/docs: 2026-03-26 11:10 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -722,9 +722,14 @@ http://127.0.0.1:9464/
   - same-meter assist contour для dashboard тоже больше не имеет права заново перечитывать repo
     rollout observations и derive-ить assistant scopes на каждом секундном refresh, если active
     scope не изменился;
-  - для human dashboard этот assist contour теперь переиспользуется как bounded cache до `10`
-    секунд, чтобы `token_budget_dashboard_report` не жёг секунду за секундой один и тот же
-    unchanged same-meter path.
+  - для human dashboard этот assist contour теперь инвалидируется не по таймеру, а по фактическим
+    входам:
+    - current rollout observations reuse-ятся, пока не меняется rollout source signature
+      текущего thread;
+    - derived assistant scopes reuse-ятся, пока не меняются missing target sets, direct-turn
+      snapshots, working-state meta или rollout source signatures задействованных thread-ов;
+    - quiet same-meter sync/write-back повторяется только если реально изменился набор missing
+      `assistant_generation/tool_overhead` targets или сам rollout source.
   - если ускорителей нет вообще, карточка не исчезает, а показывает `не обнаружено`;
   - `Установленный клиент` и `Сборка`
     - теперь живут как компактные карточки рядом друг с другом, а не занимают место hardware-card первого ряда;

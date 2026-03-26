@@ -988,6 +988,19 @@ pub fn rollout_assistant_generation_observations(
     parse_rollout_assistant_generation_observations(&thread_id, &rollout_path)
 }
 
+pub fn current_rollout_source_signature(repo_root: &str) -> Result<Option<String>> {
+    let Some(record) = current_thread_record(repo_root, current_thread_id().as_deref())? else {
+        return Ok(None);
+    };
+    if record.rollout_path.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(rollout_source_signature(
+        &record.thread_id,
+        &PathBuf::from(record.rollout_path),
+    )))
+}
+
 pub fn rollout_assistant_generation_turn_observations_for_thread(
     thread_id: &str,
 ) -> Result<Vec<RolloutAssistantGenerationTurnObservation>> {
@@ -1004,6 +1017,19 @@ pub fn rollout_assistant_generation_turn_observations_for_thread(
     parse_rollout_assistant_generation_turn_observations(thread_id, &rollout_path)
 }
 
+pub fn rollout_source_signature_for_thread(thread_id: &str) -> Result<Option<String>> {
+    let Some(record) = thread_record_by_id(thread_id)? else {
+        return Ok(None);
+    };
+    if record.rollout_path.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(rollout_source_signature(
+        thread_id,
+        &PathBuf::from(record.rollout_path),
+    )))
+}
+
 fn rollout_thread_id_from_path(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     let candidate = stem.chars().rev().take(36).collect::<String>();
@@ -1013,6 +1039,21 @@ fn rollout_thread_id_from_path(path: &Path) -> Option<String> {
     let thread_id = candidate.chars().rev().collect::<String>();
     let hyphen_count = thread_id.chars().filter(|ch| *ch == '-').count();
     (hyphen_count == 4).then_some(thread_id)
+}
+
+fn rollout_source_signature(thread_id: &str, rollout_path: &Path) -> String {
+    let canonical_path = rollout_path
+        .canonicalize()
+        .unwrap_or_else(|_| rollout_path.to_path_buf());
+    let path_label = canonical_path.display().to_string();
+    let metadata = fs::metadata(&canonical_path).ok();
+    let size_bytes = metadata.as_ref().map(|item| item.len()).unwrap_or_default();
+    let modified_epoch_ms = metadata
+        .and_then(|item| item.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default();
+    format!("{thread_id}:{path_label}:{size_bytes}:{modified_epoch_ms}")
 }
 
 fn load_thread_record(conn: &Connection, thread_id: &str) -> Result<Option<ThreadRecord>> {
@@ -2661,9 +2702,9 @@ mod tests {
         extract_chat_messages_from_rollout_text, extract_last_messages,
         latest_rollout_assistant_generation_observation, nth_previous_chat_tail_from_snapshots,
         parse_rfc3339_epoch_s, parse_role_heading, rendered_transcript_summary,
-        rollout_assistant_generation_observations, rollout_summary_from_path,
-        rollout_thread_id_from_path, select_messages_for_time, select_tail_messages,
-        time_slice_matches_exact_time,
+        rollout_assistant_generation_observations, rollout_source_signature,
+        rollout_summary_from_path, rollout_thread_id_from_path, select_messages_for_time,
+        select_tail_messages, time_slice_matches_exact_time,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use proptest::prelude::*;
@@ -2830,6 +2871,20 @@ mod tests {
             rollout_thread_id_from_path(path).as_deref(),
             Some("019ce438-f3bd-7c60-aa28-3284a96bfeb5")
         );
+    }
+
+    #[test]
+    fn rollout_source_signature_changes_with_file_metadata() {
+        let rollout_path =
+            std::env::temp_dir().join(format!("amai-rollout-signature-{}.jsonl", Uuid::new_v4()));
+        fs::write(&rollout_path, "{\"type\":\"noop\"}\n").expect("write rollout");
+        let first = rollout_source_signature("thread-1", &rollout_path);
+        fs::write(&rollout_path, "{\"type\":\"noop\"}\n{\"type\":\"noop2\"}\n")
+            .expect("rewrite rollout");
+        let second = rollout_source_signature("thread-1", &rollout_path);
+        let _ = fs::remove_file(&rollout_path);
+
+        assert_ne!(first, second);
     }
 
     #[test]

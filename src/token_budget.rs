@@ -27,8 +27,6 @@ const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
 const AGENT_CYCLE_TIMELINE_MAX_POINTS: usize = 256;
 const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
 const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_generation_turn_observed";
-const DASHBOARD_ASSIST_CONTOUR_CACHE_TTL_MS: u64 = 10_000;
-
 static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<Mutex<Option<DashboardRolloutObservationCache>>> =
     OnceLock::new();
 static DASHBOARD_ASSISTANT_SCOPE_CACHE: OnceLock<Mutex<Option<DashboardAssistantScopeCache>>> =
@@ -456,14 +454,13 @@ struct AssistantGenerationScopeObservation {
 #[derive(Debug, Clone)]
 struct DashboardRolloutObservationCache {
     repo_root: PathBuf,
-    captured_at_ms: u64,
+    signature: String,
     observations: Vec<codex_threads::RolloutAssistantGenerationObservation>,
 }
 
 #[derive(Debug, Clone)]
 struct DashboardAssistantScopeCache {
     repo_root: PathBuf,
-    captured_at_ms: u64,
     signature: String,
     scopes: Vec<AssistantGenerationScopeObservation>,
 }
@@ -471,7 +468,6 @@ struct DashboardAssistantScopeCache {
 #[derive(Debug, Clone)]
 struct DashboardSameMeterSyncCache {
     repo_root: PathBuf,
-    captured_at_ms: u64,
     signature: String,
 }
 
@@ -6835,7 +6831,8 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     let config = load_config(&repo_root)?;
     let profile = resolve_profile(&config, None, &repo_root)?;
     let include_verify_events = config.measurement.include_verify_events_by_default;
-    let rollout_observations = dashboard_rollout_assistant_generation_observations_for_repo(&repo_root)?;
+    let (rollout_observation_signature, rollout_observations) =
+        dashboard_rollout_assistant_generation_observations_for_repo(&repo_root)?;
     let mut events = load_events(db, include_verify_events, None).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
     let mut events =
@@ -6858,7 +6855,10 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         })
         .unwrap_or_default();
     let sync_scope_events = active_same_meter_scope_events(&session_events, &rolling_window_events);
-    let dashboard_sync_signature = dashboard_same_meter_sync_signature(&sync_scope_events);
+    let dashboard_sync_signature = dashboard_same_meter_sync_signature(
+        &sync_scope_events,
+        &rollout_observation_signature,
+    );
     let (tool_overhead_changed, assistant_generation_changed) =
         if should_run_dashboard_same_meter_sync(&repo_root, &dashboard_sync_signature) {
             (
@@ -6902,9 +6902,12 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     } else {
         vec![session_events.as_slice(), events.as_slice()]
     };
-    let scope_observations =
-        derive_dashboard_rollout_assistant_generation_scopes(db, &repo_root, &scope_events)
-            .await?;
+    let scope_observations = derive_dashboard_rollout_assistant_generation_scopes(
+        db,
+        &repo_root,
+        &scope_events,
+    )
+    .await?;
     let mut scope_iter = scope_observations.into_iter();
     let current_session_assistant_scope = scope_iter.next().unwrap_or_default();
     let rolling_window_assistant_scope = if profile.rolling_window_hours.is_some() {
@@ -7205,30 +7208,41 @@ fn rollout_assistant_generation_observations_for_repo(
 
 fn dashboard_rollout_assistant_generation_observations_for_repo(
     repo_root: &Path,
-) -> Result<Vec<codex_threads::RolloutAssistantGenerationObservation>> {
-    if let Some(observations) = cached_dashboard_rollout_observations(repo_root) {
-        return Ok(observations);
+) -> Result<(String, Vec<codex_threads::RolloutAssistantGenerationObservation>)> {
+    let signature = dashboard_rollout_observation_source_signature(repo_root)?;
+    if let Some(observations) = cached_dashboard_rollout_observations(repo_root, &signature) {
+        return Ok((signature, observations));
     }
     let observations = rollout_assistant_generation_observations_for_repo(repo_root)?;
-    store_dashboard_rollout_observations(repo_root, &observations);
-    Ok(observations)
+    store_dashboard_rollout_observations(repo_root, &signature, &observations);
+    Ok((signature, observations))
 }
 
 fn cached_dashboard_rollout_observations(
     repo_root: &Path,
+    signature: &str,
 ) -> Option<Vec<codex_threads::RolloutAssistantGenerationObservation>> {
     let cache = DASHBOARD_ROLLOUT_OBSERVATION_CACHE.get_or_init(|| Mutex::new(None));
     let guard = cache.lock().ok()?;
     let entry = guard.as_ref()?;
-    if dashboard_cache_entry_is_fresh(repo_root, &entry.repo_root, entry.captured_at_ms) {
+    if canonical_repo_root(repo_root) == entry.repo_root && entry.signature == signature {
         Some(entry.observations.clone())
     } else {
         None
     }
 }
 
+fn dashboard_rollout_observation_source_signature(repo_root: &Path) -> Result<String> {
+    let Some(repo_root_str) = repo_root.to_str() else {
+        return Ok("no_current_rollout_source".to_string());
+    };
+    Ok(codex_threads::current_rollout_source_signature(repo_root_str)?
+        .unwrap_or_else(|| "no_current_rollout_source".to_string()))
+}
+
 fn store_dashboard_rollout_observations(
     repo_root: &Path,
+    signature: &str,
     observations: &[codex_threads::RolloutAssistantGenerationObservation],
 ) {
     let cache = DASHBOARD_ROLLOUT_OBSERVATION_CACHE.get_or_init(|| Mutex::new(None));
@@ -7237,7 +7251,7 @@ fn store_dashboard_rollout_observations(
     };
     *guard = Some(DashboardRolloutObservationCache {
         repo_root: canonical_repo_root(repo_root),
-        captured_at_ms: dashboard_cache_now_epoch_ms(),
+        signature: signature.to_string(),
         observations: observations.to_vec(),
     });
 }
@@ -7303,7 +7317,10 @@ async fn sync_rollout_assistant_generation_for_events(
     Ok(changed)
 }
 
-fn dashboard_same_meter_sync_signature(events: &[TokenBudgetEvent]) -> String {
+fn dashboard_same_meter_sync_signature(
+    events: &[TokenBudgetEvent],
+    rollout_observation_signature: &str,
+) -> String {
     let assistant_generation_missing_context_pack_ids = events
         .iter()
         .filter(|event| {
@@ -7327,6 +7344,7 @@ fn dashboard_same_meter_sync_signature(events: &[TokenBudgetEvent]) -> String {
     let payload = json!({
         "assistant_generation_missing_context_pack_ids": assistant_generation_missing_context_pack_ids,
         "tool_overhead_missing_context_pack_ids": tool_overhead_missing_context_pack_ids,
+        "rollout_observation_signature": rollout_observation_signature,
     });
     hex_sha256(
         &serde_json::to_vec(&payload)
@@ -7339,19 +7357,14 @@ fn should_run_dashboard_same_meter_sync(repo_root: &Path, signature: &str) -> bo
     let Some(mut guard) = cache.lock().ok() else {
         return true;
     };
-    let now_ms = dashboard_cache_now_epoch_ms();
     let repo_root = canonical_repo_root(repo_root);
     if let Some(entry) = guard.as_ref() {
-        if entry.repo_root == repo_root
-            && entry.signature == signature
-            && now_ms.saturating_sub(entry.captured_at_ms) <= DASHBOARD_ASSIST_CONTOUR_CACHE_TTL_MS
-        {
+        if entry.repo_root == repo_root && entry.signature == signature {
             return false;
         }
     }
     *guard = Some(DashboardSameMeterSyncCache {
         repo_root,
-        captured_at_ms: now_ms,
         signature: signature.to_string(),
     });
     true
@@ -7753,8 +7766,9 @@ async fn derive_rollout_assistant_generation_scope(
     ))
 }
 
-async fn derive_rollout_assistant_generation_scopes(
+async fn derive_dashboard_rollout_assistant_generation_scopes(
     db: &Client,
+    repo_root: &Path,
     events_by_scope: &[&[TokenBudgetEvent]],
 ) -> Result<Vec<AssistantGenerationScopeObservation>> {
     let target_sets = events_by_scope
@@ -7780,6 +7794,16 @@ async fn derive_rollout_assistant_generation_scopes(
         .values()
         .map(|item| item.thread_id.clone())
         .collect::<BTreeSet<_>>();
+    let signature = dashboard_assistant_scope_signature(
+        &target_sets,
+        &direct_turns,
+        &metadata,
+        &thread_ids,
+    )?;
+    if let Some(scopes) = cached_dashboard_assistant_generation_scopes(repo_root, &signature) {
+        return Ok(scopes);
+    }
+
     let mut turns_by_thread =
         BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
     for thread_id in thread_ids {
@@ -7789,7 +7813,7 @@ async fn derive_rollout_assistant_generation_scopes(
             turns_by_thread.insert(thread_id, turns);
         }
     }
-    Ok(target_sets
+    let scopes = target_sets
         .iter()
         .map(|target_context_pack_ids| {
             derive_rollout_assistant_generation_scope_from_sources(
@@ -7799,34 +7823,60 @@ async fn derive_rollout_assistant_generation_scopes(
                 &turns_by_thread,
             )
         })
-        .collect())
-}
-
-async fn derive_dashboard_rollout_assistant_generation_scopes(
-    db: &Client,
-    repo_root: &Path,
-    events_by_scope: &[&[TokenBudgetEvent]],
-) -> Result<Vec<AssistantGenerationScopeObservation>> {
-    let signature = dashboard_assistant_scope_signature(events_by_scope);
-    if let Some(scopes) = cached_dashboard_assistant_generation_scopes(repo_root, &signature) {
-        return Ok(scopes);
-    }
-    let scopes = derive_rollout_assistant_generation_scopes(db, events_by_scope).await?;
+        .collect::<Vec<_>>();
     store_dashboard_assistant_generation_scopes(repo_root, &signature, &scopes);
     Ok(scopes)
 }
 
-fn dashboard_assistant_scope_signature(events_by_scope: &[&[TokenBudgetEvent]]) -> String {
-    let target_sets = events_by_scope
+fn dashboard_assistant_scope_signature(
+    target_sets: &[BTreeSet<String>],
+    direct_turns: &[AssistantGenerationTurnObservedSnapshot],
+    metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
+    thread_ids: &BTreeSet<String>,
+) -> Result<String> {
+    let target_sets = target_sets
         .iter()
-        .map(|events| assistant_generation_missing_scope_context_pack_ids(Some(events)))
-        .map(|set| set.into_iter().collect::<Vec<_>>())
+        .map(|set| set.iter().cloned().collect::<Vec<_>>())
         .collect::<Vec<_>>();
-    let payload = json!({ "target_sets": target_sets });
-    hex_sha256(
+    let direct_turns = direct_turns
+        .iter()
+        .map(|item| {
+            json!({
+                "thread_id": item.thread_id,
+                "turn_id": item.turn_id,
+                "assistant_generation_tokens": item.assistant_generation_tokens,
+                "context_pack_ids": item.context_pack_ids,
+            })
+        })
+        .collect::<Vec<_>>();
+    let metadata = metadata
+        .iter()
+        .map(|(context_pack_id, item)| {
+            json!({
+                "context_pack_id": context_pack_id,
+                "thread_id": item.thread_id,
+                "captured_at_epoch_ms": item.captured_at_epoch_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut thread_rollout_signatures = BTreeMap::<String, String>::new();
+    for thread_id in thread_ids {
+        thread_rollout_signatures.insert(
+            thread_id.clone(),
+            codex_threads::rollout_source_signature_for_thread(thread_id)?
+                .unwrap_or_else(|| "no_rollout_source".to_string()),
+        );
+    }
+    let payload = json!({
+        "target_sets": target_sets,
+        "direct_turns": direct_turns,
+        "metadata": metadata,
+        "thread_rollout_signatures": thread_rollout_signatures,
+    });
+    Ok(hex_sha256(
         &serde_json::to_vec(&payload)
             .unwrap_or_else(|_| payload.to_string().into_bytes()),
-    )
+    ))
 }
 
 fn cached_dashboard_assistant_generation_scopes(
@@ -7836,9 +7886,7 @@ fn cached_dashboard_assistant_generation_scopes(
     let cache = DASHBOARD_ASSISTANT_SCOPE_CACHE.get_or_init(|| Mutex::new(None));
     let guard = cache.lock().ok()?;
     let entry = guard.as_ref()?;
-    if dashboard_cache_entry_is_fresh(repo_root, &entry.repo_root, entry.captured_at_ms)
-        && entry.signature == signature
-    {
+    if canonical_repo_root(repo_root) == entry.repo_root && entry.signature == signature {
         Some(entry.scopes.clone())
     } else {
         None
@@ -7856,27 +7904,9 @@ fn store_dashboard_assistant_generation_scopes(
     };
     *guard = Some(DashboardAssistantScopeCache {
         repo_root: canonical_repo_root(repo_root),
-        captured_at_ms: dashboard_cache_now_epoch_ms(),
         signature: signature.to_string(),
         scopes: scopes.to_vec(),
     });
-}
-
-fn dashboard_cache_entry_is_fresh(
-    requested_repo_root: &Path,
-    cached_repo_root: &Path,
-    captured_at_ms: u64,
-) -> bool {
-    canonical_repo_root(requested_repo_root) == cached_repo_root
-        && dashboard_cache_now_epoch_ms().saturating_sub(captured_at_ms)
-            <= DASHBOARD_ASSIST_CONTOUR_CACHE_TTL_MS
-}
-
-fn dashboard_cache_now_epoch_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 fn canonical_repo_root(path: &Path) -> PathBuf {
@@ -18820,15 +18850,17 @@ effective_to_epoch_ms = 2000
             },
         ];
 
-        let signature = dashboard_same_meter_sync_signature(&events);
+        let signature = dashboard_same_meter_sync_signature(&events, "rollout-a");
         let reversed = vec![events[1].clone(), events[0].clone()];
-        let reversed_signature = dashboard_same_meter_sync_signature(&reversed);
+        let reversed_signature = dashboard_same_meter_sync_signature(&reversed, "rollout-a");
         assert_eq!(signature, reversed_signature);
 
         let mut resolved = events.clone();
         resolved[0].assistant_generation_tokens = Some(5);
-        let resolved_signature = dashboard_same_meter_sync_signature(&resolved);
+        let resolved_signature = dashboard_same_meter_sync_signature(&resolved, "rollout-a");
         assert_ne!(signature, resolved_signature);
+        let changed_rollout_signature = dashboard_same_meter_sync_signature(&events, "rollout-b");
+        assert_ne!(signature, changed_rollout_signature);
     }
 
     #[test]
