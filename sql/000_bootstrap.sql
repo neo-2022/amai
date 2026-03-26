@@ -621,6 +621,9 @@ CREATE INDEX IF NOT EXISTS idx_ami_memory_search ON ami.memory_cards USING GIN (
 CREATE INDEX IF NOT EXISTS idx_ami_context_packs_project_namespace ON ami.context_packs(project_id, namespace_id);
 CREATE INDEX IF NOT EXISTS idx_ami_observability_snapshots_kind_created
     ON ami.observability_snapshots(snapshot_kind, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ami_observability_snapshots_kind_scope_project_created
+    ON ami.observability_snapshots(snapshot_kind, scope_project_code, created_at DESC)
+    WHERE scope_project_code IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ami_observability_snapshots_kind_event_key
     ON ami.observability_snapshots(snapshot_kind, event_key);
 CREATE INDEX IF NOT EXISTS idx_ami_observability_snapshots_kind_source_class

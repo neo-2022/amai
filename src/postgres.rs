@@ -2176,17 +2176,31 @@ pub async fn latest_observability_snapshot_for_project(
     payload_root: &str,
     project_code: &str,
 ) -> Result<Option<Value>> {
-    let row = client
+    let scoped_row = client
+        .query_opt(
+            r#"
+            SELECT payload
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = $1
+              AND scope_project_code = $2
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+            &[&snapshot_kind, &project_code],
+        )
+        .await?;
+    if let Some(row) = scoped_row {
+        return Ok(Some(row.get(0)));
+    }
+
+    let legacy_row = client
         .query_opt(
             &format!(
                 r#"
                 SELECT payload
                 FROM ami.observability_snapshots
                 WHERE snapshot_kind = $1
-                  AND (
-                        scope_project_code = $2
-                        OR payload->'{payload_root}'->'project'->>'code' = $2
-                  )
+                  AND payload->'{payload_root}'->'project'->>'code' = $2
                 ORDER BY created_at DESC
                 LIMIT 1
                 "#
@@ -2194,7 +2208,7 @@ pub async fn latest_observability_snapshot_for_project(
             &[&snapshot_kind, &project_code],
         )
         .await?;
-    Ok(row.map(|row| row.get(0)))
+    Ok(legacy_row.map(|row| row.get(0)))
 }
 
 pub async fn list_observability_snapshots_by_kinds(
