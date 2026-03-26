@@ -535,6 +535,16 @@ struct DashboardReportPreCacheTimings {
     total_ms: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+struct DashboardAssistantScopeDebug {
+    source_cache_status: String,
+    source_stage_ms: BTreeMap<String, u64>,
+    source_total_ms: u64,
+    scope_cache_status: String,
+    scope_stage_ms: BTreeMap<String, u64>,
+    scope_total_ms: u64,
+}
+
 #[derive(Debug, Clone)]
 struct QualityVerdict {
     target_kind: &'static str,
@@ -6957,7 +6967,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     } else {
         vec![session_events.as_slice(), events.as_slice()]
     };
-    let scope_observations =
+    let (scope_observations, assistant_scope_debug) =
         derive_dashboard_rollout_assistant_generation_scopes(db, &repo_root, &scope_events).await?;
     record_dashboard_precache_stage_ms(&mut pre_cache_timings, "assistant_scope", stage_started_at);
 
@@ -6995,6 +7005,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                 &rolling_window_events,
                 &events,
                 &pre_cache_timings,
+                &assistant_scope_debug,
             ));
         }
     }
@@ -7003,6 +7014,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         &report_signature,
         &report_components,
         &pre_cache_timings,
+        &assistant_scope_debug,
     );
     let current_session_summary = summarize_events(
         &session_events,
@@ -7892,14 +7904,34 @@ async fn dashboard_assistant_scope_sources(
     Vec<AssistantGenerationTurnObservedSnapshot>,
     BTreeMap<String, WorkingStateContextPackMeta>,
     BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
+    DashboardAssistantScopeDebug,
 )> {
+    let source_started_at = Instant::now();
+    let mut debug = DashboardAssistantScopeDebug {
+        source_cache_status: "miss".to_string(),
+        scope_cache_status: "unknown".to_string(),
+        ..Default::default()
+    };
+    let stage_started_at = Instant::now();
     let working_state_summary =
         postgres::summarize_observability_snapshots_by_kinds(db, &["working_state_event"]).await?;
+    record_dashboard_stage_ms(
+        &mut debug.source_stage_ms,
+        "working_state_summary",
+        stage_started_at,
+    );
+    let stage_started_at = Instant::now();
     let direct_turn_summary = postgres::summarize_observability_snapshots_by_kinds(
         db,
         &[ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND],
     )
     .await?;
+    record_dashboard_stage_ms(
+        &mut debug.source_stage_ms,
+        "direct_turn_summary",
+        stage_started_at,
+    );
+    let stage_started_at = Instant::now();
     if let Some((direct_turns, metadata, turns_by_thread)) =
         cached_dashboard_assistant_scope_sources(
             repo_root,
@@ -7908,19 +7940,72 @@ async fn dashboard_assistant_scope_sources(
             &direct_turn_summary,
         )?
     {
-        return Ok((direct_turns, metadata, turns_by_thread));
+        record_dashboard_stage_ms(
+            &mut debug.source_stage_ms,
+            "source_cache_lookup",
+            stage_started_at,
+        );
+        debug.source_cache_status = "hit".to_string();
+        debug.source_total_ms = source_started_at.elapsed().as_millis() as u64;
+        return Ok((direct_turns, metadata, turns_by_thread, debug));
     }
+    record_dashboard_stage_ms(
+        &mut debug.source_stage_ms,
+        "source_cache_lookup",
+        stage_started_at,
+    );
 
+    let stage_started_at = Instant::now();
     let direct_turns =
         assistant_generation_turn_observed_snapshots_for_context_packs(db, union_target_ids)
             .await?;
+    record_dashboard_stage_ms(
+        &mut debug.source_stage_ms,
+        "direct_turn_snapshots",
+        stage_started_at,
+    );
+    let direct_turn_covered_context_pack_ids = direct_turns
+        .iter()
+        .flat_map(|turn| turn.context_pack_ids.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    if direct_turn_covered_context_pack_ids == *union_target_ids {
+        debug
+            .source_stage_ms
+            .insert("direct_turn_full_coverage_short_circuit".to_string(), 0);
+        let empty_metadata = BTreeMap::new();
+        let empty_turns_by_thread = BTreeMap::new();
+        let thread_signatures = BTreeMap::new();
+        let signature = dashboard_assistant_scope_source_signature(
+            union_target_ids,
+            &working_state_summary,
+            &direct_turn_summary,
+            &thread_signatures,
+        );
+        store_dashboard_assistant_scope_sources(
+            repo_root,
+            &signature,
+            union_target_ids,
+            &direct_turns,
+            &empty_metadata,
+            &empty_turns_by_thread,
+        );
+        debug.source_total_ms = source_started_at.elapsed().as_millis() as u64;
+        return Ok((direct_turns, empty_metadata, empty_turns_by_thread, debug));
+    }
+    let stage_started_at = Instant::now();
     let metadata = latest_working_state_context_pack_metadata(db, union_target_ids).await?;
+    record_dashboard_stage_ms(
+        &mut debug.source_stage_ms,
+        "working_state_metadata",
+        stage_started_at,
+    );
     let thread_ids = metadata
         .values()
         .map(|item| item.thread_id.clone())
         .collect::<BTreeSet<_>>();
     let mut turns_by_thread =
         BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
+    let stage_started_at = Instant::now();
     for thread_id in &thread_ids {
         let turns =
             codex_threads::rollout_assistant_generation_turn_observations_for_thread(thread_id)?;
@@ -7928,12 +8013,23 @@ async fn dashboard_assistant_scope_sources(
             turns_by_thread.insert(thread_id.clone(), turns);
         }
     }
+    record_dashboard_stage_ms(
+        &mut debug.source_stage_ms,
+        "rollout_turn_threads",
+        stage_started_at,
+    );
+    let stage_started_at = Instant::now();
     let thread_signatures = dashboard_assistant_scope_thread_signatures(&thread_ids)?;
     let signature = dashboard_assistant_scope_source_signature(
         union_target_ids,
         &working_state_summary,
         &direct_turn_summary,
         &thread_signatures,
+    );
+    record_dashboard_stage_ms(
+        &mut debug.source_stage_ms,
+        "source_signature",
+        stage_started_at,
     );
     store_dashboard_assistant_scope_sources(
         repo_root,
@@ -7943,14 +8039,24 @@ async fn dashboard_assistant_scope_sources(
         &metadata,
         &turns_by_thread,
     );
-    Ok((direct_turns, metadata, turns_by_thread))
+    debug.source_total_ms = source_started_at.elapsed().as_millis() as u64;
+    Ok((direct_turns, metadata, turns_by_thread, debug))
 }
 
 async fn derive_dashboard_rollout_assistant_generation_scopes(
     db: &Client,
     repo_root: &Path,
     events_by_scope: &[&[TokenBudgetEvent]],
-) -> Result<Vec<AssistantGenerationScopeObservation>> {
+) -> Result<(
+    Vec<AssistantGenerationScopeObservation>,
+    DashboardAssistantScopeDebug,
+)> {
+    let scope_started_at = Instant::now();
+    let mut debug = DashboardAssistantScopeDebug {
+        source_cache_status: "miss".to_string(),
+        scope_cache_status: "miss".to_string(),
+        ..Default::default()
+    };
     let target_sets = events_by_scope
         .iter()
         .map(|events| assistant_generation_missing_scope_context_pack_ids(Some(events)))
@@ -7960,23 +8066,40 @@ async fn derive_dashboard_rollout_assistant_generation_scopes(
         .flat_map(|set| set.iter().cloned())
         .collect::<BTreeSet<_>>();
     if union_target_ids.is_empty() {
-        return Ok(vec![
-            AssistantGenerationScopeObservation::default();
-            events_by_scope.len()
-        ]);
+        debug.source_cache_status = "not_applicable".to_string();
+        debug.scope_cache_status = "not_applicable".to_string();
+        debug.scope_total_ms = scope_started_at.elapsed().as_millis() as u64;
+        return Ok((
+            vec![AssistantGenerationScopeObservation::default(); events_by_scope.len()],
+            debug,
+        ));
     }
 
-    let (direct_turns, metadata, turns_by_thread) =
+    let stage_started_at = Instant::now();
+    let (direct_turns, metadata, turns_by_thread, source_debug) =
         dashboard_assistant_scope_sources(db, repo_root, &union_target_ids).await?;
+    debug.source_cache_status = source_debug.source_cache_status;
+    debug.source_stage_ms = source_debug.source_stage_ms;
+    debug.source_total_ms = source_debug.source_total_ms;
+    record_dashboard_stage_ms(&mut debug.scope_stage_ms, "source_bundle", stage_started_at);
+    let stage_started_at = Instant::now();
     let signature = dashboard_assistant_scope_signature(
         &target_sets,
         &direct_turns,
         &metadata,
         &turns_by_thread,
     );
+    record_dashboard_stage_ms(
+        &mut debug.scope_stage_ms,
+        "scope_signature",
+        stage_started_at,
+    );
     if let Some(scopes) = cached_dashboard_assistant_generation_scopes(repo_root, &signature) {
-        return Ok(scopes);
+        debug.scope_cache_status = "hit".to_string();
+        debug.scope_total_ms = scope_started_at.elapsed().as_millis() as u64;
+        return Ok((scopes, debug));
     }
+    let stage_started_at = Instant::now();
     let scopes = target_sets
         .iter()
         .map(|target_context_pack_ids| {
@@ -7988,8 +8111,10 @@ async fn derive_dashboard_rollout_assistant_generation_scopes(
             )
         })
         .collect::<Vec<_>>();
+    record_dashboard_stage_ms(&mut debug.scope_stage_ms, "scope_build", stage_started_at);
     store_dashboard_assistant_generation_scopes(repo_root, &signature, &scopes);
-    Ok(scopes)
+    debug.scope_total_ms = scope_started_at.elapsed().as_millis() as u64;
+    Ok((scopes, debug))
 }
 
 fn dashboard_assistant_scope_signature(
@@ -8268,6 +8393,7 @@ fn refresh_dashboard_report_live_ages(
     rolling_window_events: &[TokenBudgetEvent],
     lifetime_events: &[TokenBudgetEvent],
     pre_cache_timings: &DashboardReportPreCacheTimings,
+    assistant_scope_debug: &DashboardAssistantScopeDebug,
 ) -> Value {
     if let Some(node) = report["token_budget_report"]["cache_debug"].as_object_mut() {
         node.insert("status".to_string(), Value::from("hit"));
@@ -8278,6 +8404,10 @@ fn refresh_dashboard_report_live_ages(
         node.insert(
             "pre_cache_stage_ms".to_string(),
             dashboard_precache_stage_ms_value(pre_cache_timings),
+        );
+        node.insert(
+            "assistant_scope_debug".to_string(),
+            dashboard_assistant_scope_debug_value(assistant_scope_debug),
         );
     }
     refresh_dashboard_report_scope_age(
@@ -8388,6 +8518,7 @@ fn dashboard_report_cache_debug(
     report_signature: &str,
     components: &DashboardReportSignatureComponents,
     pre_cache_timings: &DashboardReportPreCacheTimings,
+    assistant_scope_debug: &DashboardAssistantScopeDebug,
 ) -> Value {
     let mut reasons = Vec::new();
     let mut previous_signature = Value::Null;
@@ -8425,6 +8556,7 @@ fn dashboard_report_cache_debug(
         "changed_components": reasons,
         "pre_cache_total_ms": pre_cache_timings.total_ms,
         "pre_cache_stage_ms": dashboard_precache_stage_ms_value(pre_cache_timings),
+        "assistant_scope_debug": dashboard_assistant_scope_debug_value(assistant_scope_debug),
     })
 }
 
@@ -8433,10 +8565,7 @@ fn record_dashboard_precache_stage_ms(
     stage_key: &str,
     started_at: Instant,
 ) {
-    timings.stage_ms.insert(
-        stage_key.to_string(),
-        started_at.elapsed().as_millis() as u64,
-    );
+    record_dashboard_stage_ms(&mut timings.stage_ms, stage_key, started_at);
 }
 
 fn dashboard_precache_stage_ms_value(timings: &DashboardReportPreCacheTimings) -> Value {
@@ -8447,6 +8576,28 @@ fn dashboard_precache_stage_ms_value(timings: &DashboardReportPreCacheTimings) -
             .map(|(stage_key, elapsed_ms)| (stage_key.clone(), Value::from(*elapsed_ms)))
             .collect(),
     )
+}
+
+fn record_dashboard_stage_ms(
+    stage_ms: &mut BTreeMap<String, u64>,
+    stage_key: &str,
+    started_at: Instant,
+) {
+    stage_ms.insert(
+        stage_key.to_string(),
+        started_at.elapsed().as_millis() as u64,
+    );
+}
+
+fn dashboard_assistant_scope_debug_value(debug: &DashboardAssistantScopeDebug) -> Value {
+    json!({
+        "source_cache_status": debug.source_cache_status,
+        "source_stage_ms": debug.source_stage_ms,
+        "source_total_ms": debug.source_total_ms,
+        "scope_cache_status": debug.scope_cache_status,
+        "scope_stage_ms": debug.scope_stage_ms,
+        "scope_total_ms": debug.scope_total_ms,
+    })
 }
 
 fn cached_dashboard_report_entry(repo_root: &Path) -> Option<DashboardReportCache> {
