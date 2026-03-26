@@ -62,7 +62,7 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
     match onboarding::inspect_startup_artifacts(&repo_root) {
         Ok(Some(audit)) => {
             println!(
-                "startup_artifacts: {} (instruction_present={}, instruction_sha_match={}, instruction_requires_pre_tool_read={}, instruction_missing_fail_closed={}, instruction_sha_mismatch_fail_closed={}, instruction_has_startup_next_action={}, instruction_has_required_return_task={}, instruction_has_resume_required_action_kind={}, instruction_has_previous_session_owner_follow={}, instruction_has_no_silent_drop={}, instruction_has_runtime_state_artifact={}, instruction_has_startup_execution_gate={}, instruction_has_startup_state_fallback_cli={}, instruction_has_gate_field_enforcement={}, contract_present={}, contract_sha_match={}, install_state_sha_match={}, contract_fail_closed={}, contract_has_startup_execution_gate_field={}, contract_has_startup_next_action_field={}, contract_has_required_return_task_field={}, contract_has_resume_required_action_kind={}, contract_has_previous_session_owner_follow={}, contract_has_no_silent_drop={}, contract_has_runtime_state_artifact={}, contract_has_startup_execution_gate={}, contract_has_startup_state_fallback_cli={}, contract_has_gate_field_enforcement={}, contract_enforces_gate_field_semantics={}, instruction_path={}, contract_path={})",
+                "startup_artifacts: {} (instruction_present={}, instruction_sha_match={}, instruction_requires_pre_tool_read={}, instruction_missing_fail_closed={}, instruction_sha_mismatch_fail_closed={}, instruction_has_startup_next_action={}, instruction_has_required_return_task={}, instruction_has_resume_required_action_kind={}, instruction_has_previous_session_owner_follow={}, instruction_has_no_silent_drop={}, instruction_has_runtime_state_artifact={}, instruction_has_startup_execution_gate={}, instruction_has_startup_state_fallback_cli={}, instruction_has_gate_field_enforcement={}, instruction_has_gate_semantics_consistent={}, contract_present={}, contract_sha_match={}, install_state_sha_match={}, contract_fail_closed={}, contract_has_startup_execution_gate_field={}, contract_has_startup_next_action_field={}, contract_has_required_return_task_field={}, contract_has_resume_required_action_kind={}, contract_has_previous_session_owner_follow={}, contract_has_no_silent_drop={}, contract_has_runtime_state_artifact={}, contract_has_startup_execution_gate={}, contract_has_startup_state_fallback_cli={}, contract_has_gate_semantics_consistent_field={}, contract_requires_gate_semantics_consistent_true={}, contract_has_gate_field_enforcement={}, contract_enforces_gate_field_semantics={}, instruction_path={}, contract_path={})",
                 audit.status,
                 audit.startup_instruction_exists,
                 audit
@@ -104,6 +104,9 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
                 audit
                     .startup_instruction_contains_gate_field_enforcement
                     .unwrap_or(false),
+                audit
+                    .startup_instruction_contains_gate_semantics_consistent
+                    .unwrap_or(false),
                 audit.startup_contract_exists,
                 audit
                     .startup_contract_sha_matches_current_contract
@@ -140,6 +143,12 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
                     .startup_contract_contains_startup_state_fallback_cli
                     .unwrap_or(false),
                 audit
+                    .startup_contract_contains_gate_semantics_consistent_field
+                    .unwrap_or(false),
+                audit
+                    .startup_contract_requires_gate_semantics_consistent_true
+                    .unwrap_or(false),
+                audit
                     .startup_contract_contains_gate_field_enforcement
                     .unwrap_or(false),
                 audit
@@ -174,7 +183,7 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
     match continuity::inspect_startup_runtime_state(&repo_root) {
         Ok(audit) => {
             println!(
-                "startup_runtime_state: {} (artifact_present={}, contract_sha_match={}, source_summary_field_match={}, prompt_text_present={}, startup_next_action_present={}, startup_execution_gate_present={}, required_return_task_field_present={}, execctl_active_lease_field_present={}, project_task_tree_field_present={}, project_task_ledger_field_present={}, resume_state={}, action_kind={}, lease_owner_state={}, must_follow_startup_next_action={}, unrelated_work_allowed={}, must_read_prompt_text_before_reply={}, required_action_kind_when_resume_required={}, no_silent_drop={}, gate_semantics_consistent={}, path={})",
+                "startup_runtime_state: {} (artifact_present={}, contract_sha_match={}, source_summary_field_match={}, prompt_text_present={}, startup_next_action_present={}, startup_execution_gate_present={}, required_return_task_field_present={}, execctl_active_lease_field_present={}, project_task_tree_field_present={}, project_task_ledger_field_present={}, resume_state={}, action_kind={}, lease_owner_state={}, must_follow_startup_next_action={}, unrelated_work_allowed={}, must_read_prompt_text_before_reply={}, required_action_kind_when_resume_required={}, no_silent_drop={}, artifact_gate_semantics_consistent_present={}, artifact_gate_semantics_consistent_matches_recomputed={}, gate_semantics_consistent={}, path={})",
                 audit.status,
                 audit.artifact_exists,
                 audit
@@ -199,6 +208,12 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
                     .as_deref()
                     .unwrap_or("n/a"),
                 audit.no_silent_drop.unwrap_or(false),
+                audit
+                    .artifact_gate_semantics_consistent_present
+                    .unwrap_or(false),
+                audit
+                    .artifact_gate_semantics_consistent_matches_recomputed
+                    .unwrap_or(false),
                 audit.gate_semantics_consistent.unwrap_or(false),
                 audit.output_path.display(),
             );

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 05:54 MSK
-Ручная сверка guide/docs: 2026-03-26 05:54 MSK
+modified_at: 2026-03-26 06:02 MSK
+Ручная сверка guide/docs: 2026-03-26 06:02 MSK
 
 # Operations
 
@@ -882,6 +882,7 @@ cargo run -- mcp serve
 - в этом runtime artifact должны лежать:
   - `continuity_startup_summary`;
   - `chat_start_restore.prompt_text`;
+  - `gate_semantics_consistent`;
   - `startup_execution_gate`;
   - `startup_next_action`;
   - `required_return_task`;
@@ -914,6 +915,10 @@ cargo run -- mcp serve
   - `startup_next_action`;
   - `required_return_task`;
   - `previous_session_owner` lease contour.
+- supported client теперь обязан требовать и top-level literal
+  `gate_semantics_consistent = true` внутри runtime artifact;
+  отсутствие этого поля или значение `false` считается fail-closed drift, даже если сам
+  `startup_execution_gate` формально присутствует.
 - repair path для такого drift теперь честный и bounded:
   `startup_runtime_state_repair: rerun cargo run -- continuity startup --repo-root ... --namespace continuity --json >/dev/null`
 - если нужно audit-ить runtime artifact не в самом `Amai` repo-root, а в конкретном project

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 05:54 MSK
-Ручная сверка guide/docs: 2026-03-26 05:54 MSK
+modified_at: 2026-03-26 06:02 MSK
+Ручная сверка guide/docs: 2026-03-26 06:02 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1276,6 +1276,10 @@ preview, а не только raw count.
   - `no_silent_drop`;
   если любой из этих gate fields пропал, truthful статус должен стать
   `startup_runtime_state_drift`, а не `ok`.
+- в самом runtime artifact теперь уже pinned и top-level поле
+  `gate_semantics_consistent = true/false`;
+  supported client обязан требовать именно `true`, а отсутствие поля или `false` трактовать как
+  fail-closed runtime drift, а не как повод доверять `startup_execution_gate` по привычке.
 - поверх наличия этих полей runtime audit теперь ещё и публикует
   `gate_semantics_consistent = true/false`;
   это bounded проверка, что live gate не противоречит startup summary и pinned contract semantics.

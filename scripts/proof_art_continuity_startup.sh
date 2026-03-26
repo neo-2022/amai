@@ -21,9 +21,10 @@ printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.excluded_reasons_su
 printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.prompt_text | contains("Почему вошёл последний контекст:")' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.working_state_restore.state_lineage.authoritative_event_id != ""' >/dev/null
 test -f "${startup_state_artifact}"
-jq -e '.artifact_version == "workspace-startup-runtime-state-v2"' "${startup_state_artifact}" >/dev/null
+jq -e '.artifact_version == "workspace-startup-runtime-state-v3"' "${startup_state_artifact}" >/dev/null
 jq -e '.source_tool == "amai_continuity_startup"' "${startup_state_artifact}" >/dev/null
 jq -e '.source_summary_field == "continuity_startup_summary"' "${startup_state_artifact}" >/dev/null
+jq -e '.gate_semantics_consistent == true' "${startup_state_artifact}" >/dev/null
 jq -e '.startup_execution_gate.gate_version == "startup-execution-gate-v1"' "${startup_state_artifact}" >/dev/null
 jq -e '.startup_execution_gate.no_silent_drop == true' "${startup_state_artifact}" >/dev/null
 jq -e '.startup_execution_gate.must_read_prompt_text_before_reply == true' "${startup_state_artifact}" >/dev/null

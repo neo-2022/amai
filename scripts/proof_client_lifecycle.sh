@@ -18,9 +18,12 @@ test -f .amai/onboarding/project-chat-startup-contract.json
 grep -q '"artifact_version": "workspace-startup-contract-v1"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"startup_contract_sha256": "' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"missing_or_unreadable_fail_closed": true' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"workspace_runtime_state_artifact_version": "workspace-startup-runtime-state-v3"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"required_action_kind_when_resume_required": "resume_required_return_task"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '".amai/continuity/project-chat-startup-state.json"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"startup_execution_gate_field": "startup_execution_gate"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"gate_semantics_consistent_field": "gate_semantics_consistent"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"gate_semantics_consistent_true_required": true' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"must_follow_field": "must_follow_startup_next_action"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"unrelated_work_allowed_field": "unrelated_work_allowed"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"must_read_prompt_text_before_reply_field": "must_read_prompt_text_before_reply"' .amai/onboarding/project-chat-startup-contract.json
@@ -51,6 +54,8 @@ grep -q 'startup_execution_gate.unrelated_work_allowed = false' AGENTS.md
 grep -q 'startup_execution_gate.must_read_prompt_text_before_reply = true' AGENTS.md
 grep -q 'startup_execution_gate.required_action_kind_when_resume_required = "resume_required_return_task"' AGENTS.md
 grep -q 'startup_execution_gate.no_silent_drop = true' AGENTS.md
+grep -q 'gate_semantics_consistent = true' AGENTS.md
+grep -q 'gate_semantics_consistent_true_required = true' AGENTS.md
 grep -q 'continuity startup-state --repo-root' AGENTS.md
 grep -q 'project_task_tree' AGENTS.md
 grep -q 'project_task_ledger' AGENTS.md
@@ -72,8 +77,11 @@ test -f .amai/onboarding/project-chat-startup-contract.json
 grep -q '"artifact_version": "workspace-startup-contract-v1"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"startup_contract_sha256": "' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"missing_or_unreadable_fail_closed": true' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"workspace_runtime_state_artifact_version": "workspace-startup-runtime-state-v3"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '".amai/continuity/project-chat-startup-state.json"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"startup_execution_gate_field": "startup_execution_gate"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"gate_semantics_consistent_field": "gate_semantics_consistent"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"gate_semantics_consistent_true_required": true' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"must_follow_field": "must_follow_startup_next_action"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"unrelated_work_allowed_field": "unrelated_work_allowed"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"must_read_prompt_text_before_reply_field": "must_read_prompt_text_before_reply"' .amai/onboarding/project-chat-startup-contract.json
@@ -102,6 +110,8 @@ grep -q 'startup_execution_gate.unrelated_work_allowed = false' .cursor/rules/am
 grep -q 'startup_execution_gate.must_read_prompt_text_before_reply = true' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'startup_execution_gate.required_action_kind_when_resume_required = "resume_required_return_task"' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'startup_execution_gate.no_silent_drop = true' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'gate_semantics_consistent = true' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'gate_semantics_consistent_true_required = true' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'continuity startup-state --repo-root' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'project_task_tree' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'project_task_ledger' .cursor/rules/amai-continuity-startup.mdc
@@ -123,8 +133,11 @@ test -f .amai/onboarding/project-chat-startup-contract.json
 grep -q '"artifact_version": "workspace-startup-contract-v1"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"startup_contract_sha256": "' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"missing_or_unreadable_fail_closed": true' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"workspace_runtime_state_artifact_version": "workspace-startup-runtime-state-v3"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '".amai/continuity/project-chat-startup-state.json"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"startup_execution_gate_field": "startup_execution_gate"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"gate_semantics_consistent_field": "gate_semantics_consistent"' .amai/onboarding/project-chat-startup-contract.json
+grep -q '"gate_semantics_consistent_true_required": true' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"must_follow_field": "must_follow_startup_next_action"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"unrelated_work_allowed_field": "unrelated_work_allowed"' .amai/onboarding/project-chat-startup-contract.json
 grep -q '"must_read_prompt_text_before_reply_field": "must_read_prompt_text_before_reply"' .amai/onboarding/project-chat-startup-contract.json
@@ -154,6 +167,8 @@ grep -q 'startup_execution_gate.unrelated_work_allowed = false' CLAUDE.md
 grep -q 'startup_execution_gate.must_read_prompt_text_before_reply = true' CLAUDE.md
 grep -q 'startup_execution_gate.required_action_kind_when_resume_required = "resume_required_return_task"' CLAUDE.md
 grep -q 'startup_execution_gate.no_silent_drop = true' CLAUDE.md
+grep -q 'gate_semantics_consistent = true' CLAUDE.md
+grep -q 'gate_semantics_consistent_true_required = true' CLAUDE.md
 grep -q 'continuity startup-state --repo-root' CLAUDE.md
 grep -q 'project_task_tree' CLAUDE.md
 grep -q 'project_task_ledger' CLAUDE.md

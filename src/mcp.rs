@@ -402,6 +402,21 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract does not fail closed on startup artifact sha256 mismatch"
         ));
     }
+    if startup_contract["runtime_state_artifact"]["gate_semantics_consistent_field"].as_str()
+        != Some("gate_semantics_consistent")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost runtime_state_artifact.gate_semantics_consistent_field"
+        ));
+    }
+    if startup_contract["runtime_state_artifact"]["gate_semantics_consistent_true_required"]
+        .as_bool()
+        != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract does not require gate_semantics_consistent = true"
+        ));
+    }
     let required_summary_fields = startup_contract["required_summary_fields"]
         .as_array()
         .ok_or_else(|| anyhow!("MCP startup contract is missing required_summary_fields"))?;
@@ -2639,7 +2654,7 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v8",
+                "contract_version": "continuity-startup-contract-v9",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore before any substantive work in a new or resumed chat",
@@ -2664,11 +2679,14 @@ fn protocol_manifest() -> Value {
                 },
                 "runtime_state_artifact": {
                     "workspace_runtime_state_relative_path": ".amai/continuity/project-chat-startup-state.json",
+                    "workspace_runtime_state_artifact_version": "workspace-startup-runtime-state-v3",
                     "written_by_tool": "amai_continuity_startup",
                     "source_summary_field": "continuity_startup_summary",
                     "contains_prompt_text": true,
                     "startup_execution_gate_field": "startup_execution_gate",
                     "startup_execution_gate_version": "startup-execution-gate-v1",
+                    "gate_semantics_consistent_field": "gate_semantics_consistent",
+                    "gate_semantics_consistent_true_required": true,
                     "inspection_fallback_cli": {
                         "command": "continuity startup-state",
                         "requires_repo_root_argument": true,
@@ -3176,7 +3194,7 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
                     "content": {
                         "type": "text",
                         "text": format!(
-                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_execution_gate, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. Treat startup_execution_gate as the immediate return-enforcement object. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
+                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_execution_gate, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. Treat startup_execution_gate as the immediate return-enforcement object. Require gate_semantics_consistent = true before trusting that gate or executing startup_next_action. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
                         )
                     }
                 }]
@@ -4800,7 +4818,7 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v8")
+            Some("continuity-startup-contract-v9")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["must_call_before_substantive_work"].as_bool(),
@@ -4871,6 +4889,12 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
+                ["workspace_runtime_state_artifact_version"]
+                .as_str(),
+            Some("workspace-startup-runtime-state-v3")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
                 ["startup_execution_gate_field"]
                 .as_str(),
             Some("startup_execution_gate")
@@ -4880,6 +4904,18 @@ mod tests {
                 ["startup_execution_gate_version"]
                 .as_str(),
             Some("startup-execution-gate-v1")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
+                ["gate_semantics_consistent_field"]
+                .as_str(),
+            Some("gate_semantics_consistent")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
+                ["gate_semantics_consistent_true_required"]
+                .as_bool(),
+            Some(true)
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
@@ -5132,6 +5168,7 @@ mod tests {
         assert!(text.contains("execctl_resume_contract_summary"));
         assert!(text.contains("execctl_resume_obligation"));
         assert!(text.contains("startup_execution_gate"));
+        assert!(text.contains("gate_semantics_consistent"));
         assert!(text.contains("startup_next_action"));
         assert!(text.contains("execctl_active_lease"));
         assert!(text.contains("execctl_active_lease_summary"));
