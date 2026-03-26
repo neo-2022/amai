@@ -40,6 +40,9 @@ static DASHBOARD_SAME_METER_SYNC_CACHE: OnceLock<Mutex<Option<DashboardSameMeter
 static DASHBOARD_REPORT_CACHE: OnceLock<Mutex<Option<DashboardReportCache>>> = OnceLock::new();
 static DASHBOARD_TOKEN_EVENTS_CACHE: OnceLock<Mutex<Option<DashboardTokenEventsCache>>> =
     OnceLock::new();
+static DASHBOARD_WORKING_STATE_METADATA_CACHE: OnceLock<
+    Mutex<Option<DashboardWorkingStateMetadataCache>>,
+> = OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
 struct TokenBudgetConfigFile {
@@ -503,6 +506,12 @@ struct DashboardTokenEventsCache {
     signature: String,
     summary: Vec<postgres::ObservabilitySnapshotKindSummary>,
     raw_events: Vec<TokenBudgetEvent>,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardWorkingStateMetadataCache {
+    signature: String,
+    metadata: BTreeMap<String, WorkingStateContextPackMeta>,
 }
 
 #[derive(Debug, Clone)]
@@ -7573,12 +7582,17 @@ async fn latest_working_state_context_pack_metadata(
     if context_pack_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let mut rows =
+    let summary =
+        postgres::summarize_observability_snapshots_by_kinds(db, &["working_state_event"]).await?;
+    let signature = dashboard_working_state_metadata_signature(&summary);
+    if let Some(metadata) = cached_dashboard_working_state_metadata(&signature) {
+        return Ok(filter_context_pack_metadata(&metadata, context_pack_ids));
+    }
+    let rows =
         postgres::list_observability_snapshots_by_kinds(db, &["working_state_event"], Some(4096))
             .await?;
-    rows.sort_by_key(|row| row.created_at_epoch_ms);
     let mut metadata = BTreeMap::new();
-    for row in rows.into_iter().rev() {
+    for row in rows {
         let node = &row.payload["working_state_event"];
         if node["event_kind"].as_str() != Some("retrieval_context_pack") {
             continue;
@@ -7600,11 +7614,9 @@ async fn latest_working_state_context_pack_metadata(
                 captured_at_epoch_ms: row.created_at_epoch_ms,
             },
         );
-        if metadata.len() == context_pack_ids.len() {
-            break;
-        }
     }
-    Ok(metadata)
+    store_dashboard_working_state_metadata(&signature, &metadata);
+    Ok(filter_context_pack_metadata(&metadata, context_pack_ids))
 }
 
 async fn assistant_generation_turn_observed_snapshots_for_context_packs(
@@ -9701,6 +9713,66 @@ fn dashboard_token_events_signature_from_summary(
             .collect::<Vec<_>>(),
     });
     hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
+}
+
+fn dashboard_working_state_metadata_signature(
+    summary: &[postgres::ObservabilitySnapshotKindSummary],
+) -> String {
+    let payload = json!({
+        "summary": summary
+            .iter()
+            .map(|item| {
+                json!({
+                    "snapshot_kind": item.snapshot_kind,
+                    "snapshots_count": item.snapshots_count,
+                    "latest_created_at_epoch_ms": item.latest_created_at_epoch_ms,
+                })
+            })
+            .collect::<Vec<_>>(),
+    });
+    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
+}
+
+fn cached_dashboard_working_state_metadata(
+    signature: &str,
+) -> Option<BTreeMap<String, WorkingStateContextPackMeta>> {
+    let cache = DASHBOARD_WORKING_STATE_METADATA_CACHE.get_or_init(|| Mutex::new(None));
+    let guard = cache.lock().ok()?;
+    let entry = guard.as_ref()?;
+    if entry.signature == signature {
+        Some(entry.metadata.clone())
+    } else {
+        None
+    }
+}
+
+fn store_dashboard_working_state_metadata(
+    signature: &str,
+    metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
+) {
+    let cache = DASHBOARD_WORKING_STATE_METADATA_CACHE.get_or_init(|| Mutex::new(None));
+    let Some(mut guard) = cache.lock().ok() else {
+        return;
+    };
+    *guard = Some(DashboardWorkingStateMetadataCache {
+        signature: signature.to_string(),
+        metadata: metadata.clone(),
+    });
+}
+
+fn filter_context_pack_metadata(
+    metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
+    context_pack_ids: &BTreeSet<String>,
+) -> BTreeMap<String, WorkingStateContextPackMeta> {
+    context_pack_ids
+        .iter()
+        .filter_map(|context_pack_id| {
+            metadata
+                .get(context_pack_id)
+                .cloned()
+                .map(|item| (context_pack_id.clone(), item))
+        })
+        .collect()
 }
 
 fn cached_dashboard_token_events(
