@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use filetime::{FileTime, set_file_mtime};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::cmp::Reverse;
@@ -671,6 +672,10 @@ fn windows_vm_lab_reclaimable_bytes(run_root: &Path) -> Result<u64> {
 }
 
 fn apply_windows_vm_lab_preserve_evidence(run_root: &Path) -> Result<u64> {
+    let original_mtime = FileTime::from_last_modification_time(
+        &fs::symlink_metadata(run_root)
+            .with_context(|| format!("failed to stat {}", run_root.display()))?,
+    );
     let prunable_paths = windows_vm_lab_prunable_paths(run_root)?;
     let mut reclaimed_bytes = 0_u64;
     let mut removed_paths = Vec::new();
@@ -695,6 +700,8 @@ fn apply_windows_vm_lab_preserve_evidence(run_root: &Path) -> Result<u64> {
             }))?,
         )
         .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+        set_file_mtime(run_root, original_mtime)
+            .with_context(|| format!("failed to restore mtime for {}", run_root.display()))?;
     }
     Ok(reclaimed_bytes)
 }
@@ -764,6 +771,7 @@ mod tests {
         default_unmanaged_root_alert_bytes, immediate_entries, plan_target_cleanup,
         windows_vm_lab_reclaimable_bytes,
     };
+    use filetime::{FileTime, set_file_mtime};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
@@ -991,6 +999,36 @@ mod tests {
         assert!(run_root.join("payload_extract/evidence/result.txt").exists());
         assert!(run_root.join("serial.log").exists());
         assert!(run_root.join("windows_vm_lab_cleanup_manifest.json").exists());
+
+        let _ = fs::remove_dir_all(&run_root);
+    }
+
+    #[test]
+    fn windows_vm_lab_preserve_evidence_keeps_run_root_mtime() {
+        let run_root = std::env::temp_dir().join(format!(
+            "amai-windows-vm-lab-mtime-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&run_root);
+        fs::create_dir_all(run_root.join("winiso_noprompt")).expect("winiso_noprompt");
+        fs::write(run_root.join("system.qcow2"), vec![0_u8; 8]).expect("system.qcow2");
+        fs::write(
+            run_root.join("winiso_noprompt/install.esd"),
+            vec![0_u8; 4],
+        )
+        .expect("install.esd");
+        let original_time = SystemTime::now()
+            .checked_sub(Duration::from_secs(86_400))
+            .expect("checked_sub");
+        let original_file_time = FileTime::from_system_time(original_time);
+        set_file_mtime(&run_root, original_file_time).expect("set initial mtime");
+
+        apply_windows_vm_lab_preserve_evidence(&run_root).expect("apply prune");
+
+        let restored_file_time = FileTime::from_last_modification_time(
+            &fs::symlink_metadata(&run_root).expect("stat run root"),
+        );
+        assert_eq!(restored_file_time, original_file_time);
 
         let _ = fs::remove_dir_all(&run_root);
     }

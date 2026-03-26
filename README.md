@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 14:14 MSK
-Ручная сверка guide/docs: 2026-03-26 14:14 MSK
+modified_at: 2026-03-26 14:17 MSK
+Ручная сверка guide/docs: 2026-03-26 14:17 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -2146,6 +2146,7 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
   - auto-path этого не сделает;
   - symlink `output/windows-vm-lab/latest` теперь не считается cleanup-entry и не съедает `keep_latest`;
   - mounted `payload.mount` больше не валит весь reclaim contour: этот mountpoint специально не считается prune-target и при необходимости снимается отдельным operator path-ом;
+  - evidence-preserving prune теперь возвращает исходный `mtime` run-root, чтобы сам cleanup не искажал `keep_latest` порядок для следующих циклов;
   - после prune-run рядом остаётся `windows_vm_lab_cleanup_manifest.json` с перечнем реально удалённых тяжёлых путей и суммой reclaimed bytes;
 - в human dashboard теперь есть отдельная карточка `Локальный мусор и retention`, где явно видны:
   - общий repo footprint;

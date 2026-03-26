@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 14:14 MSK
-Ручная сверка guide/docs: 2026-03-26 14:14 MSK
+modified_at: 2026-03-26 14:17 MSK
+Ручная сверка guide/docs: 2026-03-26 14:17 MSK
 
 # Operations
 
@@ -2511,6 +2511,7 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
   - auto-path их не удаляет;
   - symlink `output/windows-vm-lab/latest` игнорируется cleanup-сканером и не вмешивается в `keep_latest`;
   - mounted `payload.mount` больше не считается prune-target, чтобы случайный root-owned mountpoint не валил весь reclaim run;
+  - evidence-preserving prune восстанавливает исходный `mtime` run-root, чтобы сам cleanup не переворачивал порядок `keep_latest` на следующем цикле;
   - после apply рядом с run-root пишется `windows_vm_lab_cleanup_manifest.json`, чтобы было видно, какие тяжёлые пути реально срезаны и сколько места вернулось.
 - human dashboard теперь показывает отдельную карточку `Локальный мусор и retention`, чтобы оператор видел:
   - общий repo footprint;
