@@ -59,7 +59,9 @@ grep -q 'gate_semantics_consistent = true' AGENTS.md
 grep -q 'gate_semantics_consistent_true_required = true' AGENTS.md
 grep -q 'continuity startup-state --repo-root' AGENTS.md
 grep -q 'project_task_tree' AGENTS.md
+grep -q 'project_task_tree_summary' AGENTS.md
 grep -q 'project_task_ledger' AGENTS.md
+grep -q 'project_task_ledger_summary' AGENTS.md
 
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client codex
 if [[ -f "${temp_home}/.codex/config.toml" ]] && grep -q '\[mcp_servers.amai\]' "${temp_home}/.codex/config.toml"; then
@@ -116,7 +118,9 @@ grep -q 'gate_semantics_consistent = true' .cursor/rules/amai-continuity-startup
 grep -q 'gate_semantics_consistent_true_required = true' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'continuity startup-state --repo-root' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'project_task_tree' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'project_task_tree_summary' .cursor/rules/amai-continuity-startup.mdc
 grep -q 'project_task_ledger' .cursor/rules/amai-continuity-startup.mdc
+grep -q 'project_task_ledger_summary' .cursor/rules/amai-continuity-startup.mdc
 
 HOME="${temp_home}" RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" ./scripts/disconnect_local.sh --client cursor
 if [[ -f "${temp_home}/.cursor/mcp.json" ]] && grep -q '"amai"' "${temp_home}/.cursor/mcp.json"; then
@@ -174,7 +178,9 @@ grep -q 'gate_semantics_consistent = true' CLAUDE.md
 grep -q 'gate_semantics_consistent_true_required = true' CLAUDE.md
 grep -q 'continuity startup-state --repo-root' CLAUDE.md
 grep -q 'project_task_tree' CLAUDE.md
+grep -q 'project_task_tree_summary' CLAUDE.md
 grep -q 'project_task_ledger' CLAUDE.md
+grep -q 'project_task_ledger_summary' CLAUDE.md
 
 ./scripts/disconnect_local.sh --client claude-code
 if [[ -f .mcp.json ]] && grep -q '"amai"' .mcp.json; then

@@ -104,6 +104,10 @@ pub(crate) struct StartupArtifactAudit {
     pub startup_instruction_contains_runtime_state_artifact_version: Option<bool>,
     pub startup_instruction_contains_runtime_state_written_by_tool: Option<bool>,
     pub startup_instruction_contains_runtime_state_source_summary_field: Option<bool>,
+    pub startup_instruction_contains_project_task_tree: Option<bool>,
+    pub startup_instruction_contains_project_task_tree_summary: Option<bool>,
+    pub startup_instruction_contains_project_task_ledger: Option<bool>,
+    pub startup_instruction_contains_project_task_ledger_summary: Option<bool>,
     pub startup_instruction_contains_startup_execution_gate: Option<bool>,
     pub startup_instruction_contains_startup_state_fallback_cli: Option<bool>,
     pub startup_instruction_contains_gate_field_enforcement: Option<bool>,
@@ -586,6 +590,10 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_runtime_state_artifact_version,
         startup_instruction_contains_runtime_state_written_by_tool,
         startup_instruction_contains_runtime_state_source_summary_field,
+        startup_instruction_contains_project_task_tree,
+        startup_instruction_contains_project_task_tree_summary,
+        startup_instruction_contains_project_task_ledger,
+        startup_instruction_contains_project_task_ledger_summary,
         startup_instruction_contains_startup_execution_gate,
         startup_instruction_contains_startup_state_fallback_cli,
         startup_instruction_contains_gate_field_enforcement,
@@ -612,6 +620,10 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             Some(content.contains("workspace_runtime_state_artifact_version = \"workspace-startup-runtime-state-v3\"")),
             Some(content.contains("его пишет `amai_continuity_startup`")),
             Some(content.contains("он должен нести `continuity_startup_summary`")),
+            Some(content.contains("project_task_tree")),
+            Some(content.contains("project_task_tree_summary")),
+            Some(content.contains("project_task_ledger")),
+            Some(content.contains("project_task_ledger_summary")),
             Some(content.contains("startup_execution_gate")),
             Some(content.contains("continuity startup-state --repo-root")),
             Some(
@@ -629,7 +641,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         )
     } else {
         (
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
         )
     };
 
@@ -841,6 +853,10 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         || startup_instruction_contains_runtime_state_artifact_version != Some(true)
         || startup_instruction_contains_runtime_state_written_by_tool != Some(true)
         || startup_instruction_contains_runtime_state_source_summary_field != Some(true)
+        || startup_instruction_contains_project_task_tree != Some(true)
+        || startup_instruction_contains_project_task_tree_summary != Some(true)
+        || startup_instruction_contains_project_task_ledger != Some(true)
+        || startup_instruction_contains_project_task_ledger_summary != Some(true)
         || startup_instruction_contains_startup_execution_gate != Some(true)
         || startup_instruction_contains_startup_state_fallback_cli != Some(true)
         || startup_instruction_contains_gate_field_enforcement != Some(true)
@@ -888,6 +904,10 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_runtime_state_artifact_version,
         startup_instruction_contains_runtime_state_written_by_tool,
         startup_instruction_contains_runtime_state_source_summary_field,
+        startup_instruction_contains_project_task_tree,
+        startup_instruction_contains_project_task_tree_summary,
+        startup_instruction_contains_project_task_ledger,
+        startup_instruction_contains_project_task_ledger_summary,
         startup_instruction_contains_startup_execution_gate,
         startup_instruction_contains_startup_state_fallback_cli,
         startup_instruction_contains_gate_field_enforcement,
@@ -2612,7 +2632,9 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("resume_required_return_task"));
         assert!(text.contains("required_return_task"));
         assert!(text.contains("project_task_tree"));
+        assert!(text.contains("project_task_tree_summary"));
         assert!(text.contains("project_task_ledger"));
+        assert!(text.contains("project_task_ledger_summary"));
         assert!(
             text.contains(
                 startup_contract_artifact_path(repo)
@@ -2847,6 +2869,22 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             audit.startup_instruction_contains_runtime_state_source_summary_field,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_project_task_tree,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_project_task_tree_summary,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_project_task_ledger,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_instruction_contains_project_task_ledger_summary,
             Some(true)
         );
         assert_eq!(
