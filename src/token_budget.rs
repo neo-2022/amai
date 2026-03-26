@@ -8604,13 +8604,66 @@ async fn load_events(
     let mut events = Vec::new();
     for row in rows {
         if let Some(event) = parse_snapshot_event(&row)? {
-            if !include_traffic_class_in_report(&event.traffic_class, include_verify_events) {
-                continue;
-            }
             events.push(event);
         }
     }
-    Ok(events)
+    let events = suppress_shadowed_live_events(events);
+    Ok(events
+        .into_iter()
+        .filter(|event| include_traffic_class_in_report(&event.traffic_class, include_verify_events))
+        .collect())
+}
+
+fn can_shadow_live_report_event(event: &TokenBudgetEvent) -> bool {
+    if event.traffic_class == "live" {
+        return false;
+    }
+    event.source_kind.starts_with("proof_")
+        || event.source_kind.starts_with("verify_")
+        || event.source_kind.starts_with("benchmark_")
+        || event.payload_origin == "operator_source_kind_rewrite"
+}
+
+fn shadowed_live_event_key(event: &TokenBudgetEvent) -> Option<String> {
+    let correlation_id = event.correlation_id.trim();
+    if correlation_id.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}:{}:{}:{}",
+        event.project, event.namespace, event.measurement_scope, correlation_id
+    ))
+}
+
+fn suppress_shadowed_live_events(events: Vec<TokenBudgetEvent>) -> Vec<TokenBudgetEvent> {
+    let mut newest_shadow_by_key = BTreeMap::<String, i64>::new();
+    for event in &events {
+        if !can_shadow_live_report_event(event) {
+            continue;
+        }
+        let Some(key) = shadowed_live_event_key(event) else {
+            continue;
+        };
+        newest_shadow_by_key
+            .entry(key)
+            .and_modify(|current| *current = (*current).max(event.created_at_epoch_ms))
+            .or_insert(event.created_at_epoch_ms);
+    }
+    events
+        .into_iter()
+        .filter(|event| {
+            if event.traffic_class != "live" {
+                return true;
+            }
+            let Some(key) = shadowed_live_event_key(event) else {
+                return true;
+            };
+            let Some(shadow_created_at_epoch_ms) = newest_shadow_by_key.get(&key) else {
+                return true;
+            };
+            *shadow_created_at_epoch_ms < event.created_at_epoch_ms
+        })
+        .collect()
 }
 
 fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<TokenBudgetEvent>> {
@@ -13164,6 +13217,7 @@ mod tests {
         provider_rate_card_default_path, provider_usage_default_path, reconcile_followup_recovery,
         repair_legacy_token_event_payload, report_contract_json, resolve_session_id,
         rewrite_token_ledger_source_kind_payload, summarize_events,
+        suppress_shadowed_live_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -13331,6 +13385,58 @@ mod tests {
                 event
             }
         };
+    }
+
+    #[test]
+    fn suppress_shadowed_live_events_drops_stale_live_sibling() {
+        let live = token_event! {
+            created_at_epoch_ms: 100,
+            event_id: "live-event".to_string(),
+            correlation_id: "ctx-1".to_string(),
+            source_kind: "live_context_pack".to_string(),
+            traffic_class: "live".to_string(),
+            payload_origin: "context_pack_token_budget".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+        };
+        let proof = token_event! {
+            created_at_epoch_ms: 200,
+            event_id: "proof-event".to_string(),
+            correlation_id: "ctx-1".to_string(),
+            source_kind: "proof_warmup_context_pack".to_string(),
+            traffic_class: "proof".to_string(),
+            payload_origin: "proof_warmup_context_pack".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+        };
+
+        let filtered = suppress_shadowed_live_events(vec![live, proof.clone()]);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].event_id, proof.event_id);
+    }
+
+    #[test]
+    fn suppress_shadowed_live_events_keeps_unshadowed_live_scope() {
+        let live = token_event! {
+            created_at_epoch_ms: 100,
+            event_id: "live-event".to_string(),
+            correlation_id: "ctx-1".to_string(),
+            source_kind: "live_context_pack".to_string(),
+            traffic_class: "live".to_string(),
+            payload_origin: "context_pack_token_budget".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+        };
+        let proof_other_scope = token_event! {
+            created_at_epoch_ms: 200,
+            event_id: "proof-event".to_string(),
+            correlation_id: "ctx-1".to_string(),
+            source_kind: "proof_warmup_context_pack".to_string(),
+            traffic_class: "proof".to_string(),
+            payload_origin: "proof_warmup_context_pack".to_string(),
+            measurement_scope: "whole_cycle_observed_lower_bound".to_string(),
+        };
+
+        let filtered = suppress_shadowed_live_events(vec![live.clone(), proof_other_scope]);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|event| event.event_id == live.event_id));
     }
 
     #[test]

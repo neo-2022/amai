@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 06:30 MSK
-Ручная сверка guide/docs: 2026-03-26 06:30 MSK
+modified_at: 2026-03-26 08:51 MSK
+Ручная сверка guide/docs: 2026-03-26 08:51 MSK
 
 # Operations
 
@@ -47,6 +47,10 @@ proof/verify события.
   chat/window мог стартовать clean-session even if old live traffic был совсем недавно;
 - для runtime-доказательства этого контура есть отдельный сценарий:
   `./scripts/proof_token_session_boundary.sh`;
+- если destructive rewrite не делался, но для того же
+  `project + namespace + measurement_scope + correlation_id` уже появился более новый
+  `proof_* / verify_* / benchmark_*` snapshot, report-layer теперь обязан fail-closed выбросить
+  старый `live_context_pack` из live cards и same-meter views;
 - если contamination уже попал в текущую live session до этого guardrail, repair выполняется только
   честным reverify/new window path, а не тихим задним переписыванием истории.
 

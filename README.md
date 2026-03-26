@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 06:30 MSK
-Ручная сверка guide/docs: 2026-03-26 06:30 MSK
+modified_at: 2026-03-26 08:51 MSK
+Ручная сверка guide/docs: 2026-03-26 08:51 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -94,6 +94,12 @@ modified_at: 2026-03-26 06:30 MSK
   `project`, `project_prefix`, `namespace`, `source_kind` и `rewrite_source_kind`;
 - этот путь не делает silent background rewrite: оператор сам задаёт, какой именно contamination
   переводится из `live` в `proof/verify`, а `repair_reason` остаётся в payload как audit-trace.
+- кроме этого report-layer теперь сам fail-closed подавляет stale `live_context_pack`, если для
+  того же `project + namespace + measurement_scope + correlation_id` уже materialized более новый
+  `proof_* / verify_* / benchmark_*` sibling;
+- это нужно затем, чтобы старый инженерный live хвост не продолжал портить
+  `rolling_window/current_session` и same-meter alignment только потому, что non-live repair
+  появился как отдельный новый snapshot, а не как destructive rewrite старого live события.
 
 Поверх этого `Amai` теперь автоматически собирает ещё и `chat-start restore pack`.
 

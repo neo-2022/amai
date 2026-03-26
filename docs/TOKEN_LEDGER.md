@@ -1,5 +1,5 @@
-modified_at: 2026-03-25 22:55 MSK
-Ручная сверка guide/docs: 2026-03-25 22:55 MSK
+modified_at: 2026-03-26 08:51 MSK
+Ручная сверка guide/docs: 2026-03-26 08:51 MSK
 
 # Token Ledger
 
@@ -93,6 +93,13 @@ Ledger не имеет права смешивать:
   source-kind rewrite по selector-ам `project/project_prefix + namespace + source_kind`;
 - rewrite path обязан оставлять audit след в `token_budget_event.repair.operator_source_kind_rewrite`
   и не имеет права молча переписывать весь rolling window без явного operator selector-а;
+- если destructive rewrite не делался, но для того же
+  `project + namespace + measurement_scope + correlation_id` уже появился более новый non-live
+  sibling (`proof_* / verify_* / benchmark_*`), report-layer теперь обязан fail-closed выкинуть
+  старое `live_context_pack` из product views;
+- это нужно затем, чтобы same-meter и live savings не продолжали считать stale contamination
+  только потому, что engineering repair materialized как отдельный snapshot, а не как update
+  старого live payload;
 - тихо переписывать такую историю задним числом запрещено.
 
 ## Обязательные поля события
