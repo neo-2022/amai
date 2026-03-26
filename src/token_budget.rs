@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tiktoken_rs::{CoreBPE, cl100k_base, o200k_base};
 use tokio_postgres::Client;
 use uuid::Uuid;
@@ -27,8 +27,9 @@ const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
 const AGENT_CYCLE_TIMELINE_MAX_POINTS: usize = 256;
 const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
 const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_generation_turn_observed";
-static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<Mutex<Option<DashboardRolloutObservationCache>>> =
-    OnceLock::new();
+static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<
+    Mutex<Option<DashboardRolloutObservationCache>>,
+> = OnceLock::new();
 static DASHBOARD_ASSISTANT_SCOPE_SOURCE_CACHE: OnceLock<
     Mutex<Option<DashboardAssistantScopeSourceCache>>,
 > = OnceLock::new();
@@ -478,7 +479,8 @@ struct DashboardAssistantScopeSourceCache {
     target_context_pack_ids: BTreeSet<String>,
     direct_turns: Vec<AssistantGenerationTurnObservedSnapshot>,
     metadata: BTreeMap<String, WorkingStateContextPackMeta>,
-    turns_by_thread: BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
+    turns_by_thread:
+        BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
 }
 
 #[derive(Debug, Clone)]
@@ -525,6 +527,12 @@ struct DashboardReportSignatureComponents {
     current_session_assistant_scope: String,
     rolling_window_assistant_scope: String,
     lifetime_assistant_scope: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DashboardReportPreCacheTimings {
+    stage_ms: BTreeMap<String, u64>,
+    total_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -6869,16 +6877,36 @@ pub async fn collect_default_report(db: &Client) -> Result<Value> {
 }
 
 pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
+    let collect_started_at = Instant::now();
+    let mut pre_cache_timings = DashboardReportPreCacheTimings::default();
+
+    let stage_started_at = Instant::now();
     let repo_root = config::discover_repo_root(None)?;
     let config = load_config(&repo_root)?;
     let profile = resolve_profile(&config, None, &repo_root)?;
     let include_verify_events = config.measurement.include_verify_events_by_default;
+    record_dashboard_precache_stage_ms(
+        &mut pre_cache_timings,
+        "config_and_profile",
+        stage_started_at,
+    );
+
+    let stage_started_at = Instant::now();
     let (rollout_observation_signature, rollout_observations) =
         dashboard_rollout_assistant_generation_observations_for_repo(&repo_root)?;
+    record_dashboard_precache_stage_ms(
+        &mut pre_cache_timings,
+        "rollout_observations",
+        stage_started_at,
+    );
+
+    let stage_started_at = Instant::now();
     let mut events = load_dashboard_token_events(db, &repo_root, include_verify_events).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
-    let events =
-        reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
+    let events = reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
+    record_dashboard_precache_stage_ms(&mut pre_cache_timings, "token_events", stage_started_at);
+
+    let stage_started_at = Instant::now();
     let now_epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before unix epoch")?
@@ -6897,10 +6925,11 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         })
         .unwrap_or_default();
     let sync_scope_events = active_same_meter_scope_events(&session_events, &rolling_window_events);
-    let dashboard_sync_signature = dashboard_same_meter_sync_signature(
-        &sync_scope_events,
-        &rollout_observation_signature,
-    );
+    let dashboard_sync_signature =
+        dashboard_same_meter_sync_signature(&sync_scope_events, &rollout_observation_signature);
+    record_dashboard_precache_stage_ms(&mut pre_cache_timings, "scope_partition", stage_started_at);
+
+    let stage_started_at = Instant::now();
     let (_tool_overhead_changed, _assistant_generation_changed) =
         if should_run_dashboard_same_meter_sync(&repo_root, &dashboard_sync_signature) {
             (
@@ -6916,6 +6945,9 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         } else {
             (false, false)
         };
+    record_dashboard_precache_stage_ms(&mut pre_cache_timings, "same_meter_sync", stage_started_at);
+
+    let stage_started_at = Instant::now();
     let scope_events = if profile.rolling_window_hours.is_some() {
         vec![
             session_events.as_slice(),
@@ -6925,12 +6957,11 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     } else {
         vec![session_events.as_slice(), events.as_slice()]
     };
-    let scope_observations = derive_dashboard_rollout_assistant_generation_scopes(
-        db,
-        &repo_root,
-        &scope_events,
-    )
-    .await?;
+    let scope_observations =
+        derive_dashboard_rollout_assistant_generation_scopes(db, &repo_root, &scope_events).await?;
+    record_dashboard_precache_stage_ms(&mut pre_cache_timings, "assistant_scope", stage_started_at);
+
+    let stage_started_at = Instant::now();
     let mut scope_iter = scope_observations.into_iter();
     let current_session_assistant_scope = scope_iter.next().unwrap_or_default();
     let rolling_window_assistant_scope = if profile.rolling_window_hours.is_some() {
@@ -6948,6 +6979,12 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         &lifetime_assistant_scope,
     );
     let report_signature = dashboard_report_signature(&report_components);
+    record_dashboard_precache_stage_ms(
+        &mut pre_cache_timings,
+        "report_signature",
+        stage_started_at,
+    );
+    pre_cache_timings.total_ms = collect_started_at.elapsed().as_millis() as u64;
     let cached_report_entry = cached_dashboard_report_entry(&repo_root);
     if let Some(entry) = cached_report_entry.as_ref() {
         if entry.signature == report_signature {
@@ -6957,6 +6994,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                 &session_events,
                 &rolling_window_events,
                 &events,
+                &pre_cache_timings,
             ));
         }
     }
@@ -6964,6 +7002,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         cached_report_entry.as_ref(),
         &report_signature,
         &report_components,
+        &pre_cache_timings,
     );
     let current_session_summary = summarize_events(
         &session_events,
@@ -7046,10 +7085,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         }
     });
     if let Some(node) = report["token_budget_report"]["cache_debug"].as_object_mut() {
-        node.insert(
-            "status".to_string(),
-            Value::from("miss"),
-        );
+        node.insert("status".to_string(), Value::from("miss"));
     }
     store_dashboard_report(&repo_root, &report_signature, &report_components, &report);
     Ok(report)
@@ -7266,9 +7302,13 @@ fn rollout_assistant_generation_observations_for_repo(
 
 fn dashboard_rollout_assistant_generation_observations_for_repo(
     repo_root: &Path,
-) -> Result<(String, Vec<codex_threads::RolloutAssistantGenerationObservation>)> {
+) -> Result<(
+    String,
+    Vec<codex_threads::RolloutAssistantGenerationObservation>,
+)> {
     let source_signature = dashboard_rollout_observation_source_signature(repo_root)?;
-    if let Some(observations) = cached_dashboard_rollout_observations(repo_root, &source_signature) {
+    if let Some(observations) = cached_dashboard_rollout_observations(repo_root, &source_signature)
+    {
         let semantic_signature = dashboard_rollout_observation_signature(&observations);
         return Ok((semantic_signature, observations));
     }
@@ -7296,8 +7336,10 @@ fn dashboard_rollout_observation_source_signature(repo_root: &Path) -> Result<St
     let Some(repo_root_str) = repo_root.to_str() else {
         return Ok("no_current_rollout_source".to_string());
     };
-    Ok(codex_threads::current_rollout_source_signature(repo_root_str)?
-        .unwrap_or_else(|| "no_current_rollout_source".to_string()))
+    Ok(
+        codex_threads::current_rollout_source_signature(repo_root_str)?
+            .unwrap_or_else(|| "no_current_rollout_source".to_string()),
+    )
 }
 
 fn dashboard_rollout_observation_signature(
@@ -7316,10 +7358,7 @@ fn dashboard_rollout_observation_signature(
         })
         .collect::<Vec<_>>();
     let payload = Value::Array(payload);
-    hex_sha256(
-        &serde_json::to_vec(&payload)
-            .unwrap_or_else(|_| payload.to_string().into_bytes()),
-    )
+    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
 }
 
 fn store_dashboard_rollout_observations(
@@ -7428,10 +7467,7 @@ fn dashboard_same_meter_sync_signature(
         "tool_overhead_missing_context_pack_ids": tool_overhead_missing_context_pack_ids,
         "rollout_observation_signature": rollout_observation_signature,
     });
-    hex_sha256(
-        &serde_json::to_vec(&payload)
-            .unwrap_or_else(|_| payload.to_string().into_bytes()),
-    )
+    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
 }
 
 fn should_run_dashboard_same_meter_sync(repo_root: &Path, signature: &str) -> bool {
@@ -7864,16 +7900,14 @@ async fn dashboard_assistant_scope_sources(
         &[ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND],
     )
     .await?;
-    if let Some((
-        direct_turns,
-        metadata,
-        turns_by_thread,
-    )) = cached_dashboard_assistant_scope_sources(
-        repo_root,
-        union_target_ids,
-        &working_state_summary,
-        &direct_turn_summary,
-    )? {
+    if let Some((direct_turns, metadata, turns_by_thread)) =
+        cached_dashboard_assistant_scope_sources(
+            repo_root,
+            union_target_ids,
+            &working_state_summary,
+            &direct_turn_summary,
+        )?
+    {
         return Ok((direct_turns, metadata, turns_by_thread));
     }
 
@@ -8021,10 +8055,7 @@ fn dashboard_assistant_scope_signature(
         "metadata": metadata,
         "turns_by_thread": turns_by_thread,
     });
-    hex_sha256(
-        &serde_json::to_vec(&payload)
-            .unwrap_or_else(|_| payload.to_string().into_bytes()),
-    )
+    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
 }
 
 fn dashboard_assistant_scope_source_signature(
@@ -8034,7 +8065,8 @@ fn dashboard_assistant_scope_source_signature(
     rollout_thread_signatures: &BTreeMap<String, String>,
 ) -> String {
     let summary_json = |items: &[postgres::ObservabilitySnapshotKindSummary]| {
-        items.iter()
+        items
+            .iter()
             .map(|item| {
                 json!({
                     "snapshot_kind": item.snapshot_kind,
@@ -8050,10 +8082,7 @@ fn dashboard_assistant_scope_source_signature(
         "direct_turn_summary": summary_json(direct_turn_summary),
         "rollout_thread_signatures": rollout_thread_signatures,
     });
-    hex_sha256(
-        &serde_json::to_vec(&payload)
-            .unwrap_or_else(|_| payload.to_string().into_bytes()),
-    )
+    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
 }
 
 fn dashboard_assistant_scope_thread_signatures(
@@ -8062,8 +8091,10 @@ fn dashboard_assistant_scope_thread_signatures(
     let mut signatures = BTreeMap::new();
     for thread_id in thread_ids {
         let signature =
-            codex_threads::rollout_assistant_generation_turn_source_signature_for_thread(thread_id)?
-                .unwrap_or_else(|| "no_rollout_source".to_string());
+            codex_threads::rollout_assistant_generation_turn_source_signature_for_thread(
+                thread_id,
+            )?
+            .unwrap_or_else(|| "no_rollout_source".to_string());
         signatures.insert(thread_id.clone(), signature);
     }
     Ok(signatures)
@@ -8180,12 +8211,16 @@ fn dashboard_report_signature_components(
 ) -> DashboardReportSignatureComponents {
     DashboardReportSignatureComponents {
         current_session_events: hex_sha256(
-            &serde_json::to_vec(&dashboard_report_event_signature_payload(current_session_events))
-                .unwrap_or_else(|_| b"dashboard_current_session_events".to_vec()),
+            &serde_json::to_vec(&dashboard_report_event_signature_payload(
+                current_session_events,
+            ))
+            .unwrap_or_else(|_| b"dashboard_current_session_events".to_vec()),
         ),
         rolling_window_events: hex_sha256(
-            &serde_json::to_vec(&dashboard_report_event_signature_payload(rolling_window_events))
-                .unwrap_or_else(|_| b"dashboard_rolling_window_events".to_vec()),
+            &serde_json::to_vec(&dashboard_report_event_signature_payload(
+                rolling_window_events,
+            ))
+            .unwrap_or_else(|_| b"dashboard_rolling_window_events".to_vec()),
         ),
         lifetime_events: hex_sha256(
             &serde_json::to_vec(&dashboard_report_event_signature_payload(lifetime_events))
@@ -8223,10 +8258,7 @@ fn dashboard_report_signature(components: &DashboardReportSignatureComponents) -
         "rolling_window_assistant_scope": components.rolling_window_assistant_scope,
         "lifetime_assistant_scope": components.lifetime_assistant_scope,
     });
-    hex_sha256(
-        &serde_json::to_vec(&payload)
-            .unwrap_or_else(|_| payload.to_string().into_bytes()),
-    )
+    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
 }
 
 fn refresh_dashboard_report_live_ages(
@@ -8235,9 +8267,18 @@ fn refresh_dashboard_report_live_ages(
     current_session_events: &[TokenBudgetEvent],
     rolling_window_events: &[TokenBudgetEvent],
     lifetime_events: &[TokenBudgetEvent],
+    pre_cache_timings: &DashboardReportPreCacheTimings,
 ) -> Value {
     if let Some(node) = report["token_budget_report"]["cache_debug"].as_object_mut() {
         node.insert("status".to_string(), Value::from("hit"));
+        node.insert(
+            "pre_cache_total_ms".to_string(),
+            Value::from(pre_cache_timings.total_ms),
+        );
+        node.insert(
+            "pre_cache_stage_ms".to_string(),
+            dashboard_precache_stage_ms_value(pre_cache_timings),
+        );
     }
     refresh_dashboard_report_scope_age(
         &mut report,
@@ -8346,6 +8387,7 @@ fn dashboard_report_cache_debug(
     previous_entry: Option<&DashboardReportCache>,
     report_signature: &str,
     components: &DashboardReportSignatureComponents,
+    pre_cache_timings: &DashboardReportPreCacheTimings,
 ) -> Value {
     let mut reasons = Vec::new();
     let mut previous_signature = Value::Null;
@@ -8381,7 +8423,30 @@ fn dashboard_report_cache_debug(
         "signature": report_signature,
         "previous_signature": previous_signature,
         "changed_components": reasons,
+        "pre_cache_total_ms": pre_cache_timings.total_ms,
+        "pre_cache_stage_ms": dashboard_precache_stage_ms_value(pre_cache_timings),
     })
+}
+
+fn record_dashboard_precache_stage_ms(
+    timings: &mut DashboardReportPreCacheTimings,
+    stage_key: &str,
+    started_at: Instant,
+) {
+    timings.stage_ms.insert(
+        stage_key.to_string(),
+        started_at.elapsed().as_millis() as u64,
+    );
+}
+
+fn dashboard_precache_stage_ms_value(timings: &DashboardReportPreCacheTimings) -> Value {
+    Value::Object(
+        timings
+            .stage_ms
+            .iter()
+            .map(|(stage_key, elapsed_ms)| (stage_key.clone(), Value::from(*elapsed_ms)))
+            .collect(),
+    )
 }
 
 fn cached_dashboard_report_entry(repo_root: &Path) -> Option<DashboardReportCache> {
@@ -9417,7 +9482,9 @@ fn filter_dashboard_token_events(
     let events = suppress_shadowed_live_events(raw_events);
     events
         .into_iter()
-        .filter(|event| include_traffic_class_in_report(&event.traffic_class, include_verify_events))
+        .filter(|event| {
+            include_traffic_class_in_report(&event.traffic_class, include_verify_events)
+        })
         .collect()
 }
 
@@ -9426,12 +9493,17 @@ async fn load_dashboard_token_events(
     repo_root: &Path,
     include_verify_events: bool,
 ) -> Result<Vec<TokenBudgetEvent>> {
-    let summary =
-        postgres::summarize_observability_snapshots_by_kinds(db, &["token_budget_event", "token_benchmark"])
-            .await?;
+    let summary = postgres::summarize_observability_snapshots_by_kinds(
+        db,
+        &["token_budget_event", "token_benchmark"],
+    )
+    .await?;
     let signature = dashboard_token_events_signature_from_summary(&summary);
     if let Some(raw_events) = cached_dashboard_token_events(repo_root, &signature) {
-        return Ok(filter_dashboard_token_events(raw_events, include_verify_events));
+        return Ok(filter_dashboard_token_events(
+            raw_events,
+            include_verify_events,
+        ));
     }
     if let Some((previous_summary, previous_raw_events)) =
         cached_dashboard_token_events_entry(repo_root)
@@ -9456,7 +9528,10 @@ async fn load_dashboard_token_events(
     }
     let raw_events = load_raw_events(db, None).await?;
     store_dashboard_token_events(repo_root, &signature, &summary, &raw_events);
-    Ok(filter_dashboard_token_events(raw_events, include_verify_events))
+    Ok(filter_dashboard_token_events(
+        raw_events,
+        include_verify_events,
+    ))
 }
 
 fn dashboard_token_events_signature_from_summary(
@@ -9474,10 +9549,7 @@ fn dashboard_token_events_signature_from_summary(
             })
             .collect::<Vec<_>>(),
     });
-    hex_sha256(
-        &serde_json::to_vec(&payload)
-            .unwrap_or_else(|_| payload.to_string().into_bytes()),
-    )
+    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
 }
 
 fn cached_dashboard_token_events(
@@ -9496,7 +9568,10 @@ fn cached_dashboard_token_events(
 
 fn cached_dashboard_token_events_entry(
     repo_root: &Path,
-) -> Option<(Vec<postgres::ObservabilitySnapshotKindSummary>, Vec<TokenBudgetEvent>)> {
+) -> Option<(
+    Vec<postgres::ObservabilitySnapshotKindSummary>,
+    Vec<TokenBudgetEvent>,
+)> {
     let cache = DASHBOARD_TOKEN_EVENTS_CACHE.get_or_init(|| Mutex::new(None));
     let guard = cache.lock().ok()?;
     let entry = guard.as_ref()?;
@@ -11913,11 +11988,11 @@ fn build_client_limit_strict_meter_slice(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let explicitly_unmodeled_components = baseline_equivalence
-        ["explicitly_unmodeled_baseline_components"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let explicitly_unmodeled_components =
+        baseline_equivalence["explicitly_unmodeled_baseline_components"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
     let missing_components = baseline_equivalence["missing_baseline_components"]
         .as_array()
         .cloned()
@@ -11962,11 +12037,11 @@ fn build_client_limit_explicit_boundary_surface(
     contract: &TokenBudgetContractConfig,
     baseline_equivalence: &Value,
 ) -> Value {
-    let explicit_boundary_components = baseline_equivalence
-        ["explicitly_unmodeled_baseline_components"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let explicit_boundary_components =
+        baseline_equivalence["explicitly_unmodeled_baseline_components"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
     let measured_components = baseline_equivalence["measured_baseline_components"]
         .as_array()
         .cloned()
@@ -14449,12 +14524,10 @@ mod tests {
         build_usage_event_schema_json, configured_provider_rate_card_source,
         configured_provider_usage_source, contractual_line_item_json,
         count_cli_context_pack_output_overhead_tokens, count_tool_overhead_tokens,
-        current_session_events, dashboard_report_signature,
-        dashboard_report_signature_components,
-        dashboard_assistant_scope_source_signature,
+        current_session_events, dashboard_assistant_scope_source_signature,
+        dashboard_report_signature, dashboard_report_signature_components,
         dashboard_same_meter_sync_signature, dashboard_token_events_delta_limit,
-        dashboard_token_events_signature_from_summary,
-        default_adjustment_preview_model_version,
+        dashboard_token_events_signature_from_summary, default_adjustment_preview_model_version,
         default_adjustment_registry_version, default_adjustment_request_schema_version,
         default_backfill_policy_version, default_baseline_method_version, default_billing_mode,
         default_billing_policy_version, default_contractual_evidence_pack_version,
@@ -18216,11 +18289,13 @@ effective_to_epoch_ms = 2000
             "client-limit-explicit-boundary-surface-v1"
         );
         assert_eq!(
-            economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]["lower_bound_tokens"],
+            economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]
+                ["lower_bound_tokens"],
             45
         );
         assert_eq!(
-            economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]["components"],
+            economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]
+                ["components"],
             json!(["client_prompt"])
         );
         assert_eq!(
@@ -18248,7 +18323,8 @@ effective_to_epoch_ms = 2000
             json!(["tool_overhead_outside_retrieval"])
         );
         assert_eq!(
-            economics["current_session"]["client_limit_meter_alignment"]["explicit_boundary_surface"]["state"],
+            economics["current_session"]["client_limit_meter_alignment"]["explicit_boundary_surface"]
+                ["state"],
             "no_explicit_boundary"
         );
         assert_eq!(
@@ -18342,18 +18418,16 @@ effective_to_epoch_ms = 2000
             "observed_tool_overhead_live_events": 0,
             "observed_continuity_restore_live_events": 1
         });
-        let events = vec![
-            token_event! {
-                event_id: "event-1".to_string(),
-                correlation_id: "event-1".to_string(),
-                measurement_scope: "whole_cycle_observed_lower_bound".to_string(),
-                query_type: "continuity_restore".to_string(),
-                target_kind: "continuity_restore".to_string(),
-                traffic_class: "live".to_string(),
-                client_prompt_tokens: Some(30),
-                continuity_restore_tokens: Some(7),
-            },
-        ];
+        let events = vec![token_event! {
+            event_id: "event-1".to_string(),
+            correlation_id: "event-1".to_string(),
+            measurement_scope: "whole_cycle_observed_lower_bound".to_string(),
+            query_type: "continuity_restore".to_string(),
+            target_kind: "continuity_restore".to_string(),
+            traffic_class: "live".to_string(),
+            client_prompt_tokens: Some(30),
+            continuity_restore_tokens: Some(7),
+        }];
 
         let alignment = super::build_client_limit_meter_alignment(
             &contract_fixture(),
@@ -19757,8 +19831,7 @@ effective_to_epoch_ms = 2000
 
     #[test]
     fn dashboard_assistant_scope_source_signature_changes_with_rollout_threads() {
-        let target_context_pack_ids =
-            BTreeSet::from(["ctx-a".to_string(), "ctx-b".to_string()]);
+        let target_context_pack_ids = BTreeSet::from(["ctx-a".to_string(), "ctx-b".to_string()]);
         let working_state_summary = vec![ObservabilitySnapshotKindSummary {
             snapshot_kind: "working_state_event".to_string(),
             snapshots_count: 10,
