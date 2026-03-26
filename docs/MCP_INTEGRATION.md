@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 05:00 MSK
-Ручная сверка guide/docs: 2026-03-26 05:00 MSK
+modified_at: 2026-03-26 05:35 MSK
+Ручная сверка guide/docs: 2026-03-26 05:35 MSK
 
 # MCP Integration
 
@@ -436,6 +436,13 @@ stack-а, но и какие deployment promises вообще честно до�
   `project_task_tree`, `project_task_ledger`.
 - тот же `startup_execution_gate` теперь идёт и прямо в `continuity_startup_summary`, а не только
   в runtime artifact/fallback path.
+- startup contract теперь ещё и pin-ит field-level gate semantics, чтобы клиент знал literal
+  meaning без prompt-guessing:
+  - `startup_execution_gate.must_follow_startup_next_action = true`;
+  - `startup_execution_gate.unrelated_work_allowed = false`;
+  - `startup_execution_gate.must_read_prompt_text_before_reply = true`;
+  - `startup_execution_gate.required_action_kind_when_resume_required = "resume_required_return_task"`;
+  - `startup_execution_gate.no_silent_drop = true`.
 - `amai status` теперь читает и этот runtime artifact; если он не materialized, status честно
   показывает `startup_runtime_state: not_materialized`, а если он потерял hash или required fields —
   `startup_runtime_state: startup_runtime_state_drift`.

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 05:00 MSK
-Ручная сверка guide/docs: 2026-03-26 05:00 MSK
+modified_at: 2026-03-26 05:35 MSK
+Ручная сверка guide/docs: 2026-03-26 05:35 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1227,6 +1227,14 @@ preview, а не только raw count.
   не потерялись ли в JSON contract поля `startup_next_action`, `required_return_task`,
   `resume_required_return_task`, `previous_session_owner_must_follow_startup_next_action = true`,
   `no_silent_drop = true`.
+- поверх этого contract теперь отдельно pin-ит и field-level semantics самого gate:
+  - `startup_execution_gate.must_follow_startup_next_action = true`;
+  - `startup_execution_gate.unrelated_work_allowed = false`;
+  - `startup_execution_gate.must_read_prompt_text_before_reply = true`;
+  - `startup_execution_gate.required_action_kind_when_resume_required = "resume_required_return_task"`;
+  - `startup_execution_gate.no_silent_drop = true`;
+  это нужно затем, чтобы supported client читал не только факт наличия gate, но и literal meaning
+  каждого обязательного поля без prompt-guessing.
 - truthful пример:
   если после `disconnect` managed startup block снят, `amai status` должен честно показать
   `startup_artifacts: missing_startup_instruction`, а не делать вид, что startup всё ещё готов.

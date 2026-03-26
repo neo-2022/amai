@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 05:00 MSK
-Ручная сверка guide/docs: 2026-03-26 05:00 MSK
+modified_at: 2026-03-26 05:35 MSK
+Ручная сверка guide/docs: 2026-03-26 05:35 MSK
 
 # Operations
 
@@ -853,6 +853,13 @@ cargo run -- mcp serve
   `required_action_kind_when_resume_required = resume_required_return_task`,
   `previous_session_owner_must_follow_startup_next_action = true`,
   `no_silent_drop = true`.
+- начиная с текущего contract slice status обязан ловить и drift в field-level gate semantics:
+  managed startup instruction и JSON contract должны literally удерживать:
+  - `startup_execution_gate.must_follow_startup_next_action = true`;
+  - `startup_execution_gate.unrelated_work_allowed = false`;
+  - `startup_execution_gate.must_read_prompt_text_before_reply = true`;
+  - `startup_execution_gate.required_action_kind_when_resume_required = "resume_required_return_task"`;
+  - `startup_execution_gate.no_silent_drop = true`.
 - truthful интерпретация status такая:
   - `ok` — managed startup artifact на месте и contract drift не обнаружен;
   - `missing_startup_instruction` — onboarding когда-то materialized startup artifact, но сейчас он
@@ -882,8 +889,12 @@ cargo run -- mcp serve
   - `project_task_tree`;
   - `project_task_ledger`.
 - `startup_execution_gate` считается immediate operator/client gate:
-  он machine-readable фиксирует `must_follow_startup_next_action` и
-  `unrelated_work_allowed`.
+  он machine-readable фиксирует:
+  - `must_follow_startup_next_action`;
+  - `unrelated_work_allowed`;
+  - `must_read_prompt_text_before_reply`;
+  - `required_action_kind_when_resume_required`;
+  - `no_silent_drop`.
 - этот gate теперь обязателен не только в runtime artifact и fallback CLI, но и прямо в
   `continuity_startup_summary`.
 - `amai status` теперь auditing-ит runtime artifact отдельной строкой `startup_runtime_state: ...`.

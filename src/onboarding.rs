@@ -103,6 +103,7 @@ pub(crate) struct StartupArtifactAudit {
     pub startup_instruction_contains_runtime_state_artifact: Option<bool>,
     pub startup_instruction_contains_startup_execution_gate: Option<bool>,
     pub startup_instruction_contains_startup_state_fallback_cli: Option<bool>,
+    pub startup_instruction_contains_gate_field_enforcement: Option<bool>,
     pub startup_contract_path: Option<PathBuf>,
     pub startup_contract_exists: bool,
     pub startup_contract_sha_matches_current_contract: Option<bool>,
@@ -117,6 +118,8 @@ pub(crate) struct StartupArtifactAudit {
     pub startup_contract_contains_runtime_state_artifact: Option<bool>,
     pub startup_contract_contains_startup_execution_gate: Option<bool>,
     pub startup_contract_contains_startup_state_fallback_cli: Option<bool>,
+    pub startup_contract_contains_gate_field_enforcement: Option<bool>,
+    pub startup_contract_enforces_gate_field_semantics: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -575,6 +578,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_runtime_state_artifact,
         startup_instruction_contains_startup_execution_gate,
         startup_instruction_contains_startup_state_fallback_cli,
+        startup_instruction_contains_gate_field_enforcement,
     ) = if startup_instruction_exists {
         let path = startup_instruction_path
             .as_ref()
@@ -596,9 +600,22 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             Some(content.contains(".amai/continuity/project-chat-startup-state.json")),
             Some(content.contains("startup_execution_gate")),
             Some(content.contains("continuity startup-state --repo-root")),
+            Some(
+                content.contains("startup_execution_gate.must_follow_startup_next_action = true")
+                    && content.contains("startup_execution_gate.unrelated_work_allowed = false")
+                    && content.contains(
+                        "startup_execution_gate.must_read_prompt_text_before_reply = true",
+                    )
+                    && content.contains(
+                        "startup_execution_gate.required_action_kind_when_resume_required = \"resume_required_return_task\"",
+                    )
+                    && content.contains("startup_execution_gate.no_silent_drop = true"),
+            ),
         )
     } else {
-        (None, None, None, None, None, None, None, None, None, None, None, None)
+        (
+            None, None, None, None, None, None, None, None, None, None, None, None, None,
+        )
     };
 
     let startup_contract_path = state.startup_contract_path.as_ref().map(PathBuf::from);
@@ -618,6 +635,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_contract_contains_runtime_state_artifact,
         startup_contract_contains_startup_execution_gate,
         startup_contract_contains_startup_state_fallback_cli,
+        startup_contract_contains_gate_field_enforcement,
+        startup_contract_enforces_gate_field_semantics,
     ) = if startup_contract_exists {
         let path = startup_contract_path
             .as_ref()
@@ -636,6 +655,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
                 .iter()
                 .any(|field| field.as_str() == Some(name))
         };
+        let gate_enforcement = &payload["startup_contract"]["startup_execution_gate_enforcement"];
         let artifact_fail_closed = payload["startup_contract"]["artifact_enforcement"]
                 ["missing_or_unreadable_fail_closed"]
                 .as_bool()
@@ -712,9 +732,52 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
                             .as_bool()
                             == Some(true),
                 ),
+                Some(
+                    gate_enforcement["gate_field"].as_str() == Some("startup_execution_gate")
+                        && gate_enforcement["action_kind_field"].as_str()
+                            == Some("action_kind")
+                        && gate_enforcement["blocking_field"].as_str() == Some("blocking")
+                        && gate_enforcement["resume_state_field"].as_str()
+                            == Some("resume_state")
+                        && gate_enforcement["required_return_task_present_field"].as_str()
+                            == Some("required_return_task_present")
+                        && gate_enforcement["required_return_task_headline_field"].as_str()
+                            == Some("required_return_task_headline")
+                        && gate_enforcement["required_return_task_next_step_field"].as_str()
+                            == Some("required_return_task_next_step")
+                        && gate_enforcement["lease_owner_state_field"].as_str()
+                            == Some("lease_owner_state")
+                        && gate_enforcement["must_follow_field"].as_str()
+                            == Some("must_follow_startup_next_action")
+                        && gate_enforcement["unrelated_work_allowed_field"].as_str()
+                            == Some("unrelated_work_allowed")
+                        && gate_enforcement["must_read_prompt_text_before_reply_field"].as_str()
+                            == Some("must_read_prompt_text_before_reply")
+                        && gate_enforcement["required_action_kind_field"].as_str()
+                            == Some("required_action_kind_when_resume_required")
+                        && gate_enforcement["no_silent_drop_field"].as_str()
+                            == Some("no_silent_drop"),
+                ),
+                Some(
+                    gate_enforcement["must_follow_true_blocks_unrelated_work"].as_bool()
+                        == Some(true)
+                        && gate_enforcement["unrelated_work_allowed_false_blocks_unrelated_work"]
+                            .as_bool()
+                            == Some(true)
+                        && gate_enforcement["must_read_prompt_text_true_requires_prompt_before_reply"]
+                            .as_bool()
+                            == Some(true)
+                        && gate_enforcement["required_action_kind_resume_required_value"]
+                            .as_str()
+                            == Some("resume_required_return_task")
+                        && gate_enforcement["no_silent_drop_must_be_true"].as_bool()
+                            == Some(true),
+                ),
             )
     } else {
-        (None, None, None, None, None, None, None, None, None, None, None)
+        (
+            None, None, None, None, None, None, None, None, None, None, None, None, None,
+        )
     };
 
     let install_state_sha_matches_current_contract = state
@@ -737,6 +800,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         || startup_instruction_contains_runtime_state_artifact != Some(true)
         || startup_instruction_contains_startup_execution_gate != Some(true)
         || startup_instruction_contains_startup_state_fallback_cli != Some(true)
+        || startup_instruction_contains_gate_field_enforcement != Some(true)
     {
         "startup_instruction_drift".to_string()
     } else if startup_contract_sha_matches_current_contract != Some(true)
@@ -751,6 +815,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         || startup_contract_contains_runtime_state_artifact != Some(true)
         || startup_contract_contains_startup_execution_gate != Some(true)
         || startup_contract_contains_startup_state_fallback_cli != Some(true)
+        || startup_contract_contains_gate_field_enforcement != Some(true)
+        || startup_contract_enforces_gate_field_semantics != Some(true)
     {
         "startup_contract_drift".to_string()
     } else {
@@ -774,6 +840,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_instruction_contains_runtime_state_artifact,
         startup_instruction_contains_startup_execution_gate,
         startup_instruction_contains_startup_state_fallback_cli,
+        startup_instruction_contains_gate_field_enforcement,
         startup_contract_path,
         startup_contract_exists,
         startup_contract_sha_matches_current_contract,
@@ -788,6 +855,8 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_contract_contains_runtime_state_artifact,
         startup_contract_contains_startup_execution_gate,
         startup_contract_contains_startup_state_fallback_cli,
+        startup_contract_contains_gate_field_enforcement,
+        startup_contract_enforces_gate_field_semantics,
     }))
 }
 
@@ -2047,6 +2116,25 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     let startup_execution_gate_field = runtime_state_artifact["startup_execution_gate_field"]
         .as_str()
         .unwrap_or("startup_execution_gate");
+    let startup_execution_gate_enforcement = &contract["startup_execution_gate_enforcement"];
+    let gate_must_follow_field = startup_execution_gate_enforcement["must_follow_field"]
+        .as_str()
+        .unwrap_or("must_follow_startup_next_action");
+    let gate_unrelated_work_allowed_field =
+        startup_execution_gate_enforcement["unrelated_work_allowed_field"]
+            .as_str()
+            .unwrap_or("unrelated_work_allowed");
+    let gate_prompt_read_field = startup_execution_gate_enforcement
+        ["must_read_prompt_text_before_reply_field"]
+        .as_str()
+        .unwrap_or("must_read_prompt_text_before_reply");
+    let gate_required_action_kind_field =
+        startup_execution_gate_enforcement["required_action_kind_field"]
+            .as_str()
+            .unwrap_or("required_action_kind_when_resume_required");
+    let gate_no_silent_drop_field = startup_execution_gate_enforcement["no_silent_drop_field"]
+        .as_str()
+        .unwrap_or("no_silent_drop");
     let startup_state_fallback_cli = runtime_state_artifact["inspection_fallback_cli"]["command"]
         .as_str()
         .unwrap_or("continuity startup-state");
@@ -2133,7 +2221,7 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
         .unwrap_or(false);
 
     Ok(format!(
-        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала прочитай machine-readable startup contract `{}` (relative path `{}`) и используй его как source-of-truth, а не этот markdown-блок.\n3. Этот artifact обязан быть прочитан до MCP tool call: {}.\n4. Если startup contract artifact отсутствует или не читается, fail-closed: {}.\n5. Проверь, что {} = \"{}\"; при mismatch fail-closed: {}.\n6. Затем вызови MCP tool `{tool}`.\n7. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n8. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n9. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n10. После startup прочитай live runtime artifact `{}`; его пишет `{}` и он должен нести `{}`.\n11. Из runtime artifact отдельно прочитай `{}` и используй его как immediate startup gate для auto-return.\n12. Если direct file-read runtime artifact неудобен, используй pinned fallback CLI: `cargo run -- {} --repo-root \"{}\" --json`.\n13. После restore обязательно подними поля: {required_summary_fields}.\n14. Верни в активную рабочую линию obligations: {restored_obligations}.\n15. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n16. `{startup_next_action_field}` считается первым обязательным действием после startup.\n17. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n18. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n19. Silent drop запрещён: {}.\n20. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
+        "Перед любым содержательным ответом в новом или resumed чате:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала прочитай machine-readable startup contract `{}` (relative path `{}`) и используй его как source-of-truth, а не этот markdown-блок.\n3. Этот artifact обязан быть прочитан до MCP tool call: {}.\n4. Если startup contract artifact отсутствует или не читается, fail-closed: {}.\n5. Проверь, что {} = \"{}\"; при mismatch fail-closed: {}.\n6. Затем вызови MCP tool `{tool}`.\n7. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n8. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n9. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n10. После startup прочитай live runtime artifact `{}`; его пишет `{}` и он должен нести `{}`.\n11. Из runtime artifact отдельно прочитай `{}` и используй его как immediate startup gate для auto-return.\n12. Считай literal `{startup_execution_gate_field}.{gate_must_follow_field} = true` жёстким запретом на unrelated work до выполнения startup_next_action.\n13. Считай literal `{startup_execution_gate_field}.{gate_unrelated_work_allowed_field} = false` жёстким запретом на unrelated work.\n14. Считай literal `{startup_execution_gate_field}.{gate_prompt_read_field} = true` обязательством сначала прочитать `chat_start_restore.prompt_text` до первого ответа.\n15. Считай literal `{startup_execution_gate_field}.{gate_required_action_kind_field} = \"{required_action_kind}\"` pinned action-kind для required return path.\n16. Считай literal `{startup_execution_gate_field}.{gate_no_silent_drop_field} = true` прямым запретом на silent drop pending return линии.\n17. Если direct file-read runtime artifact неудобен, используй pinned fallback CLI: `cargo run -- {} --repo-root \"{}\" --json`.\n18. После restore обязательно подними поля: {required_summary_fields}.\n19. Верни в активную рабочую линию obligations: {restored_obligations}.\n20. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n21. `{startup_next_action_field}` считается первым обязательным действием после startup.\n22. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n23. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n24. Silent drop запрещён: {}.\n25. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
         repo_root.display(),
         contract_path.display(),
         startup_contract_relative_path,
@@ -2469,6 +2557,15 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("sha256_mismatch_fail_closed = true"));
         assert!(text.contains(".amai/continuity/project-chat-startup-state.json"));
         assert!(text.contains("startup_execution_gate"));
+        assert!(text.contains("startup_execution_gate.must_follow_startup_next_action = true"));
+        assert!(text.contains("startup_execution_gate.unrelated_work_allowed = false"));
+        assert!(text.contains(
+            "startup_execution_gate.must_read_prompt_text_before_reply = true"
+        ));
+        assert!(text.contains(
+            "startup_execution_gate.required_action_kind_when_resume_required = \"resume_required_return_task\""
+        ));
+        assert!(text.contains("startup_execution_gate.no_silent_drop = true"));
         assert!(text.contains("continuity startup-state --repo-root"));
         let expected_sha = startup_contract_sha256(&mcp::project_chat_startup_contract())
             .expect("startup contract hash");
@@ -2520,6 +2617,38 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(
             payload["startup_contract"]["runtime_state_artifact"]["inspection_fallback_cli"]["command"],
             json!("continuity startup-state")
+        );
+        assert_eq!(
+            payload["startup_contract"]["startup_execution_gate_enforcement"]["gate_field"],
+            json!("startup_execution_gate")
+        );
+        assert_eq!(
+            payload["startup_contract"]["startup_execution_gate_enforcement"]["must_follow_field"],
+            json!("must_follow_startup_next_action")
+        );
+        assert_eq!(
+            payload["startup_contract"]["startup_execution_gate_enforcement"]["unrelated_work_allowed_field"],
+            json!("unrelated_work_allowed")
+        );
+        assert_eq!(
+            payload["startup_contract"]["startup_execution_gate_enforcement"]["must_read_prompt_text_before_reply_field"],
+            json!("must_read_prompt_text_before_reply")
+        );
+        assert_eq!(
+            payload["startup_contract"]["startup_execution_gate_enforcement"]["required_action_kind_field"],
+            json!("required_action_kind_when_resume_required")
+        );
+        assert_eq!(
+            payload["startup_contract"]["startup_execution_gate_enforcement"]["no_silent_drop_field"],
+            json!("no_silent_drop")
+        );
+        assert_eq!(
+            payload["startup_contract"]["startup_execution_gate_enforcement"]["must_follow_true_blocks_unrelated_work"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["startup_execution_gate_enforcement"]["required_action_kind_resume_required_value"],
+            json!("resume_required_return_task")
         );
     }
 
@@ -2628,6 +2757,10 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             Some(true)
         );
         assert_eq!(
+            audit.startup_instruction_contains_gate_field_enforcement,
+            Some(true)
+        );
+        assert_eq!(
             audit.startup_contract_sha_matches_current_contract,
             Some(true)
         );
@@ -2664,6 +2797,14 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             audit.startup_contract_contains_startup_state_fallback_cli,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_contract_contains_gate_field_enforcement,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_contract_enforces_gate_field_semantics,
             Some(true)
         );
 

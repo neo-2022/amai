@@ -466,6 +466,76 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract resume_enforcement does not require previous_session_owner to follow startup_next_action"
         ));
     }
+    if startup_contract["startup_execution_gate_enforcement"]["gate_field"].as_str()
+        != Some("startup_execution_gate")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost startup_execution_gate_enforcement.gate_field"
+        ));
+    }
+    if startup_contract["startup_execution_gate_enforcement"]["must_follow_field"].as_str()
+        != Some("must_follow_startup_next_action")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost startup_execution_gate_enforcement.must_follow_field"
+        ));
+    }
+    if startup_contract["startup_execution_gate_enforcement"]["unrelated_work_allowed_field"]
+        .as_str()
+        != Some("unrelated_work_allowed")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost startup_execution_gate_enforcement.unrelated_work_allowed_field"
+        ));
+    }
+    if startup_contract["startup_execution_gate_enforcement"]
+        ["must_read_prompt_text_before_reply_field"]
+        .as_str()
+        != Some("must_read_prompt_text_before_reply")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost startup_execution_gate_enforcement.must_read_prompt_text_before_reply_field"
+        ));
+    }
+    if startup_contract["startup_execution_gate_enforcement"]["required_action_kind_field"]
+        .as_str()
+        != Some("required_action_kind_when_resume_required")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost startup_execution_gate_enforcement.required_action_kind_field"
+        ));
+    }
+    if startup_contract["startup_execution_gate_enforcement"]["no_silent_drop_field"].as_str()
+        != Some("no_silent_drop")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost startup_execution_gate_enforcement.no_silent_drop_field"
+        ));
+    }
+    if startup_contract["startup_execution_gate_enforcement"]
+        ["must_follow_true_blocks_unrelated_work"]
+        .as_bool()
+        != Some(true)
+        || startup_contract["startup_execution_gate_enforcement"]
+            ["unrelated_work_allowed_false_blocks_unrelated_work"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["startup_execution_gate_enforcement"]
+            ["must_read_prompt_text_true_requires_prompt_before_reply"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["startup_execution_gate_enforcement"]["no_silent_drop_must_be_true"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["startup_execution_gate_enforcement"]
+            ["required_action_kind_resume_required_value"]
+            .as_str()
+            != Some("resume_required_return_task")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost startup_execution_gate_enforcement semantics"
+        ));
+    }
 
     let tools = session.request("tools/list", json!({})).await?;
     let tool_names = tools["tools"]
@@ -2569,7 +2639,7 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v7",
+                "contract_version": "continuity-startup-contract-v8",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore before any substantive work in a new or resumed chat",
@@ -2605,6 +2675,26 @@ fn protocol_manifest() -> Value {
                         "json_required": true,
                         "returns_startup_execution_gate": true
                     }
+                },
+                "startup_execution_gate_enforcement": {
+                    "gate_field": "startup_execution_gate",
+                    "action_kind_field": "action_kind",
+                    "blocking_field": "blocking",
+                    "resume_state_field": "resume_state",
+                    "required_return_task_present_field": "required_return_task_present",
+                    "required_return_task_headline_field": "required_return_task_headline",
+                    "required_return_task_next_step_field": "required_return_task_next_step",
+                    "lease_owner_state_field": "lease_owner_state",
+                    "must_follow_field": "must_follow_startup_next_action",
+                    "unrelated_work_allowed_field": "unrelated_work_allowed",
+                    "must_read_prompt_text_before_reply_field": "must_read_prompt_text_before_reply",
+                    "required_action_kind_field": "required_action_kind_when_resume_required",
+                    "no_silent_drop_field": "no_silent_drop",
+                    "must_follow_true_blocks_unrelated_work": true,
+                    "unrelated_work_allowed_false_blocks_unrelated_work": true,
+                    "must_read_prompt_text_true_requires_prompt_before_reply": true,
+                    "required_action_kind_resume_required_value": "resume_required_return_task",
+                    "no_silent_drop_must_be_true": true
                 },
                 "required_arguments": ["project"],
                 "optional_arguments": ["repo_root", "namespace", "token_source_kind"],
@@ -4710,7 +4800,7 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v7")
+            Some("continuity-startup-contract-v8")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["must_call_before_substantive_work"].as_bool(),
@@ -4844,6 +4934,77 @@ mod tests {
                 ["source_summary_field"]
                 .as_str(),
             Some("continuity_startup_summary")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]["gate_field"]
+                .as_str(),
+            Some("startup_execution_gate")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]["must_follow_field"]
+                .as_str(),
+            Some("must_follow_startup_next_action")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]["unrelated_work_allowed_field"]
+                .as_str(),
+            Some("unrelated_work_allowed")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]
+                ["must_read_prompt_text_before_reply_field"]
+                .as_str(),
+            Some("must_read_prompt_text_before_reply")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]["required_action_kind_field"]
+                .as_str(),
+            Some("required_action_kind_when_resume_required")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]["no_silent_drop_field"]
+                .as_str(),
+            Some("no_silent_drop")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]
+                ["must_follow_true_blocks_unrelated_work"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]
+                ["unrelated_work_allowed_false_blocks_unrelated_work"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]
+                ["must_read_prompt_text_true_requires_prompt_before_reply"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]
+                ["required_action_kind_resume_required_value"]
+                .as_str(),
+            Some("resume_required_return_task")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]["no_silent_drop_must_be_true"]
+                .as_bool(),
+            Some(true)
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["resume_enforcement"]
