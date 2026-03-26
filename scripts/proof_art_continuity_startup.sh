@@ -41,6 +41,7 @@ printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_ex
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.must_read_prompt_text_before_reply == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.required_action_kind_when_resume_required == "resume_required_return_task"' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.no_silent_drop == true' >/dev/null
+printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.gate_semantics_consistent == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_execution_gate.action_kind != null' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.required_return_task != null' >/dev/null
 

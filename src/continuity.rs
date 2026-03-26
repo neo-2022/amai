@@ -109,6 +109,7 @@ pub(crate) struct StartupRuntimeStateAudit {
     pub must_read_prompt_text_before_reply: Option<bool>,
     pub required_action_kind_when_resume_required: Option<String>,
     pub no_silent_drop: Option<bool>,
+    pub gate_semantics_consistent: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -166,6 +167,7 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
             must_read_prompt_text_before_reply: None,
             required_action_kind_when_resume_required: None,
             no_silent_drop: None,
+            gate_semantics_consistent: None,
         });
     };
     let expected_contract_sha =
@@ -224,6 +226,94 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         .as_str()
         .map(ToOwned::to_owned);
     let no_silent_drop = payload["startup_execution_gate"]["no_silent_drop"].as_bool();
+    let gate_required_return_task_present = payload["startup_execution_gate"]
+        ["required_return_task_present"]
+        .as_bool();
+    let gate_required_return_task_headline = payload["startup_execution_gate"]
+        ["required_return_task_headline"]
+        .as_str();
+    let gate_required_return_task_next_step = payload["startup_execution_gate"]
+        ["required_return_task_next_step"]
+        .as_str();
+    let blocking = payload["startup_execution_gate"]["blocking"].as_bool();
+    let required_return_task_headline = summary["required_return_task"]["headline"].as_str();
+    let required_return_task_next_step = summary["required_return_task"]["next_step"].as_str();
+    let gate_contract = mcp::project_chat_startup_contract();
+    let gate_enforcement = &gate_contract["startup_execution_gate_enforcement"];
+    let resume_enforcement = &gate_contract["resume_enforcement"];
+    let previous_session_owner_value = resume_enforcement["previous_session_owner_value"]
+        .as_str()
+        .unwrap_or("previous_session_owner");
+    let gate_semantics_consistent = match (
+        must_follow_startup_next_action,
+        unrelated_work_allowed,
+        must_read_prompt_text_before_reply,
+        required_action_kind_when_resume_required.as_deref(),
+        no_silent_drop,
+        action_kind.as_deref(),
+        gate_required_return_task_present,
+        blocking,
+    ) {
+        (
+            Some(must_follow),
+            Some(unrelated_allowed),
+            Some(must_read_prompt),
+            Some(required_action_kind),
+            Some(no_silent_drop_value),
+            Some(startup_action_kind),
+            Some(gate_required_return_present),
+            Some(blocking_value),
+        ) => {
+            let mut ok = true;
+            if gate_enforcement["must_follow_true_blocks_unrelated_work"].as_bool() == Some(true)
+                && must_follow
+                && unrelated_allowed
+            {
+                ok = false;
+            }
+            if gate_enforcement["must_read_prompt_text_true_requires_prompt_before_reply"]
+                .as_bool()
+                == Some(true)
+                && must_read_prompt
+                && prompt_text_present != Some(true)
+            {
+                ok = false;
+            }
+            if gate_enforcement["required_action_kind_resume_required_value"]
+                .as_str()
+                .is_some_and(|expected| expected != required_action_kind)
+            {
+                ok = false;
+            }
+            if gate_enforcement["no_silent_drop_must_be_true"].as_bool() == Some(true)
+                && !no_silent_drop_value
+            {
+                ok = false;
+            }
+            if startup_action_kind == required_action_kind {
+                if required_return_task_field_present != Some(true)
+                    || !gate_required_return_present
+                    || required_return_task_headline.is_none()
+                    || required_return_task_next_step.is_none()
+                    || gate_required_return_task_headline != required_return_task_headline
+                    || gate_required_return_task_next_step != required_return_task_next_step
+                    || !blocking_value
+                {
+                    ok = false;
+                }
+            }
+            if lease_owner_state.as_deref() == Some(previous_session_owner_value)
+                && resume_enforcement["previous_session_owner_must_follow_startup_next_action"]
+                    .as_bool()
+                    == Some(true)
+                && !must_follow
+            {
+                ok = false;
+            }
+            Some(ok)
+        }
+        _ => None,
+    };
 
     let status = if payload["artifact_version"].as_str()
         != Some("workspace-startup-runtime-state-v2")
@@ -242,6 +332,7 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         || must_read_prompt_text_before_reply.is_none()
         || required_action_kind_when_resume_required.is_none()
         || no_silent_drop.is_none()
+        || gate_semantics_consistent != Some(true)
     {
         "startup_runtime_state_drift".to_string()
     } else {
@@ -269,6 +360,7 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
         must_read_prompt_text_before_reply,
         required_action_kind_when_resume_required,
         no_silent_drop,
+        gate_semantics_consistent,
     })
 }
 
@@ -301,6 +393,7 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
                     "must_read_prompt_text_before_reply": audit.must_read_prompt_text_before_reply,
                     "required_action_kind_when_resume_required": audit.required_action_kind_when_resume_required,
                     "no_silent_drop": audit.no_silent_drop,
+                    "gate_semantics_consistent": audit.gate_semantics_consistent,
                     "startup_execution_gate": artifact_payload.as_ref().map(|payload| payload["startup_execution_gate"].clone()).unwrap_or(Value::Null),
                     "startup_next_action": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["startup_next_action"].clone()).unwrap_or(Value::Null),
                     "required_return_task": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["required_return_task"].clone()).unwrap_or(Value::Null),
@@ -389,6 +482,10 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
     println!(
         "No silent drop: {}",
         audit.no_silent_drop.unwrap_or(false)
+    );
+    println!(
+        "Gate semantics consistent: {}",
+        audit.gate_semantics_consistent.unwrap_or(false)
     );
     if let Some(payload) = artifact_payload.as_ref() {
         println!(
@@ -3867,8 +3964,9 @@ mod tests {
         continuity_replay_guard_probes, continuity_snapshot_semantic_epoch_ms,
         continuity_temporal_lookup_probes, degradation_proof_scenarios, enrich_thread_index_file,
         extract_next_step_from_text, fake_continuity_handoff_snapshot,
-        fake_continuity_import_snapshot, is_meta_continuity_handoff, latest_scoped_snapshot,
-        parse_chat_reference_spec, render_direct_answer, resolve_answer_intent,
+        fake_continuity_import_snapshot, inspect_startup_runtime_state,
+        is_meta_continuity_handoff, latest_scoped_snapshot, parse_chat_reference_spec,
+        render_direct_answer, resolve_answer_intent, startup_runtime_state_artifact_path,
     };
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
@@ -4917,6 +5015,18 @@ mod tests {
             json!(true)
         );
         assert_eq!(
+            artifact["startup_execution_gate"]["required_return_task_present"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["startup_execution_gate"]["required_return_task_headline"],
+            json!("Pending line")
+        );
+        assert_eq!(
+            artifact["startup_execution_gate"]["required_return_task_next_step"],
+            json!("Close same-meter live gap.")
+        );
+        assert_eq!(
             artifact["continuity_startup_summary"]["startup_next_action"]["action_kind"],
             json!("resume_required_return_task")
         );
@@ -4932,6 +5042,80 @@ mod tests {
             artifact["working_state_restore_lineage"]["authoritative_event_id"],
             json!("evt_123")
         );
+    }
+
+    #[test]
+    fn inspect_startup_runtime_state_reports_gate_semantics_consistent() {
+        let unique = format!(
+            "amai-startup-runtime-audit-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_nanos()
+        );
+        let repo = std::env::temp_dir().join(unique);
+        fs::create_dir_all(repo.join(".amai/continuity")).expect("runtime state dir");
+
+        let payload = json!({
+            "continuity_startup": {
+                "project": {
+                    "code": "art",
+                    "display_name": "Art",
+                    "repo_root": repo.display().to_string()
+                },
+                "namespace": {
+                    "code": "continuity",
+                    "display_name": "Continuity"
+                }
+            },
+            "chat_start_restore": {
+                "headline": "Current active line",
+                "next_step": "Ship runtime return enforcement.",
+                "restore_confidence": "high",
+                "prompt_text": "CHAT_START_RESTORE\nCurrent active line",
+                "execctl_resume_state": "pending_return_queue_present",
+                "startup_next_action": {
+                    "action_kind": "resume_required_return_task",
+                    "blocking": true,
+                    "headline": "Pending line",
+                    "next_step": "Close same-meter live gap."
+                },
+                "required_return_task": {
+                    "headline": "Pending line",
+                    "next_step": "Close same-meter live gap."
+                },
+                "execctl_active_lease": {
+                    "lease_owner_state": "previous_session_owner",
+                    "headline": "Current active line"
+                },
+                "project_task_tree": {
+                    "open_tasks_count": 2
+                },
+                "project_task_ledger": {
+                    "open_tasks_count": 2
+                }
+            },
+            "working_state_restore": {
+                "state_lineage": {
+                    "authoritative_event_id": "evt_123",
+                    "session_id": "sess_123"
+                }
+            }
+        });
+        let artifact =
+            build_startup_runtime_state_artifact(repo.as_path(), &payload, 42)
+                .expect("startup runtime state artifact");
+        fs::write(
+            startup_runtime_state_artifact_path(repo.as_path()),
+            serde_json::to_string_pretty(&artifact).expect("serialize artifact"),
+        )
+        .expect("write artifact");
+
+        let audit = inspect_startup_runtime_state(repo.as_path()).expect("startup runtime audit");
+        assert_eq!(audit.status, "ok");
+        assert_eq!(audit.gate_semantics_consistent, Some(true));
+
+        fs::remove_dir_all(&repo).expect("cleanup temp repo");
     }
 
     #[test]

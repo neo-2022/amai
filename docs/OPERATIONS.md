@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 05:48 MSK
-Ручная сверка guide/docs: 2026-03-26 05:48 MSK
+modified_at: 2026-03-26 05:54 MSK
+Ручная сверка guide/docs: 2026-03-26 05:54 MSK
 
 # Operations
 
@@ -908,6 +908,12 @@ cargo run -- mcp serve
   - `must_read_prompt_text_before_reply`;
   - `required_action_kind_when_resume_required`;
   - `no_silent_drop`.
+- status/runtime audit теперь ещё отдельно публикует `gate_semantics_consistent`;
+  он обязан падать в `false`, если live gate противоречит:
+  - pinned contract semantics;
+  - `startup_next_action`;
+  - `required_return_task`;
+  - `previous_session_owner` lease contour.
 - repair path для такого drift теперь честный и bounded:
   `startup_runtime_state_repair: rerun cargo run -- continuity startup --repo-root ... --namespace continuity --json >/dev/null`
 - если нужно audit-ить runtime artifact не в самом `Amai` repo-root, а в конкретном project
