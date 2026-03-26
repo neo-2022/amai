@@ -28,6 +28,7 @@ const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
 const AGENT_CYCLE_TIMELINE_MAX_POINTS: usize = 256;
 const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
 const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_generation_turn_observed";
+const CONTINUITY_PRE_AMAI_BASELINE_STRATEGY: &str = "truthful_pre_amai_continuity_summaries_v1";
 static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<
     Mutex<Option<DashboardRolloutObservationCache>>,
 > = OnceLock::new();
@@ -363,6 +364,7 @@ struct InfraCostProfileFile {
 
 #[derive(Debug, Clone)]
 struct TokenBudgetEvent {
+    snapshot_id: Option<Uuid>,
     created_at_epoch_ms: i64,
     event_id: String,
     correlation_id: String,
@@ -452,6 +454,15 @@ struct TokenBudgetEvent {
     assistant_generation_tokens: Option<u64>,
     tool_overhead_tokens: Option<u64>,
     continuity_restore_tokens: Option<u64>,
+    pre_amai_baseline_source: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct ContinuityPreAmaiBaselineMaterialization {
+    baseline_tokens: u64,
+    baseline_bytes: usize,
+    source_entries: Vec<String>,
+    source_ref: Value,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -658,11 +669,11 @@ fn default_agent_cycle_model_version() -> String {
 }
 
 fn default_client_limit_meter_alignment_version() -> String {
-    "client-limit-meter-alignment-v9".to_string()
+    "client-limit-meter-alignment-v10".to_string()
 }
 
 fn default_client_limit_baseline_equivalence_version() -> String {
-    "client-limit-baseline-equivalence-v3".to_string()
+    "client-limit-baseline-equivalence-v4".to_string()
 }
 
 fn default_client_limit_strict_meter_slice_version() -> String {
@@ -678,7 +689,7 @@ fn default_client_limit_continuity_boundary_rollup_version() -> String {
 }
 
 fn default_client_limit_pre_amai_baseline_source_version() -> String {
-    "client-limit-pre-amai-baseline-source-v1".to_string()
+    "client-limit-pre-amai-baseline-source-v2".to_string()
 }
 
 fn default_excluded_taxonomy_version() -> String {
@@ -5519,33 +5530,41 @@ fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Valu
     let continuity_boundary_rollup = alignment["continuity_boundary_rollup"].clone();
     let pre_amai_baseline_source_status = alignment["pre_amai_baseline_source_status"].clone();
     let strict_client_meter_slice = alignment["strict_client_meter_slice"].clone();
-    let review_state = match (
-        continuity_boundary_rollup["state"]
-            .as_str()
-            .unwrap_or("unknown"),
-        explicit_boundary_surface["state"]
-            .as_str()
-            .unwrap_or("unknown"),
-        strict_client_meter_slice["state"]
-            .as_str()
-            .unwrap_or("unknown"),
-    ) {
-        ("amai_continuity_boundary_observed", "amai_continuity_boundary", _) => {
-            "strict_slice_plus_observed_amai_continuity_boundary"
+    let same_meter_as_client_limit = alignment["same_meter_as_client_limit"].as_bool() == Some(true);
+    let review_state = if same_meter_as_client_limit {
+        "same_meter_equivalent"
+    } else {
+        match (
+            continuity_boundary_rollup["state"]
+                .as_str()
+                .unwrap_or("unknown"),
+            explicit_boundary_surface["state"]
+                .as_str()
+                .unwrap_or("unknown"),
+            strict_client_meter_slice["state"]
+                .as_str()
+                .unwrap_or("unknown"),
+        ) {
+            ("amai_continuity_boundary_observed", "amai_continuity_boundary", _) => {
+                "strict_slice_plus_observed_amai_continuity_boundary"
+            }
+            ("amai_continuity_boundary_present_without_tokens", "amai_continuity_boundary", _) => {
+                "strict_slice_plus_empty_amai_continuity_boundary"
+            }
+            (_, "amai_continuity_boundary", _) => "amai_continuity_boundary_present",
+            (_, "no_explicit_boundary", "strict_slice_covers_all_applicable_components") => {
+                "strict_slice_covers_all_applicable_components"
+            }
+            (_, "no_explicit_boundary", "strict_slice_partial_lower_bound") => {
+                "strict_slice_partial_without_explicit_boundary"
+            }
+            _ => "client_limit_boundary_review_unknown",
         }
-        ("amai_continuity_boundary_present_without_tokens", "amai_continuity_boundary", _) => {
-            "strict_slice_plus_empty_amai_continuity_boundary"
-        }
-        (_, "amai_continuity_boundary", _) => "amai_continuity_boundary_present",
-        (_, "no_explicit_boundary", "strict_slice_covers_all_applicable_components") => {
-            "strict_slice_covers_all_applicable_components"
-        }
-        (_, "no_explicit_boundary", "strict_slice_partial_lower_bound") => {
-            "strict_slice_partial_without_explicit_boundary"
-        }
-        _ => "client_limit_boundary_review_unknown",
     };
     let note = match review_state {
+        "same_meter_equivalent" => {
+            "В этом scope full same-meter equivalence уже materialized: карточка и model-token percent теперь можно читать в том же meter, которым клиент считает лимит."
+        }
         "strict_slice_plus_observed_amai_continuity_boundary" => {
             "Strict client-meter slice уже measured, а Amai-specific continuity boundary вынесена отдельно как observed token weight вне same-meter slice."
         }
@@ -5566,7 +5585,7 @@ fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Valu
         }
     };
     json!({
-        "same_meter_as_client_limit": false,
+        "same_meter_as_client_limit": same_meter_as_client_limit,
         "alignment_state": alignment["alignment_state"].clone(),
         "baseline_equivalence_state": alignment["baseline_equivalence"]["state"].clone(),
         "review_state": review_state,
@@ -5587,6 +5606,21 @@ fn build_dashboard_statement_preview(
     rollout_observations: &[codex_threads::RolloutAssistantGenerationObservation],
     assistant_scope: Option<&AssistantGenerationScopeObservation>,
 ) -> Value {
+    let with_amai_measured_tokens = summary["total_context_tokens"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_add(summary["total_recovery_tokens"].as_u64().unwrap_or(0));
+    let verified_with_amai_measured_tokens = summary["verified_delivered_tokens"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_add(summary["verified_recovery_tokens"].as_u64().unwrap_or(0));
+    let observed_whole_cycle_with_amai_tokens =
+        observed_whole_cycle_with_assistant_scope_tokens(summary, assistant_scope)
+            .unwrap_or(with_amai_measured_tokens);
+    let verified_observed_whole_cycle_with_amai_tokens =
+        summary["verified_observed_whole_cycle_with_amai_tokens"]
+            .as_u64()
+            .unwrap_or(verified_with_amai_measured_tokens);
     json!({
         "scope_code": scope_code,
         "scope_label": scope_label,
@@ -5600,6 +5634,24 @@ fn build_dashboard_statement_preview(
             Some(rollout_observations),
             assistant_scope,
         ),
+        "observed_client_prompt_tokens": summary["observed_client_prompt_tokens"].clone(),
+        "observed_assistant_generation_tokens": Value::from(
+            assistant_scope
+                .map(|scope| scope.observed_tokens)
+                .unwrap_or_else(|| summary["observed_assistant_generation_tokens"].as_u64().unwrap_or(0))
+        ),
+        "observed_tool_overhead_tokens": summary["observed_tool_overhead_tokens"].clone(),
+        "observed_continuity_restore_tokens": summary["observed_continuity_restore_tokens"].clone(),
+        "without_amai_measured_tokens": summary["total_naive_tokens"].as_u64().unwrap_or(0),
+        "with_amai_measured_tokens": with_amai_measured_tokens,
+        "observed_whole_cycle_with_amai_tokens": observed_whole_cycle_with_amai_tokens,
+        "measured_saved_tokens": summary["total_effective_saved_tokens"].as_i64().unwrap_or(0),
+        "measured_saved_pct": summary["effective_savings_pct"].as_f64().unwrap_or(0.0),
+        "verified_without_amai_measured_tokens": summary["verified_baseline_tokens"].as_u64().unwrap_or(0),
+        "verified_with_amai_measured_tokens": verified_with_amai_measured_tokens,
+        "verified_observed_whole_cycle_with_amai_tokens": verified_observed_whole_cycle_with_amai_tokens,
+        "verified_measured_saved_tokens": summary["verified_effective_saved_tokens"].as_i64().unwrap_or(0),
+        "verified_measured_saved_pct": summary["verified_effective_savings_pct"].as_f64().unwrap_or(0.0),
         "note": "Dashboard preview intentionally stays read-only and lightweight: it is for fast operator cards, not for contractual export, settlement, or billing semantics."
     })
 }
@@ -7029,7 +7081,8 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     let stage_started_at = Instant::now();
     let mut events = load_dashboard_token_events(db, &repo_root, include_verify_events).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
-    let events = reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
+    let mut events =
+        reconcile_followup_recovery(&events, profile.session_gap_minutes as i64 * 60_000);
     record_dashboard_precache_stage_ms(&mut pre_cache_timings, "token_events", stage_started_at);
 
     let stage_started_at = Instant::now();
@@ -7038,8 +7091,8 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         .context("system clock before unix epoch")?
         .as_millis() as i64;
     let session_gap_ms = profile.session_gap_minutes.saturating_mul(60_000) as i64;
-    let session_events = current_session_events(&events, session_gap_ms);
-    let rolling_window_events = profile
+    let mut session_events = current_session_events(&events, session_gap_ms);
+    let mut rolling_window_events = profile
         .rolling_window_hours
         .map(|hours| {
             let lower_bound = now_epoch_ms.saturating_sub((hours as i64).saturating_mul(3_600_000));
@@ -7056,7 +7109,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     record_dashboard_precache_stage_ms(&mut pre_cache_timings, "scope_partition", stage_started_at);
 
     let stage_started_at = Instant::now();
-    let (_tool_overhead_changed, _assistant_generation_changed) =
+    let (tool_overhead_changed, assistant_generation_changed, continuity_baseline_changed) =
         if should_run_dashboard_same_meter_sync(&repo_root, &dashboard_sync_signature) {
             (
                 sync_context_pack_tool_overhead_for_events(db, &repo_root, &sync_scope_events)
@@ -7067,11 +7120,38 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                     &rollout_observations,
                 )
                 .await?,
+                sync_continuity_pre_amai_baseline_for_events(db, &repo_root, &sync_scope_events)
+                    .await?,
             )
         } else {
-            (false, false)
+            (false, false, false)
         };
     record_dashboard_precache_stage_ms(&mut pre_cache_timings, "same_meter_sync", stage_started_at);
+
+    if tool_overhead_changed || assistant_generation_changed || continuity_baseline_changed {
+        let stage_started_at = Instant::now();
+        let mut refreshed_events =
+            load_dashboard_token_events(db, &repo_root, include_verify_events).await?;
+        refreshed_events.sort_by_key(|event| event.created_at_epoch_ms);
+        events = reconcile_followup_recovery(
+            &refreshed_events,
+            profile.session_gap_minutes as i64 * 60_000,
+        );
+        session_events = current_session_events(&events, session_gap_ms);
+        rolling_window_events = profile
+            .rolling_window_hours
+            .map(|hours| {
+                let lower_bound =
+                    now_epoch_ms.saturating_sub((hours as i64).saturating_mul(3_600_000));
+                events
+                    .iter()
+                    .filter(|event| event.created_at_epoch_ms >= lower_bound)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        record_dashboard_precache_stage_ms(&mut pre_cache_timings, "token_events_reload", stage_started_at);
+    }
 
     let stage_started_at = Instant::now();
     let scope_events = if profile.rolling_window_hours.is_some() {
@@ -7698,6 +7778,95 @@ async fn sync_context_pack_tool_overhead_for_events(
             changed = true;
         }
     }
+    Ok(changed)
+}
+
+fn is_live_continuity_restore_event(event: &TokenBudgetEvent) -> bool {
+    event.traffic_class == "live"
+        && event.measurement_scope == "whole_cycle_observed_lower_bound"
+        && (event.query_type == "continuity_restore"
+            || event.target_kind == "continuity_restore")
+}
+
+async fn sync_continuity_pre_amai_baseline_for_events(
+    db: &Client,
+    repo_root: &Path,
+    events: &[TokenBudgetEvent],
+) -> Result<bool> {
+    let targets = events
+        .iter()
+        .filter(|event| is_live_continuity_restore_event(event))
+        .filter(|event| {
+            event.naive_tokens == 0
+                || event.baseline_strategy != CONTINUITY_PRE_AMAI_BASELINE_STRATEGY
+                || event.pre_amai_baseline_source.is_none()
+        })
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Ok(false);
+    }
+
+    let config = load_config(repo_root)?;
+    let tokenizer = build_tokenizer(&config.measurement.tokenizer)?;
+    let mut snapshots_by_scope = BTreeMap::<
+        (String, String),
+        Vec<ObservabilitySnapshotRecord>,
+    >::new();
+    let mut changed = false;
+
+    for event in targets {
+        let Some(snapshot_id) = event.snapshot_id.as_ref() else {
+            continue;
+        };
+        let scope_key = (event.project.clone(), event.namespace.clone());
+        if !snapshots_by_scope.contains_key(&scope_key) {
+            let scoped = postgres::list_scoped_observability_snapshots_by_kinds(
+                db,
+                &["continuity_import", "continuity_handoff"],
+                &scope_key.0,
+                &scope_key.1,
+                None,
+            )
+            .await?;
+            snapshots_by_scope.insert(scope_key.clone(), scoped);
+        }
+        let scoped_snapshots = snapshots_by_scope
+            .get(&scope_key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let continuity_import_snapshot = latest_scoped_continuity_snapshot_before(
+            scoped_snapshots,
+            "continuity_import",
+            &event.project,
+            &event.namespace,
+            event.occurred_at_epoch_ms,
+        );
+        let continuity_handoff_snapshot = latest_scoped_continuity_snapshot_before(
+            scoped_snapshots,
+            "continuity_handoff",
+            &event.project,
+            &event.namespace,
+            event.occurred_at_epoch_ms,
+        );
+        let Some(materialization) = continuity_pre_amai_baseline_materialization(
+            &tokenizer,
+            &event.project,
+            &event.namespace,
+            continuity_import_snapshot,
+            continuity_handoff_snapshot,
+        ) else {
+            continue;
+        };
+        let Some(row) = postgres::get_observability_snapshot_record(db, snapshot_id).await? else {
+            continue;
+        };
+        let mut payload = row.payload.clone();
+        if apply_continuity_pre_amai_baseline(&mut payload, &materialization)? {
+            postgres::update_observability_snapshot_payload(db, snapshot_id, &payload).await?;
+            changed = true;
+        }
+    }
+
     Ok(changed)
 }
 
@@ -8932,6 +9101,38 @@ pub async fn record_continuity_restore_observed_event(
         prompt_text,
         continuity_restore_tokens,
     )?;
+    let continuity_snapshots = postgres::list_scoped_observability_snapshots_by_kinds(
+        db,
+        &["continuity_import", "continuity_handoff"],
+        project_code,
+        namespace_code,
+        None,
+    )
+    .await?;
+    let occurred_at_epoch_ms = event["token_budget_event"]["occurred_at_epoch_ms"]
+        .as_i64()
+        .unwrap_or_else(|| current_epoch_ms().unwrap_or_default());
+    if let Some(materialization) = continuity_pre_amai_baseline_materialization(
+        &tokenizer,
+        project_code,
+        namespace_code,
+        latest_scoped_continuity_snapshot_before(
+            &continuity_snapshots,
+            "continuity_import",
+            project_code,
+            namespace_code,
+            occurred_at_epoch_ms,
+        ),
+        latest_scoped_continuity_snapshot_before(
+            &continuity_snapshots,
+            "continuity_handoff",
+            project_code,
+            namespace_code,
+            occurred_at_epoch_ms,
+        ),
+    ) {
+        let _ = apply_continuity_pre_amai_baseline(&mut event, &materialization)?;
+    }
     if traffic_class == "live" {
         let profile = resolve_profile(&config, None, &repo_root)?;
         enrich_live_event_payload(db, &mut event, &profile).await?;
@@ -9038,7 +9239,9 @@ async fn collect_report(
     let assistant_generation_changed =
         sync_rollout_assistant_generation_for_events(db, &sync_scope_events, &rollout_observations)
             .await?;
-    if tool_overhead_changed || assistant_generation_changed {
+    let continuity_baseline_changed =
+        sync_continuity_pre_amai_baseline_for_events(db, repo_root, &sync_scope_events).await?;
+    if tool_overhead_changed || assistant_generation_changed || continuity_baseline_changed {
         let mut refreshed = load_events(db, include_verify_events, limit).await?;
         refreshed.sort_by_key(|event| event.created_at_epoch_ms);
         events =
@@ -10344,8 +10547,12 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
     let tool_overhead_tokens = node["whole_cycle_observed"]["tool_overhead_tokens"].as_u64();
     let continuity_restore_tokens =
         node["whole_cycle_observed"]["continuity_restore_tokens"].as_u64();
+    let pre_amai_baseline_source = node["pre_amai_baseline_source"]
+        .as_object()
+        .map(|_| node["pre_amai_baseline_source"].clone());
 
     Ok(Some(TokenBudgetEvent {
+        snapshot_id: Some(row.snapshot_id),
         created_at_epoch_ms: row.created_at_epoch_ms,
         event_id,
         correlation_id,
@@ -10435,6 +10642,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         assistant_generation_tokens,
         tool_overhead_tokens,
         continuity_restore_tokens,
+        pre_amai_baseline_source,
     }))
 }
 
@@ -12044,6 +12252,7 @@ fn client_limit_meter_alignment_state(
     events: Option<&[TokenBudgetEvent]>,
     assistant_scope: Option<&AssistantGenerationScopeObservation>,
     baseline_equivalence: &Value,
+    same_meter_as_client_limit: bool,
 ) -> &'static str {
     let (events_total, live_events_count, _non_live_events_count, counted_events) =
         client_limit_meter_alignment_counts(summary, events);
@@ -12075,7 +12284,9 @@ fn client_limit_meter_alignment_state(
         .iter()
         .any(|(_code, observed_live_events, _observed_tokens)| *observed_live_events > 0);
 
-    if events_total == 0 {
+    if same_meter_as_client_limit {
+        "same_meter_equivalent"
+    } else if events_total == 0 {
         "no_usage_observed"
     } else if live_events_count == 0 {
         "only_non_live_scope_activity"
@@ -12200,6 +12411,7 @@ fn client_limit_baseline_component_semantics(
 ) -> Vec<Value> {
     let (_events_total, live_events_count, _non_live_events_count, _counted_events) =
         client_limit_meter_alignment_counts(summary, events);
+    let continuity_baseline_source = continuity_pre_amai_baseline_source_from_events(events);
     client_limit_component_stats(summary, assistant_scope)
         .into_iter()
         .filter_map(|(code, observed_live_events, observed_tokens)| {
@@ -12218,24 +12430,41 @@ fn client_limit_baseline_component_semantics(
                     (
                         "whole_cycle_component_incomplete",
                         None,
-                        "Observed whole-cycle coverage по этому компоненту ещё неполная, поэтому честный baseline-equivalent расчёт пока рано materialize-ить.",
+                        "Observed whole-cycle coverage по этому компоненту ещё неполная, поэтому честный baseline-equivalent расчёт пока рано materialize-ить.".to_string(),
                     )
                 } else {
                     match code {
                         "client_prompt" => (
                             "observed_tokens_passthrough",
                             Some(observed_tokens),
-                            "Для client_prompt baseline-equivalent tokens совпадают с реально observed tokens: исходный пользовательский запрос к клиенту не меняется из-за Amai.",
+                            "Для client_prompt baseline-equivalent tokens совпадают с реально observed tokens: исходный пользовательский запрос к клиенту не меняется из-за Amai.".to_string(),
                         ),
-                        "continuity_restore_outside_retrieval" => (
-                            "baseline_semantics_explicitly_unmodeled",
-                            None,
-                            "Continuity restore payload строится самим Amai continuity contour и сейчас не имеет truthful pre-Amai baseline-equivalent модели; этот gap должен оставаться явной границей, а не guessed baseline.",
-                        ),
+                        "continuity_restore_outside_retrieval" => {
+                            if let Some((baseline_tokens, source_ref)) =
+                                continuity_baseline_source.as_ref()
+                            {
+                                let source_kind = source_ref["source_kind"]
+                                    .as_str()
+                                    .unwrap_or(CONTINUITY_PRE_AMAI_BASELINE_STRATEGY);
+                                (
+                                    "truthful_pre_amai_baseline_source",
+                                    Some(*baseline_tokens),
+                                    format!(
+                                        "Для continuity_restore_outside_retrieval truthful pre-Amai baseline source уже materialized через {source_kind}, поэтому этот компонент теперь можно считать baseline-equivalent без guessed boundary."
+                                    ),
+                                )
+                            } else {
+                                (
+                                    "baseline_semantics_explicitly_unmodeled",
+                                    None,
+                                    "Continuity restore payload строится самим Amai continuity contour и сейчас не имеет truthful pre-Amai baseline-equivalent модели; этот gap должен оставаться явной границей, а не guessed baseline.".to_string(),
+                                )
+                            }
+                        }
                         _ => (
                             "baseline_semantics_unmaterialized",
                             None,
-                            "Observed tokens уже есть, но baseline-equivalent semantics для этого компонента ещё не materialized.",
+                            "Observed tokens уже есть, но baseline-equivalent semantics для этого компонента ещё не materialized.".to_string(),
                         ),
                     }
                 };
@@ -12361,7 +12590,10 @@ fn build_client_limit_baseline_equivalence(
             && explicitly_unmodeled_baseline_components.is_empty()
             && whole_cycle_components_fully_observed
             && counted_events > 0,
-        "baseline_equivalent_to_client_limit": false,
+        "baseline_equivalent_to_client_limit": missing_baseline_components.is_empty()
+            && explicitly_unmodeled_baseline_components.is_empty()
+            && whole_cycle_components_fully_observed
+            && counted_events > 0,
         "live_events_count": live_events_count,
         "counted_live_events": counted_events,
         "applicable_component_count": applicable_components.len(),
@@ -12566,10 +12798,79 @@ fn build_client_limit_continuity_boundary_rollup(
     })
 }
 
+fn continuity_pre_amai_baseline_source_from_events(
+    events: Option<&[TokenBudgetEvent]>,
+) -> Option<(u64, Value)> {
+    let mut total_baseline_tokens = 0_u64;
+    let mut current_source_ref = None;
+    let mut found = false;
+
+    for event in events.into_iter().flatten() {
+        if !is_client_limit_component_target_event("continuity_restore_outside_retrieval", event) {
+            continue;
+        }
+        if event.baseline_strategy != CONTINUITY_PRE_AMAI_BASELINE_STRATEGY || event.naive_tokens == 0
+        {
+            return None;
+        }
+        total_baseline_tokens = total_baseline_tokens.saturating_add(event.naive_tokens);
+        found = true;
+        if let Some(source_ref) = event.pre_amai_baseline_source.clone() {
+            current_source_ref = Some(source_ref);
+        }
+    }
+
+    if !found {
+        return None;
+    }
+
+    Some((
+        total_baseline_tokens,
+        current_source_ref.unwrap_or_else(|| {
+            json!({
+                "state": "materialized",
+                "source_kind": CONTINUITY_PRE_AMAI_BASELINE_STRATEGY,
+                "source_family": "truthful_pre_amai_baseline_source",
+            })
+        }),
+    ))
+}
+
 fn build_client_limit_pre_amai_baseline_source_status(
     contract: &TokenBudgetContractConfig,
+    events: Option<&[TokenBudgetEvent]>,
+    baseline_equivalence: &Value,
     explicit_boundary_surface: &Value,
 ) -> Value {
+    if let Some((_, source_ref)) = continuity_pre_amai_baseline_source_from_events(events) {
+        return json!({
+            "model_version": contract.client_limit_pre_amai_baseline_source_version.clone(),
+            "state": "materialized",
+            "required": true,
+            "source_family": "truthful_pre_amai_baseline_source",
+            "blocking_reason": Value::Null,
+            "same_meter_resume_possible": true,
+            "current_source_ref": source_ref,
+            "note": "Для continuity_restore_outside_retrieval truthful pre-Amai baseline source уже materialized прямо в token ledger events, поэтому explicit boundary больше не нужна."
+        });
+    }
+    let continuity_component_applicable = baseline_equivalence["applicable_components"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|item| item.as_str() == Some("continuity_restore_outside_retrieval"));
+    if !continuity_component_applicable {
+        return json!({
+            "model_version": contract.client_limit_pre_amai_baseline_source_version.clone(),
+            "state": "not_required",
+            "required": false,
+            "source_family": Value::Null,
+            "blocking_reason": Value::Null,
+            "same_meter_resume_possible": false,
+            "current_source_ref": Value::Null,
+            "note": "В этом scope truthful pre-Amai baseline source не нужен: continuity_restore_outside_retrieval сейчас не входит в applicable whole-cycle components."
+        });
+    }
     if explicit_boundary_surface["state"].as_str() != Some("amai_continuity_boundary") {
         return json!({
             "model_version": contract.client_limit_pre_amai_baseline_source_version.clone(),
@@ -12650,7 +12951,12 @@ fn build_client_limit_meter_alignment(
         &explicit_boundary_surface,
     );
     let pre_amai_baseline_source_status =
-        build_client_limit_pre_amai_baseline_source_status(contract, &explicit_boundary_surface);
+        build_client_limit_pre_amai_baseline_source_status(
+            contract,
+            events,
+            &baseline_equivalence,
+            &explicit_boundary_surface,
+        );
     let mut blocking_reasons =
         client_limit_meter_alignment_blocking_reasons(summary, events, assistant_scope);
     match assistant_generation_observation_source["state"]
@@ -12680,6 +12986,8 @@ fn build_client_limit_meter_alignment(
         }
         _ => {}
     }
+    let same_meter_as_client_limit = blocking_reasons.is_empty()
+        && baseline_equivalence["baseline_equivalent_to_client_limit"].as_bool() == Some(true);
     json!({
         "model_version": contract.client_limit_meter_alignment_version.clone(),
         "surface_kind": surface_kind,
@@ -12688,8 +12996,9 @@ fn build_client_limit_meter_alignment(
             events,
             assistant_scope,
             &baseline_equivalence,
+            same_meter_as_client_limit,
         ),
-        "same_meter_as_client_limit": false,
+        "same_meter_as_client_limit": same_meter_as_client_limit,
         "events_total": events_total,
         "live_events_count": live_events_count,
         "non_live_events_count": non_live_events_count,
@@ -13584,6 +13893,9 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
             "continuity_restore_tokens": event.continuity_restore_tokens,
         }),
     );
+    if let Some(source) = &event.pre_amai_baseline_source {
+        object.insert("pre_amai_baseline_source".to_string(), source.clone());
+    }
     Value::Object(object)
 }
 
@@ -14103,6 +14415,305 @@ fn build_continuity_restore_observed_event(
             "continuity_restore_prompt_sha256": hex_sha256(prompt_text.as_bytes()),
         }
     }))
+}
+
+fn continuity_snapshot_semantic_epoch_ms(snapshot: &ObservabilitySnapshotRecord) -> i64 {
+    snapshot.payload["_observability"]["captured_at_epoch_ms"]
+        .as_i64()
+        .or_else(|| {
+            snapshot.payload["continuity_import"]["imported_at_epoch_ms"]
+                .as_i64()
+        })
+        .or_else(|| {
+            snapshot.payload["continuity_handoff"]["captured_at_epoch_ms"]
+                .as_i64()
+        })
+        .unwrap_or(snapshot.created_at_epoch_ms)
+}
+
+fn continuity_snapshot_matches_scope(
+    snapshot: &ObservabilitySnapshotRecord,
+    snapshot_kind: &str,
+    project_code: &str,
+    namespace_code: &str,
+) -> bool {
+    let root = match snapshot_kind {
+        "continuity_import" => &snapshot.payload["continuity_import"],
+        "continuity_handoff" => &snapshot.payload["continuity_handoff"],
+        _ => return false,
+    };
+    root["project"]["code"].as_str() == Some(project_code)
+        && root["namespace"]["code"].as_str() == Some(namespace_code)
+}
+
+fn latest_scoped_continuity_snapshot_before<'a>(
+    snapshots: &'a [ObservabilitySnapshotRecord],
+    snapshot_kind: &str,
+    project_code: &str,
+    namespace_code: &str,
+    cutoff_epoch_ms: i64,
+) -> Option<&'a ObservabilitySnapshotRecord> {
+    snapshots
+        .iter()
+        .filter(|snapshot| snapshot.snapshot_kind == snapshot_kind)
+        .filter(|snapshot| {
+            continuity_snapshot_matches_scope(snapshot, snapshot_kind, project_code, namespace_code)
+        })
+        .filter(|snapshot| continuity_snapshot_semantic_epoch_ms(snapshot) <= cutoff_epoch_ms)
+        .max_by_key(|snapshot| {
+            (
+                continuity_snapshot_semantic_epoch_ms(snapshot),
+                snapshot.created_at_epoch_ms,
+            )
+        })
+}
+
+fn render_continuity_pre_amai_baseline_text(
+    project_code: &str,
+    namespace_code: &str,
+    continuity_import_snapshot: Option<&ObservabilitySnapshotRecord>,
+    continuity_handoff_snapshot: Option<&ObservabilitySnapshotRecord>,
+) -> Option<(String, Vec<String>, Value)> {
+    if continuity_import_snapshot.is_none() && continuity_handoff_snapshot.is_none() {
+        return None;
+    }
+
+    let mut lines = vec![
+        "PRE_AMAI_CONTINUITY_BASELINE".to_string(),
+        format!("Project: {project_code}"),
+        format!("Namespace: {namespace_code}"),
+    ];
+    let mut source_entries = Vec::new();
+
+    let continuity_import_ref = continuity_import_snapshot.map(|snapshot| {
+        let node = &snapshot.payload["continuity_import"];
+        let imported_at_epoch_ms = continuity_snapshot_semantic_epoch_ms(snapshot);
+        lines.push(String::new());
+        lines.push("## Continuity Import".to_string());
+        lines.push(format!("- imported_at_epoch_ms: {imported_at_epoch_ms}"));
+        if let Some(value) = node["documents_imported"].as_u64() {
+            lines.push(format!("- documents_imported: {value}"));
+        }
+        if let Some(value) = node["session_memory_files"].as_u64() {
+            lines.push(format!("- session_memory_files: {value}"));
+        }
+        if let Some(value) = node["rendered_transcript_files"].as_u64() {
+            lines.push(format!("- rendered_transcript_files: {value}"));
+        }
+        if let Some(value) = node["bootstrap_summary"]["details"]["thread_count"].as_u64() {
+            lines.push(format!("- bootstrap_thread_count: {value}"));
+        }
+        if let Some(value) = node["bootstrap_summary"]["details"]["latest_rendered_transcript"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!("- latest_rendered_transcript: {value}"));
+        }
+        if let Some(value) = node["active_workline_summary"]["details"]["headline"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!("- active_workline_headline: {value}"));
+        }
+        if let Some(value) = node["active_workline_summary"]["details"]["next_step"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(format!("- active_workline_next_step: {value}"));
+        }
+        source_entries.push(format!("continuity_import:{}", snapshot.snapshot_id));
+        json!({
+            "snapshot_id": snapshot.snapshot_id.to_string(),
+            "semantic_epoch_ms": imported_at_epoch_ms,
+        })
+    });
+
+    let continuity_handoff_ref = continuity_handoff_snapshot.map(|snapshot| {
+        let node = &snapshot.payload["continuity_handoff"];
+        let captured_at_epoch_ms = continuity_snapshot_semantic_epoch_ms(snapshot);
+        lines.push(String::new());
+        lines.push("## Continuity Handoff".to_string());
+        lines.push(format!("- captured_at_epoch_ms: {captured_at_epoch_ms}"));
+        if let Some(value) = node["headline"].as_str().filter(|value| !value.is_empty()) {
+            lines.push(format!("- headline: {value}"));
+        }
+        if let Some(value) = node["next_step"].as_str().filter(|value| !value.is_empty()) {
+            lines.push(format!("- next_step: {value}"));
+        }
+        if let Some(value) = node["details"].as_str().filter(|value| !value.trim().is_empty()) {
+            lines.push(String::new());
+            lines.push("### Handoff Details".to_string());
+            lines.push(value.trim().to_string());
+        }
+        source_entries.push(format!("continuity_handoff:{}", snapshot.snapshot_id));
+        json!({
+            "snapshot_id": snapshot.snapshot_id.to_string(),
+            "semantic_epoch_ms": captured_at_epoch_ms,
+        })
+    });
+
+    Some((
+        lines.join("\n"),
+        source_entries,
+        json!({
+            "state": "materialized",
+            "source_kind": CONTINUITY_PRE_AMAI_BASELINE_STRATEGY,
+            "source_family": "truthful_pre_amai_baseline_source",
+            "source_scope": "continuity_observability_snapshots",
+            "continuity_import": continuity_import_ref.unwrap_or(Value::Null),
+            "continuity_handoff": continuity_handoff_ref.unwrap_or(Value::Null),
+        }),
+    ))
+}
+
+fn continuity_pre_amai_baseline_materialization(
+    tokenizer: &CoreBPE,
+    project_code: &str,
+    namespace_code: &str,
+    continuity_import_snapshot: Option<&ObservabilitySnapshotRecord>,
+    continuity_handoff_snapshot: Option<&ObservabilitySnapshotRecord>,
+) -> Option<ContinuityPreAmaiBaselineMaterialization> {
+    let (baseline_text, source_entries, mut source_ref) = render_continuity_pre_amai_baseline_text(
+        project_code,
+        namespace_code,
+        continuity_import_snapshot,
+        continuity_handoff_snapshot,
+    )?;
+    let baseline_tokens = tokenizer.encode_with_special_tokens(&baseline_text).len() as u64;
+    let baseline_sha256 = hex_sha256(baseline_text.as_bytes());
+    if let Some(object) = source_ref.as_object_mut() {
+        object.insert(
+            "baseline_sha256".to_string(),
+            Value::String(baseline_sha256),
+        );
+        object.insert(
+            "source_entries".to_string(),
+            Value::Array(
+                source_entries
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+    Some(ContinuityPreAmaiBaselineMaterialization {
+        baseline_tokens,
+        baseline_bytes: baseline_text.len(),
+        source_entries,
+        source_ref,
+    })
+}
+
+fn apply_continuity_pre_amai_baseline(
+    payload: &mut Value,
+    materialization: &ContinuityPreAmaiBaselineMaterialization,
+) -> Result<bool> {
+    let node = payload["token_budget_event"]
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("token budget payload missing token_budget_event"))?;
+    let continuity_tokens = node["whole_cycle_observed"]["continuity_restore_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    if continuity_tokens == 0 {
+        return Ok(false);
+    }
+
+    let effective_saved_tokens =
+        materialization.baseline_tokens as i64 - continuity_tokens as i64;
+    let saved_tokens = materialization
+        .baseline_tokens
+        .saturating_sub(continuity_tokens);
+    let savings_factor = if continuity_tokens == 0 {
+        materialization.baseline_tokens as f64
+    } else {
+        materialization.baseline_tokens as f64 / continuity_tokens as f64
+    };
+    let savings_percent = if materialization.baseline_tokens == 0 {
+        0.0
+    } else {
+        saved_tokens as f64 * 100.0 / materialization.baseline_tokens as f64
+    };
+    let effective_savings_percent =
+        percent_from_signed(effective_saved_tokens, materialization.baseline_tokens);
+
+    let already_materialized = node["baseline_strategy"].as_str()
+        == Some(CONTINUITY_PRE_AMAI_BASELINE_STRATEGY)
+        && node["baseline_tokens"].as_u64() == Some(materialization.baseline_tokens)
+        && node["pre_amai_baseline_source"] == materialization.source_ref;
+    if already_materialized {
+        return Ok(false);
+    }
+
+    node.insert("baseline_hit_target".to_string(), Value::Bool(true));
+    node.insert("cold_warm_state".to_string(), json!("pre_amai_baseline_materialized"));
+    node.insert(
+        "baseline_strategy".to_string(),
+        json!(CONTINUITY_PRE_AMAI_BASELINE_STRATEGY),
+    );
+    node.insert(
+        "baseline_tokens".to_string(),
+        Value::from(materialization.baseline_tokens),
+    );
+    node.insert(
+        "naive_tokens".to_string(),
+        Value::from(materialization.baseline_tokens),
+    );
+    node.insert(
+        "pre_amai_baseline_source".to_string(),
+        materialization.source_ref.clone(),
+    );
+
+    let naive_scope = ensure_nested_object(node, "naive_scope")?;
+    naive_scope.insert(
+        "files_considered".to_string(),
+        Value::from(materialization.source_entries.len() as u64),
+    );
+    naive_scope.insert(
+        "files".to_string(),
+        Value::Array(
+            materialization
+                .source_entries
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect::<Vec<_>>(),
+        ),
+    );
+    naive_scope.insert(
+        "rendered_bytes".to_string(),
+        Value::from(materialization.baseline_bytes as u64),
+    );
+    naive_scope.insert(
+        "tokens".to_string(),
+        Value::from(materialization.baseline_tokens),
+    );
+
+    let savings = ensure_nested_object(node, "savings")?;
+    savings.insert("saved_tokens".to_string(), Value::from(saved_tokens));
+    savings.insert(
+        "effective_saved_tokens".to_string(),
+        Value::from(effective_saved_tokens),
+    );
+    savings.insert("savings_factor".to_string(), Value::from(savings_factor));
+    savings.insert("savings_percent".to_string(), Value::from(savings_percent));
+    savings.insert(
+        "effective_savings_percent".to_string(),
+        Value::from(effective_savings_percent),
+    );
+    node.insert("saved_tokens".to_string(), Value::from(saved_tokens));
+    node.insert(
+        "effective_saved_tokens".to_string(),
+        Value::from(effective_saved_tokens),
+    );
+    node.insert("savings_factor".to_string(), Value::from(savings_factor));
+    node.insert("savings_percent".to_string(), Value::from(savings_percent));
+    node.insert("gross_savings_pct".to_string(), Value::from(savings_percent));
+    node.insert(
+        "effective_savings_percent".to_string(),
+        Value::from(effective_savings_percent),
+    );
+    Ok(true)
 }
 
 fn derive_traffic_class(source_kind: &str) -> String {
@@ -15165,6 +15776,7 @@ mod tests {
         ($($field:ident : $value:expr,)+) => {
             {
                 let mut event = TokenBudgetEvent {
+                    snapshot_id: None,
                     created_at_epoch_ms: 0,
                     event_id: "event-default".to_string(),
                     correlation_id: "event-default".to_string(),
@@ -15254,6 +15866,7 @@ mod tests {
                     assistant_generation_tokens: None,
                     tool_overhead_tokens: None,
                     continuity_restore_tokens: None,
+                    pre_amai_baseline_source: None,
                 };
                 $(event.$field = $value;)+
                 event
@@ -15582,11 +16195,11 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_meter_alignment_version"],
-            "client-limit-meter-alignment-v9"
+            "client-limit-meter-alignment-v10"
         );
         assert_eq!(
             token_event["contract"]["client_limit_baseline_equivalence_version"],
-            "client-limit-baseline-equivalence-v3"
+            "client-limit-baseline-equivalence-v4"
         );
         assert_eq!(
             token_event["contract"]["client_limit_strict_meter_slice_version"],
@@ -16187,11 +16800,11 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v9"
+            "client-limit-meter-alignment-v10"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["baseline_equivalence"]["model_version"],
-            "client-limit-baseline-equivalence-v3"
+            "client-limit-baseline-equivalence-v4"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["strict_client_meter_slice"]["model_version"],
@@ -16207,7 +16820,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["pre_amai_baseline_source_status"]["model_version"],
-            "client-limit-pre-amai-baseline-source-v1"
+            "client-limit-pre-amai-baseline-source-v2"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -18937,11 +19550,11 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v9"
+            "client-limit-meter-alignment-v10"
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["baseline_equivalence_model_version"],
-            "client-limit-baseline-equivalence-v3"
+            "client-limit-baseline-equivalence-v4"
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["strict_meter_slice_model_version"],
@@ -18957,7 +19570,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["pre_amai_baseline_source_model_version"],
-            "client-limit-pre-amai-baseline-source-v1"
+            "client-limit-pre-amai-baseline-source-v2"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]
@@ -19198,6 +19811,86 @@ effective_to_epoch_ms = 2000
                         .any(|reason| reason == "same_meter_baseline_explicit_boundary")
                 })
         );
+    }
+
+    #[test]
+    fn client_limit_meter_alignment_materializes_same_meter_when_continuity_baseline_exists() {
+        let summary = json!({
+            "events_total": 1,
+            "live_events_count": 1,
+            "non_live_events_count": 0,
+            "counted_events": 1,
+            "observed_client_prompt_tokens": 30,
+            "observed_assistant_generation_tokens": 0,
+            "observed_tool_overhead_tokens": 0,
+            "observed_continuity_restore_tokens": 7,
+            "observed_client_prompt_live_events": 1,
+            "observed_assistant_generation_live_events": 0,
+            "observed_tool_overhead_live_events": 0,
+            "observed_continuity_restore_live_events": 1
+        });
+        let events = vec![token_event! {
+            event_id: "event-continuity-exact".to_string(),
+            correlation_id: "event-continuity-exact".to_string(),
+            measurement_scope: "whole_cycle_observed_lower_bound".to_string(),
+            query_type: "continuity_restore".to_string(),
+            target_kind: "continuity_restore".to_string(),
+            traffic_class: "live".to_string(),
+            baseline_strategy: super::CONTINUITY_PRE_AMAI_BASELINE_STRATEGY.to_string(),
+            naive_tokens: 12,
+            client_prompt_tokens: Some(30),
+            continuity_restore_tokens: Some(7),
+            pre_amai_baseline_source: Some(json!({
+                "state": "materialized",
+                "source_kind": super::CONTINUITY_PRE_AMAI_BASELINE_STRATEGY,
+                "source_family": "truthful_pre_amai_baseline_source",
+            })),
+        }];
+
+        let alignment = super::build_client_limit_meter_alignment(
+            &contract_fixture(),
+            "statement_preview",
+            &summary,
+            Some(&events),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            alignment["baseline_equivalence"]["state"],
+            "baseline_semantics_materialized"
+        );
+        assert_eq!(alignment["alignment_state"], "same_meter_equivalent");
+        assert_eq!(alignment["same_meter_as_client_limit"], json!(true));
+        assert_eq!(
+            alignment["baseline_equivalence"]["measured_baseline_tokens_lower_bound"],
+            42
+        );
+        assert_eq!(
+            alignment["baseline_equivalence"]["measured_baseline_components"],
+            json!(["client_prompt", "continuity_restore_outside_retrieval"])
+        );
+        assert_eq!(
+            alignment["baseline_equivalence"]["explicitly_unmodeled_baseline_components"],
+            json!([])
+        );
+        assert_eq!(
+            alignment["explicit_boundary_surface"]["state"],
+            "no_explicit_boundary"
+        );
+        assert_eq!(
+            alignment["continuity_boundary_rollup"]["state"],
+            "no_amai_continuity_boundary"
+        );
+        assert_eq!(
+            alignment["pre_amai_baseline_source_status"]["state"],
+            "materialized"
+        );
+        assert_eq!(
+            alignment["pre_amai_baseline_source_status"]["same_meter_resume_possible"],
+            json!(true)
+        );
+        assert_eq!(alignment["blocking_reasons"], json!([]));
     }
 
     #[test]
@@ -19457,6 +20150,7 @@ effective_to_epoch_ms = 2000
     #[test]
     fn token_ledger_repair_selector_matches_project_prefix_namespace_and_source_kind() {
         let event = TokenBudgetEvent {
+            snapshot_id: None,
             created_at_epoch_ms: 0,
             event_id: "event-1".to_string(),
             correlation_id: "corr-1".to_string(),
@@ -19546,6 +20240,7 @@ effective_to_epoch_ms = 2000
             assistant_generation_tokens: None,
             tool_overhead_tokens: None,
             continuity_restore_tokens: None,
+            pre_amai_baseline_source: None,
         };
 
         let matches = matches_token_ledger_repair_selector(

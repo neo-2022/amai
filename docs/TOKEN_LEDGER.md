@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 00:01 MSK
-Ручная сверка guide/docs: 2026-03-27 00:01 MSK
+modified_at: 2026-03-27 01:01 MSK
+Ручная сверка guide/docs: 2026-03-27 01:01 MSK
 
 # Token Ledger
 
@@ -779,12 +779,13 @@ whole-cycle компонент на одинаковое число всех liv
 `statement_previews` нужны затем, чтобы по каждому scope показать:
 - measured non-billable lower bound;
 - прямую verified correlation между model tokens `без Amai / с Amai`;
-- concrete `verified_measured_saved_pct`, который dashboard поднимает как строку
-  `Экономия токенов модели`;
-- этот процент для dashboard обязан читаться из verified scope summary, а не из
-  contractual `statement_preview`, если preview-layer не materialize-ит такую пару напрямую;
-- если full same-meter equivalence ещё не materialized, тот же процент обязан
-  оставаться truthful measured-slice percentage и не притворяться полным client-limit meter;
+- concrete exact percent только там, где уже materialized same-meter pair
+  `без Amai / с Amai`;
+- dashboard обязан читать этот exact percent из same-meter pair, а не из retrieval-only
+  verified slice;
+- если full same-meter equivalence ещё не materialized, строка `Экономия токенов модели`
+  обязана fail-closed не показывать процент вовсе и прямо говорить, что `exact pair`
+  ещё не materialized;
 - coverage;
 - settlement status;
 - settlement stage;
@@ -1386,9 +1387,12 @@ Hashes по line items нужны затем, чтобы:
 
 Для `continuity_restore_outside_retrieval` это теперь значит буквально:
 - guessed baseline запрещён;
-- boundary остаётся explicit;
+- boundary остаётся explicit, пока не materialized truthful `pre-Amai baseline source`;
 - full same-meter equivalence можно возобновить только если появится
-  truthful `pre-Amai baseline source`.
+  truthful `pre-Amai baseline source`;
+- если такой source уже materialized в event payload, компонент больше не имеет права
+  оставаться `explicitly_unmodeled`: он должен переходить в
+  `baseline_semantics_state = truthful_pre_amai_baseline_source`.
 
 Поверх этого теперь есть отдельный object:
 - `pre_amai_baseline_source_status`
@@ -1401,6 +1405,15 @@ contract surface:
 - `blocking_reason`
 - `same_meter_resume_possible`
 - `current_source_ref`
+
+Начиная с `client-limit-meter-alignment-v10 / client-limit-baseline-equivalence-v4 /
+client-limit-pre-amai-baseline-source-v2` этот status уже не advisory-only:
+- live `current_session / rolling_window` могут materialize-ить truthful pre-Amai baseline
+  для continuity из `continuity_import + continuity_handoff` snapshots;
+- после этого `same_meter_as_client_limit = true` и `alignment_state = same_meter_equivalent`
+  становятся допустимыми без guessed baseline;
+- dashboard получает право показывать exact pair `без Amai / с Amai / экономия / процент`
+  по модели именно в том же meter, которым клиент считает лимит.
 
 ## Preliminary vs stable
 

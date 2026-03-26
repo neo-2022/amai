@@ -2248,6 +2248,47 @@ pub async fn list_observability_snapshots_by_kinds(
         .collect())
 }
 
+pub async fn list_scoped_observability_snapshots_by_kinds(
+    client: &Client,
+    kinds: &[&str],
+    project_code: &str,
+    namespace_code: &str,
+    limit: Option<i64>,
+) -> Result<Vec<ObservabilitySnapshotRecord>> {
+    if kinds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = limit.unwrap_or(i64::MAX);
+    let rows = client
+        .query(
+            r#"
+            SELECT
+                snapshot_id,
+                snapshot_kind,
+                payload,
+                (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = ANY($1::text[])
+              AND scope_project_code = $2
+              AND scope_namespace_code = $3
+            ORDER BY created_at DESC
+            LIMIT $4
+            "#,
+            &[&kinds, &project_code, &namespace_code, &limit],
+        )
+        .await
+        .context("failed to list scoped observability snapshots by kinds")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ObservabilitySnapshotRecord {
+            snapshot_id: row.get(0),
+            snapshot_kind: row.get(1),
+            payload: row.get(2),
+            created_at_epoch_ms: row.get(3),
+        })
+        .collect())
+}
+
 pub async fn latest_clean_benchmark_snapshot_payload(
     client: &Client,
     snapshot_kind: &str,
@@ -2432,6 +2473,33 @@ pub async fn update_observability_snapshot_payload(
         .await
         .context("failed to update observability snapshot payload")?;
     Ok(())
+}
+
+pub async fn get_observability_snapshot_record(
+    client: &Client,
+    snapshot_id: &Uuid,
+) -> Result<Option<ObservabilitySnapshotRecord>> {
+    let row = client
+        .query_opt(
+            r#"
+            SELECT
+                snapshot_id,
+                snapshot_kind,
+                payload,
+                (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms
+            FROM ami.observability_snapshots
+            WHERE snapshot_id = $1
+            "#,
+            &[snapshot_id],
+        )
+        .await
+        .context("failed to fetch observability snapshot by id")?;
+    Ok(row.map(|row| ObservabilitySnapshotRecord {
+        snapshot_id: row.get(0),
+        snapshot_kind: row.get(1),
+        payload: row.get(2),
+        created_at_epoch_ms: row.get(3),
+    }))
 }
 
 fn observability_conflict_error(

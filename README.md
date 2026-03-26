@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 00:01 MSK
-Ручная сверка guide/docs: 2026-03-27 00:01 MSK
+modified_at: 2026-03-27 01:01 MSK
+Ручная сверка guide/docs: 2026-03-27 01:01 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1700,9 +1700,10 @@ preview, а не только raw count.
   - `statement_previews.current_session / rolling_window / lifetime`
   - там уже видно measured non-billable lower bound по scope;
   - dashboard hero-cards теперь ещё поднимают из verified scope summary прямую строку
-    `Экономия токенов модели`: если same-meter already materialized, процент читается
-    как тот же meter клиента; если нет, карточка честно показывает measured percentage
-    только по verified model-token slice и отдельно напоминает про explicit continuity boundary;
+    `Экономия токенов модели`: если same-meter already materialized, строка показывает
+    exact pair `без Amai / с Amai / экономия / процент` в том же meter клиента; если нет,
+    карточка fail-closed не показывает процент вовсе и честно пишет, что exact pair ещё
+    не materialized;
   - там теперь ещё явно видны `lifecycle_state`, `contractual_state`, `settlement_stage`,
     `next_settlement_stage_candidate` и `close_barriers`;
   - там теперь ещё есть `transactional_statuses`, чтобы customer-facing export видел отдельно
@@ -1841,12 +1842,12 @@ preview, а не только raw count.
     direct turn attach или rollout turn timeline и не может быть честно разложено
     по каждому retrieval event без дублирования токенов.
   - operational metering contract теперь ещё несёт:
-  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v9`
-  - `client_limit_baseline_equivalence_version = client-limit-baseline-equivalence-v3`
+  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v10`
+  - `client_limit_baseline_equivalence_version = client-limit-baseline-equivalence-v4`
   - `client_limit_strict_meter_slice_version = client-limit-strict-meter-slice-v1`
   - `client_limit_explicit_boundary_surface_version = client-limit-explicit-boundary-surface-v2`
   - `client_limit_continuity_boundary_rollup_version = client-limit-continuity-boundary-rollup-v2`
-  - `client_limit_pre_amai_baseline_source_version = client-limit-pre-amai-baseline-source-v1`
+  - `client_limit_pre_amai_baseline_source_version = client-limit-pre-amai-baseline-source-v2`
   - `contractual_statement_summary`, `statement_export_preview.json`,
     `settlement_report_preview.json` и
     `contractual_evidence_pack.json` теперь отдельно несут
@@ -1868,6 +1869,12 @@ preview, а не только raw count.
   - рядом теперь materialized отдельный `pre_amai_baseline_source_status`;
     он прямо показывает, требуется ли truthful `pre-Amai baseline source`,
     materialized ли он уже, и какой blocker удерживает same-meter contour открытым.
+  - начиная с `v10/v4/v2` live contour ещё умеет materialize-ить truthful
+    `pre-Amai baseline source` для `continuity_restore_outside_retrieval` из
+    `continuity_import + continuity_handoff` observability snapshots; если этот source
+    уже найден и other components fully observed, `current_session / rolling_window`
+    переходят в `same_meter_equivalent` и dashboard показывает exact model-token percent,
+    а не measured-slice approximation.
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
   - начиная с `v9/v3` слой ещё и честно поднимает `baseline_equivalence` как отдельный
