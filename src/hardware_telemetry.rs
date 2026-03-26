@@ -3,10 +3,11 @@ use serde_json::Value;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use sysinfo::{Disks, MINIMUM_CPU_UPDATE_INTERVAL, System};
+use sysinfo::{DiskRefreshKind, Disks, MINIMUM_CPU_UPDATE_INTERVAL, MemoryRefreshKind, System};
 
 #[derive(Debug, Clone)]
 pub struct MachineSummary {
@@ -99,6 +100,13 @@ struct DiskLiveStats {
     write_mib_per_sec: Option<f64>,
 }
 
+#[derive(Debug, Clone)]
+struct CachedMachineSummary {
+    repo_root: PathBuf,
+    captured_at_ms: u64,
+    summary: MachineSummary,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostPlatform {
     Linux,
@@ -129,11 +137,22 @@ impl HostPlatform {
 
 static CPU_SYSTEM_CACHE: OnceLock<Mutex<System>> = OnceLock::new();
 static DISK_IO_CACHE: OnceLock<Mutex<Option<DiskIoSample>>> = OnceLock::new();
+static MACHINE_SUMMARY_CACHE: OnceLock<Mutex<Option<CachedMachineSummary>>> = OnceLock::new();
+const MACHINE_SUMMARY_CACHE_TTL_MS: u64 = 60_000;
 
 pub fn collect_machine_summary(repo_root: &Path) -> Result<MachineSummary> {
+    if let Some(summary) = cached_machine_summary(repo_root) {
+        return Ok(summary);
+    }
+    let summary = collect_machine_summary_uncached(repo_root)?;
+    store_machine_summary_cache(repo_root, &summary);
+    Ok(summary)
+}
+
+fn collect_machine_summary_uncached(repo_root: &Path) -> Result<MachineSummary> {
     let platform = HostPlatform::current();
-    let mut system = System::new_all();
-    system.refresh_memory();
+    let mut system = System::new();
+    system.refresh_memory_specifics(MemoryRefreshKind::everything());
 
     let cpu_model = system
         .cpus()
@@ -156,7 +175,8 @@ pub fn collect_machine_summary(repo_root: &Path) -> Result<MachineSummary> {
     let (memory_type, memory_speed_label, memory_provider) =
         detect_memory_characteristics(platform);
 
-    let disks = Disks::new_with_refreshed_list();
+    let disks =
+        Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
     let disk_space = disk_space_for_path(&disks, repo_root);
     let disk_total_gib = disk_space
         .map(|(total, _)| bytes_to_gib(total))
@@ -179,10 +199,11 @@ pub fn collect_machine_summary(repo_root: &Path) -> Result<MachineSummary> {
         cpu_temperature_celsius,
         cpu_max_mhz,
         cpu_source_label: format!(
-            "Источник: {} auto-detect. Нагрузка: sysinfo; температура: {}; частота: {}.",
+            "Источник: {} auto-detect. Нагрузка: sysinfo; температура: {}; частота: {}. Dashboard reuses machine summary for up to {} s.",
             platform.label(),
             cpu_temp_provider,
-            cpu_frequency_provider
+            cpu_frequency_provider,
+            MACHINE_SUMMARY_CACHE_TTL_MS / 1000
         ),
         total_memory_gib,
         available_memory_gib,
@@ -191,9 +212,10 @@ pub fn collect_machine_summary(repo_root: &Path) -> Result<MachineSummary> {
         memory_type,
         memory_speed_label,
         memory_source_label: format!(
-            "Источник: {} auto-detect provider chain: {}.",
+            "Источник: {} auto-detect provider chain: {}. Dashboard reuses machine summary for up to {} s.",
             platform.label(),
-            memory_provider
+            memory_provider,
+            MACHINE_SUMMARY_CACHE_TTL_MS / 1000
         ),
         swap_total_gib,
         swap_used_gib,
@@ -201,9 +223,10 @@ pub fn collect_machine_summary(repo_root: &Path) -> Result<MachineSummary> {
         disk_model: disk.model,
         disk_kind: disk.kind,
         disk_source_label: format!(
-            "Источник: {} auto-detect provider chain: {}.",
+            "Источник: {} auto-detect provider chain: {}. Dashboard reuses machine summary for up to {} s.",
             platform.label(),
-            disk.source_label
+            disk.source_label,
+            MACHINE_SUMMARY_CACHE_TTL_MS / 1000
         ),
         disk_total_gib,
         disk_available_gib,
@@ -219,7 +242,7 @@ pub fn collect_machine_summary(repo_root: &Path) -> Result<MachineSummary> {
 
 fn read_cpu_usage_percent() -> Option<f64> {
     let cache = CPU_SYSTEM_CACHE.get_or_init(|| {
-        let mut system = System::new_all();
+        let mut system = System::new();
         system.refresh_cpu_all();
         thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
         system.refresh_cpu_usage();
@@ -1524,6 +1547,50 @@ fn now_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn cached_machine_summary(repo_root: &Path) -> Option<MachineSummary> {
+    let cache = MACHINE_SUMMARY_CACHE.get_or_init(|| Mutex::new(None));
+    let guard = cache.lock().ok()?;
+    let entry = guard.as_ref()?;
+    let now_ms = now_epoch_ms();
+    if should_reuse_cached_machine_summary(
+        repo_root,
+        &entry.repo_root,
+        entry.captured_at_ms,
+        now_ms,
+    ) {
+        Some(entry.summary.clone())
+    } else {
+        None
+    }
+}
+
+fn store_machine_summary_cache(repo_root: &Path, summary: &MachineSummary) {
+    let cache = MACHINE_SUMMARY_CACHE.get_or_init(|| Mutex::new(None));
+    let Some(mut guard) = cache.lock().ok() else {
+        return;
+    };
+    *guard = Some(CachedMachineSummary {
+        repo_root: canonicalize_repo_root(repo_root),
+        captured_at_ms: now_epoch_ms(),
+        summary: summary.clone(),
+    });
+}
+
+fn should_reuse_cached_machine_summary(
+    requested_repo_root: &Path,
+    cached_repo_root: &Path,
+    captured_at_ms: u64,
+    now_ms: u64,
+) -> bool {
+    let requested_repo_root = canonicalize_repo_root(requested_repo_root);
+    requested_repo_root == cached_repo_root
+        && now_ms.saturating_sub(captured_at_ms) <= MACHINE_SUMMARY_CACHE_TTL_MS
+}
+
+fn canonicalize_repo_root(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn bytes_to_gib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0 * 1024.0)
 }
@@ -1537,8 +1604,10 @@ mod tests {
     use super::{
         AcceleratorKind, classify_accelerator_kind, derive_gpu_backend_from_model,
         extract_first_number, map_windows_smbios_memory_type, normalize_linux_block_device_name,
-        normalize_pci_bus_label, parse_capacity_to_gib,
+        normalize_pci_bus_label, parse_capacity_to_gib, should_reuse_cached_machine_summary,
+        MACHINE_SUMMARY_CACHE_TTL_MS,
     };
+    use std::path::Path;
 
     #[test]
     fn normalizes_linux_nvme_partition_name() {
@@ -1591,5 +1660,30 @@ mod tests {
             classify_accelerator_kind(Some("gpu"), "Intel UHD Graphics 770"),
             AcceleratorKind::IntegratedGpu
         );
+    }
+
+    #[test]
+    fn cached_machine_summary_reuse_requires_same_repo_root_and_fresh_age() {
+        let repo_root = Path::new("/tmp/amai");
+        let other_repo_root = Path::new("/tmp/other");
+        let now_ms = 1_000_000;
+        assert!(should_reuse_cached_machine_summary(
+            repo_root,
+            repo_root,
+            now_ms - MACHINE_SUMMARY_CACHE_TTL_MS,
+            now_ms,
+        ));
+        assert!(!should_reuse_cached_machine_summary(
+            other_repo_root,
+            repo_root,
+            now_ms - MACHINE_SUMMARY_CACHE_TTL_MS,
+            now_ms,
+        ));
+        assert!(!should_reuse_cached_machine_summary(
+            repo_root,
+            repo_root,
+            now_ms - MACHINE_SUMMARY_CACHE_TTL_MS - 1,
+            now_ms,
+        ));
     }
 }

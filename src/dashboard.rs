@@ -4838,7 +4838,7 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
     let mut card = json!({
         "kind": "live_compare",
         "title": "Скорость ответа",
-        "title_tooltip": "Показывает, как быстро Amai отвечает прямо сейчас в двух обычных ситуациях: когда похожий запрос уже был и когда запрос идёт впервые. Верхние числа — это обычное время ответа в этих двух случаях. Это не сводка по всей работе Amai: сюда не входят сохранённые проверки, служебные прогоны и другие отдельные рабочие линии.",
+        "title_tooltip": "Показывает, как быстро Amai отвечает прямо сейчас в двух обычных ситуациях: когда похожий запрос уже был и когда запрос идёт впервые. Верхние числа — это обычное время ответа в этих двух случаях. Это session-scoped live-срез, а не историческая сводка по всей работе Amai: сюда не входят сохранённые проверки, служебные прогоны и другие отдельные рабочие линии.",
         "status": overall_status,
         "status_label": status_label(overall_status),
         "status_tooltip": live_latency_compare_status_tooltip(
@@ -4846,8 +4846,8 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
             &hot_assessment,
             &cold_assessment,
         ),
-        "source_label": "Источник: живая retrieval-выборка текущей сессии из token_budget live lane, обновляется при новых context-pack запросах. Benchmark-данные сюда не подмешиваются.",
-        "note": "",
+        "source_label": "Источник: живая retrieval-выборка текущей сессии из token_budget live lane, обновляется при новых context-pack запросах. Benchmark-данные сюда не подмешиваются. При новом live session/window выборка для этой карточки начинается заново.",
+        "note": "Это live-срез текущей сессии. Отдельный historical contour для этой карточки пока не materialized.",
         "metrics": [
             {
                 "label": "Повторный запрос",
