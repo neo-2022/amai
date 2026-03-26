@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 16:19 MSK
-Ручная сверка guide/docs: 2026-03-26 16:19 MSK
+modified_at: 2026-03-26 16:31 MSK
+Ручная сверка guide/docs: 2026-03-26 16:31 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1842,6 +1842,7 @@ preview, а не только raw count.
   - `client_limit_strict_meter_slice_version = client-limit-strict-meter-slice-v1`
   - `client_limit_explicit_boundary_surface_version = client-limit-explicit-boundary-surface-v2`
   - `client_limit_continuity_boundary_rollup_version = client-limit-continuity-boundary-rollup-v2`
+  - `client_limit_pre_amai_baseline_source_version = client-limit-pre-amai-baseline-source-v1`
   - `contractual_statement_summary`, `statement_export_preview.json`,
     `settlement_report_preview.json` и
     `contractual_evidence_pack.json` теперь отдельно несут
@@ -1860,6 +1861,9 @@ preview, а не только raw count.
     - `equivalence_resume_condition`
     Это нужно затем, чтобы rule `не подменять continuity boundary guessed baseline-ом`
     жил не только в prose-note, а в явном contract surface.
+  - рядом теперь materialized отдельный `pre_amai_baseline_source_status`;
+    он прямо показывает, требуется ли truthful `pre-Amai baseline source`,
+    materialized ли он уже, и какой blocker удерживает same-meter contour открытым.
   - это отдельный truth-layer, который прямо объясняет, почему высокая measured
     lower bound ещё не обязана означать такое же падение клиентской шкалы `5h`.
   - начиная с `v9/v3` слой ещё и честно поднимает `baseline_equivalence` как отдельный

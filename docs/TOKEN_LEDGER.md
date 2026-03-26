@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 16:19 MSK
-Ручная сверка guide/docs: 2026-03-26 16:19 MSK
+modified_at: 2026-03-26 16:31 MSK
+Ручная сверка guide/docs: 2026-03-26 16:31 MSK
 
 # Token Ledger
 
@@ -1382,6 +1382,18 @@ Hashes по line items нужны затем, чтобы:
 - boundary остаётся explicit;
 - full same-meter equivalence можно возобновить только если появится
   truthful `pre-Amai baseline source`.
+
+Поверх этого теперь есть отдельный object:
+- `pre_amai_baseline_source_status`
+
+Он нужен затем, чтобы blocker жил не только как boundary-note, а как отдельный
+contract surface:
+- `state`
+- `required`
+- `source_family`
+- `blocking_reason`
+- `same_meter_resume_possible`
+- `current_source_ref`
 
 ## Preliminary vs stable
 

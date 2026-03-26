@@ -106,6 +106,8 @@ struct TokenBudgetContractConfig {
     client_limit_explicit_boundary_surface_version: String,
     #[serde(default = "default_client_limit_continuity_boundary_rollup_version")]
     client_limit_continuity_boundary_rollup_version: String,
+    #[serde(default = "default_client_limit_pre_amai_baseline_source_version")]
+    client_limit_pre_amai_baseline_source_version: String,
     #[serde(default = "default_excluded_taxonomy_version")]
     excluded_taxonomy_version: String,
     #[serde(default = "default_dedup_contract_version")]
@@ -193,6 +195,8 @@ impl Default for TokenBudgetContractConfig {
                 default_client_limit_explicit_boundary_surface_version(),
             client_limit_continuity_boundary_rollup_version:
                 default_client_limit_continuity_boundary_rollup_version(),
+            client_limit_pre_amai_baseline_source_version:
+                default_client_limit_pre_amai_baseline_source_version(),
             excluded_taxonomy_version: default_excluded_taxonomy_version(),
             dedup_contract_version: default_dedup_contract_version(),
             backfill_policy_version: default_backfill_policy_version(),
@@ -673,6 +677,10 @@ fn default_client_limit_continuity_boundary_rollup_version() -> String {
     "client-limit-continuity-boundary-rollup-v2".to_string()
 }
 
+fn default_client_limit_pre_amai_baseline_source_version() -> String {
+    "client-limit-pre-amai-baseline-source-v1".to_string()
+}
+
 fn default_excluded_taxonomy_version() -> String {
     "token-excluded-usage-v1".to_string()
 }
@@ -825,6 +833,9 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
         "client_limit_continuity_boundary_rollup_version": contract
             .client_limit_continuity_boundary_rollup_version
             .clone(),
+        "client_limit_pre_amai_baseline_source_version": contract
+            .client_limit_pre_amai_baseline_source_version
+            .clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
         "backfill_policy_version": contract.backfill_policy_version.clone(),
@@ -885,6 +896,9 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
             .clone(),
         "client_limit_explicit_boundary_surface_version": contract
             .client_limit_explicit_boundary_surface_version
+            .clone(),
+        "client_limit_pre_amai_baseline_source_version": contract
+            .client_limit_pre_amai_baseline_source_version
             .clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
@@ -5503,6 +5517,7 @@ fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Valu
     let alignment = &statement_preview["client_limit_meter_alignment"];
     let explicit_boundary_surface = alignment["explicit_boundary_surface"].clone();
     let continuity_boundary_rollup = alignment["continuity_boundary_rollup"].clone();
+    let pre_amai_baseline_source_status = alignment["pre_amai_baseline_source_status"].clone();
     let strict_client_meter_slice = alignment["strict_client_meter_slice"].clone();
     let review_state = match (
         continuity_boundary_rollup["state"]
@@ -5558,6 +5573,7 @@ fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Valu
         "strict_client_meter_slice": strict_client_meter_slice,
         "explicit_boundary_surface": explicit_boundary_surface,
         "continuity_boundary_rollup": continuity_boundary_rollup,
+        "pre_amai_baseline_source_status": pre_amai_baseline_source_status,
         "note": note,
     })
 }
@@ -12546,6 +12562,35 @@ fn build_client_limit_continuity_boundary_rollup(
     })
 }
 
+fn build_client_limit_pre_amai_baseline_source_status(
+    contract: &TokenBudgetContractConfig,
+    explicit_boundary_surface: &Value,
+) -> Value {
+    if explicit_boundary_surface["state"].as_str() != Some("amai_continuity_boundary") {
+        return json!({
+            "model_version": contract.client_limit_pre_amai_baseline_source_version.clone(),
+            "state": "not_required",
+            "required": false,
+            "source_family": Value::Null,
+            "blocking_reason": Value::Null,
+            "same_meter_resume_possible": false,
+            "current_source_ref": Value::Null,
+            "note": "В этом scope truthful pre-Amai baseline source не нужен: explicit Amai continuity boundary сейчас не активен."
+        });
+    }
+
+    json!({
+        "model_version": contract.client_limit_pre_amai_baseline_source_version.clone(),
+        "state": "required_not_materialized",
+        "required": true,
+        "source_family": "truthful_pre_amai_baseline_source",
+        "blocking_reason": "missing_truthful_pre_amai_baseline_source",
+        "same_meter_resume_possible": false,
+        "current_source_ref": Value::Null,
+        "note": "Для continuity_restore_outside_retrieval full same-meter equivalence не возобновится, пока не появится отдельный truthful pre-Amai baseline source. До этого boundary должен оставаться explicit."
+    })
+}
+
 fn build_client_limit_meter_alignment(
     contract: &TokenBudgetContractConfig,
     surface_kind: &str,
@@ -12600,6 +12645,8 @@ fn build_client_limit_meter_alignment(
         &baseline_equivalence,
         &explicit_boundary_surface,
     );
+    let pre_amai_baseline_source_status =
+        build_client_limit_pre_amai_baseline_source_status(contract, &explicit_boundary_surface);
     let mut blocking_reasons =
         client_limit_meter_alignment_blocking_reasons(summary, events, assistant_scope);
     match assistant_generation_observation_source["state"]
@@ -12654,6 +12701,7 @@ fn build_client_limit_meter_alignment(
         "strict_client_meter_slice": strict_client_meter_slice,
         "explicit_boundary_surface": explicit_boundary_surface,
         "continuity_boundary_rollup": continuity_boundary_rollup,
+        "pre_amai_baseline_source_status": pre_amai_baseline_source_status,
         "note": "Этот слой честно показывает, что текущие savings пока считаются как lower-bound части агентного цикла. Whole-cycle observed components могут постепенно materialize-иться, но same meter с клиентским лимитом нельзя объявлять раньше, чем появится и полное observed покрытие, и baseline-equivalent semantics."
     })
 }
@@ -12692,6 +12740,9 @@ fn build_agent_cycle_economics(
                     .clone(),
                 "continuity_boundary_rollup_model_version": contract
                     .client_limit_continuity_boundary_rollup_version
+                    .clone(),
+                "pre_amai_baseline_source_model_version": contract
+                    .client_limit_pre_amai_baseline_source_version
                     .clone(),
                 "alignment_state": "partial_lower_bound_not_meter_equivalent",
                 "same_meter_as_client_limit": false,
@@ -16148,6 +16199,10 @@ effective_to_epoch_ms = 2000
             "client-limit-continuity-boundary-rollup-v2"
         );
         assert_eq!(
+            preview["client_limit_meter_alignment"]["pre_amai_baseline_source_status"]["model_version"],
+            "client-limit-pre-amai-baseline-source-v1"
+        );
+        assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
             "statement_preview"
         );
@@ -18894,6 +18949,10 @@ effective_to_epoch_ms = 2000
             "client-limit-continuity-boundary-rollup-v2"
         );
         assert_eq!(
+            economics["contract"]["client_limit_meter_alignment"]["pre_amai_baseline_source_model_version"],
+            "client-limit-pre-amai-baseline-source-v1"
+        );
+        assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]
                 ["lower_bound_tokens"],
             45
@@ -19102,6 +19161,26 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             alignment["continuity_boundary_rollup"]["equivalence_resume_condition"],
             "truthful_pre_amai_baseline_source"
+        );
+        assert_eq!(
+            alignment["pre_amai_baseline_source_status"]["state"],
+            "required_not_materialized"
+        );
+        assert_eq!(
+            alignment["pre_amai_baseline_source_status"]["required"],
+            json!(true)
+        );
+        assert_eq!(
+            alignment["pre_amai_baseline_source_status"]["source_family"],
+            "truthful_pre_amai_baseline_source"
+        );
+        assert_eq!(
+            alignment["pre_amai_baseline_source_status"]["blocking_reason"],
+            "missing_truthful_pre_amai_baseline_source"
+        );
+        assert_eq!(
+            alignment["pre_amai_baseline_source_status"]["same_meter_resume_possible"],
+            json!(false)
         );
         assert!(
             alignment["blocking_reasons"]
