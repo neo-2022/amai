@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:42 MSK
-Ручная сверка guide/docs: 2026-03-26 03:42 MSK
+modified_at: 2026-03-26 03:46 MSK
+Ручная сверка guide/docs: 2026-03-26 03:46 MSK
 
 # Operations
 
@@ -848,6 +848,11 @@ cargo run -- mcp serve
 - тот же status теперь auditing-ит и return-enforcement literals внутри managed startup block:
   `startup_next_action`, `required_return_task`, `resume_required_return_task`,
   `previous_session_owner_must_follow_startup_next_action = true`, `no_silent_drop = true`.
+- и тот же status теперь auditing-ит contract-side `resume_enforcement` и required summary fields:
+  `startup_next_action`, `required_return_task`,
+  `required_action_kind_when_resume_required = resume_required_return_task`,
+  `previous_session_owner_must_follow_startup_next_action = true`,
+  `no_silent_drop = true`.
 - truthful интерпретация status такая:
   - `ok` — managed startup artifact на месте и contract drift не обнаружен;
   - `missing_startup_instruction` — onboarding когда-то materialized startup artifact, но сейчас он

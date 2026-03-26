@@ -105,6 +105,11 @@ pub(crate) struct StartupArtifactAudit {
     pub startup_contract_sha_matches_current_contract: Option<bool>,
     pub install_state_sha_matches_current_contract: Option<bool>,
     pub startup_contract_enforces_fail_closed: Option<bool>,
+    pub startup_contract_contains_startup_next_action_field: Option<bool>,
+    pub startup_contract_contains_required_return_task_field: Option<bool>,
+    pub startup_contract_contains_resume_required_action_kind: Option<bool>,
+    pub startup_contract_contains_previous_session_owner_follow: Option<bool>,
+    pub startup_contract_contains_no_silent_drop: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -590,8 +595,15 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         .as_ref()
         .map(|path| path.is_file())
         .unwrap_or(false);
-    let (startup_contract_sha_matches_current_contract, startup_contract_enforces_fail_closed) =
-        if startup_contract_exists {
+    let (
+        startup_contract_sha_matches_current_contract,
+        startup_contract_enforces_fail_closed,
+        startup_contract_contains_startup_next_action_field,
+        startup_contract_contains_required_return_task_field,
+        startup_contract_contains_resume_required_action_kind,
+        startup_contract_contains_previous_session_owner_follow,
+        startup_contract_contains_no_silent_drop,
+    ) = if startup_contract_exists {
             let path = startup_contract_path
                 .as_ref()
                 .expect("startup contract path must exist when marked present");
@@ -600,6 +612,15 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             let payload: Value = serde_json::from_str(&content)
                 .with_context(|| format!("failed to parse {}", path.display()))?;
             let artifact_sha = payload["startup_contract_sha256"].as_str();
+            let required_summary_fields = payload["startup_contract"]["required_summary_fields"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let contains_required_summary_field = |name: &str| {
+                required_summary_fields
+                    .iter()
+                    .any(|field| field.as_str() == Some(name))
+            };
             let artifact_fail_closed = payload["startup_contract"]["artifact_enforcement"]
                 ["missing_or_unreadable_fail_closed"]
                 .as_bool()
@@ -615,9 +636,28 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             (
                 Some(artifact_sha == Some(expected_contract_sha.as_str())),
                 Some(artifact_fail_closed),
+                Some(contains_required_summary_field("startup_next_action")),
+                Some(contains_required_summary_field("required_return_task")),
+                Some(
+                    payload["startup_contract"]["resume_enforcement"]
+                        ["required_action_kind_when_resume_required"]
+                        .as_str()
+                        == Some("resume_required_return_task"),
+                ),
+                Some(
+                    payload["startup_contract"]["resume_enforcement"]
+                        ["previous_session_owner_must_follow_startup_next_action"]
+                        .as_bool()
+                        == Some(true),
+                ),
+                Some(
+                    payload["startup_contract"]["resume_enforcement"]["no_silent_drop"]
+                        .as_bool()
+                        == Some(true),
+                ),
             )
         } else {
-            (None, None)
+            (None, None, None, None, None, None, None)
         };
 
     let install_state_sha_matches_current_contract =
@@ -640,6 +680,11 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
     } else if startup_contract_sha_matches_current_contract != Some(true)
         || install_state_sha_matches_current_contract != Some(true)
         || startup_contract_enforces_fail_closed != Some(true)
+        || startup_contract_contains_startup_next_action_field != Some(true)
+        || startup_contract_contains_required_return_task_field != Some(true)
+        || startup_contract_contains_resume_required_action_kind != Some(true)
+        || startup_contract_contains_previous_session_owner_follow != Some(true)
+        || startup_contract_contains_no_silent_drop != Some(true)
     {
         "startup_contract_drift".to_string()
     } else {
@@ -665,6 +710,11 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
         startup_contract_sha_matches_current_contract,
         install_state_sha_matches_current_contract,
         startup_contract_enforces_fail_closed,
+        startup_contract_contains_startup_next_action_field,
+        startup_contract_contains_required_return_task_field,
+        startup_contract_contains_resume_required_action_kind,
+        startup_contract_contains_previous_session_owner_follow,
+        startup_contract_contains_no_silent_drop,
     }))
 }
 
@@ -2447,6 +2497,23 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(audit.startup_contract_sha_matches_current_contract, Some(true));
         assert_eq!(audit.install_state_sha_matches_current_contract, Some(true));
         assert_eq!(audit.startup_contract_enforces_fail_closed, Some(true));
+        assert_eq!(
+            audit.startup_contract_contains_startup_next_action_field,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_contract_contains_required_return_task_field,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_contract_contains_resume_required_action_kind,
+            Some(true)
+        );
+        assert_eq!(
+            audit.startup_contract_contains_previous_session_owner_follow,
+            Some(true)
+        );
+        assert_eq!(audit.startup_contract_contains_no_silent_drop, Some(true));
 
         fs::remove_dir_all(&repo).expect("cleanup temp repo");
     }

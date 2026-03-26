@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 03:42 MSK
-Ручная сверка guide/docs: 2026-03-26 03:42 MSK
+modified_at: 2026-03-26 03:46 MSK
+Ручная сверка guide/docs: 2026-03-26 03:46 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1223,6 +1223,10 @@ preview, а не только raw count.
   `amai status`: строка `startup_artifacts: ...` показывает, жив ли managed startup artifact,
   совпадает ли workspace contract с текущим pinned hash, остались ли fail-closed поля на месте и
   не потерялись ли `startup_next_action / required_return_task / no_silent_drop` в managed startup block;
+- тот же status теперь auditing-ит и contract-side return enforcement:
+  не потерялись ли в JSON contract поля `startup_next_action`, `required_return_task`,
+  `resume_required_return_task`, `previous_session_owner_must_follow_startup_next_action = true`,
+  `no_silent_drop = true`.
 - truthful пример:
   если после `disconnect` managed startup block снят, `amai status` должен честно показать
   `startup_artifacts: missing_startup_instruction`, а не делать вид, что startup всё ещё готов.

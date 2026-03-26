@@ -60,7 +60,7 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
     match onboarding::inspect_startup_artifacts(&repo_root) {
         Ok(Some(audit)) => {
             println!(
-                "startup_artifacts: {} (instruction_present={}, instruction_sha_match={}, instruction_requires_pre_tool_read={}, instruction_missing_fail_closed={}, instruction_sha_mismatch_fail_closed={}, instruction_has_startup_next_action={}, instruction_has_required_return_task={}, instruction_has_resume_required_action_kind={}, instruction_has_previous_session_owner_follow={}, instruction_has_no_silent_drop={}, contract_present={}, contract_sha_match={}, install_state_sha_match={}, contract_fail_closed={}, instruction_path={}, contract_path={})",
+                "startup_artifacts: {} (instruction_present={}, instruction_sha_match={}, instruction_requires_pre_tool_read={}, instruction_missing_fail_closed={}, instruction_sha_mismatch_fail_closed={}, instruction_has_startup_next_action={}, instruction_has_required_return_task={}, instruction_has_resume_required_action_kind={}, instruction_has_previous_session_owner_follow={}, instruction_has_no_silent_drop={}, contract_present={}, contract_sha_match={}, install_state_sha_match={}, contract_fail_closed={}, contract_has_startup_next_action_field={}, contract_has_required_return_task_field={}, contract_has_resume_required_action_kind={}, contract_has_previous_session_owner_follow={}, contract_has_no_silent_drop={}, instruction_path={}, contract_path={})",
                 audit.status,
                 audit.startup_instruction_exists,
                 audit.startup_instruction_contains_expected_sha.unwrap_or(false),
@@ -80,6 +80,19 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
                 audit.startup_contract_sha_matches_current_contract.unwrap_or(false),
                 audit.install_state_sha_matches_current_contract.unwrap_or(false),
                 audit.startup_contract_enforces_fail_closed.unwrap_or(false),
+                audit
+                    .startup_contract_contains_startup_next_action_field
+                    .unwrap_or(false),
+                audit
+                    .startup_contract_contains_required_return_task_field
+                    .unwrap_or(false),
+                audit
+                    .startup_contract_contains_resume_required_action_kind
+                    .unwrap_or(false),
+                audit
+                    .startup_contract_contains_previous_session_owner_follow
+                    .unwrap_or(false),
+                audit.startup_contract_contains_no_silent_drop.unwrap_or(false),
                 audit.startup_instruction_path
                     .as_ref()
                     .map(|path| path.display().to_string())
