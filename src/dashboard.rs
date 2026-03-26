@@ -4820,14 +4820,22 @@ fn with_status_label(mut card: Value, status_label: &str) -> Value {
 fn live_latency_compare_card(snapshot: &Value) -> Value {
     let hot = latency_slice(snapshot, "hot");
     let cold = latency_slice(snapshot, "cold");
+    let mixed = latency_slice(snapshot, "mixed");
     let hot_sample_count = hot
         .and_then(|slice| slice["sample_count"].as_u64())
         .unwrap_or_default();
     let cold_sample_count = cold
         .and_then(|slice| slice["sample_count"].as_u64())
         .unwrap_or_default();
+    let mixed_sample_count = mixed
+        .and_then(|slice| slice["sample_count"].as_u64())
+        .unwrap_or_default();
     let hot_has_data = hot_sample_count > 0;
     let cold_has_data = cold_sample_count > 0;
+    let mixed_has_data = mixed_sample_count > 0;
+    if !hot_has_data && !cold_has_data && mixed_has_data {
+        return mixed_live_latency_card(snapshot, mixed, mixed_sample_count);
+    }
     let hot_targets = live_latency_table_targets(snapshot, "hot");
     let cold_targets = live_latency_table_targets(snapshot, "cold");
     let hot_assessment = assess_live_latency_slice(hot, &hot_targets);
@@ -4907,6 +4915,56 @@ fn live_latency_compare_card(snapshot: &Value) -> Value {
         card = with_status_label(card, "идёт накопление выборки");
     }
     card
+}
+
+fn mixed_live_latency_card(snapshot: &Value, slice: Option<&Value>, sample_count: u64) -> Value {
+    let current_latency_ms = slice.and_then(|value| value["current_latency_ms"].as_f64());
+    with_status_tooltip(
+        with_status_label(
+            json!({
+                "kind": "live_compare",
+                "title": "Скорость ответа",
+                "title_tooltip": "Показывает, как быстро Amai отвечает прямо сейчас. Если runtime ещё не разделил live поток на первый и повторный запрос, карточка честно показывает общий поток текущей сессии вместо пустых hot/cold-заглушек.",
+                "status": "waiting",
+                "status_label": "live без разделения режимов",
+                "source_label": "Источник: живая retrieval-выборка текущей сессии из token_budget live lane. Сейчас runtime дал только общий mixed live поток, поэтому карточка показывает его напрямую.",
+                "note": "Сейчас у этой сессии есть только общий live поток без честного разделения на первый и повторный запрос. Поэтому карточка показывает реальную mixed-выборку здесь и сейчас.",
+                "metrics": [
+                    {
+                        "label": "Текущий live поток",
+                        "tooltip": "Общая медиана живой retrieval-выборки этой сессии, пока runtime ещё не разделил её на hot/cold.",
+                        "value": format_ms(snapshot, slice.and_then(|value| value["p50_latency_ms"].as_f64())),
+                        "note": format!("Живая mixed-выборка: {}.", format_u64(Some(sample_count)))
+                    },
+                    {
+                        "label": "Последний запрос",
+                        "tooltip": "Последний зафиксированный live latency в текущей сессии.",
+                        "value": format_ms(snapshot, current_latency_ms),
+                        "note": "Это последний live запрос этой сессии, а не историческая сводка."
+                    }
+                ],
+                "table": {
+                    "columns": [
+                        { "label": "Режим", "tooltip": "Какой live contour сейчас реально доступен в этой сессии." },
+                        { "label": "P50", "tooltip": "Медиана. Это обычный уровень ответа, который пользователь видит чаще всего." },
+                        { "label": "P95", "tooltip": "Тяжёлый хвост. Почти все запросы должны укладываться в эту границу." },
+                        { "label": "P99", "tooltip": "Ещё более строгий хвост. Показывает редкие тяжёлые выбросы." },
+                        { "label": "Max", "tooltip": "Самый тяжёлый одиночный запрос в текущей живой выборке." },
+                        { "label": "Выборка", "tooltip": "Сколько живых mixed-запросов уже вошло в расчёт." }
+                    ],
+                    "rows": [
+                        {
+                            "label": "Общий live поток — сейчас",
+                            "tooltip": "Живая retrieval-выборка текущей сессии без разделения на hot/cold.",
+                            "values": compare_values(snapshot, slice, sample_count)
+                        }
+                    ]
+                }
+            }),
+            "live без разделения режимов",
+        ),
+        "Статус пока не переводится в normal/pass или problem-status, потому что runtime ещё не разделил текущую live-выборку на hot/cold режимы. Панель честно показывает общий live поток этой сессии вместо пустого состояния.",
+    )
 }
 
 fn working_state_live_card(snapshot: &Value) -> Value {
@@ -7140,6 +7198,73 @@ mod tests {
         let card = live_latency_compare_card(&snapshot);
         assert_eq!(card["status"].as_str(), Some("pass"));
         assert_eq!(card["status_label"].as_str(), Some("в норме"));
+    }
+
+    #[test]
+    fn live_compare_card_surfaces_mixed_live_slice_when_hot_cold_are_absent() {
+        let snapshot = json!({
+            "thresholds": {
+                "dashboard": {
+                    "timing_format": {
+                        "switch_to_nanoseconds_below_ms": 0.001,
+                        "switch_to_microseconds_below_ms": 1.0,
+                        "switch_to_seconds_at_or_above_ms": 1000.0,
+                        "non_positive_floor_label": "0 ns",
+                        "seconds_suffix": "s",
+                        "milliseconds_suffix": "ms",
+                        "microseconds_suffix": "µs",
+                        "nanoseconds_suffix": "ns",
+                        "seconds_decimals": 3,
+                        "milliseconds_decimals": 3,
+                        "microseconds_decimals": 3,
+                        "nanoseconds_decimals": 0
+                    }
+                }
+            },
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "latency_slices": [
+                            {
+                                "state": "mixed",
+                                "sample_count": 3,
+                                "current_latency_ms": 1.7,
+                                "p50_latency_ms": 1.2,
+                                "p95_latency_ms": 2.4,
+                                "p99_latency_ms": 2.4,
+                                "max_latency_ms": 2.4
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let card = live_latency_compare_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("waiting"));
+        assert_eq!(
+            card["status_label"].as_str(),
+            Some("live без разделения режимов")
+        );
+        assert_eq!(
+            card["metrics"][0]["label"].as_str(),
+            Some("Текущий live поток")
+        );
+        assert_eq!(
+            card["metrics"][0]["value"].as_str(),
+            Some("1.2 ms")
+        );
+        assert_eq!(
+            card["metrics"][1]["label"].as_str(),
+            Some("Последний запрос")
+        );
+        assert_eq!(card["table"]["rows"].as_array().map(|rows| rows.len()), Some(1));
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("общий live поток")
+        );
     }
 
     #[test]
