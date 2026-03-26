@@ -27,12 +27,14 @@ const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
 const AGENT_CYCLE_TIMELINE_MAX_POINTS: usize = 256;
 const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
 const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_generation_turn_observed";
+const DASHBOARD_REPORT_LIVE_TIME_BUCKET_MS: i64 = 5_000;
 static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<Mutex<Option<DashboardRolloutObservationCache>>> =
     OnceLock::new();
 static DASHBOARD_ASSISTANT_SCOPE_CACHE: OnceLock<Mutex<Option<DashboardAssistantScopeCache>>> =
     OnceLock::new();
 static DASHBOARD_SAME_METER_SYNC_CACHE: OnceLock<Mutex<Option<DashboardSameMeterSyncCache>>> =
     OnceLock::new();
+static DASHBOARD_REPORT_CACHE: OnceLock<Mutex<Option<DashboardReportCache>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
 struct TokenBudgetConfigFile {
@@ -469,6 +471,13 @@ struct DashboardAssistantScopeCache {
 struct DashboardSameMeterSyncCache {
     repo_root: PathBuf,
     signature: String,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardReportCache {
+    repo_root: PathBuf,
+    signature: String,
+    report: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -6916,6 +6925,18 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         None
     };
     let lifetime_assistant_scope = scope_iter.next().unwrap_or_default();
+    let report_signature = dashboard_report_signature(
+        &session_events,
+        &rolling_window_events,
+        &events,
+        &current_session_assistant_scope,
+        rolling_window_assistant_scope.as_ref(),
+        &lifetime_assistant_scope,
+        now_epoch_ms,
+    );
+    if let Some(report) = cached_dashboard_report(&repo_root, &report_signature) {
+        return Ok(report);
+    }
     let current_session_summary = summarize_events(
         &session_events,
         now_epoch_ms,
@@ -6942,7 +6963,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     } else {
         build_product_headline(&lifetime_summary, "всё время записи")
     };
-    Ok(json!({
+    let report = json!({
         "token_budget_report": {
             "surface": "dashboard_read_only",
             "profile": {
@@ -6994,7 +7015,9 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
             },
             "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups и client-limit alignment, не разворачивает полный contractual/export contour, но делает ограниченный quiet same-meter sync/write-back только для active live scope текущей сессии и рабочего окна.",
         }
-    }))
+    });
+    store_dashboard_report(&repo_root, &report_signature, &report);
+    Ok(report)
 }
 
 pub async fn collect_default_report_with_overrides(
@@ -7947,6 +7970,123 @@ fn store_dashboard_assistant_generation_scopes(
         repo_root: canonical_repo_root(repo_root),
         signature: signature.to_string(),
         scopes: scopes.to_vec(),
+    });
+}
+
+fn dashboard_report_signature(
+    current_session_events: &[TokenBudgetEvent],
+    rolling_window_events: &[TokenBudgetEvent],
+    lifetime_events: &[TokenBudgetEvent],
+    current_session_assistant_scope: &AssistantGenerationScopeObservation,
+    rolling_window_assistant_scope: Option<&AssistantGenerationScopeObservation>,
+    lifetime_assistant_scope: &AssistantGenerationScopeObservation,
+    now_epoch_ms: i64,
+) -> String {
+    let payload = json!({
+        "live_time_bucket": now_epoch_ms.div_euclid(DASHBOARD_REPORT_LIVE_TIME_BUCKET_MS),
+        "current_session_events": dashboard_report_event_signature_payload(current_session_events),
+        "rolling_window_events": dashboard_report_event_signature_payload(rolling_window_events),
+        "lifetime_events": dashboard_report_event_signature_payload(lifetime_events),
+        "current_session_assistant_scope": dashboard_report_assistant_scope_signature_payload(
+            current_session_assistant_scope,
+        ),
+        "rolling_window_assistant_scope": rolling_window_assistant_scope
+            .map(dashboard_report_assistant_scope_signature_payload)
+            .unwrap_or(Value::Null),
+        "lifetime_assistant_scope": dashboard_report_assistant_scope_signature_payload(
+            lifetime_assistant_scope,
+        ),
+    });
+    hex_sha256(
+        &serde_json::to_vec(&payload)
+            .unwrap_or_else(|_| payload.to_string().into_bytes()),
+    )
+}
+
+fn dashboard_report_event_signature_payload(events: &[TokenBudgetEvent]) -> Value {
+    Value::Array(
+        events
+            .iter()
+            .map(|event| {
+                json!({
+                    "created_at_epoch_ms": event.created_at_epoch_ms,
+                    "event_id": event.event_id,
+                    "correlation_id": event.correlation_id,
+                    "session_id": event.session_id,
+                    "source_kind": event.source_kind,
+                    "traffic_class": event.traffic_class,
+                    "measurement_scope": event.measurement_scope,
+                    "query": event.query,
+                    "query_type": event.query_type,
+                    "target_kind": event.target_kind,
+                    "tokenizer": event.tokenizer,
+                    "latency_ms": event.latency_ms,
+                    "saved_tokens": event.saved_tokens,
+                    "naive_tokens": event.naive_tokens,
+                    "context_tokens": event.context_tokens,
+                    "recovery_tokens": event.recovery_tokens,
+                    "effective_saved_tokens": event.effective_saved_tokens,
+                    "quality_ok": event.quality_ok,
+                    "quality_method": event.quality_method,
+                    "quality_tier": event.quality_tier,
+                    "head_hit_target": event.head_hit_target,
+                    "needed_followup": event.needed_followup,
+                    "resolved_by_event_id": event.resolved_by_event_id,
+                    "fallback_triggered": event.fallback_triggered,
+                    "document_hits": event.document_hits,
+                    "symbol_hits_count": event.symbol_hits_count,
+                    "file_hits": event.file_hits,
+                    "sources_count": event.sources_count,
+                    "chunks_count": event.chunks_count,
+                    "client_prompt_tokens": event.client_prompt_tokens,
+                    "assistant_generation_tokens": event.assistant_generation_tokens,
+                    "tool_overhead_tokens": event.tool_overhead_tokens,
+                    "continuity_restore_tokens": event.continuity_restore_tokens,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn dashboard_report_assistant_scope_signature_payload(
+    scope: &AssistantGenerationScopeObservation,
+) -> Value {
+    json!({
+        "target_group_count": scope.target_group_count,
+        "observed_group_count": scope.observed_group_count,
+        "observed_tokens": scope.observed_tokens,
+        "target_context_pack_ids": scope.target_context_pack_ids,
+        "matched_context_pack_ids": scope.matched_context_pack_ids,
+        "unmatched_context_pack_ids": scope.unmatched_context_pack_ids,
+        "matched_turn_ids": scope.matched_turn_ids,
+        "available_turns": scope.available_turns,
+        "available_direct_turns": scope.available_direct_turns,
+        "available_rollout_turns": scope.available_rollout_turns,
+        "matched_direct_turn_ids": scope.matched_direct_turn_ids,
+        "matched_rollout_turn_ids": scope.matched_rollout_turn_ids,
+    })
+}
+
+fn cached_dashboard_report(repo_root: &Path, signature: &str) -> Option<Value> {
+    let cache = DASHBOARD_REPORT_CACHE.get_or_init(|| Mutex::new(None));
+    let guard = cache.lock().ok()?;
+    let entry = guard.as_ref()?;
+    if canonical_repo_root(repo_root) == entry.repo_root && entry.signature == signature {
+        Some(entry.report.clone())
+    } else {
+        None
+    }
+}
+
+fn store_dashboard_report(repo_root: &Path, signature: &str, report: &Value) {
+    let cache = DASHBOARD_REPORT_CACHE.get_or_init(|| Mutex::new(None));
+    let Some(mut guard) = cache.lock().ok() else {
+        return;
+    };
+    *guard = Some(DashboardReportCache {
+        repo_root: canonical_repo_root(repo_root),
+        signature: signature.to_string(),
+        report: report.clone(),
     });
 }
 
@@ -13813,8 +13953,9 @@ fn build_tokenizer(name: &str) -> Result<CoreBPE> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MeasurementConfig, NaiveScope, TokenBudgetContractConfig, TokenBudgetEvent,
-        TokenLedgerRepairRequest, apply_reverification_metadata, baseline_strategy_breakdown,
+        AssistantGenerationScopeObservation, MeasurementConfig, NaiveScope,
+        TokenBudgetContractConfig, TokenBudgetEvent, TokenLedgerRepairRequest,
+        apply_reverification_metadata, baseline_strategy_breakdown,
         bind_infra_cost_profile_json_from_source, bind_rate_card_json_from_source,
         build_adjustment_registry_json, build_adjustment_request_schema_json,
         build_baseline_contract_json, build_billing_policy_json,
@@ -13828,7 +13969,8 @@ mod tests {
         build_usage_event_schema_json, configured_provider_rate_card_source,
         configured_provider_usage_source, contractual_line_item_json,
         count_cli_context_pack_output_overhead_tokens, count_tool_overhead_tokens,
-        current_session_events, default_adjustment_preview_model_version,
+        current_session_events, dashboard_report_signature,
+        dashboard_same_meter_sync_signature, default_adjustment_preview_model_version,
         default_adjustment_registry_version, default_adjustment_request_schema_version,
         default_backfill_policy_version, default_baseline_method_version, default_billing_mode,
         default_billing_policy_version, default_contractual_evidence_pack_version,
@@ -13852,8 +13994,7 @@ mod tests {
         parse_infra_cost_profile_file, parse_rate_card_file, parse_snapshot_event,
         provider_rate_card_default_path, provider_usage_default_path, reconcile_followup_recovery,
         repair_legacy_token_event_payload, report_contract_json, resolve_session_id,
-        rewrite_token_ledger_source_kind_payload, summarize_events,
-        suppress_shadowed_live_events, dashboard_same_meter_sync_signature,
+        rewrite_token_ledger_source_kind_payload, summarize_events, suppress_shadowed_live_events,
     };
     use crate::postgres::ObservabilitySnapshotRecord;
     use serde_json::json;
@@ -18902,6 +19043,155 @@ effective_to_epoch_ms = 2000
         assert_ne!(signature, resolved_signature);
         let changed_rollout_signature = dashboard_same_meter_sync_signature(&events, "rollout-b");
         assert_ne!(signature, changed_rollout_signature);
+    }
+
+    #[test]
+    fn dashboard_report_signature_changes_on_live_bucket_boundary() {
+        let events = vec![token_event! {
+            created_at_epoch_ms: 10,
+            event_id: "event-a".to_string(),
+            correlation_id: "ctx-a".to_string(),
+            session_id: "session-1".to_string(),
+            rolling_window_profile: "codex_5h".to_string(),
+            timestamp_utc: 10,
+            occurred_at_epoch_ms: 10,
+            ingested_at_epoch_ms: 10,
+            query: "q-a".to_string(),
+            query_hash: "hash-a".to_string(),
+            query_type: "code_lookup".to_string(),
+            target_kind: "file".to_string(),
+            baseline_hit_target: true,
+            amai_hit_target: true,
+            cold_warm_state: "warm".to_string(),
+            baseline_strategy: "naive_top_files".to_string(),
+            retrieval_mode: Some("local_strict".to_string()),
+            tokenizer: "o200k_base".to_string(),
+            latency_ms: 1.0,
+            saved_tokens: 10,
+            naive_tokens: 20,
+            context_tokens: 10,
+            recovery_tokens: 0,
+            effective_saved_tokens: 10,
+            savings_factor: 2.0,
+            savings_percent: 50.0,
+            effective_savings_percent: 50.0,
+            quality_ok: true,
+            quality_score: 1.0,
+            quality_method: "retrieval_parity".to_string(),
+            quality_tier: "retrieval".to_string(),
+            head_hit_target: true,
+            needed_followup: false,
+            followup_count: 0,
+            followup_of_event_id: None,
+            resolved_by_event_id: None,
+            fallback_triggered: false,
+            fallback_count: 0,
+            document_hits: 1,
+            symbol_hits_count: 0,
+            file_hits: 1,
+            sources_count: 1,
+            chunks_count: 1,
+            pack_token_count: 10,
+            deduped_token_count: 10,
+        }];
+        let scope = AssistantGenerationScopeObservation::default();
+        let left = dashboard_report_signature(
+            &events,
+            &events,
+            &events,
+            &scope,
+            Some(&scope),
+            &scope,
+            4_999,
+        );
+        let right = dashboard_report_signature(
+            &events,
+            &events,
+            &events,
+            &scope,
+            Some(&scope),
+            &scope,
+            5_000,
+        );
+
+        assert_ne!(left, right);
+    }
+
+    #[test]
+    fn dashboard_report_signature_changes_when_assistant_scope_changes() {
+        let events = vec![token_event! {
+            created_at_epoch_ms: 10,
+            event_id: "event-a".to_string(),
+            correlation_id: "ctx-a".to_string(),
+            session_id: "session-1".to_string(),
+            rolling_window_profile: "codex_5h".to_string(),
+            timestamp_utc: 10,
+            occurred_at_epoch_ms: 10,
+            ingested_at_epoch_ms: 10,
+            query: "q-a".to_string(),
+            query_hash: "hash-a".to_string(),
+            query_type: "code_lookup".to_string(),
+            target_kind: "file".to_string(),
+            baseline_hit_target: true,
+            amai_hit_target: true,
+            cold_warm_state: "warm".to_string(),
+            baseline_strategy: "naive_top_files".to_string(),
+            retrieval_mode: Some("local_strict".to_string()),
+            tokenizer: "o200k_base".to_string(),
+            latency_ms: 1.0,
+            saved_tokens: 10,
+            naive_tokens: 20,
+            context_tokens: 10,
+            recovery_tokens: 0,
+            effective_saved_tokens: 10,
+            savings_factor: 2.0,
+            savings_percent: 50.0,
+            effective_savings_percent: 50.0,
+            quality_ok: true,
+            quality_score: 1.0,
+            quality_method: "retrieval_parity".to_string(),
+            quality_tier: "retrieval".to_string(),
+            head_hit_target: true,
+            needed_followup: false,
+            followup_count: 0,
+            followup_of_event_id: None,
+            resolved_by_event_id: None,
+            fallback_triggered: false,
+            fallback_count: 0,
+            document_hits: 1,
+            symbol_hits_count: 0,
+            file_hits: 1,
+            sources_count: 1,
+            chunks_count: 1,
+            pack_token_count: 10,
+            deduped_token_count: 10,
+        }];
+        let base_scope = AssistantGenerationScopeObservation::default();
+        let changed_scope = AssistantGenerationScopeObservation {
+            observed_tokens: 42,
+            matched_context_pack_ids: ["ctx-a".to_string()].into_iter().collect(),
+            ..AssistantGenerationScopeObservation::default()
+        };
+        let left = dashboard_report_signature(
+            &events,
+            &events,
+            &events,
+            &base_scope,
+            Some(&base_scope),
+            &base_scope,
+            5_000,
+        );
+        let right = dashboard_report_signature(
+            &events,
+            &events,
+            &events,
+            &changed_scope,
+            Some(&base_scope),
+            &base_scope,
+            5_000,
+        );
+
+        assert_ne!(left, right);
     }
 
     #[test]

@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 11:28 MSK
-Ручная сверка guide/docs: 2026-03-26 11:28 MSK
+modified_at: 2026-03-26 11:39 MSK
+Ручная сверка guide/docs: 2026-03-26 11:39 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -717,6 +717,12 @@ http://127.0.0.1:9464/
     - loop обязан сначала подождать `refresh_ms`, потому что первый cache fill уже выполнен до
       bind listener;
     - это убирает бессмысленный двойной cold refresh сразу после рестарта human dashboard.
+  - `token_budget_dashboard_report` больше не должен заново собираться на каждом секундном refresh,
+    если live input не изменился по смыслу:
+    - отчёт кэшируется по semantic signature `current_session / rolling_window / lifetime` events
+      и assistant-scope contour;
+    - возраст-зависимые поля re-bucket-ятся по `5s`, чтобы панель оставалась near-live без
+      бессмысленной полной пересборки каждую секунду в steady-state.
   - machine summary теперь переиспользуется как cache до `60` секунд, чтобы human dashboard не
     зависал на `dmidecode/sysinfo`-хвосте и не раздувал long-lived `observe serve`.
   - при этом статическая host-инвентаризация памяти больше не должна заново ходить в `dmidecode`
