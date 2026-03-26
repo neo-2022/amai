@@ -3667,6 +3667,12 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
     }
 
     let safe_reclaimable_bytes = cleanup["selected_reclaimable_bytes"].as_u64().unwrap_or(0);
+    let policy_retained_reclaimable_bytes = cleanup["policy_retained_reclaimable_bytes"]
+        .as_u64()
+        .unwrap_or(0);
+    let manual_only_reclaimable_bytes = cleanup["manual_only_reclaimable_bytes"]
+        .as_u64()
+        .unwrap_or(0);
     let safe_selected = cleanup["selected"].as_u64().unwrap_or(0);
     let safe_expired = cleanup["expired"].as_u64().unwrap_or(0);
     let aggressive_reclaimable_bytes = cleanup["aggressive_preview_reclaimable_bytes"]
@@ -3692,6 +3698,14 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
         .as_array()
         .cloned()
         .unwrap_or_default();
+    let policy_retained_targets = cleanup["policy_retained_targets"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let manual_only_reclaimable_targets = cleanup["manual_only_reclaimable_targets"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let last_apply = &cleanup["last_apply"];
     let last_reclaim_bytes = last_apply["reclaimed_bytes"].as_u64().unwrap_or(0);
     let last_deleted = last_apply["deleted"].as_u64().unwrap_or(0);
@@ -3700,13 +3714,20 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
 
     let value = if !large_unmanaged_roots.is_empty() && out_of_policy_bytes > 0 {
         format!("{} вне policy", human_bytes(out_of_policy_bytes as f64))
+    } else if safe_reclaimable_bytes > 0 {
+        format!("{} safe", human_bytes(safe_reclaimable_bytes as f64))
+    } else if manual_only_reclaimable_bytes > 0 {
+        format!("{} manual", human_bytes(manual_only_reclaimable_bytes as f64))
+    } else if policy_retained_reclaimable_bytes > 0 {
+        format!(
+            "{} ждёт TTL",
+            human_bytes(policy_retained_reclaimable_bytes as f64)
+        )
     } else if aggressive_reclaimable_bytes > 0 {
         format!(
             "{} preview",
             human_bytes(aggressive_reclaimable_bytes as f64)
         )
-    } else if safe_reclaimable_bytes > 0 {
-        format!("{} safe", human_bytes(safe_reclaimable_bytes as f64))
     } else {
         "по policy чисто".to_string()
     };
@@ -3728,6 +3749,16 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
         let target_path = target["path"].as_str().unwrap_or("неизвестный target");
         note.push_str(&format!(
             " Для {target_path} уже есть explicit manual-only cleanup contour: используйте `observe cleanup-artifacts --target {target_path} --apply` или `--target {target_path} --aggressive --apply`, auto-retention этот путь не трогает."
+        ));
+    }
+    if let Some(target) = policy_retained_targets.first() {
+        let target_path = target["path"].as_str().unwrap_or("неизвестный target");
+        let target_bytes = target["aggressive_preview_reclaimable_bytes"]
+            .as_u64()
+            .unwrap_or(0);
+        note.push_str(&format!(
+            " Сейчас основной policy-covered hot storage удерживается возрастным запасом и keep-latest: {target_path} = {}. Это не unmanaged drift и не сломанный cleanup, а осознанный retention hold.",
+            human_bytes(target_bytes as f64)
         ));
     }
     if last_reclaim_bytes > 0 {
@@ -3772,6 +3803,16 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
                 "Aggressive preview",
                 human_bytes(aggressive_reclaimable_bytes as f64),
                 Some("Сколько rebuildable хвоста можно убрать сразу explicit aggressive path-ом, не трогая live state."),
+            ),
+            metric_row(
+                "Policy-retained hot storage",
+                human_bytes(policy_retained_reclaimable_bytes as f64),
+                Some("Сколько rebuildable веса уже входит в cleanup policy, но пока удерживается TTL/keep-latest и therefore ещё не попадает под safe reclaim."),
+            ),
+            metric_row(
+                "Manual reclaim now",
+                human_bytes(manual_only_reclaimable_bytes as f64),
+                Some("Сколько веса сейчас доступно только через explicit/manual cleanup contours, а не через auto-retention."),
             ),
             metric_row(
                 "Last reclaim",
@@ -3838,6 +3879,49 @@ fn artifact_cleanup_card(snapshot: &Value) -> Value {
                         .join(", ")
                 },
                 Some("Пути, которые уже заведены в cleanup policy, но остаются только на explicit/manual path и не удаляются auto-retention-ом."),
+            ),
+            metric_row(
+                "Policy waiting targets",
+                if policy_retained_targets.is_empty() {
+                    "нет".to_string()
+                } else {
+                    policy_retained_targets
+                        .iter()
+                        .map(|target| {
+                            let path = target["path"].as_str().unwrap_or("неизвестный target");
+                            let ttl_hours = target["ttl_hours"].as_u64().unwrap_or(0);
+                            let keep_latest = target["keep_latest"].as_u64().unwrap_or(0);
+                            let reclaimable = target["aggressive_preview_reclaimable_bytes"]
+                                .as_u64()
+                                .unwrap_or(0);
+                            format!(
+                                "{path} ({}, ttl {ttl_hours}h, keep_latest {keep_latest})",
+                                human_bytes(reclaimable as f64)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                Some("Cleanup-targets, которые уже policy-covered, но всё ещё intentionally удерживаются возрастным запасом или keep-latest."),
+            ),
+            metric_row(
+                "Manual reclaim targets",
+                if manual_only_reclaimable_targets.is_empty() {
+                    "нет".to_string()
+                } else {
+                    manual_only_reclaimable_targets
+                        .iter()
+                        .map(|target| {
+                            let path = target["path"].as_str().unwrap_or("неизвестный target");
+                            let reclaimable = target["aggressive_preview_reclaimable_bytes"]
+                                .as_u64()
+                                .unwrap_or(0);
+                            format!("{path} ({})", human_bytes(reclaimable as f64))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                Some("Manual-only cleanup contours, где reclaim уже доступен, но auto-retention этот path не трогает."),
             ),
             metric_row(
                 "Keep latest / protected",
@@ -6333,9 +6417,13 @@ fn artifact_cleanup_status(snapshot: &Value) -> &'static str {
     }
     if cleanup["selected"].as_u64().unwrap_or(0) > 0 {
         "alert"
-    } else if cleanup["aggressive_preview_selected"].as_u64().unwrap_or(0) > 0 {
-        "alert"
     } else if cleanup["repo_inventory"]["unmanaged_alert_triggered"].as_bool() == Some(true) {
+        "alert"
+    } else if cleanup["manual_only_reclaimable_bytes"].as_u64().unwrap_or(0) > 0 {
+        "alert"
+    } else if cleanup["policy_retained_reclaimable_bytes"].as_u64().unwrap_or(0) > 0 {
+        "waiting"
+    } else if cleanup["aggressive_preview_selected"].as_u64().unwrap_or(0) > 0 {
         "alert"
     } else {
         "pass"
@@ -6355,12 +6443,6 @@ fn artifact_cleanup_warning(snapshot: &Value) -> Option<String> {
         return Some(format!(
             "Локальный rebuildable хвост уже aged past TTL: safe reclaim сейчас {}. Это не live state и его можно убрать policy-cleanup path-ом.",
             human_bytes(safe_bytes as f64)
-        ));
-    }
-    if aggressive_bytes > 0 {
-        return Some(format!(
-            "Локальный rebuildable хвост ещё не дожил до TTL, но aggressive reclaim path уже мог бы вернуть {} без удаления live state. Safe policy сейчас специально ждёт возрастной запас.",
-            human_bytes(aggressive_bytes as f64)
         ));
     }
     let repo_inventory = &cleanup["repo_inventory"];
@@ -6390,6 +6472,28 @@ fn artifact_cleanup_warning(snapshot: &Value) -> Option<String> {
             root_path,
             human_bytes(root_unmanaged_bytes as f64),
             manual_hint
+        ));
+    }
+    let manual_only_bytes = cleanup["manual_only_reclaimable_bytes"].as_u64().unwrap_or(0);
+    if manual_only_bytes > 0 {
+        return Some(format!(
+            "Сейчас уже есть {} reclaimable веса на manual-only cleanup contour. Auto-retention этот путь специально не трогает, поэтому нужен explicit operator run.",
+            human_bytes(manual_only_bytes as f64)
+        ));
+    }
+    let policy_retained_bytes = cleanup["policy_retained_reclaimable_bytes"]
+        .as_u64()
+        .unwrap_or(0);
+    if policy_retained_bytes > 0 {
+        return Some(format!(
+            "Сейчас {} rebuildable веса уже policy-covered, но intentionally удерживается TTL/keep-latest. Cleanup не сломан: это hot storage, которое auto-path уберёт позже, а aggressive path может снять раньше.",
+            human_bytes(policy_retained_bytes as f64)
+        ));
+    }
+    if aggressive_bytes > 0 {
+        return Some(format!(
+            "Локальный rebuildable хвост ещё не дожил до TTL, но aggressive reclaim path уже мог бы вернуть {} без удаления live state. Safe policy сейчас специально ждёт возрастной запас.",
+            human_bytes(aggressive_bytes as f64)
         ));
     }
     None
@@ -7996,6 +8100,10 @@ mod tests {
                 "captured_at_epoch_ms": 42,
                 "selected": 0,
                 "selected_reclaimable_bytes": 0,
+                "policy_retained_reclaimable_bytes": 0,
+                "policy_retained_targets": [],
+                "manual_only_reclaimable_bytes": 0,
+                "manual_only_reclaimable_targets": [],
                 "expired": 0,
                 "kept_latest": 3,
                 "protected": 1,
@@ -8049,15 +8157,15 @@ mod tests {
             Some("33.16 GiB")
         );
         assert_eq!(
-            cleanup_card["rows"][5]["value"].as_str(),
+            cleanup_card["rows"][7]["value"].as_str(),
             Some("46.96 GiB (30, aggressive)")
         );
         assert_eq!(
-            cleanup_card["rows"][9]["value"].as_str(),
+            cleanup_card["rows"][11]["value"].as_str(),
             Some("output/windows-vm-lab (186.00 GiB)")
         );
         assert_eq!(
-            cleanup_card["rows"][10]["value"].as_str(),
+            cleanup_card["rows"][12]["value"].as_str(),
             Some("output/windows-vm-lab (186.00 GiB, ttl 168h, keep_latest 2)")
         );
     }
@@ -8089,6 +8197,66 @@ mod tests {
         assert!(warning.contains("вне cleanup policy"));
         assert!(warning.contains("output/windows-vm-lab"));
         assert!(warning.contains("observe cleanup-artifacts --target output/windows-vm-lab --apply"));
+    }
+
+    #[test]
+    fn artifact_cleanup_card_surfaces_policy_retained_hot_storage_as_waiting() {
+        let snapshot = json!({
+            "artifact_cleanup": {
+                "captured_at_epoch_ms": 42,
+                "selected": 0,
+                "selected_reclaimable_bytes": 0,
+                "policy_retained_reclaimable_bytes": 18_460_613_632u64,
+                "policy_retained_targets": [
+                    {
+                        "path": "target/debug",
+                        "ttl_hours": 168,
+                        "keep_latest": 3,
+                        "aggressive_preview_reclaimable_bytes": 16_254_702_590u64
+                    }
+                ],
+                "manual_only_reclaimable_bytes": 0,
+                "manual_only_reclaimable_targets": [],
+                "expired": 0,
+                "kept_latest": 13,
+                "protected": 0,
+                "targets_scanned": 8,
+                "aggressive_preview_selected": 19,
+                "aggressive_preview_reclaimable_bytes": 32_577_450_367u64,
+                "last_apply": {
+                    "captured_at_epoch_ms": 41,
+                    "mode": "aggressive",
+                    "deleted": 1,
+                    "reclaimed_bytes": 28_888_311_035u64
+                },
+                "repo_inventory": {
+                    "repo_total_bytes": 35_728_482_155u64,
+                    "cleanup_scope_bytes": 32_698_373_188u64,
+                    "out_of_policy_bytes": 3_030_108_967u64,
+                    "unmanaged_alert_triggered": false,
+                    "large_unmanaged_roots": [],
+                    "manual_only_targets": [
+                        {
+                            "path": "output/windows-vm-lab",
+                            "ttl_hours": 24,
+                            "keep_latest": 2,
+                            "total_bytes": 15_079_381u64
+                        }
+                    ],
+                    "unreadable_paths_count": 1
+                }
+            }
+        });
+        let cards = build_machine_cards(&snapshot, None, None);
+        let cleanup_card = cards
+            .iter()
+            .find(|card| card["title"].as_str() == Some("Локальный мусор и retention"))
+            .expect("cleanup card");
+        assert_eq!(cleanup_card["status"].as_str(), Some("waiting"));
+        assert_eq!(cleanup_card["value"].as_str(), Some("17.19 GiB ждёт TTL"));
+        let warning = artifact_cleanup_warning(&snapshot).expect("warning");
+        assert!(warning.contains("policy-covered"));
+        assert!(warning.contains("TTL/keep-latest"));
     }
 
     #[test]

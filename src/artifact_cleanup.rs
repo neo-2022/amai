@@ -143,6 +143,8 @@ pub fn run_cleanup(
     let mut expired_total = 0_u64;
     let mut selected_total = 0_u64;
     let mut selected_reclaimable_bytes_total = 0_u64;
+    let mut policy_retained_reclaimable_bytes_total = 0_u64;
+    let mut manual_only_reclaimable_bytes_total = 0_u64;
     let mut deleted_total = 0_u64;
     let mut reclaimed_bytes_total = 0_u64;
     let mut kept_latest_total = 0_u64;
@@ -150,6 +152,8 @@ pub fn run_cleanup(
     let mut aggressive_preview_total = 0_u64;
     let mut aggressive_preview_reclaimed_bytes = 0_u64;
     let mut managed_target_sizes = Vec::new();
+    let mut policy_retained_targets_json = Vec::new();
+    let mut manual_only_reclaimable_targets_json = Vec::new();
     let mut target_matched = target.is_none();
 
     for target in profile
@@ -222,7 +226,31 @@ pub fn run_cleanup(
         kept_latest_total += active_plan.kept_latest;
         protected_total += active_plan.protected;
         aggressive_preview_total += aggressive_preview.selected;
-        aggressive_preview_reclaimed_bytes += selected_reclaimable_bytes(&aggressive_preview);
+        let aggressive_preview_reclaimable_bytes = selected_reclaimable_bytes(&aggressive_preview);
+        aggressive_preview_reclaimed_bytes += aggressive_preview_reclaimable_bytes;
+
+        if target.auto_apply && active_plan.selected == 0 && aggressive_preview.selected > 0 {
+            policy_retained_reclaimable_bytes_total += aggressive_preview_reclaimable_bytes;
+            policy_retained_targets_json.push(json!({
+                "path": target.path,
+                "description": target.description,
+                "ttl_hours": target.ttl_hours,
+                "keep_latest": target.keep_latest,
+                "aggressive_preview_selected": aggressive_preview.selected,
+                "aggressive_preview_reclaimable_bytes": aggressive_preview_reclaimable_bytes,
+            }));
+        }
+        if !target.auto_apply && aggressive_preview.selected > 0 {
+            manual_only_reclaimable_bytes_total += aggressive_preview_reclaimable_bytes;
+            manual_only_reclaimable_targets_json.push(json!({
+                "path": target.path,
+                "description": target.description,
+                "ttl_hours": target.ttl_hours,
+                "keep_latest": target.keep_latest,
+                "aggressive_preview_selected": aggressive_preview.selected,
+                "aggressive_preview_reclaimable_bytes": aggressive_preview_reclaimable_bytes,
+            }));
+        }
 
         let mut deleted = 0_u64;
         let mut reclaimed_bytes = 0_u64;
@@ -283,6 +311,10 @@ pub fn run_cleanup(
             "expired": expired_total,
             "selected": selected_total,
             "selected_reclaimable_bytes": selected_reclaimable_bytes_total,
+            "policy_retained_reclaimable_bytes": policy_retained_reclaimable_bytes_total,
+            "policy_retained_targets": policy_retained_targets_json,
+            "manual_only_reclaimable_bytes": manual_only_reclaimable_bytes_total,
+            "manual_only_reclaimable_targets": manual_only_reclaimable_targets_json,
             "deleted": deleted_total,
             "reclaimed_bytes": reclaimed_bytes_total,
             "kept_latest": kept_latest_total,

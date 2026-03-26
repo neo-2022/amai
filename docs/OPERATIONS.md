@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 14:17 MSK
-Ручная сверка guide/docs: 2026-03-26 14:17 MSK
+modified_at: 2026-03-26 14:25 MSK
+Ручная сверка guide/docs: 2026-03-26 14:25 MSK
 
 # Operations
 
@@ -2521,8 +2521,10 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
   - какие manual-only contours уже заведены и каким explicit cleanup command их reclaim-ить;
   - safe reclaim now;
   - aggressive preview;
+  - policy-retained hot storage, который уже covered cleanup policy, но ещё удерживается TTL/keep_latest;
   - last reclaim;
   - почему объём проекта может ещё не уменьшаться, даже если aggressive preview уже большой.
+- если объём уже policy-covered и удерживается только возрастным запасом/`keep_latest`, карточка должна surfac-ить это как `waiting`, а не как broken unmanaged growth.
 - после любого `--apply` summary сразу пересчитывается повторным dry-run, поэтому карточка и warning не должны продолжать показывать уже удалённый хвост как будто он всё ещё лежит на диске.
 
 После `reverify` live event теперь должен нести richer fields:

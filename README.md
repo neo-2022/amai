@@ -1,5 +1,5 @@
-modified_at: 2026-03-26 14:17 MSK
-Ручная сверка guide/docs: 2026-03-26 14:17 MSK
+modified_at: 2026-03-26 14:25 MSK
+Ручная сверка guide/docs: 2026-03-26 14:25 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -2156,8 +2156,10 @@ cargo run --release -- observe cleanup-artifacts --aggressive --apply
   - какие manual-only cleanup contours уже есть и каким explicit command их reclaim-ить;
   - сколько можно убрать безопасно прямо сейчас;
   - сколько можно убрать explicit aggressive path-ом;
+  - сколько rebuildable веса уже policy-covered, но всё ещё удерживается TTL/keep-latest как hot storage;
   - сколько вернул последний apply-run;
   - почему safe policy может пока держать хвост, даже если aggressive preview уже большой;
+- если rebuildable хвост уже policy-covered и просто ждёт TTL/keep-latest, карточка теперь обязана показывать это как `waiting`, а не как новый unmanaged cleanup defect;
 - после apply-run карточка больше не должна врать старым preview:
   - summary сразу пересчитывается повторным dry-run;
   - dashboard показывает текущий reclaim contour отдельно от `Last reclaim`, а не смешивает уже удалённый хвост с тем, что ещё реально лежит на диске.
