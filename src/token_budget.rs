@@ -7962,33 +7962,17 @@ async fn sync_context_pack_tool_overhead_for_events(
             &output_json,
             delivered_tokens,
         )?;
-        let attached = attach_whole_cycle_observed_to_snapshot(
+        let attached = attach_tool_overhead_observed_and_source_status_to_snapshot(
             db,
             &row,
             Some(json!({ "context_pack_id": context_pack_id })),
-            None,
-            None,
-            Some(tool_overhead_tokens),
-            None,
+            tool_overhead_tokens,
+            source_status,
         )
         .await?;
         if attached
             .as_ref()
-            .and_then(|value| value["whole_cycle_observed_attach"]["attached"].as_bool())
-            .unwrap_or(false)
-        {
-            changed = true;
-        }
-        let source_attached = attach_tool_overhead_source_status_to_snapshot(
-            db,
-            &row,
-            Some(json!({ "context_pack_id": context_pack_id })),
-            source_status,
-        )
-        .await?;
-        if source_attached
-            .as_ref()
-            .and_then(|value| value["tool_overhead_source_attach"]["attached"].as_bool())
+            .and_then(|value| value["tool_overhead_attach"]["attached"].as_bool())
             .unwrap_or(false)
         {
             changed = true;
@@ -15266,6 +15250,112 @@ async fn attach_whole_cycle_observed_to_snapshot(
     })))
 }
 
+fn apply_tool_overhead_observed_and_source_status(
+    node: &mut serde_json::Map<String, Value>,
+    tool_overhead_tokens: u64,
+    source_status: &Value,
+) -> Result<(Vec<String>, Vec<String>, Value, Value, bool)> {
+    let mut updated_fields = Vec::new();
+    let mut retained_fields = Vec::new();
+    {
+        let whole_cycle = ensure_nested_object(node, "whole_cycle_observed")?;
+        apply_whole_cycle_observed_token(
+            whole_cycle,
+            "tool_overhead_tokens",
+            Some(tool_overhead_tokens),
+            &mut updated_fields,
+            &mut retained_fields,
+        )?;
+    }
+    let source_updated = {
+        let whole_cycle_source = ensure_nested_object(node, "whole_cycle_observed_source")?;
+        let existing = whole_cycle_source.get("tool_overhead");
+        let updated = existing != Some(source_status);
+        if updated {
+            whole_cycle_source.insert("tool_overhead".to_string(), source_status.clone());
+        }
+        updated
+    };
+    Ok((
+        updated_fields.clone(),
+        retained_fields,
+        node.get("whole_cycle_observed")
+            .cloned()
+            .unwrap_or(Value::Null),
+        node.get("whole_cycle_observed_source")
+            .and_then(|value| value["tool_overhead"].as_object().map(|_| value["tool_overhead"].clone()))
+            .unwrap_or_else(|| {
+                node.get("whole_cycle_observed_source")
+                    .and_then(|value| value.get("tool_overhead"))
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            }),
+        !updated_fields.is_empty() || source_updated,
+    ))
+}
+
+async fn attach_tool_overhead_observed_and_source_status_to_snapshot(
+    db: &Client,
+    row: &ObservabilitySnapshotRecord,
+    selector: Option<Value>,
+    tool_overhead_tokens: u64,
+    source_status: Value,
+) -> Result<Option<Value>> {
+    let mut payload = row.payload.clone();
+    let preserved_source_event_id = preserved_snapshot_source_event_id(db, row).await?;
+    preserve_observability_source_event_id(&mut payload, preserved_source_event_id.as_deref())?;
+    let (
+        event_id,
+        correlation_id,
+        updated_fields,
+        retained_fields,
+        whole_cycle_observed,
+        tool_overhead_source,
+        attached,
+    ) = {
+        let node = payload["token_budget_event"]
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("token budget payload missing token_budget_event"))?;
+        let event_id = node.get("event_id").cloned().unwrap_or(Value::Null);
+        let correlation_id = node.get("correlation_id").cloned().unwrap_or(Value::Null);
+        let (
+            updated_fields,
+            retained_fields,
+            whole_cycle_observed,
+            tool_overhead_source,
+            attached,
+        ) = apply_tool_overhead_observed_and_source_status(
+            node,
+            tool_overhead_tokens,
+            &source_status,
+        )?;
+        (
+            event_id,
+            correlation_id,
+            updated_fields,
+            retained_fields,
+            whole_cycle_observed,
+            tool_overhead_source,
+            attached,
+        )
+    };
+    postgres::update_observability_snapshot_payload(db, &row.snapshot_id, &payload).await?;
+    Ok(Some(json!({
+        "tool_overhead_attach": {
+            "selector": selector.unwrap_or(Value::Null),
+            "snapshot_id": row.snapshot_id,
+            "event_id": event_id,
+            "correlation_id": correlation_id,
+            "updated_fields": updated_fields,
+            "retained_fields": retained_fields,
+            "whole_cycle_observed": whole_cycle_observed,
+            "tool_overhead_source": tool_overhead_source,
+            "attached": attached,
+            "note": "Tool-overhead whole-cycle tokens and source status are attached atomically so provenance updates cannot overwrite freshly materialized tool_overhead tokens."
+        }
+    })))
+}
+
 async fn attach_tool_overhead_source_status_to_snapshot(
     db: &Client,
     row: &ObservabilitySnapshotRecord,
@@ -21641,6 +21731,49 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             status["missing_source_state_sample"][0]["state"],
             "missing_context_pack_identity_irrecoverable"
+        );
+    }
+
+    #[test]
+    fn tool_overhead_atomic_attach_keeps_tokens_when_source_status_updates() {
+        let mut payload = json!({
+            "token_budget_event": {
+                "event_id": "event-tool-overhead-attach",
+                "correlation_id": "event-tool-overhead-attach",
+                "whole_cycle_observed": {
+                    "tool_overhead_tokens": null
+                },
+                "whole_cycle_observed_source": {}
+            }
+        });
+        let node = payload["token_budget_event"]
+            .as_object_mut()
+            .expect("token budget event");
+        let source_status = json!({
+            "state": "secondary_context_pack_match_materialized",
+            "source_kind": "context_pack_query_time_match_v1",
+            "resolution_condition": "already_materialized"
+        });
+
+        let (updated_fields, retained_fields, whole_cycle_observed, tool_overhead_source, attached) =
+            super::apply_tool_overhead_observed_and_source_status(node, 2077, &source_status)
+                .expect("apply tool overhead attach");
+
+        assert!(attached);
+        assert_eq!(updated_fields, vec!["tool_overhead_tokens".to_string()]);
+        assert!(retained_fields.is_empty());
+        assert_eq!(whole_cycle_observed["tool_overhead_tokens"], 2077);
+        assert_eq!(
+            tool_overhead_source["state"],
+            "secondary_context_pack_match_materialized"
+        );
+        assert_eq!(
+            payload["token_budget_event"]["whole_cycle_observed"]["tool_overhead_tokens"],
+            2077
+        );
+        assert_eq!(
+            payload["token_budget_event"]["whole_cycle_observed_source"]["tool_overhead"]["state"],
+            "secondary_context_pack_match_materialized"
         );
     }
 
