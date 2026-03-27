@@ -5621,6 +5621,13 @@ fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Valu
             "Этот surface оставляет boundary semantics отдельным review/export слоем: он показывает measured strict slice и explicit continuity boundary без operational same-meter детализации."
         }
     };
+    let note = if frozen_gap_review_surface["state"].as_str() == Some("review_required") {
+        format!(
+            "{note} Дополнительно exact raw history здесь ещё честно unavailable: irrecoverable historical debt уже требует отдельного frozen-gap review и запрещает claim raw exact history."
+        )
+    } else {
+        note.to_string()
+    };
     json!({
         "same_meter_as_client_limit": same_meter_as_client_limit,
         "alignment_state": alignment["alignment_state"].clone(),
@@ -12434,11 +12441,27 @@ fn build_product_headline(
         ),
         _ => None,
     };
+    let frozen_gap_note = if client_limit_boundary_semantics["frozen_gap_review_surface"]["state"]
+        .as_str()
+        == Some("review_required")
+    {
+        Some(
+            "Raw exact history здесь дополнительно unavailable: irrecoverable historical debt уже требует отдельного frozen-gap review.",
+        )
+    } else {
+        None
+    };
     let annotate_note = |base: &str| -> String {
-        match boundary_note {
-            Some(extra) => format!("{base} {extra}"),
-            None => base.to_string(),
+        let mut note = base.to_string();
+        if let Some(extra) = boundary_note {
+            note.push(' ');
+            note.push_str(extra);
         }
+        if let Some(extra) = frozen_gap_note {
+            note.push(' ');
+            note.push_str(extra);
+        }
+        note
     };
 
     if counted_events > 0 {
@@ -20742,6 +20765,88 @@ effective_to_epoch_ms = 2000
                 .as_str()
                 .unwrap_or_default()
                 .contains("headline не равен клиентскому лимиту")
+        );
+    }
+
+    #[test]
+    fn product_headline_appends_frozen_gap_review_note_when_required() {
+        let headline = build_product_headline(
+            &json!({
+                "events_total": 12,
+                "counted_events": 7,
+                "preliminary": false,
+                "verified_effective_savings_pct": 28.4,
+                "effective_savings_pct": 31.2,
+                "verified_effective_saved_tokens": 184220,
+                "total_effective_saved_tokens": 200000,
+                "quality_ok_rate": 96.1,
+                "fallback_rate": 3.8,
+                "client_limit_meter_alignment": {
+                    "alignment_state": "whole_cycle_observed_explicit_boundary_not_meter_equivalent",
+                    "baseline_equivalence": {
+                        "state": "baseline_component_semantics_explicit_boundary"
+                    },
+                    "strict_client_meter_slice": {
+                        "state": "strict_slice_partial_lower_bound",
+                        "lower_bound_tokens": 320
+                    },
+                    "explicit_boundary_surface": {
+                        "state": "amai_continuity_boundary"
+                    },
+                    "continuity_boundary_rollup": {
+                        "state": "amai_continuity_boundary_observed",
+                        "observed_tokens": 50329
+                    },
+                    "frozen_gap_review_surface": {
+                        "state": "review_required"
+                    }
+                }
+            }),
+            "окно Codex 5 часов",
+            None,
+        );
+        assert!(
+            headline["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("frozen-gap review")
+        );
+    }
+
+    #[test]
+    fn client_limit_boundary_review_surface_appends_frozen_gap_note_when_required() {
+        let surface = super::build_client_limit_boundary_review_surface(&json!({
+            "client_limit_meter_alignment": {
+                "same_meter_as_client_limit": false,
+                "alignment_state": "whole_cycle_observed_explicit_boundary_not_meter_equivalent",
+                "baseline_equivalence": {
+                    "state": "baseline_component_semantics_explicit_boundary"
+                },
+                "strict_client_meter_slice": {
+                    "state": "strict_slice_partial_lower_bound"
+                },
+                "explicit_boundary_surface": {
+                    "state": "amai_continuity_boundary"
+                },
+                "continuity_boundary_rollup": {
+                    "state": "amai_continuity_boundary_observed"
+                },
+                "pre_amai_baseline_source_status": {
+                    "state": "materialized"
+                },
+                "exact_pair_status": {
+                    "state": "exact_pair_blocked"
+                },
+                "frozen_gap_review_surface": {
+                    "state": "review_required"
+                }
+            }
+        }));
+        assert!(
+            surface["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("raw exact history")
         );
     }
 
