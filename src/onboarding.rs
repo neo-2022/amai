@@ -2370,6 +2370,13 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
         client_budget_enforcement["reply_execution_gate_version"]
             .as_str()
             .unwrap_or("client-reply-budget-gate-v1");
+    let client_budget_guard_enforcement_flag = client_budget_enforcement["guard_enforcement_flag"]
+        .as_str()
+        .unwrap_or("--enforce-reply-gate");
+    let client_budget_guard_enforcement_exit_on_blocking =
+        client_budget_enforcement["guard_enforcement_exit_on_blocking"]
+            .as_bool()
+            .unwrap_or(true);
     let client_budget_must_check_before_each_reply =
         client_budget_enforcement["must_check_before_each_substantive_reply"]
             .as_bool()
@@ -2412,7 +2419,7 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
             .unwrap_or(false);
 
     Ok(format!(
-        "Перед первым содержательным ответом в новом или resumed чате, а затем перед каждым следующим содержательным ответом, пока этот чат жив:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала прочитай machine-readable startup contract `{}` (relative path `{}`) и используй его как source-of-truth, а не этот markdown-блок.\n3. Этот artifact обязан быть прочитан до MCP tool call: {}.\n4. Если startup contract artifact отсутствует или не читается, fail-closed: {}.\n5. Проверь, что {} = \"{}\"; при mismatch fail-closed: {}.\n6. Затем вызови MCP tool `{tool}`.\n7. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n8. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n9. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n10. После startup прочитай live runtime artifact `{}`; его пишет `{}` и он должен нести `{}`.\n11. Считай literal `workspace_runtime_state_artifact_version = \"{runtime_state_artifact_version}\"` обязательным pin для этого runtime artifact; если version отличается, fail-closed и не доверяй restore.\n12. Из runtime artifact отдельно прочитай `{}` и используй его как immediate startup gate для auto-return.\n13. Считай literal `{gate_semantics_consistent_field} = true` обязательным доказательством, что runtime artifact согласован с pinned startup contract; если поле отсутствует или не true, fail-closed: {}.\n14. Считай literal `{startup_execution_gate_field}.{gate_must_follow_field} = true` жёстким запретом на unrelated work до выполнения startup_next_action.\n15. Считай literal `{startup_execution_gate_field}.{gate_unrelated_work_allowed_field} = false` жёстким запретом на unrelated work.\n16. Считай literal `{startup_execution_gate_field}.{gate_prompt_read_field} = true` обязательством сначала прочитать `chat_start_restore.prompt_text` до первого ответа.\n17. Считай literal `{startup_execution_gate_field}.{gate_required_action_kind_field} = \"{required_action_kind}\"` pinned action-kind для required return path.\n18. Считай literal `{startup_execution_gate_field}.{gate_no_silent_drop_field} = true` прямым запретом на silent drop pending return линии.\n19. Если direct file-read runtime artifact неудобен, используй pinned fallback CLI: `cargo run -- {} --repo-root \"{}\" --json`.\n20. После restore обязательно подними поля: {required_summary_fields}.\n21. Верни в активную рабочую линию obligations: {restored_obligations}.\n22. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n23. `{startup_next_action_field}` считается первым обязательным действием после startup.\n24. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n25. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n26. Silent drop запрещён: {}.\n27. Во время работы держи live client-limit discipline: считай literal `live_client_budget_enforcement.must_check_before_each_substantive_reply = {}` обязанностью проверять machine-readable guard `{}` перед каждым содержательным ответом.\n28. После проверки сразу прочитай `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}` и считай literal `gate_version = \"{client_budget_reply_execution_gate_version}\"` pinned execution gate для следующего ответа.\n29. Если последняя проверка guard старше `live_client_budget_enforcement.max_guard_age_seconds = {}` секунд или её нет, сначала обнови guard командой `cargo run -- {}`.\n30. Считай literal `live_client_budget_enforcement.stale_guard_requires_refresh = {}` запретом на ответ по устаревшему meter.\n31. Если `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}.must_rotate_before_reply = true`, сначала сохрани handoff и продолжи только в свежем чате через continuity startup: `save_handoff_before_rotate = {}` и `fresh_chat_requires_continuity_startup = {}`.\n32. Если `{client_budget_guard_summary_field}.{client_budget_rotate_now_field} = true` или `{client_budget_guard_summary_field}.{client_budget_status_label_field}` равен одному из [{client_budget_rotate_status_labels}], трактуй это как ту же rotate-law и не пытайся продолжать в текущем thread.\n33. Не добивай текущий thread до выгорания 5h лимита только потому, что внутренний Amai-slice выглядит экономным: для клиента source-of-truth — полная шкала live-turn, rate-limit contour и `observe client-budget-guard`; literal `full_scale_client_truth_required = {}`.\n34. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
+        "Перед первым содержательным ответом в новом или resumed чате, а затем перед каждым следующим содержательным ответом, пока этот чат жив:\n1. Считай текущий workspace проектом с repo root `{}`.\n2. Сначала прочитай machine-readable startup contract `{}` (relative path `{}`) и используй его как source-of-truth, а не этот markdown-блок.\n3. Этот artifact обязан быть прочитан до MCP tool call: {}.\n4. Если startup contract artifact отсутствует или не читается, fail-closed: {}.\n5. Проверь, что {} = \"{}\"; при mismatch fail-closed: {}.\n6. Затем вызови MCP tool `{tool}`.\n7. Передай `repo_root = \"{}\"` и `namespace = \"{namespace}\"`.\n8. Если registered project code уже известен клиенту, передай и `project`; иначе требуй exact project binding по `repo_root`.\n9. Не переходи к `{}` и другим новым действиям, пока не получен `continuity_startup_summary`.\n10. После startup прочитай live runtime artifact `{}`; его пишет `{}` и он должен нести `{}`.\n11. Считай literal `workspace_runtime_state_artifact_version = \"{runtime_state_artifact_version}\"` обязательным pin для этого runtime artifact; если version отличается, fail-closed и не доверяй restore.\n12. Из runtime artifact отдельно прочитай `{}` и используй его как immediate startup gate для auto-return.\n13. Считай literal `{gate_semantics_consistent_field} = true` обязательным доказательством, что runtime artifact согласован с pinned startup contract; если поле отсутствует или не true, fail-closed: {}.\n14. Считай literal `{startup_execution_gate_field}.{gate_must_follow_field} = true` жёстким запретом на unrelated work до выполнения startup_next_action.\n15. Считай literal `{startup_execution_gate_field}.{gate_unrelated_work_allowed_field} = false` жёстким запретом на unrelated work.\n16. Считай literal `{startup_execution_gate_field}.{gate_prompt_read_field} = true` обязательством сначала прочитать `chat_start_restore.prompt_text` до первого ответа.\n17. Считай literal `{startup_execution_gate_field}.{gate_required_action_kind_field} = \"{required_action_kind}\"` pinned action-kind для required return path.\n18. Считай literal `{startup_execution_gate_field}.{gate_no_silent_drop_field} = true` прямым запретом на silent drop pending return линии.\n19. Если direct file-read runtime artifact неудобен, используй pinned fallback CLI: `cargo run -- {} --repo-root \"{}\" --json`.\n20. После restore обязательно подними поля: {required_summary_fields}.\n21. Верни в активную рабочую линию obligations: {restored_obligations}.\n22. Смотри поля `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}` и `{active_lease_field}`.\n23. `{startup_next_action_field}` считается первым обязательным действием после startup.\n24. Если `{startup_next_action_field}.action_kind == \"{required_action_kind}\"`, трактуй это как required_return_task и выполни именно этот return path до unrelated work: {}.\n25. Если `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"`, не захватывай линию молча и follow startup_next_action first: {}.\n26. Silent drop запрещён: {}.\n27. Во время работы держи live client-limit discipline: считай literal `live_client_budget_enforcement.must_check_before_each_substantive_reply = {}` обязанностью проверять machine-readable guard `{}` перед каждым содержательным ответом.\n28. Для hard gate automation используй тот же guard с flag `{client_budget_guard_enforcement_flag}`; literal `guard_enforcement_exit_on_blocking = {}` означает: если reply уже нужно остановить и перевести в свежий чат, команда обязана выйти с non-zero exit code.\n29. После проверки сразу прочитай `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}` и считай literal `gate_version = \"{client_budget_reply_execution_gate_version}\"` pinned execution gate для следующего ответа.\n30. Если последняя проверка guard старше `live_client_budget_enforcement.max_guard_age_seconds = {}` секунд или её нет, сначала обнови guard командой `cargo run -- {}`.\n31. Считай literal `live_client_budget_enforcement.stale_guard_requires_refresh = {}` запретом на ответ по устаревшему meter.\n32. Если `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}.must_rotate_before_reply = true`, сначала сохрани handoff и продолжи только в свежем чате через continuity startup: `save_handoff_before_rotate = {}` и `fresh_chat_requires_continuity_startup = {}`.\n33. Если `{client_budget_guard_summary_field}.{client_budget_rotate_now_field} = true` или `{client_budget_guard_summary_field}.{client_budget_status_label_field}` равен одному из [{client_budget_rotate_status_labels}], трактуй это как ту же rotate-law и не пытайся продолжать в текущем thread.\n34. Не добивай текущий thread до выгорания 5h лимита только потому, что внутренний Amai-slice выглядит экономным: для клиента source-of-truth — полная шкала live-turn, rate-limit contour и `observe client-budget-guard`; literal `full_scale_client_truth_required = {}`.\n35. Если startup вернул любой из fail-closed сценариев ({fail_closed}), не угадывай continuity и прямо сообщай о блокере.",
         repo_root.display(),
         contract_path.display(),
         startup_contract_relative_path,
@@ -2467,6 +2474,11 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
             "false"
         },
         client_budget_guard_summary_field,
+        if client_budget_guard_enforcement_exit_on_blocking {
+            "true"
+        } else {
+            "false"
+        },
         client_budget_max_guard_age_seconds,
         client_budget_guard_command,
         if client_budget_stale_guard_requires_refresh {
@@ -2810,6 +2822,8 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains(
             "live_client_budget_enforcement.must_check_before_each_substantive_reply = true"
         ));
+        assert!(text.contains("--enforce-reply-gate"));
+        assert!(text.contains("guard_enforcement_exit_on_blocking = true"));
         assert!(text.contains("client_budget_guard.reply_execution_gate"));
         assert!(text.contains("gate_version = \"client-reply-budget-gate-v1\""));
         assert!(text.contains("live_client_budget_enforcement.max_guard_age_seconds = 10"));
@@ -2919,7 +2933,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["startup_contract"]["contract_version"],
-            json!("continuity-startup-contract-v11")
+            json!("continuity-startup-contract-v12")
         );
         assert_eq!(
             payload["startup_contract"]["purpose"],
@@ -2938,6 +2952,14 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["reply_execution_gate_version"],
             json!("client-reply-budget-gate-v1")
+        );
+        assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["guard_enforcement_flag"],
+            json!("--enforce-reply-gate")
+        );
+        assert_eq!(
+            payload["startup_contract"]["live_client_budget_enforcement"]["guard_enforcement_exit_on_blocking"],
+            json!(true)
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["must_check_before_each_substantive_reply"],

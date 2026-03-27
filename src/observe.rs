@@ -230,12 +230,26 @@ pub async fn print_guardrails(cfg: &AppConfig) -> Result<()> {
     }
 }
 
-pub async fn print_client_budget_guard(cfg: &AppConfig) -> Result<()> {
+pub async fn print_client_budget_guard(cfg: &AppConfig, enforce_reply_gate: bool) -> Result<()> {
     maybe_cleanup_local_artifacts().await?;
     let snapshot = collect_snapshot_preview(cfg).await?;
     let guard = dashboard::current_session_budget_guard(&snapshot);
     println!("{}", serde_json::to_string_pretty(&guard)?);
+    if enforce_reply_gate && client_budget_guard_blocks_reply(&guard) {
+        return Err(anyhow!(
+            "client budget reply gate blocked this reply: rotate into a fresh chat first"
+        ));
+    }
     Ok(())
+}
+
+fn client_budget_guard_blocks_reply(guard: &Value) -> bool {
+    guard["reply_execution_gate"]["must_rotate_before_reply"]
+        .as_bool()
+        .or_else(|| guard["reply_execution_gate"]["blocking"].as_bool())
+        .or_else(|| guard["should_rotate_chat_now"].as_bool())
+        .or_else(|| guard["should_rotate_chat_soon"].as_bool())
+        .unwrap_or(false)
 }
 
 pub async fn print_retention_cleanup(
@@ -1836,11 +1850,7 @@ async fn metrics_handler(State(state): State<ObserveState>) -> impl IntoResponse
 
 async fn dashboard_page_handler(State(state): State<ObserveState>) -> impl IntoResponse {
     let html = dashboard::render_html(state.dashboard_refresh_ms);
-    (
-        no_store_headers("text/html; charset=utf-8"),
-        Html(html),
-    )
-        .into_response()
+    (no_store_headers("text/html; charset=utf-8"), Html(html)).into_response()
 }
 
 async fn grafana_password_help_handler() -> impl IntoResponse {
@@ -1932,14 +1942,12 @@ async fn favicon_handler() -> impl IntoResponse {
 async fn dashboard_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
     refresh_client_live_meter_on_request(&state).await;
     match cached_dashboard_payload(&state).await {
-        Ok(payload) => {
-            (
-                StatusCode::OK,
-                no_store_headers("application/json; charset=utf-8"),
-                serde_json::to_string_pretty(&payload).unwrap_or_default(),
-            )
-                .into_response()
-        }
+        Ok(payload) => (
+            StatusCode::OK,
+            no_store_headers("application/json; charset=utf-8"),
+            serde_json::to_string_pretty(&payload).unwrap_or_default(),
+        )
+            .into_response(),
         Err(error) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
@@ -1951,14 +1959,12 @@ async fn dashboard_api_handler(State(state): State<ObserveState>) -> impl IntoRe
 async fn snapshot_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
     refresh_client_live_meter_on_request(&state).await;
     match cached_snapshot_with_meta(&state).await {
-        Ok(snapshot) => {
-            (
-                StatusCode::OK,
-                no_store_headers("application/json; charset=utf-8"),
-                serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
-            )
-                .into_response()
-        }
+        Ok(snapshot) => (
+            StatusCode::OK,
+            no_store_headers("application/json; charset=utf-8"),
+            serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+        )
+            .into_response(),
         Err(error) => (
             StatusCode::SERVICE_UNAVAILABLE,
             format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
@@ -1999,9 +2005,7 @@ async fn healthz_handler(State(state): State<ObserveState>) -> impl IntoResponse
     }
 }
 
-fn no_store_headers(
-    content_type: &'static str,
-) -> [(header::HeaderName, HeaderValue); 4] {
+fn no_store_headers(content_type: &'static str) -> [(header::HeaderName, HeaderValue); 4] {
     [
         (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
         (
@@ -2143,12 +2147,12 @@ async fn maybe_refresh_client_live_meter(state: &ObserveState) -> Result<()> {
 
 fn cached_client_live_meter_state(snapshot: &Value) -> CachedClientLiveMeterState {
     let meter = &snapshot["token_budget_report"]["client_live_meter"];
-    let working_state_thread_id = snapshot["latest_repo_working_state_restore"]
-        ["working_state_restore"]["thread_id"]
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+    let working_state_thread_id =
+        snapshot["latest_repo_working_state_restore"]["working_state_restore"]["thread_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
     CachedClientLiveMeterState {
         working_state_thread_id,
         thread_id: meter["thread_id"]
@@ -4303,5 +4307,28 @@ mod tests {
             thresholds["observability"]["schema_version"].as_u64(),
             Some(2)
         );
+    }
+
+    #[test]
+    fn client_budget_guard_blocks_reply_when_reply_execution_gate_requires_rotate() {
+        let guard = json!({
+            "reply_execution_gate": {
+                "must_rotate_before_reply": true
+            }
+        });
+        assert!(super::client_budget_guard_blocks_reply(&guard));
+    }
+
+    #[test]
+    fn client_budget_guard_allows_reply_when_rotate_flags_are_clear() {
+        let guard = json!({
+            "reply_execution_gate": {
+                "must_rotate_before_reply": false,
+                "blocking": false
+            },
+            "should_rotate_chat_now": false,
+            "should_rotate_chat_soon": false
+        });
+        assert!(!super::client_budget_guard_blocks_reply(&guard));
     }
 }

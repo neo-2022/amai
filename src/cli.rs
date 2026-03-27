@@ -167,7 +167,7 @@ pub enum ObserveCommand {
     Snapshot,
     SlaCheck,
     Guardrails,
-    ClientBudgetGuard,
+    ClientBudgetGuard(ObserveClientBudgetGuardArgs),
     TokenReport(ObserveTokenReportArgs),
     TokenEvidencePack(ObserveTokenEvidencePackArgs),
     TokenContractualSources(ObserveTokenContractualSourcesArgs),
@@ -182,6 +182,12 @@ pub enum ObserveCommand {
     RepairTokenLedger(ObserveRepairTokenLedgerArgs),
     ReverifyTokenLedger(ObserveReverifyTokenLedgerArgs),
     Serve(ObserveServeArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveClientBudgetGuardArgs {
+    #[arg(long, default_value_t = false)]
+    pub enforce_reply_gate: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1001,6 +1007,26 @@ mod tests {
         let Command::Observe { command } = cli.command else {
             panic!("expected observe command");
         };
-        assert!(matches!(command, ObserveCommand::ClientBudgetGuard));
+        let ObserveCommand::ClientBudgetGuard(args) = command else {
+            panic!("expected client-budget-guard command");
+        };
+        assert!(!args.enforce_reply_gate);
+    }
+
+    #[test]
+    fn observe_client_budget_guard_enforce_flag_cli_parses() {
+        let cli = Cli::parse_from([
+            "amai",
+            "observe",
+            "client-budget-guard",
+            "--enforce-reply-gate",
+        ]);
+        let Command::Observe { command } = cli.command else {
+            panic!("expected observe command");
+        };
+        let ObserveCommand::ClientBudgetGuard(args) = command else {
+            panic!("expected client-budget-guard command");
+        };
+        assert!(args.enforce_reply_gate);
     }
 }

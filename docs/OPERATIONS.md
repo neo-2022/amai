@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 21:08 MSK
-Ручная сверка guide/docs: 2026-03-27 21:08 MSK
+modified_at: 2026-03-27 21:24 MSK
+Ручная сверка guide/docs: 2026-03-27 21:24 MSK
 
 # Operations
 
@@ -943,6 +943,8 @@ cargo run -- mcp serve
   - `must_check_before_each_substantive_reply = true`;
   - `reply_execution_gate_field = reply_execution_gate`;
   - `reply_execution_gate_version = client-reply-budget-gate-v1`;
+  - `guard_enforcement_flag = --enforce-reply-gate`;
+  - `guard_enforcement_exit_on_blocking = true`;
   - `max_guard_age_seconds = 10`;
   - `stale_guard_requires_refresh = true`;
   - `rotate_status_labels = ["новый чат рекомендован", "новый чат нужен сейчас"]`;
@@ -955,6 +957,10 @@ cargo run -- mcp serve
   source-of-truth для решения о следующем ответе теперь `client_budget_guard.reply_execution_gate`
   с explicit `blocking`, `must_rotate_before_reply`, `action_kind`,
   `guard_observed_at_epoch_ms` и `guard_fresh_until_epoch_ms`.
+- Если automation нужен hard stop без разбора JSON вручную, используйте
+  `cargo run -- observe client-budget-guard --enforce-reply-gate`:
+  он печатает тот же guard, но завершает команду non-zero exit code, когда reply уже должен
+  быть остановлен и переведён в свежий чат.
 - status/runtime audit теперь ещё отдельно публикует `gate_semantics_consistent`;
   он обязан падать в `false`, если live gate противоречит:
   - pinned contract semantics;
