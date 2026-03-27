@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 20:34 MSK
-Ручная сверка guide/docs: 2026-03-27 20:34 MSK
+modified_at: 2026-03-27 20:48 MSK
+Ручная сверка guide/docs: 2026-03-27 20:48 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1261,7 +1261,8 @@ preview, а не только raw count.
 - per-tool `summary_field`, который внешний клиент может ожидать в structured output.
 
 Отдельно `startup_contracts` теперь machine-readable фиксируют, что клиент
-обязан делать до первого содержательного хода:
+обязан делать до первого содержательного хода и затем повторять перед каждым
+следующим содержательным ответом, пока чат жив:
 - вызвать `amai_continuity_startup`;
 - использовать namespace `continuity` по умолчанию;
 - не переходить к retrieval и новым действиям, пока не получен
@@ -1289,6 +1290,13 @@ preview, а не только raw count.
   - `working_state_restore.client_budget_guard` теперь обязан опираться на тот же full-turn
     source of truth, что и живая current-session card; slice-only tracked savings нельзя
     использовать как основание для startup verdict по клиентскому лимиту.
+  - отдельный `live_client_budget_enforcement` contour теперь machine-readable pin-ит:
+    - `must_check_before_each_substantive_reply = true`;
+    - `max_guard_age_seconds = 10`;
+    - `stale_guard_requires_refresh = true`;
+    - `rotate_status_labels = ["новый чат рекомендован", "новый чат нужен сейчас"]`;
+    - `save_handoff_before_rotate = true`;
+    - `fresh_chat_requires_continuity_startup = true`.
 
 Следующий practical contour теперь тоже materialized не только в docs, но и в onboarding:
 - `VS Code` получает managed workspace startup instructions
@@ -1822,6 +1830,9 @@ Fail-closed правило для расхождений:
     `новый чат нужен сейчас`, либо полный live-turn помечен как `не доказано` на раздутом
     turn, агент не должен дожигать текущий thread и обязан продолжать через fresh chat +
     continuity startup;
+  - этот же закон теперь требует recheck не реже, чем раз в `10` секунд:
+    если последняя machine-readable проверка старше `max_guard_age_seconds`, supported client
+    обязан сначала обновить `cargo run -- observe client-budget-guard`, а уже потом отвечать;
   - для этого в observe-layer теперь есть отдельный machine-readable truth-source:
     `cargo run -- observe client-budget-guard`;
   - этот contour обязан говорить не prose-эвфемизмами, а прямыми полями вроде

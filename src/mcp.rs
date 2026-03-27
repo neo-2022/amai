@@ -558,6 +558,87 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract lost startup_execution_gate_enforcement semantics"
         ));
     }
+    if startup_contract["live_client_budget_enforcement"]["guard_command"].as_str()
+        != Some("observe client-budget-guard")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement.guard_command"
+        ));
+    }
+    if startup_contract["live_client_budget_enforcement"]["guard_summary_field"].as_str()
+        != Some("client_budget_guard")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement.guard_summary_field"
+        ));
+    }
+    if startup_contract["live_client_budget_enforcement"]
+        ["must_check_before_each_substantive_reply"]
+        .as_bool()
+        != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract does not require live client-budget guard before each substantive reply"
+        ));
+    }
+    if startup_contract["live_client_budget_enforcement"]["max_guard_age_seconds"].as_u64()
+        != Some(10)
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement.max_guard_age_seconds = 10"
+        ));
+    }
+    if startup_contract["live_client_budget_enforcement"]["stale_guard_requires_refresh"].as_bool()
+        != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract does not require stale live client-budget guard refresh"
+        ));
+    }
+    if startup_contract["live_client_budget_enforcement"]["rotate_now_field"].as_str()
+        != Some("should_rotate_chat_now")
+        || startup_contract["live_client_budget_enforcement"]["rotate_soon_field"].as_str()
+            != Some("should_rotate_chat_soon")
+        || startup_contract["live_client_budget_enforcement"]["status_label_field"].as_str()
+            != Some("status_label")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement rotate field mapping"
+        ));
+    }
+    let rotate_status_labels = startup_contract["live_client_budget_enforcement"]
+        ["rotate_status_labels"]
+        .as_array()
+        .ok_or_else(|| {
+            anyhow!("MCP startup contract is missing live_client_budget_enforcement.rotate_status_labels")
+        })?;
+    if !rotate_status_labels
+        .iter()
+        .any(|value| value.as_str() == Some("новый чат рекомендован"))
+        || !rotate_status_labels
+            .iter()
+            .any(|value| value.as_str() == Some("новый чат нужен сейчас"))
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement rotate status labels"
+        ));
+    }
+    if startup_contract["live_client_budget_enforcement"]["save_handoff_before_rotate"]
+        .as_bool()
+        != Some(true)
+        || startup_contract["live_client_budget_enforcement"]
+            ["fresh_chat_requires_continuity_startup"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["live_client_budget_enforcement"]
+            ["full_scale_client_truth_required"]
+            .as_bool()
+            != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement truth semantics"
+        ));
+    }
 
     let tools = session.request("tools/list", json!({})).await?;
     let tool_names = tools["tools"]
@@ -2661,10 +2742,10 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v9",
+                "contract_version": "continuity-startup-contract-v10",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
-                "purpose": "project-scoped continuity restore before any substantive work in a new or resumed chat",
+                "purpose": "project-scoped continuity restore plus live client-budget discipline before each substantive reply in a new, resumed, or ongoing chat",
                 "must_call_before_substantive_work": true,
                 "must_call_before_tools": [
                     "amai_context_pack",
@@ -2722,6 +2803,23 @@ fn protocol_manifest() -> Value {
                     "must_read_prompt_text_true_requires_prompt_before_reply": true,
                     "required_action_kind_resume_required_value": "resume_required_return_task",
                     "no_silent_drop_must_be_true": true
+                },
+                "live_client_budget_enforcement": {
+                    "guard_command": "observe client-budget-guard",
+                    "guard_summary_field": "client_budget_guard",
+                    "must_check_before_each_substantive_reply": true,
+                    "max_guard_age_seconds": 10,
+                    "stale_guard_requires_refresh": true,
+                    "rotate_now_field": "should_rotate_chat_now",
+                    "rotate_soon_field": "should_rotate_chat_soon",
+                    "status_label_field": "status_label",
+                    "rotate_status_labels": [
+                        "новый чат рекомендован",
+                        "новый чат нужен сейчас"
+                    ],
+                    "save_handoff_before_rotate": true,
+                    "fresh_chat_requires_continuity_startup": true,
+                    "full_scale_client_truth_required": true
                 },
                 "required_arguments": ["project"],
                 "optional_arguments": ["repo_root", "namespace", "token_source_kind"],
@@ -2844,7 +2942,7 @@ fn protocol_manifest() -> Value {
                 "purpose": "safe onboarding without mixing projects",
             },
             "amai-continuity-startup": {
-                "purpose": "project-scoped startup guidance for continuity restore before substantive work",
+                "purpose": "project-scoped startup guidance for continuity restore and live client-budget discipline before each substantive reply",
             },
             "amai-context-pack": {
                 "purpose": "project-scoped retrieval guidance for context-pack requests",
@@ -4827,7 +4925,7 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v9")
+            Some("continuity-startup-contract-v10")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["must_call_before_substantive_work"].as_bool(),
@@ -5157,7 +5255,31 @@ mod tests {
         );
         assert_eq!(
             manifest["prompt_contracts"]["amai-continuity-startup"]["purpose"].as_str(),
-            Some("project-scoped startup guidance for continuity restore before substantive work")
+            Some(
+                "project-scoped startup guidance for continuity restore and live client-budget discipline before each substantive reply"
+            )
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
+            Some("continuity-startup-contract-v10")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["guard_command"]
+                .as_str(),
+            Some("observe client-budget-guard")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["must_check_before_each_substantive_reply"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["max_guard_age_seconds"]
+                .as_u64(),
+            Some(10)
         );
         assert_eq!(
             manifest["error_contracts"]["tool_execution_failed"]["error_class"].as_str(),
