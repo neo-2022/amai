@@ -1693,7 +1693,11 @@ async fn metrics_handler(State(state): State<ObserveState>) -> impl IntoResponse
 
 async fn dashboard_page_handler(State(state): State<ObserveState>) -> impl IntoResponse {
     let html = dashboard::render_html(state.dashboard_refresh_ms);
-    Html(html).into_response()
+    (
+        no_store_headers("text/html; charset=utf-8"),
+        Html(html),
+    )
+        .into_response()
 }
 
 async fn grafana_password_help_handler() -> impl IntoResponse {
@@ -1786,13 +1790,9 @@ async fn dashboard_api_handler(State(state): State<ObserveState>) -> impl IntoRe
     refresh_client_live_meter_on_request(&state).await;
     match cached_dashboard_payload(&state).await {
         Ok(payload) => {
-            let headers = [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json; charset=utf-8"),
-            )];
             (
                 StatusCode::OK,
-                headers,
+                no_store_headers("application/json; charset=utf-8"),
                 serde_json::to_string_pretty(&payload).unwrap_or_default(),
             )
                 .into_response()
@@ -1809,13 +1809,9 @@ async fn snapshot_api_handler(State(state): State<ObserveState>) -> impl IntoRes
     refresh_client_live_meter_on_request(&state).await;
     match cached_snapshot_with_meta(&state).await {
         Ok(snapshot) => {
-            let headers = [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json; charset=utf-8"),
-            )];
             (
                 StatusCode::OK,
-                headers,
+                no_store_headers("application/json; charset=utf-8"),
                 serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
             )
                 .into_response()
@@ -1858,6 +1854,20 @@ async fn healthz_handler(State(state): State<ObserveState>) -> impl IntoResponse
         )
             .into_response(),
     }
+}
+
+fn no_store_headers(
+    content_type: &'static str,
+) -> [(header::HeaderName, HeaderValue); 4] {
+    [
+        (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
+        (
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+        ),
+        (header::PRAGMA, HeaderValue::from_static("no-cache")),
+        (header::EXPIRES, HeaderValue::from_static("0")),
+    ]
 }
 
 async fn refresh_observe_cache(

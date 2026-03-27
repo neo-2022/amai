@@ -267,6 +267,31 @@ pub fn render_html(refresh_ms: u64) -> String {
       line-height: 1.34;
     }
 
+    .hero-metric-card .metric-rows {
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .hero-metric-card .metric-row {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 4px;
+      padding-top: 10px;
+    }
+
+    .hero-metric-card .metric-label {
+      display: block;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .hero-metric-card .metric-row-value {
+      font-size: 13px;
+      line-height: 1.45;
+      text-align: left;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
     .hero-side {
       padding: 10px;
       display: flex;
