@@ -1503,7 +1503,7 @@ fn derive_pending_return_queue(
         .map(normalize_next_step_hint)
         .unwrap_or_default();
     let normalized_new_next_step = normalize_next_step_hint(new_next_step);
-    if previous_goal.is_empty()
+    if !is_meaningful_pending_return_headline(previous_goal)
         || previous_goal == new_headline
         || (!previous_next_step.is_empty() && previous_next_step == normalized_new_next_step)
     {
@@ -1537,7 +1537,7 @@ fn extract_pending_return_queue(
     queue.retain(|item| {
         let headline = item["headline"].as_str().unwrap_or_default();
         let next_step = item["next_step"].as_str().unwrap_or_default();
-        !headline.is_empty()
+        is_meaningful_pending_return_headline(headline)
             && !(headline == current_goal
                 && normalize_next_step_hint(next_step)
                     == normalize_next_step_hint(current_next_step))
@@ -1575,6 +1575,11 @@ fn prepend_pending_return_item(queue: &mut Vec<Value>, candidate: Value) {
     queue.insert(0, candidate);
 }
 
+fn is_meaningful_pending_return_headline(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed != "ещё нет данных"
+}
+
 fn summarize_pending_return_queue(value: &Value) -> Option<String> {
     let items = value.as_array()?;
     let rendered = items
@@ -1583,7 +1588,7 @@ fn summarize_pending_return_queue(value: &Value) -> Option<String> {
         .filter_map(|item| {
             let headline = item["headline"].as_str().unwrap_or_default();
             let next_step = item["next_step"].as_str().unwrap_or_default();
-            if headline.is_empty() {
+            if !is_meaningful_pending_return_headline(headline) {
                 None
             } else if next_step.is_empty() {
                 Some(headline.to_string())
@@ -2161,12 +2166,24 @@ fn build_execctl_resume_contract(project_task_tree: &Value, pending_return_queue
         .unwrap_or(Value::Null);
     let required_return_task = nodes
         .iter()
-        .find(|item| item["task_role"].as_str() == Some("pending_return"))
+        .find(|item| {
+            item["task_role"].as_str() == Some("pending_return")
+                && is_meaningful_pending_return_headline(
+                    item["headline"].as_str().unwrap_or_default(),
+                )
+        })
         .cloned()
         .or_else(|| {
             pending_return_queue
                 .as_array()
-                .and_then(|items| items.first().cloned())
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        is_meaningful_pending_return_headline(
+                            item["headline"].as_str().unwrap_or_default(),
+                        )
+                    })
+                })
+                .cloned()
         })
         .unwrap_or(Value::Null);
     let pending_return_count = nodes
@@ -3132,6 +3149,29 @@ mod tests {
     }
 
     #[test]
+    fn derive_pending_return_queue_skips_placeholder_previous_line() {
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "ещё нет данных",
+                "next_step": "ещё нет данных",
+                "pending_return_queue": [],
+                "state_lineage": {
+                    "authoritative_event_id": "event-123",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/home/art/agent-memory-index"
+                }
+            }
+        });
+        let queue = derive_pending_return_queue(
+            Some(&restore["working_state_restore"]),
+            "Project relocation contour",
+            "Document automatic startup behavior.",
+            42,
+        );
+        assert!(queue.is_empty());
+    }
+
+    #[test]
     fn compose_restore_bundle_surfaces_pending_return_queue() {
         let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
         let latest_handoff = ObservabilitySnapshotRecord {
@@ -3242,6 +3282,57 @@ mod tests {
             restore["project_task_ledger_summary"]
                 .as_str()
                 .is_some_and(|value| value.contains("historical_handoffs(0)"))
+        );
+    }
+
+    #[test]
+    fn compose_restore_bundle_drops_placeholder_pending_return_queue() {
+        let base = now_epoch_ms().unwrap_or(1_000_000) as i64;
+        let latest_handoff = ObservabilitySnapshotRecord {
+            snapshot_id: Uuid::new_v4(),
+            snapshot_kind: WORKING_STATE_EVENT_KIND.to_string(),
+            payload: json!({
+                "working_state_event": {
+                    "event_id": "handoff-1",
+                    "project": { "code": "art" },
+                    "namespace": { "code": "continuity" },
+                    "agent_scope": "art::continuity::default",
+                    "session_id": "session-a",
+                    "event_kind": "continuity_handoff",
+                    "headline": "Project relocation contour",
+                    "next_step_hint": "Dovetail runtime auto-start guarantees.",
+                    "summary": "Relocation contour materialized.",
+                    "recorded_at_epoch_ms": base,
+                    "pending_return_queue": [
+                        {
+                            "headline": "ещё нет данных",
+                            "next_step": "ещё нет данных",
+                            "queued_at_epoch_ms": base - 1,
+                            "resume_state": "pending_return",
+                            "queued_reason": "interrupted_by_new_handoff"
+                        }
+                    ]
+                }
+            }),
+            created_at_epoch_ms: base,
+        };
+        let bundle = compose_restore_bundle(
+            &json!({"code":"art"}),
+            &json!({"code":"continuity"}),
+            &[latest_handoff],
+        );
+        let restore = &bundle["working_state_restore"];
+        assert_eq!(restore["execctl_resume_state"], json!("clear"));
+        assert_eq!(
+            restore["execctl_resume_contract"]["resume_state"],
+            json!("clear")
+        );
+        assert_eq!(restore["pending_return_queue"], json!([]));
+        assert_eq!(restore["pending_return_summary"], Value::Null);
+        assert_eq!(restore["execctl_resume_contract_summary"], json!("clear"));
+        assert_eq!(
+            restore["startup_next_action"]["action_kind"],
+            json!("continue_active_workline")
         );
     }
 
