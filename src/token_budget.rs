@@ -7765,24 +7765,27 @@ async fn sync_context_pack_tool_overhead_for_events(
     repo_root: &Path,
     events: &[TokenBudgetEvent],
 ) -> Result<bool> {
-    let target_context_pack_ids = events
+    let target_events = events
         .iter()
         .filter(|event| {
-            event.traffic_class == "live"
+            event.snapshot_kind == "token_budget_event"
+                && event.snapshot_id.is_some()
+                && event.traffic_class == "live"
                 && event.measurement_scope == "retrieval_lower_bound"
                 && event.tool_overhead_tokens.is_none()
         })
-        .filter_map(event_context_pack_id)
-        .collect::<BTreeSet<_>>();
-    if target_context_pack_ids.is_empty() {
+        .collect::<Vec<_>>();
+    if target_events.is_empty() {
         return Ok(false);
     }
     let config = load_config(repo_root)?;
-    let latest_rows =
-        latest_token_budget_snapshots_for_context_packs(db, &target_context_pack_ids).await?;
+    let mut stored_payloads = BTreeMap::<String, Option<String>>::new();
     let mut changed = false;
-    for context_pack_id in target_context_pack_ids {
-        let Some(row) = latest_rows.get(&context_pack_id) else {
+    for event in target_events {
+        let Some(snapshot_id) = event.snapshot_id.as_ref() else {
+            continue;
+        };
+        let Some(row) = postgres::get_observability_snapshot_record(db, snapshot_id).await? else {
             continue;
         };
         let existing =
@@ -7794,12 +7797,40 @@ async fn sync_context_pack_tool_overhead_for_events(
         let delivered_tokens = row.payload["token_budget_event"]["context_pack_render"]["tokens"]
             .as_u64()
             .or_else(|| row.payload["token_budget_event"]["delivered_tokens"].as_u64())
-            .unwrap_or(0);
-        let Some(output_json) = stored_context_pack_payload_json(db, &context_pack_id).await?
-        else {
+            .unwrap_or(event.context_tokens);
+        let Some(context_pack_id) = event_context_pack_id(event) else {
             let attached = attach_tool_overhead_source_status_to_snapshot(
                 db,
-                row,
+                &row,
+                Some(json!({ "event_id": event.event_id })),
+                json!({
+                    "state": "missing_context_pack_identity_irrecoverable",
+                    "source_kind": "token_budget_event_identity_v1",
+                    "resolution_condition": "recover_legacy_context_pack_identity_or_freeze_irrecoverable_gap",
+                    "note": "This live retrieval event has no effective context_pack_id or reusable correlation fallback, so payload-based tool_overhead reconstruction cannot be linked to a stored context pack."
+                }),
+            )
+            .await?;
+            if attached
+                .as_ref()
+                .and_then(|value| value["tool_overhead_source_attach"]["attached"].as_bool())
+                .unwrap_or(false)
+            {
+                changed = true;
+            }
+            continue;
+        };
+        let output_json = if let Some(cached) = stored_payloads.get(&context_pack_id) {
+            cached.clone()
+        } else {
+            let loaded = stored_context_pack_payload_json(db, &context_pack_id).await?;
+            stored_payloads.insert(context_pack_id.clone(), loaded.clone());
+            loaded
+        };
+        let Some(output_json) = output_json else {
+            let attached = attach_tool_overhead_source_status_to_snapshot(
+                db,
+                &row,
                 Some(json!({ "context_pack_id": context_pack_id })),
                 json!({
                     "state": "context_pack_payload_missing_irrecoverable",
@@ -7825,7 +7856,7 @@ async fn sync_context_pack_tool_overhead_for_events(
         )?;
         let attached = attach_whole_cycle_observed_to_snapshot(
             db,
-            row,
+            &row,
             Some(json!({ "context_pack_id": context_pack_id })),
             None,
             None,
@@ -7842,6 +7873,10 @@ async fn sync_context_pack_tool_overhead_for_events(
         }
     }
     Ok(changed)
+}
+
+fn is_irrecoverable_tool_overhead_source_state(state: &str) -> bool {
+    state.ends_with("_irrecoverable")
 }
 
 fn is_live_continuity_restore_event(event: &TokenBudgetEvent) -> bool {
@@ -12640,10 +12675,11 @@ fn tool_overhead_observation_source_status(
     let irrecoverable_missing_live_events = missing_events
         .iter()
         .filter(|event| {
-            event.tool_overhead_source
+            event
+                .tool_overhead_source
                 .as_ref()
                 .and_then(|value| value["state"].as_str())
-                == Some("context_pack_payload_missing_irrecoverable")
+                .is_some_and(is_irrecoverable_tool_overhead_source_state)
         })
         .count() as u64;
     let recoverability_state = if missing_events.is_empty() {
@@ -14902,6 +14938,8 @@ async fn attach_whole_cycle_observed_to_snapshot(
     continuity_restore_tokens: Option<u64>,
 ) -> Result<Option<Value>> {
     let mut payload = row.payload.clone();
+    let preserved_source_event_id = preserved_snapshot_source_event_id(db, row).await?;
+    preserve_observability_source_event_id(&mut payload, preserved_source_event_id.as_deref())?;
     let (
         event_id,
         correlation_id,
@@ -14991,6 +15029,8 @@ async fn attach_tool_overhead_source_status_to_snapshot(
     source_status: Value,
 ) -> Result<Option<Value>> {
     let mut payload = row.payload.clone();
+    let preserved_source_event_id = preserved_snapshot_source_event_id(db, row).await?;
+    preserve_observability_source_event_id(&mut payload, preserved_source_event_id.as_deref())?;
     let (event_id, correlation_id, updated, tool_overhead_source) = {
         let node = payload["token_budget_event"]
             .as_object_mut()
@@ -15025,6 +15065,49 @@ async fn attach_tool_overhead_source_status_to_snapshot(
             "note": "Tool-overhead source status is mutable provenance metadata: it may advance from missing-source to materialized-source if historical context-pack payloads are later recovered."
         }
     })))
+}
+
+async fn preserved_snapshot_source_event_id(
+    db: &Client,
+    row: &ObservabilitySnapshotRecord,
+) -> Result<Option<String>> {
+    if let Some(source_event_id) = row.payload["_observability"]["source_event_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(Some(source_event_id.to_string()));
+    }
+    let existing_event_key = db
+        .query_opt(
+            "SELECT event_key FROM ami.observability_snapshots WHERE snapshot_id = $1",
+            &[&row.snapshot_id],
+        )
+        .await
+        .context("failed to load observability snapshot event_key")?
+        .map(|record| record.get::<_, String>(0));
+    Ok(existing_event_key.filter(|value| value.starts_with("legacy:")))
+}
+
+fn preserve_observability_source_event_id(
+    payload: &mut Value,
+    source_event_id: Option<&str>,
+) -> Result<()> {
+    let Some(source_event_id) = source_event_id.filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let root = payload
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("observability payload root must be an object"))?;
+    let observability = root
+        .entry("_observability".to_string())
+        .or_insert_with(|| json!({}));
+    let observability = observability
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("observability metadata must be an object"))?;
+    observability
+        .entry("source_event_id".to_string())
+        .or_insert_with(|| Value::String(source_event_id.to_string()));
+    Ok(())
 }
 
 fn apply_whole_cycle_observed_token(
@@ -20619,7 +20702,10 @@ effective_to_epoch_ms = 2000
             alignment["pre_amai_baseline_source_status"]["same_meter_resume_possible"],
             json!(false)
         );
-        assert_eq!(alignment["exact_pair_status"]["state"], "exact_pair_blocked");
+        assert_eq!(
+            alignment["exact_pair_status"]["state"],
+            "exact_pair_blocked"
+        );
         assert_eq!(alignment["exact_pair_status"]["blocking_reason_count"], 1);
         assert_eq!(
             alignment["exact_pair_status"]["primary_blocking_reason"],
@@ -20725,7 +20811,10 @@ effective_to_epoch_ms = 2000
             alignment["exact_pair_status"]["state"],
             "exact_pair_materialized"
         );
-        assert_eq!(alignment["exact_pair_status"]["exact_pair_available"], json!(true));
+        assert_eq!(
+            alignment["exact_pair_status"]["exact_pair_available"],
+            json!(true)
+        );
         assert_eq!(alignment["blocking_reasons"], json!([]));
     }
 
@@ -20796,7 +20885,10 @@ effective_to_epoch_ms = 2000
         );
 
         assert_eq!(alignment["same_meter_as_client_limit"], json!(false));
-        assert_eq!(alignment["exact_pair_status"]["state"], "exact_pair_blocked");
+        assert_eq!(
+            alignment["exact_pair_status"]["state"],
+            "exact_pair_blocked"
+        );
         assert_eq!(alignment["exact_pair_status"]["blocking_reason_count"], 2);
         assert_eq!(
             alignment["exact_pair_status"]["primary_blocking_reason"],
@@ -21172,6 +21264,36 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             status["missing_source_state_sample"][0]["state"],
             "context_pack_payload_missing_irrecoverable"
+        );
+    }
+
+    #[test]
+    fn tool_overhead_observation_source_treats_missing_identity_as_irrecoverable() {
+        let missing_event = token_event! {
+            context_pack_id: None,
+            correlation_id: "event-without-context-pack".to_string(),
+            event_id: "event-without-context-pack".to_string(),
+            namespace: "art".to_string(),
+            source_kind: "live_context_pack".to_string(),
+            query_type: "code_lookup".to_string(),
+            target_kind: "file".to_string(),
+            tool_overhead_tokens: None,
+            tool_overhead_source: Some(json!({
+                "state": "missing_context_pack_identity_irrecoverable",
+                "source_kind": "token_budget_event_identity_v1",
+            })),
+        };
+
+        let status = super::tool_overhead_observation_source_status(
+            Some(&[missing_event]),
+            Some(&super::AssistantGenerationScopeObservation::default()),
+        );
+
+        assert_eq!(status["recoverability_state"], "source_loss_irrecoverable");
+        assert_eq!(status["irrecoverable_missing_live_events"], 1);
+        assert_eq!(
+            status["missing_source_state_sample"][0]["state"],
+            "missing_context_pack_identity_irrecoverable"
         );
     }
 
