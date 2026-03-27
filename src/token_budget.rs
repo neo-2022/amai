@@ -5396,7 +5396,11 @@ fn build_contractual_statement_summary(
     );
     insert(
         "reviewed_frozen_debt_export_surface",
-        build_reviewed_frozen_debt_export_surface(contract, &client_limit_boundary_semantics),
+        build_reviewed_frozen_debt_export_surface(
+            contract,
+            &client_limit_boundary_semantics,
+            Some(scope_code),
+        ),
     );
     insert(
         "note",
@@ -5740,7 +5744,8 @@ fn build_dashboard_statement_export_preview(
         "surface": "dashboard_export_compact",
         "reviewed_frozen_debt_export_surface": build_reviewed_frozen_debt_export_surface(
             contract,
-            &client_limit_boundary_semantics
+            &client_limit_boundary_semantics,
+            statement_preview["scope_code"].as_str(),
         ),
     })
 }
@@ -5854,6 +5859,7 @@ fn build_settlement_report_preview(
             build_reviewed_frozen_debt_export_surface(
                 contract,
                 &statement_export_preview["client_limit_boundary_semantics"],
+                statement_export_preview["scope_code"].as_str(),
             )
         } else {
             statement_export_preview["reviewed_frozen_debt_export_surface"].clone()
@@ -6346,7 +6352,11 @@ fn build_statement_export_preview(
     );
     insert(
         "reviewed_frozen_debt_export_surface",
-        build_reviewed_frozen_debt_export_surface(contract, &client_limit_boundary_semantics),
+        build_reviewed_frozen_debt_export_surface(
+            contract,
+            &client_limit_boundary_semantics,
+            Some(scope_code),
+        ),
     );
     insert(
         "note",
@@ -6394,6 +6404,7 @@ fn build_contractual_evidence_pack(
             build_reviewed_frozen_debt_export_surface(
                 contract,
                 &statement_export_preview["client_limit_boundary_semantics"],
+                statement_export_preview["scope_code"].as_str(),
             )
         } else {
             statement_export_preview["reviewed_frozen_debt_export_surface"].clone()
@@ -13946,6 +13957,7 @@ fn build_client_limit_frozen_gap_review_surface(
 fn build_reviewed_frozen_debt_export_surface(
     contract: &TokenBudgetContractConfig,
     client_limit_boundary_semantics: &Value,
+    scope_code: Option<&str>,
 ) -> Value {
     let exact_pair_status = &client_limit_boundary_semantics["exact_pair_status"];
     let frozen_gap_review_surface = &client_limit_boundary_semantics["frozen_gap_review_surface"];
@@ -14001,6 +14013,24 @@ fn build_reviewed_frozen_debt_export_surface(
     } else {
         json!([])
     };
+    let review_bundle_command = if export_ready_report_only {
+        scope_code.map(|scope_code| {
+            format!(
+                "cargo run --release -- observe token-statement-export --scope {scope_code}"
+            )
+        })
+    } else {
+        None
+    };
+    let evidence_pack_command = if export_ready_report_only {
+        scope_code.map(|scope_code| {
+            format!(
+                "cargo run --release -- observe token-evidence-pack --scope {scope_code}"
+            )
+        })
+    } else {
+        None
+    };
     let note = match state {
         "reviewed_frozen_debt_export_ready_report_only" => {
             "Этот surface materialize-ит отдельный reviewed frozen-debt export: historical source-loss можно показывать только как report-only review contour с явным раскрытием debt и без притворства raw exact history."
@@ -14045,6 +14075,8 @@ fn build_reviewed_frozen_debt_export_surface(
         "forbidden_claims": forbidden_claims,
         "required_disclosures": required_disclosures,
         "propagated_surfaces": propagated_surfaces,
+        "review_bundle_command": review_bundle_command,
+        "evidence_pack_command": evidence_pack_command,
         "note": note,
     })
 }
@@ -21078,6 +21110,7 @@ effective_to_epoch_ms = 2000
                     "resolution_condition": "freeze_irrecoverable_gap_or_keep_exact_pair_unavailable"
                 }
             }),
+            Some("lifetime"),
         );
         assert_eq!(
             surface["state"],
@@ -21094,6 +21127,14 @@ effective_to_epoch_ms = 2000
                 "claim_exact_same_meter_pair_materialized"
             ])
         );
+        assert_eq!(
+            surface["review_bundle_command"],
+            "cargo run --release -- observe token-statement-export --scope lifetime"
+        );
+        assert_eq!(
+            surface["evidence_pack_command"],
+            "cargo run --release -- observe token-evidence-pack --scope lifetime"
+        );
     }
 
     #[test]
@@ -21101,6 +21142,7 @@ effective_to_epoch_ms = 2000
         let contract = contract_fixture();
         let preview = super::build_dashboard_statement_export_preview(
             &json!({
+                "scope_code": "lifetime",
                 "client_limit_meter_alignment": {
                     "same_meter_as_client_limit": false,
                     "exact_pair_status": {
@@ -21123,6 +21165,10 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             preview["reviewed_frozen_debt_export_surface"]["state"],
             "reviewed_frozen_debt_export_ready_report_only"
+        );
+        assert_eq!(
+            preview["reviewed_frozen_debt_export_surface"]["review_bundle_command"],
+            "cargo run --release -- observe token-statement-export --scope lifetime"
         );
     }
 

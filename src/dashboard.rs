@@ -6794,14 +6794,18 @@ fn reviewed_frozen_debt_export_metric_row(alignment: &Value) -> Option<Value> {
                 .join(", ")
         })
         .unwrap_or_default();
+    let review_bundle_command = surface["review_bundle_command"].as_str().unwrap_or_default();
+    let evidence_pack_command = surface["evidence_pack_command"].as_str().unwrap_or_default();
     let tooltip = format!(
-        "Этот ряд показывает отдельный report-only export contour для irrecoverable historical debt.\n- Surface kind: {}\n- Blocker component: {}\n- Irrecoverable rows: {}\n- Allowed claims: {}\n- Forbidden claims: {}\n- Propagated surfaces: {}\n- Этот contour не чинит lifetime exactness и не имеет права притворяться raw exact history.",
+        "Этот ряд показывает отдельный report-only export contour для irrecoverable historical debt.\n- Surface kind: {}\n- Blocker component: {}\n- Irrecoverable rows: {}\n- Allowed claims: {}\n- Forbidden claims: {}\n- Propagated surfaces: {}\n- Review bundle command: {}\n- Evidence pack command: {}\n- Этот contour не чинит lifetime exactness и не имеет права притворяться raw exact history.",
         surface_kind,
         blocker_code,
         format_u64(Some(irrecoverable_missing_live_events)),
         allowed_claims,
         forbidden_claims,
-        propagated_surfaces
+        propagated_surfaces,
+        review_bundle_command,
+        evidence_pack_command
     );
     Some(metric_row(
         "Review-only export",
@@ -9777,7 +9781,9 @@ mod tests {
                     "statement_export_preview",
                     "settlement_report_preview",
                     "contractual_evidence_pack"
-                ]
+                ],
+                "review_bundle_command": "cargo run --release -- observe token-statement-export --scope lifetime",
+                "evidence_pack_command": "cargo run --release -- observe token-evidence-pack --scope lifetime"
             }
         });
 
@@ -9793,6 +9799,12 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("claim_raw_exact_history")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("token-statement-export --scope lifetime")
         );
     }
 

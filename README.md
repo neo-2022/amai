@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 14:13 MSK
-Ручная сверка guide/docs: 2026-03-27 14:13 MSK
+modified_at: 2026-03-27 14:29 MSK
+Ручная сверка guide/docs: 2026-03-27 14:29 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1871,6 +1871,10 @@ preview, а не только raw count.
       формализован как report-only export path;
     - этот row не имеет права притворяться raw exact history и существует
       только чтобы явно отделить historical source-loss от обычного lag;
+    - тот же row теперь несёт и operator path:
+      прямые команды `observe token-statement-export --scope ...` и
+      `observe token-evidence-pack --scope ...` surface-ятся в tooltip,
+      чтобы review-only export можно было собрать без ручного поиска runbook;
   - тот же decision point теперь materialized и machine-readable:
     `frozen_gap_review_surface` фиксирует neutral `review_required` state,
     allowed paths и запрет `claim_raw_exact_history` без отдельного решения;
