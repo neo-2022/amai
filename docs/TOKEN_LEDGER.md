@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 01:01 MSK
-Ручная сверка guide/docs: 2026-03-27 01:01 MSK
+modified_at: 2026-03-27 12:42 MSK
+Ручная сверка guide/docs: 2026-03-27 12:42 MSK
 
 # Token Ledger
 
@@ -659,9 +659,13 @@ whole-cycle компонент на одинаковое число всех liv
     несколько retrieval context packs;
   - это уменьшает шанс, что report случайно поднимет only-lifetime evidence из старого
     turn вместо действительно missing current-scope events;
-  - но same-meter claim всё равно запрещён, если usable rollout observations вообще не
-    пересекаются с correlation set текущего `current_session / rolling_window` scope:
-    в таком случае `assistant_generation` там обязан честно остаться `unmeasured`;
+- но same-meter claim всё равно запрещён, если usable rollout observations вообще не
+  пересекаются с correlation set текущего `current_session / rolling_window` scope:
+  в таком случае `assistant_generation` там обязан честно остаться `unmeasured`;
+- если usable turn-group scope уже materialized и полностью покрывает assistant slice,
+  `assistant_generation` разрешается считать как `observed_tokens_passthrough`:
+  это тот же самый model-visible output spend, уже deduplicated по turn-group, а не
+  guessed per-context-pack baseline;
 - это означает, что live caller может materialize-ить same-meter evidence не только через
   прямой бинарь `amai`, но и через MCP/bridge path;
 - retrieval path не притворяется, что знает их сам;
@@ -786,6 +790,9 @@ whole-cycle компонент на одинаковое число всех liv
 - если full same-meter equivalence ещё не materialized, строка `Экономия токенов модели`
   обязана fail-closed не показывать процент вовсе и прямо говорить, что `exact pair`
   ещё не materialized;
+- exact pair не имеет права считать `assistant_generation` точным только по legacy
+  event-level attach; для этого нужен именно turn-group scope или другой equally truthful
+  deduplicated source;
 - coverage;
 - settlement status;
 - settlement stage;

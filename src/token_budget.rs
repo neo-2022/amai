@@ -12988,6 +12988,23 @@ fn client_limit_baseline_component_semantics(
                             Some(observed_tokens),
                             "Для client_prompt baseline-equivalent tokens совпадают с реально observed tokens: исходный пользовательский запрос к клиенту не меняется из-за Amai.".to_string(),
                         ),
+                        "assistant_generation" => {
+                            if assistant_scope.is_some() {
+                                (
+                                    "observed_tokens_passthrough",
+                                    Some(observed_tokens),
+                                    "Для assistant_generation baseline-equivalent tokens совпадают с реально observed turn-group tokens: это тот же самый model-visible output spend, уже собранный по deduplicated turn scope, а не guessed per-context-pack baseline."
+                                        .to_string(),
+                                )
+                            } else {
+                                (
+                                    "baseline_semantics_unmaterialized",
+                                    None,
+                                    "Observed assistant_generation tokens уже есть, но без turn-group scope этот слой ещё не может честно доказать deduplicated model-output passthrough и therefore не materialize-ит exact baseline."
+                                        .to_string(),
+                                )
+                            }
+                        }
                         "continuity_restore_outside_retrieval" => {
                             if let Some((baseline_tokens, source_ref)) =
                                 continuity_baseline_source.as_ref()
@@ -20869,7 +20886,7 @@ effective_to_epoch_ms = 2000
     }
 
     #[test]
-    fn client_limit_exact_pair_status_surfaces_tool_and_assistant_gaps_together() {
+    fn client_limit_exact_pair_status_keeps_only_tool_gap_after_assistant_passthrough() {
         let summary = json!({
             "events_total": 2,
             "live_events_count": 2,
@@ -20936,10 +20953,22 @@ effective_to_epoch_ms = 2000
 
         assert_eq!(alignment["same_meter_as_client_limit"], json!(false));
         assert_eq!(
+            alignment["baseline_equivalence"]["component_semantics"][1]["code"],
+            "assistant_generation"
+        );
+        assert_eq!(
+            alignment["baseline_equivalence"]["component_semantics"][1]["baseline_semantics_state"],
+            "observed_tokens_passthrough"
+        );
+        assert_eq!(
+            alignment["baseline_equivalence"]["component_semantics"][1]["baseline_measured_tokens"],
+            11
+        );
+        assert_eq!(
             alignment["exact_pair_status"]["state"],
             "exact_pair_blocked"
         );
-        assert_eq!(alignment["exact_pair_status"]["blocking_reason_count"], 2);
+        assert_eq!(alignment["exact_pair_status"]["blocking_reason_count"], 1);
         assert_eq!(
             alignment["exact_pair_status"]["primary_blocking_reason"],
             "tool_overhead_outside_retrieval_partially_measured"
@@ -20960,17 +20989,63 @@ effective_to_epoch_ms = 2000
             alignment["exact_pair_status"]["blockers"][0]["resolution_condition"],
             "recover_historical_tool_overhead_source_or_freeze_irrecoverable_gap"
         );
+    }
+
+    #[test]
+    fn assistant_generation_baseline_stays_unmaterialized_without_turn_scope() {
+        let summary = json!({
+            "events_total": 1,
+            "live_events_count": 1,
+            "non_live_events_count": 0,
+            "counted_events": 1,
+            "observed_client_prompt_tokens": 10,
+            "observed_assistant_generation_tokens": 17,
+            "observed_tool_overhead_tokens": 0,
+            "observed_continuity_restore_tokens": 0,
+            "observed_client_prompt_live_events": 1,
+            "observed_assistant_generation_live_events": 1,
+            "observed_tool_overhead_live_events": 1,
+            "observed_continuity_restore_live_events": 0
+        });
+        let events = vec![token_event! {
+            event_id: "event-retrieval-ungrouped".to_string(),
+            context_pack_id: Some("cp-ungrouped".to_string()),
+            correlation_id: "cp-ungrouped".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+            traffic_class: "live".to_string(),
+            client_prompt_tokens: Some(10),
+            assistant_generation_tokens: Some(17),
+            tool_overhead_tokens: Some(0),
+        }];
+
+        let alignment = super::build_client_limit_meter_alignment(
+            &contract_fixture(),
+            "statement_preview",
+            &summary,
+            Some(&events),
+            None,
+            None,
+        );
+
         assert_eq!(
-            alignment["exact_pair_status"]["blockers"][1]["code"],
+            alignment["baseline_equivalence"]["component_semantics"][1]["code"],
             "assistant_generation"
         );
         assert_eq!(
-            alignment["exact_pair_status"]["blockers"][1]["blocking_reason"],
-            "assistant_generation_baseline_semantics_unmaterialized"
+            alignment["baseline_equivalence"]["component_semantics"][1]["baseline_semantics_state"],
+            "baseline_semantics_unmaterialized"
         );
         assert_eq!(
-            alignment["exact_pair_status"]["blockers"][1]["resolution_condition"],
-            "assistant_generation_baseline_semantics_materialized"
+            alignment["baseline_equivalence"]["component_semantics"][1]["baseline_measured_tokens"],
+            json!(null)
+        );
+        assert_eq!(
+            alignment["exact_pair_status"]["blockers"][0]["code"],
+            "assistant_generation"
+        );
+        assert_eq!(
+            alignment["exact_pair_status"]["blockers"][0]["blocking_reason"],
+            "assistant_generation_baseline_semantics_unmaterialized"
         );
     }
 

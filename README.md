@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 01:01 MSK
-Ручная сверка guide/docs: 2026-03-27 01:01 MSK
+modified_at: 2026-03-27 12:42 MSK
+Ручная сверка guide/docs: 2026-03-27 12:42 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1704,6 +1704,9 @@ preview, а не только raw count.
     exact pair `без Amai / с Amai / экономия / процент` в том же meter клиента; если нет,
     карточка fail-closed не показывает процент вовсе и честно пишет, что exact pair ещё
     не materialized;
+  - для этого слоя `assistant_generation` теперь тоже может стать exact same-meter
+    компонентом, но только когда он поднят не как per-context-pack число, а как
+    deduplicated turn-group passthrough из rollout/direct-turn scope;
   - там теперь ещё явно видны `lifecycle_state`, `contractual_state`, `settlement_stage`,
     `next_settlement_stage_candidate` и `close_barriers`;
   - там теперь ещё есть `transactional_statuses`, чтобы customer-facing export видел отдельно
@@ -2001,6 +2004,9 @@ preview, а не только raw count.
     если usable rollout `context_pack_id` не пересекаются с `current_session /
     rolling_window` correlation set, `assistant_generation` в этих scope честно остаётся
     unmeasured, даже если lifetime уже начал получать rollout-backed observed values;
+  - если такой turn-group scope есть и покрытие уже полное, `assistant_generation`
+    разрешается materialize-ить как `observed_tokens_passthrough`, потому что это
+    уже тот же самый model-visible output spend, а не guessed counterfactual baseline;
   - теперь этот gap не прячется внутри общей blocker-строки:
     `client_limit_meter_alignment` отдельно публикует
     `assistant_generation_observation_source`, чтобы оператор видел, есть ли
