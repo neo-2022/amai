@@ -2385,6 +2385,17 @@ fn with_postgres_rates(current: &Value, previous: Option<&Value>) -> Value {
             dt,
         )
     });
+    let deadlocks_delta = counter_delta(
+        current["deadlocks_total"].as_f64().unwrap_or(0.0),
+        previous.and_then(|value| value["postgres"]["deadlocks_total"].as_f64()),
+    );
+    let deadlocks_per_sec = dt_s.and_then(|dt| {
+        delta_rate(
+            current["deadlocks_total"].as_f64().unwrap_or(0.0),
+            previous.and_then(|value| value["postgres"]["deadlocks_total"].as_f64()),
+            dt,
+        )
+    });
     let wal_bytes_per_sec = dt_s.and_then(|dt| {
         delta_rate(
             current["wal_bytes_total"].as_f64().unwrap_or(0.0),
@@ -2398,6 +2409,14 @@ fn with_postgres_rates(current: &Value, previous: Option<&Value>) -> Value {
         object.insert(
             "transactions_per_sec".to_string(),
             tx_per_sec.map_or(Value::Null, Value::from),
+        );
+        object.insert(
+            "deadlocks_delta".to_string(),
+            deadlocks_delta.map_or(Value::Null, Value::from),
+        );
+        object.insert(
+            "deadlocks_per_sec".to_string(),
+            deadlocks_per_sec.map_or(Value::Null, Value::from),
         );
         object.insert(
             "wal_bytes_per_sec".to_string(),
@@ -2732,10 +2751,6 @@ fn evaluate_sla(snapshot: &Value, profile: &ObservabilityProfile) -> Value {
             profile.postgres.alert_replica_lag_seconds,
             profile.postgres.critical_replica_lag_seconds,
         ),
-        zero_check(
-            "postgres.deadlocks_total",
-            snapshot["postgres"]["deadlocks_total"].as_f64(),
-        ),
         max_check(
             "qdrant.index_optimize_queue",
             snapshot["qdrant"]["index_optimize_queue"].as_f64(),
@@ -2802,6 +2817,13 @@ fn evaluate_sla(snapshot: &Value, profile: &ObservabilityProfile) -> Value {
             profile.parser.critical_coverage_ratio,
         ),
     ];
+
+    if let Some(check) = optional_zero_check(
+        "postgres.deadlocks_delta",
+        snapshot["postgres"]["deadlocks_delta"].as_f64(),
+    ) {
+        checks.push(check);
+    }
 
     if let Some(check) = optional_zero_check(
         "accuracy.cross_project_leakage",
@@ -3141,6 +3163,14 @@ fn delta_rate(current: f64, previous: Option<f64>, dt_s: f64) -> Option<f64> {
     Some((current - previous) / dt_s)
 }
 
+fn counter_delta(current: f64, previous: Option<f64>) -> Option<f64> {
+    let previous = previous?;
+    if current < previous {
+        return None;
+    }
+    Some(current - previous)
+}
+
 fn render_prometheus_metrics(snapshot: &Value) -> String {
     let mut output = String::new();
 
@@ -3167,6 +3197,12 @@ fn render_prometheus_metrics(snapshot: &Value) -> String {
         "amai_postgres_deadlocks_total",
         "PostgreSQL deadlocks total for the active database.",
         snapshot["postgres"]["deadlocks_total"].as_f64(),
+    );
+    push_metric(
+        &mut output,
+        "amai_postgres_deadlocks_delta",
+        "PostgreSQL deadlock counter delta between the latest system snapshots.",
+        snapshot["postgres"]["deadlocks_delta"].as_f64(),
     );
     push_metric(
         &mut output,
@@ -4221,7 +4257,8 @@ mod tests {
                 "connection_usage_ratio": 0.1,
                 "query_probe_p95_ms": 1.0,
                 "replica_lag_seconds": 0.0,
-                "deadlocks_total": 0.0
+                "deadlocks_total": 0.0,
+                "deadlocks_delta": 0.0
             },
             "qdrant": {
                 "index_optimize_queue": 0.0,
@@ -4267,6 +4304,118 @@ mod tests {
         assert_eq!(hot_check["alert"].as_f64(), Some(6.0));
         assert_eq!(hot_check["critical"].as_f64(), Some(10.0));
         assert_eq!(hot_check["status"].as_str(), Some("alert"));
+    }
+
+    #[test]
+    fn postgres_historical_deadlock_total_without_fresh_delta_does_not_fail_sla() {
+        let profile = load_profile().expect("profile");
+        let snapshot = json!({
+            "postgres": {
+                "connection_usage_ratio": 0.1,
+                "query_probe_p95_ms": 1.0,
+                "replica_lag_seconds": 0.0,
+                "deadlocks_total": 1.0,
+                "deadlocks_delta": 0.0
+            },
+            "qdrant": {
+                "index_optimize_queue": 0.0,
+                "update_queue_length": 0.0
+            },
+            "nats": {
+                "publish_probe_p95_ms": 0.1,
+                "consumer_lag_msgs": 0.0,
+                "jetstream_disk_usage_ratio": 0.01
+            },
+            "latest_retrieval_cold": {
+                "benchmark": {
+                    "p95_ms": 2.0
+                },
+                "retrieval_runtime": {
+                    "stage_p95_ms": {
+                        "semantic_search_ms": 0.0
+                    }
+                }
+            },
+            "latest_retrieval_hot": {
+                "benchmark": {
+                    "p95_ms": 2.0
+                }
+            },
+            "latest_index_project": {
+                "index_project": {
+                    "parser_coverage_ratio": 1.0
+                }
+            }
+        });
+
+        let sla = evaluate_sla(&snapshot, &profile);
+        let deadlock_check = sla["checks"]
+            .as_array()
+            .and_then(|checks| {
+                checks
+                    .iter()
+                    .find(|check| check["metric"].as_str() == Some("postgres.deadlocks_delta"))
+            })
+            .expect("deadlock delta check");
+        assert_eq!(deadlock_check["value"].as_f64(), Some(0.0));
+        assert_eq!(deadlock_check["status"].as_str(), Some("pass"));
+        assert_eq!(sla["summary"]["critical"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn postgres_fresh_deadlock_delta_trips_sla() {
+        let profile = load_profile().expect("profile");
+        let snapshot = json!({
+            "postgres": {
+                "connection_usage_ratio": 0.1,
+                "query_probe_p95_ms": 1.0,
+                "replica_lag_seconds": 0.0,
+                "deadlocks_total": 2.0,
+                "deadlocks_delta": 1.0
+            },
+            "qdrant": {
+                "index_optimize_queue": 0.0,
+                "update_queue_length": 0.0
+            },
+            "nats": {
+                "publish_probe_p95_ms": 0.1,
+                "consumer_lag_msgs": 0.0,
+                "jetstream_disk_usage_ratio": 0.01
+            },
+            "latest_retrieval_cold": {
+                "benchmark": {
+                    "p95_ms": 2.0
+                },
+                "retrieval_runtime": {
+                    "stage_p95_ms": {
+                        "semantic_search_ms": 0.0
+                    }
+                }
+            },
+            "latest_retrieval_hot": {
+                "benchmark": {
+                    "p95_ms": 2.0
+                }
+            },
+            "latest_index_project": {
+                "index_project": {
+                    "parser_coverage_ratio": 1.0
+                }
+            }
+        });
+
+        let sla = evaluate_sla(&snapshot, &profile);
+        let deadlock_check = sla["checks"]
+            .as_array()
+            .and_then(|checks| {
+                checks
+                    .iter()
+                    .find(|check| check["metric"].as_str() == Some("postgres.deadlocks_delta"))
+            })
+            .expect("deadlock delta check");
+        assert_eq!(deadlock_check["value"].as_f64(), Some(1.0));
+        assert_eq!(deadlock_check["status"].as_str(), Some("critical"));
+        assert_eq!(sla["summary"]["critical"].as_u64(), Some(1));
     }
 
     #[test]

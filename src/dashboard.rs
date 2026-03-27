@@ -6139,7 +6139,7 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
         status_for_metric_name(snapshot, "postgres.query_probe_p95_ms"),
         status_for_metric_name(snapshot, "postgres.connection_usage_ratio"),
         status_for_metric_name(snapshot, "postgres.replica_lag_seconds"),
-        status_for_metric_name(snapshot, "postgres.deadlocks_total"),
+        status_for_metric_name(snapshot, "postgres.deadlocks_delta"),
     ]);
     let mut postgres_card = card_with_rows(
             "PostgreSQL",
@@ -6193,7 +6193,7 @@ fn build_service_cards(snapshot: &Value) -> Vec<Value> {
                 "postgres.query_probe_p95_ms",
                 "postgres.connection_usage_ratio",
                 "postgres.replica_lag_seconds",
-                "postgres.deadlocks_total",
+                "postgres.deadlocks_delta",
             ],
         ),
         "Живой PostgreSQL probe вышел из своей нормы.",
@@ -9939,8 +9939,8 @@ fn humanize_check(snapshot: &Value, check: &Value) -> String {
         "postgres.replica_lag_seconds" => {
             "Отставание реплики PostgreSQL вышло за допустимый контур."
         }
-        "postgres.deadlocks_total" => {
-            "В PostgreSQL появились deadlock-и, а здесь ожидается строго 0."
+        "postgres.deadlocks_delta" => {
+            "Между двумя последними snapshot-ами в PostgreSQL появился новый deadlock."
         }
         "qdrant.index_optimize_queue" => "У Qdrant выросла очередь оптимизации индекса.",
         "qdrant.update_queue_length" => "У Qdrant растёт очередь обновлений.",

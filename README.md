@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 21:38 MSK
-Ручная сверка guide/docs: 2026-03-27 21:38 MSK
+modified_at: 2026-03-27 21:39 MSK
+Ручная сверка guide/docs: 2026-03-27 21:39 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1164,6 +1164,11 @@ cargo run -- deployment explain --target kubernetes_server
 `observe_snapshot_summary.included_reasons_summary / excluded_reasons_summary`,
 чтобы внешний клиент видел, почему последний рабочий контекст что-то включил
 и почему часть слоёв ничего не добавила.
+
+Для PostgreSQL `deadlocks_total` теперь остаётся историческим evidence-счётчиком,
+а красный SLA/Prometheus поднимается только на свежем `deadlocks_delta` между двумя
+последними snapshot-ами. Одна старая deadlock-ситуация не должна держать красный
+статус вечно, если новых deadlock уже нет.
 
 Тот же `observe snapshot` теперь ещё и публикует `compatibility`:
 - `profile`

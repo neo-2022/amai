@@ -65,10 +65,10 @@ groups:
           description: "verify/live payload попал в benchmark-facing observability snapshots; требуется quarantine и разбор source_class/source_kind."
 
       - alert: AmaiPostgresDeadlocksDetected
-        expr: amai_postgres_deadlocks_total > 0
+        expr: amai_postgres_deadlocks_delta > 0
         for: 0m
         labels:
           severity: critical
         annotations:
           summary: "Обнаружены PostgreSQL deadlocks"
-          description: "deadlocks в Amai имеют zero-tolerance policy."
+          description: "Новый deadlock между последними snapshot-ами имеет zero-tolerance policy."

@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 21:38 MSK
-Ручная сверка guide/docs: 2026-03-27 21:38 MSK
+modified_at: 2026-03-27 21:39 MSK
+Ручная сверка guide/docs: 2026-03-27 21:39 MSK
 
 # Operations
 
@@ -2860,6 +2860,10 @@ cargo run --release -- observe cleanup-snapshots --limit 200
 - Prometheus-ready `/metrics` exporter без persistence на каждый scrape.
 
 Сейчас hot retrieval stretch-goal в SLA считается только по реальному measured `p95_ms`, а не по округлению до целых миллисекунд.
+
+Для PostgreSQL `deadlocks_total` считается только историческим evidence. Critical в
+`observe sla-check` и Prometheus теперь поднимается только если свежий
+`deadlocks_delta` между двумя последними snapshot-ами больше нуля.
 
 Сейчас `observe sla-check` fail-ит только если:
 - есть `critical` нарушение;
