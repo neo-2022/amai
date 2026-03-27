@@ -5727,6 +5727,24 @@ fn build_dashboard_statement_preview(
     })
 }
 
+fn build_dashboard_statement_export_preview(
+    statement_preview: &Value,
+    contract: &TokenBudgetContractConfig,
+) -> Value {
+    if statement_preview.is_null() {
+        return Value::Null;
+    }
+    let client_limit_boundary_semantics =
+        build_client_limit_boundary_review_surface(statement_preview);
+    json!({
+        "surface": "dashboard_export_compact",
+        "reviewed_frozen_debt_export_surface": build_reviewed_frozen_debt_export_surface(
+            contract,
+            &client_limit_boundary_semantics
+        ),
+    })
+}
+
 fn observed_whole_cycle_with_assistant_scope_tokens(
     summary: &Value,
     assistant_scope: Option<&AssistantGenerationScopeObservation>,
@@ -7381,6 +7399,17 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         &rollout_observations,
         Some(&lifetime_assistant_scope),
     );
+    let current_session_statement_export_preview = build_dashboard_statement_export_preview(
+        &current_session_statement_preview,
+        &config.contract,
+    );
+    let rolling_window_statement_export_preview = if profile.rolling_window_hours.is_some() {
+        build_dashboard_statement_export_preview(&rolling_window_statement_preview, &config.contract)
+    } else {
+        Value::Null
+    };
+    let lifetime_statement_export_preview =
+        build_dashboard_statement_export_preview(&lifetime_statement_preview, &config.contract);
     let rolling_window_headline_boundary = if profile.rolling_window_hours.is_some() {
         build_client_limit_boundary_review_surface(&rolling_window_statement_preview)
     } else {
@@ -7427,8 +7456,17 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                 },
                 "lifetime": lifetime_statement_preview,
             },
+            "statement_export_previews": {
+                "current_session": current_session_statement_export_preview,
+                "rolling_window": if profile.rolling_window_hours.is_some() {
+                    rolling_window_statement_export_preview
+                } else {
+                    Value::Null
+                },
+                "lifetime": lifetime_statement_export_preview,
+            },
             "cache_debug": cache_debug,
-            "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups и client-limit alignment, не разворачивает полный contractual/export contour, но делает ограниченный quiet same-meter sync/write-back только для active live scope текущей сессии и рабочего окна. Sync write-back может материализоваться в этом тике, а обновлённые token events подхватываются следующим refresh, чтобы текущий pass не делал лишний full reload.",
+            "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups и client-limit alignment, не разворачивает полный contractual/export contour, но поднимает compact statement_export_previews для reviewed frozen-debt surfaces. Quiet same-meter sync/write-back всё так же ограничен active live scope текущей сессии и рабочего окна. Sync write-back может materialize-иться в этом тике, а обновлённые token events подхватываются следующим refresh, чтобы текущий pass не делал лишний full reload.",
         }
     });
     if let Some(node) = report["token_budget_report"]["cache_debug"].as_object_mut() {
@@ -21055,6 +21093,36 @@ effective_to_epoch_ms = 2000
                 "claim_raw_exact_history",
                 "claim_exact_same_meter_pair_materialized"
             ])
+        );
+    }
+
+    #[test]
+    fn dashboard_statement_export_preview_surfaces_reviewed_frozen_debt_export() {
+        let contract = contract_fixture();
+        let preview = super::build_dashboard_statement_export_preview(
+            &json!({
+                "client_limit_meter_alignment": {
+                    "same_meter_as_client_limit": false,
+                    "exact_pair_status": {
+                        "state": "exact_pair_blocked",
+                        "exact_pair_available": false
+                    },
+                    "frozen_gap_review_surface": {
+                        "state": "review_required",
+                        "review_required": true,
+                        "blocking_component": "tool_overhead_outside_retrieval",
+                        "missing_live_events": 13,
+                        "irrecoverable_missing_live_events": 13,
+                        "recoverable_missing_live_events": 0,
+                        "resolution_condition": "freeze_irrecoverable_gap_or_keep_exact_pair_unavailable"
+                    }
+                }
+            }),
+            &contract,
+        );
+        assert_eq!(
+            preview["reviewed_frozen_debt_export_surface"]["state"],
+            "reviewed_frozen_debt_export_ready_report_only"
         );
     }
 

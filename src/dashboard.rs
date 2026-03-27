@@ -3219,6 +3219,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let current_session_statement = &report["statement_previews"]["current_session"];
     let rolling_window_statement = &report["statement_previews"]["rolling_window"];
     let lifetime_statement = &report["statement_previews"]["lifetime"];
+    let lifetime_statement_export = &report["statement_export_previews"]["lifetime"];
     let current_session_alignment =
         &current_session_statement["client_limit_meter_alignment"];
     let rolling_window_alignment =
@@ -3621,6 +3622,10 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         lifetime_note.push(' ');
         lifetime_note.push_str(&sentence);
     }
+    if let Some(sentence) = reviewed_frozen_debt_export_note_sentence(lifetime_statement_export) {
+        lifetime_note.push(' ');
+        lifetime_note.push_str(&sentence);
+    }
     let mut lifetime_rows = Vec::new();
     lifetime_rows.push(model_token_savings_metric_row(
         lifetime_statement,
@@ -3630,6 +3635,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         lifetime_rows.push(row);
     }
     if let Some(row) = exact_pair_frozen_debt_metric_row(lifetime_alignment) {
+        lifetime_rows.push(row);
+    }
+    if let Some(row) = reviewed_frozen_debt_export_metric_row(lifetime_statement_export) {
         lifetime_rows.push(row);
     }
     if let Some(row) = exact_model_component_delta_metric_row(lifetime_alignment) {
@@ -6732,6 +6740,80 @@ fn exact_pair_frozen_debt_metric_row(alignment: &Value) -> Option<Value> {
     ))
 }
 
+fn reviewed_frozen_debt_export_note_sentence(alignment: &Value) -> Option<&'static str> {
+    let surface = &alignment["reviewed_frozen_debt_export_surface"];
+    if surface["export_ready_report_only"].as_bool() != Some(true) {
+        return None;
+    }
+    Some(
+        "Исторический frozen debt уже вынесен в отдельный report-only export contour: его можно review-ить отдельно, но он не имеет права притворяться raw exact history.",
+    )
+}
+
+fn reviewed_frozen_debt_export_metric_row(alignment: &Value) -> Option<Value> {
+    let surface = &alignment["reviewed_frozen_debt_export_surface"];
+    if surface["export_ready_report_only"].as_bool() != Some(true) {
+        return None;
+    }
+    let surface_kind = surface["surface_kind"]
+        .as_str()
+        .unwrap_or("reviewed_frozen_debt_report_only");
+    let blocker_code = surface["blocking_component"]
+        .as_str()
+        .unwrap_or("unknown_blocker");
+    let irrecoverable_missing_live_events = surface["irrecoverable_missing_live_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let allowed_claims = surface["allowed_claims"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let forbidden_claims = surface["forbidden_claims"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let propagated_surfaces = surface["propagated_surfaces"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let tooltip = format!(
+        "Этот ряд показывает отдельный report-only export contour для irrecoverable historical debt.\n- Surface kind: {}\n- Blocker component: {}\n- Irrecoverable rows: {}\n- Allowed claims: {}\n- Forbidden claims: {}\n- Propagated surfaces: {}\n- Этот contour не чинит lifetime exactness и не имеет права притворяться raw exact history.",
+        surface_kind,
+        blocker_code,
+        format_u64(Some(irrecoverable_missing_live_events)),
+        allowed_claims,
+        forbidden_claims,
+        propagated_surfaces
+    );
+    Some(metric_row(
+        "Review-only export",
+        format!(
+            "{}: {} irrecoverable rows",
+            surface_kind,
+            format_u64(Some(irrecoverable_missing_live_events))
+        ),
+        Some(tooltip.as_str()),
+    ))
+}
+
 fn model_token_savings_metric_row(scope_summary: &Value, alignment: &Value) -> Value {
     let observed_with_amai = scope_summary["verified_observed_whole_cycle_with_amai_tokens"]
         .as_u64()
@@ -9672,6 +9754,45 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("freeze_irrecoverable_gap_or_keep_exact_pair_unavailable")
+        );
+    }
+
+    #[test]
+    fn reviewed_frozen_debt_export_metric_row_surfaces_report_only_path() {
+        let alignment = json!({
+            "reviewed_frozen_debt_export_surface": {
+                "export_ready_report_only": true,
+                "surface_kind": "reviewed_frozen_debt_report_only",
+                "blocking_component": "tool_overhead_outside_retrieval",
+                "irrecoverable_missing_live_events": 13,
+                "allowed_claims": [
+                    "reviewed_frozen_debt_report_only",
+                    "historical_source_loss_disclosed_non_exact"
+                ],
+                "forbidden_claims": [
+                    "claim_raw_exact_history",
+                    "claim_exact_same_meter_pair_materialized"
+                ],
+                "propagated_surfaces": [
+                    "statement_export_preview",
+                    "settlement_report_preview",
+                    "contractual_evidence_pack"
+                ]
+            }
+        });
+
+        let row =
+            super::reviewed_frozen_debt_export_metric_row(&alignment).expect("export row");
+        assert_eq!(row["label"], "Review-only export");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("reviewed_frozen_debt_report_only: 13 irrecoverable rows")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("claim_raw_exact_history")
         );
     }
 

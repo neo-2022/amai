@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 14:03 MSK
-Ручная сверка guide/docs: 2026-03-27 14:03 MSK
+modified_at: 2026-03-27 14:13 MSK
+Ручная сверка guide/docs: 2026-03-27 14:13 MSK
 
 # Token Ledger
 
@@ -1444,6 +1444,8 @@ client-limit-pre-amai-baseline-source-v2` этот status уже не advisory-o
   - row `Точность модели` для самого exactness state;
   - row `Frozen debt exact-пары` как review-only surface для
     irrecoverable historical debt;
+  - row `Review-only export`, если historical debt уже формализован
+    в отдельный report-only export contour;
 - этот frozen-debt row не становится raw exact history и не разрешает
   показывать exact-процент, пока separate frozen-gap decision не принят.
 - начиная с `client-limit-meter-alignment-v12` тот же разворот фиксируется и

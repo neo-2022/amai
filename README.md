@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 14:03 MSK
-Ручная сверка guide/docs: 2026-03-27 14:03 MSK
+modified_at: 2026-03-27 14:13 MSK
+Ручная сверка guide/docs: 2026-03-27 14:13 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1867,6 +1867,8 @@ preview, а не только raw count.
     - row `Точность модели` показывает, materialized ли exact pair;
     - отдельный row `Frozen debt exact-пары` появляется только для
       irrecoverable historical debt и остаётся review-only контуром;
+    - отдельный row `Review-only export` появляется, когда frozen debt уже
+      формализован как report-only export path;
     - этот row не имеет права притворяться raw exact history и существует
       только чтобы явно отделить historical source-loss от обычного lag;
   - тот же decision point теперь materialized и machine-readable:
