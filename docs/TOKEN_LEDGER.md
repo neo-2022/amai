@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 13:40 MSK
-Ручная сверка guide/docs: 2026-03-27 13:40 MSK
+modified_at: 2026-03-27 13:45 MSK
+Ручная сверка guide/docs: 2026-03-27 13:45 MSK
 
 # Token Ledger
 
@@ -1445,6 +1445,13 @@ client-limit-pre-amai-baseline-source-v2` этот status уже не advisory-o
     irrecoverable historical debt;
 - этот frozen-debt row не становится raw exact history и не разрешает
   показывать exact-процент, пока separate frozen-gap decision не принят.
+- начиная с `client-limit-meter-alignment-v12` тот же разворот фиксируется и
+  machine-readable surface-ом `frozen_gap_review_surface`:
+  - `state = review_required`
+  - `allowed_paths = [keep_exact_pair_unavailable, formalize_reviewed_frozen_debt_export]`
+  - `forbidden_paths = [claim_raw_exact_history]`
+  - surface не выбирает продуктовую политику сам, а только фиксирует,
+    что raw exact history уже недоступна и требуется отдельное решение.
 
 ## Preliminary vs stable
 

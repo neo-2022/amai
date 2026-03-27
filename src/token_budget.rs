@@ -111,6 +111,8 @@ struct TokenBudgetContractConfig {
     client_limit_continuity_boundary_rollup_version: String,
     #[serde(default = "default_client_limit_pre_amai_baseline_source_version")]
     client_limit_pre_amai_baseline_source_version: String,
+    #[serde(default = "default_client_limit_frozen_gap_review_surface_version")]
+    client_limit_frozen_gap_review_surface_version: String,
     #[serde(default = "default_excluded_taxonomy_version")]
     excluded_taxonomy_version: String,
     #[serde(default = "default_dedup_contract_version")]
@@ -200,6 +202,8 @@ impl Default for TokenBudgetContractConfig {
                 default_client_limit_continuity_boundary_rollup_version(),
             client_limit_pre_amai_baseline_source_version:
                 default_client_limit_pre_amai_baseline_source_version(),
+            client_limit_frozen_gap_review_surface_version:
+                default_client_limit_frozen_gap_review_surface_version(),
             excluded_taxonomy_version: default_excluded_taxonomy_version(),
             dedup_contract_version: default_dedup_contract_version(),
             backfill_policy_version: default_backfill_policy_version(),
@@ -696,7 +700,7 @@ fn default_agent_cycle_model_version() -> String {
 }
 
 fn default_client_limit_meter_alignment_version() -> String {
-    "client-limit-meter-alignment-v11".to_string()
+    "client-limit-meter-alignment-v12".to_string()
 }
 
 fn default_client_limit_baseline_equivalence_version() -> String {
@@ -717,6 +721,10 @@ fn default_client_limit_continuity_boundary_rollup_version() -> String {
 
 fn default_client_limit_pre_amai_baseline_source_version() -> String {
     "client-limit-pre-amai-baseline-source-v2".to_string()
+}
+
+fn default_client_limit_frozen_gap_review_surface_version() -> String {
+    "client-limit-frozen-gap-review-surface-v1".to_string()
 }
 
 fn default_excluded_taxonomy_version() -> String {
@@ -5556,6 +5564,7 @@ fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Valu
     let continuity_boundary_rollup = alignment["continuity_boundary_rollup"].clone();
     let pre_amai_baseline_source_status = alignment["pre_amai_baseline_source_status"].clone();
     let exact_pair_status = alignment["exact_pair_status"].clone();
+    let frozen_gap_review_surface = alignment["frozen_gap_review_surface"].clone();
     let strict_client_meter_slice = alignment["strict_client_meter_slice"].clone();
     let same_meter_as_client_limit =
         alignment["same_meter_as_client_limit"].as_bool() == Some(true);
@@ -5622,6 +5631,7 @@ fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Valu
         "continuity_boundary_rollup": continuity_boundary_rollup,
         "pre_amai_baseline_source_status": pre_amai_baseline_source_status,
         "exact_pair_status": exact_pair_status,
+        "frozen_gap_review_surface": frozen_gap_review_surface,
         "note": note,
     })
 }
@@ -13763,6 +13773,64 @@ fn build_client_limit_exact_pair_status(
     })
 }
 
+fn build_client_limit_frozen_gap_review_surface(
+    contract: &TokenBudgetContractConfig,
+    exact_pair_status: &Value,
+) -> Value {
+    let exact_pair_available = exact_pair_status["exact_pair_available"].as_bool() == Some(true);
+    let blocker = exact_pair_status["blockers"].as_array().and_then(|items| items.first());
+    let review_required = blocker
+        .and_then(|value| value["frozen_gap_candidate"].as_bool())
+        == Some(true);
+    let state = if exact_pair_available {
+        "not_applicable_exact_pair_materialized"
+    } else if review_required {
+        "review_required"
+    } else if exact_pair_status["state"].as_str() == Some("exact_pair_blocked") {
+        "not_applicable_without_frozen_gap_candidate"
+    } else {
+        "not_applicable"
+    };
+    let allowed_paths = if review_required {
+        json!(["keep_exact_pair_unavailable", "formalize_reviewed_frozen_debt_export"])
+    } else {
+        json!([])
+    };
+    let forbidden_paths = if review_required {
+        json!(["claim_raw_exact_history"])
+    } else {
+        json!([])
+    };
+    let note = match state {
+        "review_required" => {
+            "Этот surface формализует product decision point для irrecoverable historical debt: raw exact history уже недоступна, поэтому дальше допустимы только keep-exact-unavailable или отдельный reviewed frozen-debt export без притворства raw exact history."
+        }
+        "not_applicable_exact_pair_materialized" => {
+            "Exact same-meter pair уже materialized, поэтому отдельный frozen-gap review не нужен."
+        }
+        "not_applicable_without_frozen_gap_candidate" => {
+            "Exact pair ещё blocked, но текущий blocker пока не классифицирован как irrecoverable frozen debt candidate."
+        }
+        _ => {
+            "Frozen-gap review surface здесь не требуется."
+        }
+    };
+    json!({
+        "model_version": contract.client_limit_frozen_gap_review_surface_version.clone(),
+        "state": state,
+        "review_required": review_required,
+        "raw_exact_history_available": exact_pair_available,
+        "blocking_component": blocker.and_then(|value| value["code"].as_str()).map(|value| value.to_string()),
+        "missing_live_events": blocker.and_then(|value| value["missing_live_events"].as_u64()),
+        "irrecoverable_missing_live_events": blocker.and_then(|value| value["irrecoverable_missing_live_events"].as_u64()),
+        "recoverable_missing_live_events": blocker.and_then(|value| value["recoverable_missing_live_events"].as_u64()),
+        "resolution_condition": blocker.and_then(|value| value["resolution_condition"].as_str()).map(|value| value.to_string()),
+        "allowed_paths": allowed_paths,
+        "forbidden_paths": forbidden_paths,
+        "note": note,
+    })
+}
+
 fn build_client_limit_meter_alignment(
     contract: &TokenBudgetContractConfig,
     surface_kind: &str,
@@ -13865,6 +13933,8 @@ fn build_client_limit_meter_alignment(
         &blocking_reasons,
         same_meter_as_client_limit,
     );
+    let frozen_gap_review_surface =
+        build_client_limit_frozen_gap_review_surface(contract, &exact_pair_status);
     json!({
         "model_version": contract.client_limit_meter_alignment_version.clone(),
         "surface_kind": surface_kind,
@@ -13894,6 +13964,7 @@ fn build_client_limit_meter_alignment(
         "continuity_boundary_rollup": continuity_boundary_rollup,
         "pre_amai_baseline_source_status": pre_amai_baseline_source_status,
         "exact_pair_status": exact_pair_status,
+        "frozen_gap_review_surface": frozen_gap_review_surface,
         "note": "Этот слой честно показывает, что текущие savings пока считаются как lower-bound части агентного цикла. Whole-cycle observed components могут постепенно materialize-иться, но same meter с клиентским лимитом нельзя объявлять раньше, чем появится и полное observed покрытие, и baseline-equivalent semantics."
     })
 }
@@ -13935,6 +14006,9 @@ fn build_agent_cycle_economics(
                     .clone(),
                 "pre_amai_baseline_source_model_version": contract
                     .client_limit_pre_amai_baseline_source_version
+                    .clone(),
+                "frozen_gap_review_surface_model_version": contract
+                    .client_limit_frozen_gap_review_surface_version
                     .clone(),
                 "alignment_state": "partial_lower_bound_not_meter_equivalent",
                 "same_meter_as_client_limit": false,
@@ -18114,7 +18188,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v11"
+            "client-limit-meter-alignment-v12"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["baseline_equivalence"]["model_version"],
@@ -18135,6 +18209,10 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             preview["client_limit_meter_alignment"]["pre_amai_baseline_source_status"]["model_version"],
             "client-limit-pre-amai-baseline-source-v2"
+        );
+        assert_eq!(
+            preview["client_limit_meter_alignment"]["frozen_gap_review_surface"]["model_version"],
+            "client-limit-frozen-gap-review-surface-v1"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["surface_kind"],
@@ -20866,7 +20944,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v11"
+            "client-limit-meter-alignment-v12"
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["baseline_equivalence_model_version"],
@@ -20887,6 +20965,10 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["pre_amai_baseline_source_model_version"],
             "client-limit-pre-amai-baseline-source-v2"
+        );
+        assert_eq!(
+            economics["contract"]["client_limit_meter_alignment"]["frozen_gap_review_surface_model_version"],
+            "client-limit-frozen-gap-review-surface-v1"
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]
@@ -21344,6 +21426,22 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             tool_blocker["resolution_condition"],
             "freeze_irrecoverable_gap_or_keep_exact_pair_unavailable"
+        );
+        assert_eq!(
+            alignment["frozen_gap_review_surface"]["state"],
+            "review_required"
+        );
+        assert_eq!(
+            alignment["frozen_gap_review_surface"]["review_required"],
+            json!(true)
+        );
+        assert_eq!(
+            alignment["frozen_gap_review_surface"]["blocking_component"],
+            "tool_overhead_outside_retrieval"
+        );
+        assert_eq!(
+            alignment["frozen_gap_review_surface"]["forbidden_paths"],
+            json!(["claim_raw_exact_history"])
         );
     }
 

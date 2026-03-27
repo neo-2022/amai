@@ -9640,6 +9640,14 @@ mod tests {
     #[test]
     fn exact_pair_frozen_debt_metric_row_surfaces_resolution_law() {
         let alignment = json!({
+            "frozen_gap_review_surface": {
+                "state": "review_required",
+                "blocking_component": "tool_overhead_outside_retrieval",
+                "missing_live_events": 13,
+                "irrecoverable_missing_live_events": 13,
+                "recoverable_missing_live_events": 0,
+                "resolution_condition": "freeze_irrecoverable_gap_or_keep_exact_pair_unavailable"
+            },
             "exact_pair_status": {
                 "state": "exact_pair_blocked",
                 "blockers": [{

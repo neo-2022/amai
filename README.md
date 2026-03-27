@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 13:40 MSK
-Ручная сверка guide/docs: 2026-03-27 13:40 MSK
+modified_at: 2026-03-27 13:45 MSK
+Ручная сверка guide/docs: 2026-03-27 13:45 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1845,13 +1845,14 @@ preview, а не только raw count.
     direct turn attach или rollout turn timeline и не может быть честно разложено
     по каждому retrieval event без дублирования токенов.
   - operational metering contract теперь ещё несёт:
-  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v11`
+  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v12`
   - `client_limit_baseline_equivalence_version = client-limit-baseline-equivalence-v4`
   - `client_limit_strict_meter_slice_version = client-limit-strict-meter-slice-v1`
   - `client_limit_explicit_boundary_surface_version = client-limit-explicit-boundary-surface-v2`
   - `client_limit_continuity_boundary_rollup_version = client-limit-continuity-boundary-rollup-v2`
   - `client_limit_pre_amai_baseline_source_version = client-limit-pre-amai-baseline-source-v2`
-  - начиная с `client-limit-meter-alignment-v11` `tool_overhead_observation_source` и
+  - `client_limit_frozen_gap_review_surface_version = client-limit-frozen-gap-review-surface-v1`
+  - начиная с `client-limit-meter-alignment-v12` `tool_overhead_observation_source` и
     `exact_pair_status` различают:
     - временный recoverable measurement lag;
     - mixed lag + irrecoverable debt;
@@ -1867,6 +1868,9 @@ preview, а не только raw count.
       irrecoverable historical debt и остаётся review-only контуром;
     - этот row не имеет права притворяться raw exact history и существует
       только чтобы явно отделить historical source-loss от обычного lag;
+  - тот же decision point теперь materialized и machine-readable:
+    `frozen_gap_review_surface` фиксирует neutral `review_required` state,
+    allowed paths и запрет `claim_raw_exact_history` без отдельного решения;
   - `contractual_statement_summary`, `statement_export_preview.json`,
     `settlement_report_preview.json` и
     `contractual_evidence_pack.json` теперь отдельно несут
