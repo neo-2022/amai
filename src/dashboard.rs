@@ -2805,6 +2805,7 @@ fn current_session_budget_guard_with_restore_context(
                 "guard_fresh_until_epoch_ms": null,
                 "rotate_now": false,
                 "rotate_soon": false,
+                "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(false),
                 "action_bundle": working_state::build_rotate_chat_action_bundle(
                     None,
                     None,
@@ -2950,6 +2951,7 @@ fn build_client_budget_reply_execution_gate(
         "guard_fresh_until_epoch_ms": gate_fresh_until_epoch_ms,
         "rotate_now": should_rotate_chat_now,
         "rotate_soon": should_rotate_chat_soon,
+        "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(blocking),
         "action_bundle": working_state::build_rotate_chat_action_bundle(
             project_code,
             namespace_code,
@@ -10455,6 +10457,7 @@ mod tests {
         live_latency_compare_card, monitoring_url, working_state_live_card, worst_status,
     };
     use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary};
+    use crate::working_state;
     use serde_json::json;
 
     fn synthetic_machine_summary(
@@ -12611,6 +12614,22 @@ mod tests {
         assert_eq!(
             guard["reply_execution_gate"]["action_kind"],
             json!("rotate_chat_for_client_budget")
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["blocking_reply_contract"]["contract_version"],
+            json!(working_state::CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["blocking_reply_contract"]["active"],
+            json!(true)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["blocking_reply_contract"]["response_kind"],
+            json!(working_state::CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["blocking_reply_contract"]["max_sentences"],
+            json!(working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES)
         );
         assert_eq!(
             guard["reply_execution_gate"]["action_bundle"]["bundle_version"],

@@ -4,7 +4,7 @@ use crate::cli::{
 };
 use crate::{
     benchmark_matrix, compatibility, config, continuity, memory_task_matrix, observe, postgres,
-    profiles, retrieval, token_budget, verify,
+    profiles, retrieval, token_budget, verify, working_state,
 };
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
@@ -657,6 +657,34 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     {
         return Err(anyhow!(
             "MCP startup contract lost live_client_budget_enforcement truth semantics"
+        ));
+    }
+    if startup_contract["live_client_budget_enforcement"]["blocking_reply_contract_field"]
+        .as_str()
+        != Some("blocking_reply_contract")
+        || startup_contract["live_client_budget_enforcement"]["blocking_reply_contract_version"]
+            .as_str()
+            != Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION)
+        || startup_contract["live_client_budget_enforcement"]["blocking_reply_response_kind"]
+            .as_str()
+            != Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND)
+        || startup_contract["live_client_budget_enforcement"]["blocking_reply_max_sentences"]
+            .as_u64()
+            != Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES)
+        || startup_contract["live_client_budget_enforcement"]
+            ["blocking_reply_must_avoid_substantive_work"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["live_client_budget_enforcement"]
+            ["blocking_reply_must_use_action_bundle_operator_flow"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["live_client_budget_enforcement"]["blocking_reply_template"]
+            .as_str()
+            != Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE)
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement blocked reply contract"
         ));
     }
 
@@ -2762,7 +2790,7 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v12",
+                "contract_version": "continuity-startup-contract-v13",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore plus live client-budget discipline before each substantive reply in a new, resumed, or ongoing chat",
@@ -2843,7 +2871,14 @@ fn protocol_manifest() -> Value {
                     ],
                     "save_handoff_before_rotate": true,
                     "fresh_chat_requires_continuity_startup": true,
-                    "full_scale_client_truth_required": true
+                    "full_scale_client_truth_required": true,
+                    "blocking_reply_contract_field": "blocking_reply_contract",
+                    "blocking_reply_contract_version": working_state::CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION,
+                    "blocking_reply_response_kind": working_state::CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND,
+                    "blocking_reply_max_sentences": working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES,
+                    "blocking_reply_must_avoid_substantive_work": true,
+                    "blocking_reply_must_use_action_bundle_operator_flow": true,
+                    "blocking_reply_template": working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE
                 },
                 "required_arguments": ["project"],
                 "optional_arguments": ["repo_root", "namespace", "token_source_kind"],
@@ -4341,6 +4376,7 @@ mod tests {
         summarize_namespace_modes, token_benchmark_summary, token_report_summary,
         warm_cache_summary,
     };
+    use crate::working_state;
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -4949,7 +4985,7 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v12")
+            Some("continuity-startup-contract-v13")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["must_call_before_substantive_work"].as_bool(),
@@ -5285,7 +5321,7 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v12")
+            Some("continuity-startup-contract-v13")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
@@ -5328,6 +5364,30 @@ mod tests {
                 ["max_guard_age_seconds"]
                 .as_u64(),
             Some(10)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["blocking_reply_contract_field"]
+                .as_str(),
+            Some("blocking_reply_contract")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["blocking_reply_contract_version"]
+                .as_str(),
+            Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["blocking_reply_response_kind"]
+                .as_str(),
+            Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["blocking_reply_max_sentences"]
+                .as_u64(),
+            Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES)
         );
         assert_eq!(
             manifest["error_contracts"]["tool_execution_failed"]["error_class"].as_str(),

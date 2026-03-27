@@ -28,6 +28,12 @@ const MAX_EXECCTL_LEDGER_ENTRIES: i64 = 256;
 const EXECCTL_LEASE_TTL_MS: u64 = SESSION_GAP_MS;
 const PROJECT_TASK_TREE_VERSION: &str = "project-task-tree-v1";
 const PROJECT_TASK_LEDGER_VERSION: &str = "project-task-ledger-v2";
+pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION: &str =
+    "client-budget-blocked-reply-v1";
+pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND: &str = "rotate_chat_only";
+pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES: u64 = 2;
+pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE: &str =
+    "Этот чат уже жжёт внешний лимит клиента. Сохрани handoff, открой новый чат и запусти continuity startup.";
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
@@ -38,6 +44,22 @@ fn shell_join_command(args: &[&str]) -> String {
         .map(|value| shell_quote(value))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+pub(crate) fn build_client_budget_blocking_reply_contract(active: bool) -> Value {
+    json!({
+        "contract_version": CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION,
+        "active": active,
+        "response_kind": CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND,
+        "max_sentences": CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES,
+        "must_avoid_substantive_work": true,
+        "must_use_action_bundle_operator_flow": true,
+        "template": if active {
+            Some(CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE)
+        } else {
+            None::<&str>
+        },
+    })
 }
 
 pub async fn record_handoff_event(
