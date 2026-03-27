@@ -843,7 +843,11 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
                             == Some("no_silent_drop"),
                 ),
                 Some(
-                    gate_enforcement["must_follow_true_blocks_unrelated_work"].as_bool()
+                    gate_enforcement["blocking_true_requires_must_follow"].as_bool()
+                        == Some(true)
+                        && gate_enforcement["blocking_true_blocks_unrelated_work"].as_bool()
+                            == Some(true)
+                        && gate_enforcement["must_follow_true_blocks_unrelated_work"].as_bool()
                         == Some(true)
                         && gate_enforcement["unrelated_work_allowed_false_blocks_unrelated_work"]
                             .as_bool()
@@ -2801,6 +2805,14 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(
             payload["startup_contract"]["startup_execution_gate_enforcement"]["no_silent_drop_field"],
             json!("no_silent_drop")
+        );
+        assert_eq!(
+            payload["startup_contract"]["startup_execution_gate_enforcement"]["blocking_true_requires_must_follow"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["startup_contract"]["startup_execution_gate_enforcement"]["blocking_true_blocks_unrelated_work"],
+            json!(true)
         );
         assert_eq!(
             payload["startup_contract"]["startup_execution_gate_enforcement"]["must_follow_true_blocks_unrelated_work"],

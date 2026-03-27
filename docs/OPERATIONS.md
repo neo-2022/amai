@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 18:31 MSK
-Ручная сверка guide/docs: 2026-03-27 18:31 MSK
+modified_at: 2026-03-27 20:34 MSK
+Ручная сверка guide/docs: 2026-03-27 20:34 MSK
 
 # Operations
 
@@ -71,6 +71,21 @@ proof/verify события.
 - startup не должен падать на `relation ami.execctl_task_leases does not exist`;
 - product proof для этого контура теперь идёт не только через обычный `proof_execctl_pending_return`,
   но и через вариант, где `ami.execctl_task_leases` специально удаляется перед новым handoff.
+
+## Operational agent activity truth
+
+Dashboard больше не должен сводить multi-agent активность к одному последнему `working state`.
+
+Truth-source теперь обязан быть разложен на два независимых operational contour:
+- `active_now`
+  - это только живые lease из `ami.execctl_task_leases`;
+- `recent_scopes`
+  - это distinct `working_state_restore` snapshots из `ami.observability_snapshots` за последнее окно.
+
+Практический смысл:
+- `active_now` отвечает на вопрос «сколько агентов реально работает сейчас»;
+- `recent_scopes` отвечает на вопрос «сколько разных рабочих контуров было активно недавно»;
+- эти два числа не должны смешиваться и не должны тихо подменяться последним handoff одного repo scope.
 
 ## Bootstrap
 
@@ -917,6 +932,13 @@ cargo run -- mcp serve
   - `must_read_prompt_text_before_reply`;
   - `required_action_kind_when_resume_required`;
   - `no_silent_drop`.
+- operationally `startup_next_action.action_kind = rotate_chat_for_client_budget` теперь
+  считается таким же blocking first action, как и `resume_required_return_task`:
+  клиент обязан сохранить handoff и немедленно перейти в свежий чат через continuity startup,
+  а не продолжать жечь раздутый live-thread.
+- `working_state_restore.client_budget_guard` теперь должен совпадать с truth-law живой
+  current-session card: источник истины для startup rotate decision — полный observed client turn
+  и live raw limits, а не только internal tracked slice Amai.
 - status/runtime audit теперь ещё отдельно публикует `gate_semantics_consistent`;
   он обязан падать в `false`, если live gate противоречит:
   - pinned contract semantics;
@@ -2479,6 +2501,56 @@ cargo run --release -- observe token-statement-export \
   раньше UI-кода;
 - flip/full-screen interaction не даёт права показывать неmaterialized semantics;
 - expanded mode остаётся truth-terminal, а не visual bypass текущих tokenonomics guardrails.
+
+Этот interaction contract теперь обязателен для всех dashboard cards:
+
+- double left click = `front/back flip`;
+- double right click = `full-screen toggle`;
+- mobile:
+  - двойной тап одним пальцем = flip;
+  - двойной тап двумя пальцами = full-screen;
+- live-refresh обязан сохранять текущий interaction state карточки;
+- любой back/full-screen renderer остаётся truth-surface и не может обходить
+  materialized backend-ограничения.
+
+## Agent Hierarchy Card Operational Truth
+
+Для карточки живой структуры агентов source-of-truth теперь обязан раскладываться по
+следующей иерархии:
+
+- `Проект -> Пространства -> Инстансы агентов -> Сессии -> Thread/turn -> Модель`
+
+Operational UI-name contract:
+
+- front label: `Amai WorkSpace`
+- front tooltip: `Структура проектов`
+
+Operational laws этой карточки:
+
+- `model` никогда не подменяет `agent instance`;
+- `thread` никогда не подменяет `space`;
+- один `space` может содержать несколько `agent instance`;
+- raw client thread и durable `Amai` scope считаются разными truth-layers и не
+  взаимозаменяемы.
+
+Front-side этой карточки обязан оставаться compact KPI-surface:
+
+- recent raw client threads;
+- active live leases;
+- recent durable working-state scopes;
+- truth-gap verdict, если raw client activity уже шире, чем `Amai` durable visibility.
+
+Back-side обязан оставаться fail-closed topology surface:
+
+- показывать только materialized `project/space/session/thread/model` связи;
+- отдельно маркировать source badges:
+  - raw client thread;
+  - `Amai` live lease;
+  - working-state session;
+- не дублировать front-side KPI и не строить summary-списки по каждой сущности, если
+  эта сущность уже явно видна как подписанный блок схемы;
+- если raw thread уже есть, а `Amai` binding ещё нет, выводить его как
+  `pending binding`, а не внедрять guessed-способом в иерархию.
 
 Если в базе уже есть старые live `token_budget_event`, записанные до quality-gated формата, канонический путь теперь такой:
 

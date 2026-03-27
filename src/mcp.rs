@@ -512,8 +512,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract lost startup_execution_gate_enforcement.must_read_prompt_text_before_reply_field"
         ));
     }
-    if startup_contract["startup_execution_gate_enforcement"]["required_action_kind_field"]
-        .as_str()
+    if startup_contract["startup_execution_gate_enforcement"]["required_action_kind_field"].as_str()
         != Some("required_action_kind_when_resume_required")
     {
         return Err(anyhow!(
@@ -528,6 +527,14 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         ));
     }
     if startup_contract["startup_execution_gate_enforcement"]
+        ["blocking_true_requires_must_follow"]
+        .as_bool()
+        != Some(true)
+        || startup_contract["startup_execution_gate_enforcement"]
+            ["blocking_true_blocks_unrelated_work"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["startup_execution_gate_enforcement"]
         ["must_follow_true_blocks_unrelated_work"]
         .as_bool()
         != Some(true)
@@ -2083,15 +2090,15 @@ fn fallback_startup_execution_gate(payload: &Value) -> Value {
     let action_kind = payload["chat_start_restore"]["startup_next_action"]["action_kind"]
         .as_str()
         .unwrap_or("continue_active_workline");
-    let lease_owner_state = payload["chat_start_restore"]["execctl_active_lease"]["lease_owner_state"]
-        .as_str();
+    let lease_owner_state =
+        payload["chat_start_restore"]["execctl_active_lease"]["lease_owner_state"].as_str();
     let previous_session_owner_value = resume_enforcement["previous_session_owner_value"]
         .as_str()
         .unwrap_or("previous_session_owner");
-    let must_resume_before_unrelated = resume_enforcement
-        ["must_resume_required_return_task_before_unrelated_work"]
-        .as_bool()
-        .unwrap_or(false);
+    let must_resume_before_unrelated =
+        resume_enforcement["must_resume_required_return_task_before_unrelated_work"]
+            .as_bool()
+            .unwrap_or(false);
     let required_action_kind = resume_enforcement["required_action_kind_when_resume_required"]
         .as_str()
         .unwrap_or("resume_required_return_task");
@@ -2708,6 +2715,8 @@ fn protocol_manifest() -> Value {
                     "must_read_prompt_text_before_reply_field": "must_read_prompt_text_before_reply",
                     "required_action_kind_field": "required_action_kind_when_resume_required",
                     "no_silent_drop_field": "no_silent_drop",
+                    "blocking_true_requires_must_follow": true,
+                    "blocking_true_blocks_unrelated_work": true,
                     "must_follow_true_blocks_unrelated_work": true,
                     "unrelated_work_allowed_false_blocks_unrelated_work": true,
                     "must_read_prompt_text_true_requires_prompt_before_reply": true,
@@ -5007,6 +5016,20 @@ mod tests {
                 ["startup_execution_gate_enforcement"]["no_silent_drop_field"]
                 .as_str(),
             Some("no_silent_drop")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]
+                ["blocking_true_requires_must_follow"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]
+                ["startup_execution_gate_enforcement"]
+                ["blocking_true_blocks_unrelated_work"]
+                .as_bool(),
+            Some(true)
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]

@@ -200,6 +200,20 @@ pub struct RolloutClientMeterObservation {
     pub observation_source: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecentClientThreadRecord {
+    pub thread_id: String,
+    pub cwd: String,
+    pub rollout_path: String,
+    pub title: String,
+    pub agent_nickname: Option<String>,
+    pub agent_role: Option<String>,
+    pub model_provider: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub updated_at_epoch_s: i64,
+}
+
 #[derive(Debug, Deserialize)]
 struct ThreadIndexFile {
     #[serde(default)]
@@ -1042,6 +1056,62 @@ fn latest_thread_record() -> Result<Option<ThreadRecord>> {
         .optional()
         .context("failed to read latest thread metadata from sqlite")?;
     Ok(record)
+}
+
+pub fn recent_client_thread_records(window_seconds: i64) -> Result<Vec<RecentClientThreadRecord>> {
+    let Some(db_path) = codex_db_path() else {
+        return Ok(Vec::new());
+    };
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open {}", db_path.display()))?;
+    let now_epoch_s = OffsetDateTime::now_utc().unix_timestamp();
+    let window_start_epoch_s = now_epoch_s.saturating_sub(window_seconds.max(0));
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                id,
+                cwd,
+                rollout_path,
+                title,
+                NULLIF(TRIM(agent_nickname), ''),
+                NULLIF(TRIM(agent_role), ''),
+                NULLIF(TRIM(model_provider), ''),
+                NULLIF(TRIM(model), ''),
+                NULLIF(TRIM(reasoning_effort), ''),
+                updated_at
+            FROM threads
+            WHERE archived = 0
+              AND updated_at >= ?1
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 64
+            "#,
+        )
+        .context("failed to prepare recent client thread query")?;
+    let rows = stmt
+        .query_map(params![window_start_epoch_s], |row| {
+            Ok(RecentClientThreadRecord {
+                thread_id: row.get(0)?,
+                cwd: row.get(1)?,
+                rollout_path: row.get(2)?,
+                title: row.get(3)?,
+                agent_nickname: row.get(4)?,
+                agent_role: row.get(5)?,
+                model_provider: row.get(6)?,
+                model: row.get(7)?,
+                reasoning_effort: row.get(8)?,
+                updated_at_epoch_s: row.get(9)?,
+            })
+        })
+        .context("failed to query recent client threads")?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row.context("failed to map recent client thread record")?);
+    }
+    Ok(records)
 }
 
 pub fn latest_rollout_assistant_generation_observation(

@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -41,6 +42,14 @@ struct ClientTurnPressureGuard {
     primary_remaining_percent: f64,
     secondary_remaining_percent: f64,
     full_turn_savings_pct: Option<f64>,
+}
+
+#[derive(Debug, Default)]
+struct AgentHierarchyProjectBucket {
+    label: String,
+    project_code: Option<String>,
+    spaces: Vec<Value>,
+    pending_threads: Vec<Value>,
 }
 
 pub fn browser_base_url(bind: &str) -> String {
@@ -744,6 +753,228 @@ pub fn render_html(refresh_ms: u64) -> String {
       color: var(--muted);
       font-size: 13px;
       line-height: 1.45;
+    }
+
+    .card-shell {
+      perspective: 1600px;
+      transform-style: preserve-3d;
+      isolation: isolate;
+    }
+
+    .card-flip-stage {
+      display: grid;
+      min-height: 100%;
+      transform-style: preserve-3d;
+      transition: transform 0.2s ease;
+    }
+
+    .card-face {
+      grid-area: 1 / 1;
+      min-width: 0;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .card-face-back {
+      transform: rotateY(180deg);
+    }
+
+    .card-shell:not(.card-back-visible) .card-face-back,
+    .card-shell.card-back-visible .card-face-front {
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .card-shell.card-back-visible .card-flip-stage {
+      transform: rotateY(180deg);
+    }
+
+    body.card-fullscreen-open {
+      overflow: hidden;
+    }
+
+    .card-shell.card-fullscreen {
+      position: fixed;
+      inset: 14px;
+      z-index: 1100;
+      max-width: none;
+      width: auto;
+      height: auto;
+      margin: 0 !important;
+      overflow: auto;
+      backdrop-filter: blur(18px);
+      box-shadow:
+        0 0 1px rgba(18, 28, 33, 0.28),
+        0 0 16px rgba(18, 28, 33, 0.14),
+        0 0 40px rgba(18, 28, 33, 0.10),
+        0 28px 60px -26px rgba(18, 28, 33, 0.22);
+    }
+
+    .card-back-note {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .card-back-source {
+      margin: 10px 0 0;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.45;
+    }
+
+    .card-back-section-title {
+      margin: 12px 0 8px;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+    }
+
+    .hierarchy-panel {
+      display: grid;
+      gap: 12px;
+    }
+
+    .hierarchy-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .hierarchy-legend-item,
+    .hierarchy-source-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.2;
+      background: var(--surface);
+      color: var(--ink);
+    }
+
+    .hierarchy-legend-item.pass,
+    .hierarchy-source-badge.pass {
+      background: var(--pass-soft);
+      color: var(--pass);
+    }
+
+    .hierarchy-legend-item.alert,
+    .hierarchy-source-badge.alert {
+      background: var(--alert-soft);
+      color: var(--alert);
+    }
+
+    .hierarchy-legend-item.waiting,
+    .hierarchy-source-badge.waiting {
+      background: var(--waiting-soft);
+      color: var(--waiting);
+    }
+
+    .hierarchy-projects,
+    .hierarchy-node-children {
+      display: grid;
+      gap: 10px;
+    }
+
+    .hierarchy-node {
+      border-radius: 12px;
+      padding: 12px;
+      background: var(--surface);
+      border: 1px solid var(--surface-border);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hierarchy-node::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 4px;
+      background: rgba(97, 113, 122, 0.30);
+    }
+
+    .hierarchy-node.pass::before { background: var(--pass); }
+    .hierarchy-node.alert::before { background: var(--alert); }
+    .hierarchy-node.waiting::before { background: var(--waiting); }
+    .hierarchy-node.unknown::before { background: var(--unknown); }
+
+    .hierarchy-node-header {
+      display: grid;
+      gap: 4px;
+    }
+
+    .hierarchy-node-title {
+      margin: 0;
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 800;
+      line-height: 1.3;
+    }
+
+    .hierarchy-node-summary {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .hierarchy-node-children {
+      margin-top: 10px;
+      margin-left: 10px;
+      padding-left: 14px;
+      border-left: 1px dashed rgba(30, 42, 47, 0.14);
+    }
+
+    .hierarchy-source-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .hierarchy-thread-meta,
+    .hierarchy-pending-list {
+      margin: 10px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 8px;
+    }
+
+    .hierarchy-thread-meta li,
+    .hierarchy-pending-thread {
+      display: grid;
+      gap: 4px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.56);
+      border: 1px solid rgba(30, 42, 47, 0.06);
+    }
+
+    .hierarchy-thread-label {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .hierarchy-thread-value {
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.45;
+      font-weight: 700;
+      overflow-wrap: anywhere;
     }
 
     .compare-table-wrap {
@@ -1584,55 +1815,457 @@ pub fn render_html(refresh_ms: u64) -> String {
       return Boolean(document.querySelector(INTERACTION_HOLD_SELECTOR));
     }
 
-    function renderCompareCard(container, card) {
-      const element = document.createElement("article");
-      element.className = `compare-card ${statusClass(card.status)}`;
-      addExtraClasses(element, card.extra_class);
+    const cardInteractionState = new Map();
+    let activeFullscreenCardKey = null;
+    let lastSecondaryGesture = { key: null, at: 0 };
+    let lastTouchGesture = { key: null, fingers: 0, at: 0 };
+
+    function cardStateKey(containerId, card) {
+      return `${containerId}::${card.kind || "metric"}::${card.title || "card"}`;
+    }
+
+    function readCardState(key) {
+      return cardInteractionState.get(key) || { flipped: false, fullscreen: false };
+    }
+
+    function writeCardState(key, patch) {
+      const next = { ...readCardState(key), ...patch };
+      if (!next.flipped && !next.fullscreen) {
+        cardInteractionState.delete(key);
+      } else {
+        cardInteractionState.set(key, next);
+      }
+    }
+
+    function syncBodyFullscreenState() {
+      document.body.classList.toggle(
+        "card-fullscreen-open",
+        Boolean(document.querySelector(".card-shell.card-fullscreen"))
+      );
+    }
+
+    function isInteractiveCardTarget(target) {
+      return Boolean(
+        target &&
+        target.closest &&
+        target.closest(".has-tooltip, a, button, .copy-link-btn, .compare-table-wrap, .tooltip-layer")
+      );
+    }
+
+    function applyStoredCardState(shell) {
+      const key = shell.dataset.cardKey;
+      const state = readCardState(key);
+      shell.classList.toggle("card-back-visible", Boolean(state.flipped));
+      shell.classList.toggle("card-fullscreen", Boolean(state.fullscreen));
+      if (state.fullscreen) {
+        activeFullscreenCardKey = key;
+      }
+      syncBodyFullscreenState();
+    }
+
+    function setCardBackVisible(shell, visible) {
+      shell.classList.toggle("card-back-visible", visible);
+      writeCardState(shell.dataset.cardKey, { flipped: visible });
+    }
+
+    function setCardFullscreenVisible(shell, visible) {
+      const key = shell.dataset.cardKey;
+      if (visible && activeFullscreenCardKey && activeFullscreenCardKey !== key) {
+        const previous = document.querySelector(`[data-card-key="${CSS.escape(activeFullscreenCardKey)}"]`);
+        if (previous) {
+          previous.classList.remove("card-fullscreen");
+        }
+        writeCardState(activeFullscreenCardKey, { fullscreen: false });
+      }
+      shell.classList.toggle("card-fullscreen", visible);
+      activeFullscreenCardKey = visible ? key : null;
+      writeCardState(key, { fullscreen: visible });
+      syncBodyFullscreenState();
+    }
+
+    function toggleCardBack(shell) {
+      setCardBackVisible(shell, !shell.classList.contains("card-back-visible"));
+      extendInteractionHold(8);
+    }
+
+    function toggleCardFullscreen(shell) {
+      setCardFullscreenVisible(shell, !shell.classList.contains("card-fullscreen"));
+      extendInteractionHold(10);
+    }
+
+    function wireCardShellInteractions(shell) {
+      shell.addEventListener("dblclick", (event) => {
+        if (event.button !== 0 || isInteractiveCardTarget(event.target) || hasActiveSelection()) {
+          return;
+        }
+        event.preventDefault();
+        toggleCardBack(shell);
+      });
+
+      shell.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+      });
+
+      shell.addEventListener("pointerup", (event) => {
+        if (event.button !== 2 || isInteractiveCardTarget(event.target) || hasActiveSelection()) {
+          return;
+        }
+        const key = shell.dataset.cardKey;
+        const now = Date.now();
+        if (lastSecondaryGesture.key === key && now - lastSecondaryGesture.at <= 420) {
+          event.preventDefault();
+          toggleCardFullscreen(shell);
+          lastSecondaryGesture = { key: null, at: 0 };
+          return;
+        }
+        lastSecondaryGesture = { key, at: now };
+      });
+
+      shell.addEventListener("touchstart", (event) => {
+        shell.dataset.touchFingers = String(event.touches.length);
+      }, { passive: true });
+
+      shell.addEventListener("touchend", (event) => {
+        const target = event.target;
+        if (isInteractiveCardTarget(target) || hasActiveSelection()) {
+          return;
+        }
+        const fingers = Number(shell.dataset.touchFingers || "1");
+        const key = shell.dataset.cardKey;
+        const now = Date.now();
+        const sameGesture =
+          lastTouchGesture.key === key &&
+          lastTouchGesture.fingers === fingers &&
+          now - lastTouchGesture.at <= 420;
+        if (sameGesture) {
+          event.preventDefault();
+          if (fingers >= 2) {
+            toggleCardFullscreen(shell);
+          } else {
+            toggleCardBack(shell);
+          }
+          lastTouchGesture = { key: null, fingers: 0, at: 0 };
+          return;
+        }
+        lastTouchGesture = { key, fingers, at: now };
+      }, { passive: false });
+    }
+
+    function createCardShell(containerId, card, baseClassName, populateFront, populateBack) {
+      const shell = document.createElement("article");
+      shell.className = `${baseClassName} card-shell`;
+      shell.dataset.cardKey = cardStateKey(containerId, card);
+      addExtraClasses(shell, card.extra_class);
       if (card.table_orientation === "transposed") {
-        element.classList.add("table-transposed");
+        shell.classList.add("table-transposed");
       }
 
+      const stage = document.createElement("div");
+      stage.className = "card-flip-stage";
+      const front = document.createElement("div");
+      front.className = "card-face card-face-front";
+      populateFront(front);
+      const back = document.createElement("div");
+      back.className = "card-face card-face-back";
+      populateBack(back);
+      stage.appendChild(front);
+      stage.appendChild(back);
+      shell.appendChild(stage);
+      wireCardShellInteractions(shell);
+      applyStoredCardState(shell);
+      return shell;
+    }
+
+    function renderCompareHeader(target, card) {
       const head = document.createElement("div");
       head.className = "compare-head";
       const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
       head.appendChild(labelWithTooltip(card.title, titleTooltip, "card-title"));
       head.appendChild(statusPill(card.status, card.status_label, card.status_tooltip));
-      element.appendChild(head);
+      target.appendChild(head);
+    }
 
-      if (card.headline_value) {
-        const headline = document.createElement("p");
-        headline.className = "service-headline compare-headline";
-        appendCompareCellValue(headline, card.headline_value);
-        element.appendChild(headline);
+    function renderCompareMetrics(target, card) {
+      if (!card.metrics || card.metrics.length === 0) {
+        return;
       }
+      const compareGrid = document.createElement("div");
+      compareGrid.className = "compare-grid";
+      card.metrics.forEach((metric) => {
+        const metricCard = document.createElement("section");
+        metricCard.className = "compare-metric";
+        metricCard.appendChild(labelWithTooltip(metric.label, metric.tooltip, "compare-metric-label"));
+        metricCard.appendChild(textNode("p", "compare-metric-value", metric.value));
+        metricCard.appendChild(textNode("p", "compare-metric-note", metric.note));
+        compareGrid.appendChild(metricCard);
+      });
+      target.appendChild(compareGrid);
+    }
 
-      if (card.note) {
-        element.appendChild(textNode("p", "card-note", card.note));
-      }
-
-      if (card.metrics && card.metrics.length > 0) {
-        const compareGrid = document.createElement("div");
-        compareGrid.className = "compare-grid";
-        card.metrics.forEach((metric) => {
-          const metricCard = document.createElement("section");
-          metricCard.className = "compare-metric";
-          metricCard.appendChild(labelWithTooltip(metric.label, metric.tooltip, "compare-metric-label"));
-          metricCard.appendChild(textNode("p", "compare-metric-value", metric.value));
-          metricCard.appendChild(textNode("p", "compare-metric-note", metric.note));
-          compareGrid.appendChild(metricCard);
-        });
-        element.appendChild(compareGrid);
-      }
-
+    function renderCompareTableWrap(target, card) {
       const tableWrap = document.createElement("div");
       tableWrap.className = "compare-table-wrap";
       const table = document.createElement("table");
       table.className = "compare-table";
       renderCompareTable(table, card.table, card.table_orientation);
       tableWrap.appendChild(table);
-      element.appendChild(tableWrap);
+      target.appendChild(tableWrap);
+    }
 
-      container.appendChild(element);
+    function renderCompareFront(target, card) {
+      renderCompareHeader(target, card);
+      if (card.headline_value) {
+        const headline = document.createElement("p");
+        headline.className = "service-headline compare-headline";
+        appendCompareCellValue(headline, card.headline_value);
+        target.appendChild(headline);
+      }
+      if (card.note) {
+        target.appendChild(textNode("p", "card-note", card.note));
+      }
+      renderCompareMetrics(target, card);
+      renderCompareTableWrap(target, card);
+    }
+
+    function renderGenericBackHeader(target, card) {
+      const head = document.createElement("div");
+      head.className = "card-top";
+      const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
+      head.appendChild(labelWithTooltip(card.title, titleTooltip, "card-title"));
+      head.appendChild(statusPill(card.status, card.status_label, card.status_tooltip));
+      target.appendChild(head);
+    }
+
+    function renderMetricRows(target, card) {
+      if (!card.rows || card.rows.length === 0) {
+        return;
+      }
+      const list = document.createElement("ul");
+      list.className = "metric-rows";
+      card.rows.forEach((row) => {
+        const item = document.createElement("li");
+        item.className = "metric-row";
+        item.appendChild(labelWithTooltip(row.label, row.tooltip));
+        item.appendChild(textNode("span", "metric-row-value", row.value));
+        list.appendChild(item);
+      });
+      target.appendChild(list);
+    }
+
+    function renderCardDetails(target, card) {
+      if (!card.details || card.details.length === 0) {
+        return;
+      }
+      target.appendChild(textNode("p", "card-back-section-title", "Дополнительные детали"));
+      const list = document.createElement("ul");
+      list.className = "detail-list";
+      card.details.forEach((detail) => {
+        list.appendChild(textNode("li", "", detail));
+      });
+      target.appendChild(list);
+    }
+
+    function createHierarchyNode(levelClass, node) {
+      const element = document.createElement("section");
+      element.className = `hierarchy-node hierarchy-${levelClass} ${statusClass(node.status)}`;
+      const header = document.createElement("div");
+      header.className = "hierarchy-node-header";
+      header.appendChild(textNode("h4", "hierarchy-node-title", node.label || "ещё нет данных"));
+      if (node.summary) {
+        header.appendChild(textNode("p", "hierarchy-node-summary", node.summary));
+      }
+      element.appendChild(header);
+      return element;
+    }
+
+    function renderHierarchyThreadMeta(target, thread) {
+      const list = document.createElement("ul");
+      list.className = "hierarchy-thread-meta";
+      const rows = [
+        ["Thread", thread.thread_id || "ещё нет данных"],
+        ["Заголовок", thread.title || "ещё нет данных"],
+        ["CWD", thread.cwd || "ещё нет данных"],
+        ["Последнее обновление", thread.updated_at || "ещё нет данных"],
+      ];
+      rows.forEach(([label, value]) => {
+        const item = document.createElement("li");
+        item.appendChild(textNode("span", "hierarchy-thread-label", label));
+        if (label === "Thread" && value && value !== "ещё нет данных") {
+          item.appendChild(createInlineCopyableText(value, value, null, true));
+        } else {
+          item.appendChild(textNode("span", "hierarchy-thread-value", value));
+        }
+        list.appendChild(item);
+      });
+      target.appendChild(list);
+    }
+
+    function renderHierarchyBackPanel(target, panel, card) {
+      renderGenericBackHeader(target, card);
+      target.appendChild(textNode("p", "card-back-note", panel.title || "Иерархия живых сущностей"));
+      if (panel.note) {
+        target.appendChild(textNode("p", "card-back-note", panel.note));
+      }
+
+      if (Array.isArray(panel.legend) && panel.legend.length > 0) {
+        const legend = document.createElement("ul");
+        legend.className = "hierarchy-legend";
+        panel.legend.forEach((entry) => {
+          const item = document.createElement("li");
+          item.className = `hierarchy-legend-item ${statusClass(entry.status)}`;
+          item.appendChild(textNode("span", "", entry.label || "ещё нет данных"));
+          if (entry.note) {
+            item.setAttribute("data-tip", entry.note);
+            item.classList.add("has-tooltip");
+          }
+          legend.appendChild(item);
+        });
+        target.appendChild(legend);
+      }
+
+      const projectsWrap = document.createElement("div");
+      projectsWrap.className = "hierarchy-projects";
+      (panel.projects || []).forEach((project) => {
+        const projectNode = createHierarchyNode("project", project);
+        const projectChildren = document.createElement("div");
+        projectChildren.className = "hierarchy-node-children";
+
+        (project.spaces || []).forEach((space) => {
+          const spaceNode = createHierarchyNode("space", space);
+          const spaceChildren = document.createElement("div");
+          spaceChildren.className = "hierarchy-node-children";
+
+          (space.agents || []).forEach((agent) => {
+            const agentNode = createHierarchyNode("agent", agent);
+            if (Array.isArray(agent.source_badges) && agent.source_badges.length > 0) {
+              const badges = document.createElement("div");
+              badges.className = "hierarchy-source-badges";
+              agent.source_badges.forEach((badge) => {
+                const chip = document.createElement("span");
+                chip.className = `hierarchy-source-badge ${statusClass(badge.status)}`;
+                chip.textContent = badge.label || "ещё нет данных";
+                badges.appendChild(chip);
+              });
+              agentNode.appendChild(badges);
+            }
+
+            if (agent.session) {
+              const sessionNode = createHierarchyNode("session", agent.session);
+              const sessionChildren = document.createElement("div");
+              sessionChildren.className = "hierarchy-node-children";
+
+              if (agent.session.thread) {
+                const threadNode = createHierarchyNode("thread", {
+                  label: "Thread / turn",
+                  status: agent.session.thread.thread_id ? "pass" : "unknown",
+                  summary: agent.session.thread.title || "ещё нет данных",
+                });
+                renderHierarchyThreadMeta(threadNode, agent.session.thread);
+                sessionChildren.appendChild(threadNode);
+              }
+
+              if (agent.session.model) {
+                const modelNode = createHierarchyNode("model", {
+                  label: "Модель",
+                  status: agent.session.model.status || "unknown",
+                  summary: agent.session.model.label || "ещё нет данных",
+                });
+                sessionChildren.appendChild(modelNode);
+              }
+
+              sessionNode.appendChild(sessionChildren);
+              agentNode.appendChild(sessionNode);
+            }
+
+            spaceChildren.appendChild(agentNode);
+          });
+
+          spaceNode.appendChild(spaceChildren);
+          projectChildren.appendChild(spaceNode);
+        });
+
+        if (Array.isArray(project.pending_threads) && project.pending_threads.length > 0) {
+          const pendingWrap = document.createElement("div");
+          pendingWrap.className = "hierarchy-node-children";
+          const pendingNode = createHierarchyNode("pending", {
+            label: "Raw client threads без Amai binding",
+            status: "alert",
+            summary: "Эти thread реально активны, но Amai ещё не связала их с пространством и сессией."
+          });
+          const pendingList = document.createElement("div");
+          pendingList.className = "hierarchy-pending-list";
+          project.pending_threads.forEach((thread) => {
+            const item = document.createElement("section");
+            item.className = "hierarchy-pending-thread";
+            item.appendChild(textNode("span", "hierarchy-thread-label", thread.label || "ещё нет данных"));
+            item.appendChild(textNode("span", "hierarchy-thread-value", thread.summary || "ещё нет данных"));
+            if (thread.thread_id) {
+              item.appendChild(createInlineCopyableText(thread.thread_id, thread.thread_id, null, true));
+            }
+            if (thread.updated_at) {
+              item.appendChild(textNode("span", "hierarchy-thread-label", `Обновлён: ${thread.updated_at}`));
+            }
+            pendingList.appendChild(item);
+          });
+          pendingNode.appendChild(pendingList);
+          pendingWrap.appendChild(pendingNode);
+          projectChildren.appendChild(pendingWrap);
+        }
+
+        projectNode.appendChild(projectChildren);
+        projectsWrap.appendChild(projectNode);
+      });
+      target.appendChild(projectsWrap);
+    }
+
+    function renderMetricBack(target, card) {
+      if (card.back_panel && card.back_panel.kind === "hierarchy_tree") {
+        renderHierarchyBackPanel(target, card.back_panel, card);
+        return;
+      }
+
+      renderGenericBackHeader(target, card);
+      const valueClass = card.kind === "service_card" ? "service-headline" : "card-value";
+      target.appendChild(textNode("p", valueClass, card.value || "ещё нет данных"));
+      const backNote = card.note
+        ? `${card.note} Оборотная сторона не добавляет новых источников, а разворачивает только уже materialized truth.`
+        : "Оборотная сторона не добавляет новых источников, а разворачивает только уже materialized truth.";
+      target.appendChild(textNode("p", "card-back-note", backNote));
+      renderMetricRows(target, card);
+      renderCardDetails(target, card);
+      if (card.source_label) {
+        target.appendChild(textNode("p", "card-back-source", card.source_label));
+      }
+    }
+
+    function renderCompareBack(target, card) {
+      renderGenericBackHeader(target, card);
+      const note = card.note
+        ? `${card.note} Оборотная сторона использует тот же materialized compare surface без скрытых линий и guessed overlays.`
+        : "Оборотная сторона использует тот же materialized compare surface без скрытых линий и guessed overlays.";
+      target.appendChild(textNode("p", "card-back-note", note));
+      if (card.headline_value) {
+        const headline = document.createElement("p");
+        headline.className = "service-headline compare-headline";
+        appendCompareCellValue(headline, card.headline_value);
+        target.appendChild(headline);
+      }
+      renderCompareMetrics(target, card);
+      renderCompareTableWrap(target, card);
+      if (card.source_label) {
+        target.appendChild(textNode("p", "card-back-source", card.source_label));
+      }
+    }
+
+    function renderCompareCard(containerId, container, card) {
+      const shell = createCardShell(
+        containerId,
+        card,
+        `compare-card ${statusClass(card.status)}`,
+        (front) => renderCompareFront(front, card),
+        (back) => renderCompareBack(back, card),
+      );
+      container.appendChild(shell);
     }
 
     function renderCompareTable(table, tableData, orientation) {
@@ -1848,54 +2481,45 @@ pub fn render_html(refresh_ms: u64) -> String {
       clearNode(container);
       cards.forEach((card) => {
         if (card.kind === "live_compare" || card.kind === "compare_table") {
-          renderCompareCard(container, card);
+          renderCompareCard(containerId, container, card);
           return;
         }
-        const element = document.createElement("article");
-        element.className = `${kind} ${statusClass(card.status)}`;
-        addExtraClasses(element, card.extra_class);
+        const shell = createCardShell(
+          containerId,
+          card,
+          `${kind} ${statusClass(card.status)}`,
+          (front) => {
+            const top = document.createElement("div");
+            top.className = "card-top";
+            const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
+            top.appendChild(labelWithTooltip(card.title, titleTooltip));
+            top.appendChild(statusPill(card.status, card.status_label, card.status_tooltip));
+            front.appendChild(top);
 
-        const top = document.createElement("div");
-        top.className = "card-top";
-        const titleTooltip = mergeTooltipParts(card.title_tooltip, card.source_label);
-        top.appendChild(labelWithTooltip(card.title, titleTooltip));
-        top.appendChild(statusPill(card.status, card.status_label, card.status_tooltip));
-        element.appendChild(top);
-
-        const valueClass = kind === "service-card" ? "service-headline" : "card-value";
-        element.appendChild(textNode("p", valueClass, card.value));
-        if (card.note) {
-          element.appendChild(textNode("p", "card-note", card.note));
-        }
-
-        if (card.rows && card.rows.length > 0) {
-          const list = document.createElement("ul");
-          list.className = "metric-rows";
-          card.rows.forEach((row) => {
-            const item = document.createElement("li");
-            item.className = "metric-row";
-            item.appendChild(labelWithTooltip(row.label, row.tooltip));
-            item.appendChild(textNode("span", "metric-row-value", row.value));
-            list.appendChild(item);
-          });
-          element.appendChild(list);
-        }
-
-        if (card.details && card.details.length > 0) {
-          const list = document.createElement("ul");
-          list.className = "detail-list";
-          card.details.forEach((detail) => {
-            list.appendChild(textNode("li", "", detail));
-          });
-          element.appendChild(list);
-        }
-
-        container.appendChild(element);
+            const valueClass = kind.includes("service-card") ? "service-headline" : "card-value";
+            front.appendChild(textNode("p", valueClass, card.value));
+            if (card.note) {
+              front.appendChild(textNode("p", "card-note", card.note));
+            }
+            renderMetricRows(front, card);
+            if (card.details && card.details.length > 0) {
+              const list = document.createElement("ul");
+              list.className = "detail-list";
+              card.details.forEach((detail) => {
+                list.appendChild(textNode("li", "", detail));
+              });
+              front.appendChild(list);
+            }
+          },
+          (back) => renderMetricBack(back, card),
+        );
+        container.appendChild(shell);
       });
 
       if (containerId === "machine-cards") {
         applyMasonryGrid(container);
       }
+      syncBodyFullscreenState();
     }
 
     function applyMasonryGrid(container) {
@@ -2156,12 +2780,20 @@ pub fn build_payload(
 }
 
 pub fn current_session_budget_guard(snapshot: &Value) -> Value {
-    let report = &snapshot["token_budget_report"]["token_budget_report"];
+    current_session_budget_guard_from_report(&snapshot["token_budget_report"]["token_budget_report"])
+}
+
+pub fn current_session_budget_guard_from_report(report: &Value) -> Value {
     let client_live_meter = &report["client_live_meter"];
     let current_session_summary = &report["current_session"];
     let current_session_statement = &report["statement_previews"]["current_session"];
     let current_session_alignment = &current_session_statement["client_limit_meter_alignment"];
-    let cards = build_hero_cards(snapshot);
+    let snapshot = json!({
+        "token_budget_report": {
+            "token_budget_report": report.clone()
+        }
+    });
+    let cards = build_hero_cards(&snapshot);
     let Some(session_card) = cards.into_iter().next() else {
         return json!({
             "source": "dashboard_current_session_budget_guard_v1",
@@ -2171,7 +2803,8 @@ pub fn current_session_budget_guard(snapshot: &Value) -> Value {
             "should_rotate_chat_now": false,
             "should_rotate_chat_soon": false,
             "next_action": null,
-            "reason": "current_session hero card is unavailable"
+            "reason": "current_session hero card is unavailable",
+            "note": "current_session hero card is unavailable"
         });
     };
     let compact = compact_token_hero_card(session_card);
@@ -2224,6 +2857,7 @@ pub fn current_session_budget_guard(snapshot: &Value) -> Value {
         "tracked_slice_truth": tracked_slice_truth,
         "tracked_slice_tooltip": row_tooltip("Экономия на учтённой части"),
         "reason": compact["note"].as_str(),
+        "note": compact["note"].as_str(),
     })
 }
 
@@ -2279,6 +2913,7 @@ fn build_headline(snapshot: &Value, captured_at_epoch_ms: u64) -> Value {
 fn build_top_cards(snapshot: &Value) -> Vec<Value> {
     vec![
         live_latency_compare_card(snapshot),
+        agent_scope_activity_card(snapshot),
         working_state_live_card(snapshot),
     ]
 }
@@ -2934,6 +3569,559 @@ fn build_benchmark_cards(snapshot: &Value) -> Vec<Value> {
             "transposed",
         ),
     ]
+}
+
+fn agent_scope_activity_card(snapshot: &Value) -> Value {
+    let activity = &snapshot["agent_scope_activity"];
+    if !activity.is_object() {
+        return card_with_rows(
+            "Агенты сейчас",
+            "ещё нет данных".to_string(),
+            "Панель ещё не подняла truth-source по активным agent scopes.".to_string(),
+            "unknown",
+            Some("Источник: agent_scope_activity".to_string()),
+            Some("Показывает не только последний scope, а все активные lease и недавние working-state scopes, чтобы статистика не теряла параллельных агентов.".to_string()),
+            vec![],
+        );
+    }
+
+    let active_now_scopes = activity["active_now_scopes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let client_recent_threads = activity["client_recent_threads"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let recent_scopes = activity["recent_scopes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let active_now_count = activity["active_now_count"].as_u64().unwrap_or(0);
+    let client_recent_thread_count = activity["client_recent_thread_count"].as_u64().unwrap_or(0);
+    let client_recent_window_minutes = activity["client_recent_window_minutes"]
+        .as_u64()
+        .unwrap_or(30);
+    let recent_scope_count = activity["recent_scope_count"].as_u64().unwrap_or(0);
+    let recent_scope_window_hours = activity["recent_scope_window_hours"].as_u64().unwrap_or(24);
+
+    let client_preview = client_recent_threads
+        .iter()
+        .filter_map(|item| item["cwd"].as_str())
+        .map(|cwd| {
+            Path::new(cwd)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(cwd)
+                .to_string()
+        })
+        .take(4)
+        .collect::<Vec<_>>();
+    let active_preview = active_now_scopes
+        .iter()
+        .filter_map(|item| item["agent_scope"].as_str())
+        .take(3)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let recent_preview = recent_scopes
+        .iter()
+        .filter_map(|item| item["agent_scope"].as_str())
+        .take(4)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let latest_active_heartbeat = active_now_scopes
+        .first()
+        .and_then(|item| item["heartbeat_at_epoch_ms"].as_i64())
+        .filter(|value| *value > 0)
+        .map(|value| human_timestamp(value as u64));
+    let latest_recent_scope = recent_scopes
+        .first()
+        .and_then(|item| item["captured_at_epoch_ms"].as_i64())
+        .filter(|value| *value > 0)
+        .map(|value| human_timestamp(value as u64));
+    let latest_client_thread = client_recent_threads
+        .first()
+        .and_then(|item| item["updated_at_epoch_ms"].as_i64())
+        .filter(|value| *value > 0)
+        .map(|value| human_timestamp(value as u64));
+
+    let status = if client_recent_thread_count > active_now_count {
+        "alert"
+    } else if active_now_count > 0 {
+        "pass"
+    } else if recent_scope_count > 0 {
+        "waiting"
+    } else {
+        "unknown"
+    };
+    let note = format!(
+        "Эта карточка считает три разных truth-source: raw client thread registry за последние {} мин, active ExecCtl leases для `работают прямо сейчас` и distinct working-state scopes за последние {}ч для `работали недавно`. Поэтому один последний handoff больше не подменяет всю картину.",
+        client_recent_window_minutes,
+        recent_scope_window_hours
+    );
+    let hierarchy_back_panel =
+        build_agent_scope_hierarchy_back_panel(&client_recent_threads, &active_now_scopes, &recent_scopes);
+    let mut card = with_back_panel(
+        card_with_rows(
+        "Агенты сейчас",
+        format!(
+            "{} за {}м • {} сейчас в Amai",
+            format_count_with_word(client_recent_thread_count, "чат", "чата", "чатов"),
+            client_recent_window_minutes,
+            format_count_with_word(active_now_count, "живой агент", "живых агента", "живых агентов"),
+        ),
+        note,
+        status,
+        Some("Источник: /home/art/.codex/state_5.sqlite + ami.execctl_task_leases + ami.observability_snapshots/working_state_restore".to_string()),
+        Some("Показывает, сколько клиентских thread действительно шевелилось недавно, сколько Amai держит живых lease прямо сейчас и сколько distinct рабочих контуров уже materialized в durable working-state слое. Эти числа не взаимозаменяемы.".to_string()),
+        vec![
+            metric_row(
+                &format!("Клиентские чаты за {}м", client_recent_window_minutes),
+                if client_preview.is_empty() {
+                    format_u64(Some(client_recent_thread_count))
+                } else {
+                    format!(
+                        "{} • {}",
+                        format_u64(Some(client_recent_thread_count)),
+                        client_preview.join(", ")
+                    )
+                },
+                Some("Самый широкий live-source: сырые клиентские thread из state_5.sqlite. Именно они показывают, сколько чатов реально шевелилось недавно, даже если Amai ещё не успела поднять их в lease/snapshot."),
+            ),
+            metric_row(
+                "Работают прямо сейчас",
+                if active_preview.is_empty() {
+                    format_u64(Some(active_now_count))
+                } else {
+                    format!("{} • {}", format_u64(Some(active_now_count)), active_preview.join(", "))
+                },
+                Some("Считается только по незавершённым active lease. Это самый строгий ответ на вопрос, сколько агентов реально живо сейчас."),
+            ),
+            metric_row(
+                &format!("Работали за {}ч", recent_scope_window_hours),
+                if recent_preview.is_empty() {
+                    format_u64(Some(recent_scope_count))
+                } else {
+                    format!("{} • {}", format_u64(Some(recent_scope_count)), recent_preview.join(", "))
+                },
+                Some("Distinct working-state scopes за последнее окно. Это шире, чем active lease: сюда попадают и недавние, уже завершённые контуры."),
+            ),
+            metric_row(
+                "Последний client thread",
+                latest_client_thread.unwrap_or_else(|| "ещё нет данных".to_string()),
+                Some("Когда raw client registry последний раз видел обновление любого живого thread."),
+            ),
+            metric_row(
+                "Последний lease heartbeat",
+                latest_active_heartbeat.unwrap_or_else(|| "ещё нет данных".to_string()),
+                Some("Когда в последний раз heartbeat подтвердил реально живой active lease."),
+            ),
+            metric_row(
+                "Последний working-state scope",
+                latest_recent_scope.unwrap_or_else(|| "ещё нет данных".to_string()),
+                Some("Когда последний раз любой distinct agent scope оставил свежий working-state restore."),
+            ),
+        ],
+        ),
+        hierarchy_back_panel,
+    );
+    if status == "alert" {
+        card = with_status_label(card, "Amai видит не всех");
+    } else if status == "waiting" {
+        card = with_status_label(card, "сейчас без active lease");
+    }
+    card
+}
+
+fn build_agent_scope_hierarchy_back_panel(
+    client_recent_threads: &[Value],
+    active_now_scopes: &[Value],
+    recent_scopes: &[Value],
+) -> Value {
+    let mut threads_by_id: BTreeMap<String, &Value> = BTreeMap::new();
+    for thread in client_recent_threads {
+        if let Some(thread_id) = thread["thread_id"].as_str() {
+            threads_by_id.insert(thread_id.to_string(), thread);
+        }
+    }
+
+    let mut active_by_thread: BTreeMap<String, &Value> = BTreeMap::new();
+    let mut active_by_scope: BTreeMap<String, &Value> = BTreeMap::new();
+    for active in active_now_scopes {
+        if let Some(thread_id) = active["owner_thread_id"].as_str() {
+            active_by_thread.insert(thread_id.to_string(), active);
+        }
+        if let Some(agent_scope) = active["agent_scope"].as_str() {
+            active_by_scope.insert(agent_scope.to_string(), active);
+        }
+    }
+
+    let mut project_buckets: BTreeMap<String, AgentHierarchyProjectBucket> = BTreeMap::new();
+    let mut represented_scope_keys = BTreeSet::new();
+    let mut bound_thread_ids = BTreeSet::new();
+
+    for recent in recent_scopes {
+        let agent_scope = recent["agent_scope"].as_str();
+        let thread_id = recent["thread_id"].as_str();
+        represented_scope_keys.insert(format!(
+            "{}::{}",
+            agent_scope.unwrap_or(""),
+            thread_id.unwrap_or("")
+        ));
+        let active = thread_id
+            .and_then(|value| active_by_thread.get(value).copied())
+            .or_else(|| agent_scope.and_then(|value| active_by_scope.get(value).copied()));
+        let thread = thread_id.and_then(|value| threads_by_id.get(value).copied());
+        if let Some(thread_id) = thread_id.filter(|_| thread.is_some()) {
+            bound_thread_ids.insert(thread_id.to_string());
+        }
+        push_agent_hierarchy_space(&mut project_buckets, recent, active, thread);
+    }
+
+    for active in active_now_scopes {
+        let agent_scope = active["agent_scope"].as_str();
+        let thread_id = active["owner_thread_id"].as_str();
+        let entry_key = format!("{}::{}", agent_scope.unwrap_or(""), thread_id.unwrap_or(""));
+        if represented_scope_keys.contains(&entry_key) {
+            continue;
+        }
+        let thread = thread_id.and_then(|value| threads_by_id.get(value).copied());
+        if let Some(thread_id) = thread_id.filter(|_| thread.is_some()) {
+            bound_thread_ids.insert(thread_id.to_string());
+        }
+        push_agent_hierarchy_space(&mut project_buckets, &Value::Null, Some(active), thread);
+    }
+
+    for thread in client_recent_threads {
+        let Some(thread_id) = thread["thread_id"].as_str() else {
+            continue;
+        };
+        if bound_thread_ids.contains(thread_id) {
+            continue;
+        }
+        let project_label = project_display_label(None, thread["cwd"].as_str());
+        let project_key = project_bucket_key(None, &project_label);
+        let bucket = project_buckets
+            .entry(project_key)
+            .or_insert_with(|| AgentHierarchyProjectBucket {
+                label: project_label.clone(),
+                project_code: None,
+                spaces: Vec::new(),
+                pending_threads: Vec::new(),
+            });
+        if bucket.label.is_empty() {
+            bucket.label = project_label.clone();
+        }
+        bucket.pending_threads.push(build_unbound_client_thread_node(thread));
+    }
+
+    let projects = project_buckets
+        .into_values()
+        .map(|bucket| {
+            let spaces_count = bucket.spaces.len();
+            let pending_count = bucket.pending_threads.len();
+            let status = if pending_count > 0 {
+                "alert"
+            } else if spaces_count > 0 {
+                "pass"
+            } else {
+                "unknown"
+            };
+            let summary = format!(
+                "{} • {}",
+                format_count_with_word(spaces_count as u64, "пространство", "пространства", "пространств"),
+                format_count_with_word(pending_count as u64, "raw thread без Amai binding", "raw thread без Amai binding", "raw threads без Amai binding")
+            );
+            json!({
+                "label": bucket.label,
+                "project_code": bucket.project_code,
+                "status": status,
+                "summary": summary,
+                "spaces": bucket.spaces,
+                "pending_threads": bucket.pending_threads,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "kind": "hierarchy_tree",
+        "title": "Проект → Пространства → Инстансы агентов → Сессии → Thread/turn → Модель",
+        "note": "Оборотная сторона показывает только уже materialized сущности. Где raw client thread виден, но Amai ещё не связала его с пространством/сессией, он вынесен отдельно как pending binding, а не встраивается в иерархию guessed-способом.",
+        "legend": [
+            {
+                "label": "raw client thread",
+                "status": "alert",
+                "note": "Сущность видна в /home/art/.codex/state_5.sqlite и реально шевелилась недавно."
+            },
+            {
+                "label": "Amai live lease",
+                "status": "pass",
+                "note": "Amai держит активный lease и считает этот агентский инстанс реально живым сейчас."
+            },
+            {
+                "label": "working-state session",
+                "status": "waiting",
+                "note": "Есть свежий durable working_state_restore, поэтому пространство и сессия уже materialized в Amai."
+            }
+        ],
+        "projects": projects,
+    })
+}
+
+fn push_agent_hierarchy_space(
+    project_buckets: &mut BTreeMap<String, AgentHierarchyProjectBucket>,
+    recent_scope: &Value,
+    active_scope: Option<&Value>,
+    thread: Option<&Value>,
+) {
+    let recent_project_code = recent_scope["project_code"].as_str();
+    let recent_namespace_code = recent_scope["namespace_code"].as_str();
+    let recent_agent_scope = recent_scope["agent_scope"].as_str();
+    let recent_thread_id = recent_scope["thread_id"].as_str();
+    let scope_source = recent_agent_scope.or_else(|| active_scope.and_then(|value| value["agent_scope"].as_str()));
+    let (parsed_project_code, parsed_namespace_code, parsed_agent_leaf) =
+        parse_agent_scope_parts(scope_source);
+    let project_code = recent_project_code.or(parsed_project_code.as_deref());
+    let namespace_code = recent_namespace_code.or(parsed_namespace_code.as_deref());
+    let project_label = project_display_label(project_code, thread.and_then(|value| value["cwd"].as_str()));
+    let project_key = project_bucket_key(project_code, &project_label);
+    let bucket = project_buckets
+        .entry(project_key)
+        .or_insert_with(|| AgentHierarchyProjectBucket {
+            label: project_label.clone(),
+            project_code: project_code.map(str::to_string),
+            spaces: Vec::new(),
+            pending_threads: Vec::new(),
+        });
+    if bucket.label.is_empty() {
+        bucket.label = project_label;
+    }
+    if bucket.project_code.is_none() {
+        bucket.project_code = project_code.map(str::to_string);
+    }
+
+    let agent_label = thread_agent_label(thread, parsed_agent_leaf.as_deref());
+    let runtime_label = thread_runtime_label(thread);
+    let current_goal = compact_dashboard_text(
+        recent_scope["current_goal"].as_str(),
+        84,
+        "ещё нет materialized current goal",
+    );
+    let thread_id = recent_thread_id
+        .or_else(|| active_scope.and_then(|value| value["owner_thread_id"].as_str()))
+        .or_else(|| thread.and_then(|value| value["thread_id"].as_str()));
+    let thread_summary = thread
+        .map(|value| {
+            json!({
+                "thread_id": value["thread_id"].as_str(),
+                "title": compact_dashboard_text(value["title"].as_str(), 88, "ещё нет названия"),
+                "cwd": value["cwd"].as_str(),
+                "updated_at": value["updated_at_epoch_ms"].as_u64().map(human_timestamp),
+            })
+        })
+        .unwrap_or_else(|| {
+            json!({
+                "thread_id": thread_id,
+                "title": "raw thread ещё не materialized",
+                "cwd": Value::Null,
+                "updated_at": Value::Null,
+            })
+        });
+
+    let mut source_badges = vec![json!({
+        "label": "working-state session",
+        "status": "waiting"
+    })];
+    if thread.is_some() {
+        source_badges.push(json!({
+            "label": "raw client thread",
+            "status": "alert"
+        }));
+    }
+    if active_scope.is_some() {
+        source_badges.push(json!({
+            "label": "Amai live lease",
+            "status": "pass"
+        }));
+    }
+
+    let space_status = if active_scope.is_some() && thread.is_some() {
+        "pass"
+    } else if thread.is_some() {
+        "alert"
+    } else {
+        "waiting"
+    };
+    let namespace_label = namespace_code
+        .map(humanize_identifier)
+        .unwrap_or_else(|| "Пространство ещё не materialized".to_string());
+    let session_summary = if recent_scope.is_object() && !recent_scope.is_null() {
+        let mut parts = Vec::new();
+        if let Some(captured_at_epoch_ms) = recent_scope["captured_at_epoch_ms"].as_u64() {
+            parts.push(format!("restore {}", human_timestamp(captured_at_epoch_ms)));
+        }
+        if !current_goal.is_empty() && current_goal != "ещё нет materialized current goal" {
+            parts.push(current_goal.clone());
+        }
+        if parts.is_empty() {
+            "есть working-state session".to_string()
+        } else {
+            compact_dashboard_text(Some(&parts.join(" • ")), 112, "есть working-state session")
+        }
+    } else {
+        "живой lease есть, durable working-state session ещё не materialized".to_string()
+    };
+
+    bucket.spaces.push(json!({
+        "label": namespace_label,
+        "agent_scope": scope_source,
+        "status": space_status,
+        "summary": compact_dashboard_text(
+            Some(
+                &[
+                    scope_source.unwrap_or("scope ещё нет данных"),
+                    if active_scope.is_some() { "lease active" } else { "lease ещё нет" },
+                ]
+                .join(" • ")
+            ),
+            112,
+            "scope ещё нет данных"
+        ),
+        "agents": [
+            {
+                "label": agent_label,
+                "status": space_status,
+                "summary": runtime_label,
+                "source_badges": source_badges,
+                "session": {
+                    "label": "Текущая Amai-сессия",
+                    "status": if recent_scope.is_null() { "unknown" } else { "waiting" },
+                    "summary": session_summary,
+                    "thread": thread_summary,
+                    "model": {
+                        "label": runtime_label,
+                        "status": if thread.is_some() { "pass" } else { "unknown" },
+                    }
+                }
+            }
+        ]
+    }));
+}
+
+fn build_unbound_client_thread_node(thread: &Value) -> Value {
+    json!({
+        "label": compact_dashboard_text(thread["title"].as_str(), 72, "ещё нет названия"),
+        "status": "alert",
+        "summary": compact_dashboard_text(
+            Some(
+                &[
+                    path_leaf_label(thread["cwd"].as_str().unwrap_or("ещё нет cwd")),
+                    thread_runtime_label(Some(thread)),
+                ]
+                .join(" • ")
+            ),
+            112,
+            "raw client thread ещё не связан с Amai"
+        ),
+        "thread_id": thread["thread_id"].as_str(),
+        "updated_at": thread["updated_at_epoch_ms"].as_u64().map(human_timestamp),
+        "cwd": thread["cwd"].as_str(),
+    })
+}
+
+fn parse_agent_scope_parts(scope: Option<&str>) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(scope) = scope.map(str::trim).filter(|value| !value.is_empty()) else {
+        return (None, None, None);
+    };
+    let mut parts = scope
+        .split("::")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let project = parts.next().map(str::to_string);
+    let namespace = parts.next().map(str::to_string);
+    let leaf = parts.next().map(str::to_string);
+    (project, namespace, leaf)
+}
+
+fn project_bucket_key(project_code: Option<&str>, project_label: &str) -> String {
+    project_code
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| project_label.to_lowercase())
+}
+
+fn project_display_label(project_code: Option<&str>, cwd: Option<&str>) -> String {
+    if let Some(cwd) = cwd.and_then(|value| Path::new(value).file_name().and_then(|part| part.to_str()))
+    {
+        return humanize_identifier(cwd);
+    }
+    project_code
+        .map(humanize_identifier)
+        .unwrap_or_else(|| "Неизвестный проект".to_string())
+}
+
+fn thread_agent_label(thread: Option<&Value>, fallback_leaf: Option<&str>) -> String {
+    thread
+        .and_then(|value| value["agent_nickname"].as_str())
+        .or_else(|| thread.and_then(|value| value["agent_role"].as_str()))
+        .or(fallback_leaf)
+        .map(humanize_identifier)
+        .unwrap_or_else(|| "Инстанс агента ещё не назван".to_string())
+}
+
+fn thread_runtime_label(thread: Option<&Value>) -> String {
+    let model = thread
+        .and_then(|value| value["model"].as_str())
+        .filter(|value| !value.trim().is_empty());
+    let reasoning = thread
+        .and_then(|value| value["reasoning_effort"].as_str())
+        .filter(|value| !value.trim().is_empty());
+    let provider = thread
+        .and_then(|value| value["model_provider"].as_str())
+        .filter(|value| !value.trim().is_empty());
+    let mut parts = Vec::new();
+    if let Some(model) = model {
+        parts.push(model.to_string());
+    }
+    if let Some(reasoning) = reasoning {
+        parts.push(reasoning.to_string());
+    }
+    if let Some(provider) = provider {
+        parts.push(provider.to_string());
+    }
+    if parts.is_empty() {
+        "Модель ещё не materialized".to_string()
+    } else {
+        parts.join(" • ")
+    }
+}
+
+fn path_leaf_label(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(humanize_identifier)
+        .unwrap_or_else(|| humanize_identifier(path))
+}
+
+fn humanize_identifier(value: &str) -> String {
+    value
+        .split(['_', '-', '/', ':'])
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let head = first.to_uppercase().collect::<String>();
+                    let tail = chars.as_str().to_lowercase();
+                    format!("{head}{tail}")
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn hot_retrieval_benchmark_status(hot_retrieval: &Value, thresholds: &Value) -> &'static str {
@@ -5692,6 +6880,13 @@ fn with_status_label(mut card: Value, status_label: &str) -> Value {
             "status_label".to_string(),
             Value::from(status_label.to_string()),
         );
+    }
+    card
+}
+
+fn with_back_panel(mut card: Value, back_panel: Value) -> Value {
+    if let Some(object) = card.as_object_mut() {
+        object.insert("back_panel".to_string(), back_panel);
     }
     card
 }
@@ -9082,7 +10277,7 @@ mod tests {
         build_benchmark_cards, build_continuity_correctness_card, build_degradation_model_card,
         build_hero_cards, build_links, build_machine_cards, build_top_cards, format_ms,
         format_time_compare_pair, human_elapsed_ms, live_latency_compare_card, monitoring_url,
-        working_state_live_card, worst_status,
+        agent_scope_activity_card, working_state_live_card, worst_status,
     };
     use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary};
     use serde_json::json;
@@ -9624,30 +10819,78 @@ mod tests {
                     "recent_queries": [],
                     "restore_confidence": "preliminary"
                 }
+            },
+            "agent_scope_activity": {
+                "client_recent_window_minutes": 30,
+                "client_recent_thread_count": 1,
+                "client_recent_threads": [
+                    {
+                        "thread_id": "019d16f2-528d-7cc0-bcfe-8984f95f05c7",
+                        "cwd": "/home/art/Art",
+                        "rollout_path": "/home/art/.codex/sessions/2026/03/22/rollout-2026-03-22T22-07-52-019d16f2-528d-7cc0-bcfe-8984f95f05c7.jsonl",
+                        "title": "продолжай по Amai continuity",
+                        "agent_nickname": "Amai",
+                        "agent_role": "continuity",
+                        "model_provider": "openai",
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "xhigh",
+                        "updated_at_epoch_ms": 1774239285880u64
+                    }
+                ],
+                "active_now_count": 1,
+                "active_now_scopes": [
+                    {
+                        "agent_scope": "art::continuity::default",
+                        "owner_thread_id": "019d16f2-528d-7cc0-bcfe-8984f95f05c7",
+                        "heartbeat_at_epoch_ms": 1774239285880u64
+                    }
+                ],
+                "recent_scope_window_hours": 24,
+                "recent_scope_count": 3,
+                "recent_scopes": [
+                    {
+                        "agent_scope": "art::continuity::default",
+                        "captured_at_epoch_ms": 1774239285880u64
+                    },
+                    {
+                        "agent_scope": "bug_bounty::continuity::default",
+                        "captured_at_epoch_ms": 1774239200000u64
+                    }
+                ]
             }
         });
 
         let cards = build_top_cards(&snapshot);
-        assert_eq!(cards.len(), 2);
+        assert_eq!(cards.len(), 3);
         assert_eq!(cards[0]["title"].as_str(), Some("Скорость ответа"));
-        assert_eq!(cards[1]["title"].as_str(), Some("Текущая работа"));
+        assert_eq!(cards[1]["title"].as_str(), Some("Агенты сейчас"));
+        assert_eq!(cards[2]["title"].as_str(), Some("Текущая работа"));
         assert!(cards[0]["status_tooltip"]
             .as_str()
             .unwrap_or_default()
             .is_empty());
-        assert!(cards[1]["status_tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Уверенность в этом рабочем снимке пока"));
+        assert_eq!(cards[1]["status"].as_str(), Some("pass"));
         assert!(cards[1]["note"]
             .as_str()
             .unwrap_or_default()
-            .contains("Сейчас Amai ведёт такую работу"));
+            .contains("active ExecCtl leases"));
         assert!(cards[1]["rows"].as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row["label"].as_str() == Some("Работают прямо сейчас"))
+        }));
+        assert!(cards[2]["status_tooltip"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Уверенность в этом рабочем снимке пока"));
+        assert!(cards[2]["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Сейчас Amai ведёт такую работу"));
+        assert!(cards[2]["rows"].as_array().is_some_and(|rows| {
             rows.iter()
                 .any(|row| row["label"].as_str() == Some("Последний снимок"))
         }));
-        let rows = cards[1]["rows"].as_array().expect("rows");
+        let rows = cards[2]["rows"].as_array().expect("rows");
         assert!(rows.iter().any(|row| {
             row["label"].as_str() == Some("Почему включено")
                 && row["value"]
@@ -9660,6 +10903,94 @@ mod tests {
                     .as_str()
                     .is_some_and(|value| value.contains("семантические фрагменты"))
         }));
+    }
+
+    #[test]
+    fn agent_scope_activity_card_separates_live_and_recent_truth_sources() {
+        let snapshot = json!({
+            "agent_scope_activity": {
+                "client_recent_window_minutes": 30,
+                "client_recent_thread_count": 2,
+                "client_recent_threads": [
+                    {
+                        "thread_id": "019d16f2-528d-7cc0-bcfe-8984f95f05c7",
+                        "cwd": "/home/art/Art",
+                        "rollout_path": "/home/art/.codex/sessions/2026/03/22/rollout-2026-03-22T22-07-52-019d16f2-528d-7cc0-bcfe-8984f95f05c7.jsonl",
+                        "title": "продолжай по Amai continuity",
+                        "agent_nickname": "Amai",
+                        "agent_role": "continuity",
+                        "model_provider": "openai",
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "xhigh",
+                        "updated_at_epoch_ms": 1774239285880u64
+                    },
+                    {
+                        "thread_id": "019d258b-b511-74a2-b2f9-898ac18f5a34",
+                        "cwd": "/home/art/Bug-Bounty",
+                        "rollout_path": "/home/art/.codex/sessions/2026/03/25/rollout-2026-03-25T18-10-06-019d258b-b511-74a2-b2f9-898ac18f5a34.jsonl",
+                        "title": "Bug bounty search",
+                        "agent_nickname": "Hunter",
+                        "agent_role": "reports",
+                        "model_provider": "openai",
+                        "model": "gpt-5.4-mini",
+                        "reasoning_effort": "high",
+                        "updated_at_epoch_ms": 1774239200000u64
+                    }
+                ],
+                "active_now_count": 1,
+                "active_now_scopes": [
+                    {
+                        "agent_scope": "art::continuity::default",
+                        "owner_thread_id": "019d16f2-528d-7cc0-bcfe-8984f95f05c7",
+                        "heartbeat_at_epoch_ms": 1774239285880u64
+                    }
+                ],
+                "recent_scope_window_hours": 24,
+                "recent_scope_count": 4,
+                "recent_scopes": [
+                    {
+                        "agent_scope": "art::continuity::default",
+                        "captured_at_epoch_ms": 1774239285880u64
+                    },
+                    {
+                        "agent_scope": "bug_bounty::continuity::default",
+                        "captured_at_epoch_ms": 1774239200000u64
+                    }
+                ]
+            }
+        });
+
+        let card = agent_scope_activity_card(&snapshot);
+        assert_eq!(card["status"].as_str(), Some("alert"));
+        assert_eq!(
+            card["status_label"].as_str(),
+            Some("Amai видит не всех")
+        );
+        assert_eq!(card["value"].as_str(), Some("2 чата за 30м • 1 живой агент сейчас в Amai"));
+        assert!(card["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("active ExecCtl leases"));
+        let rows = card["rows"].as_array().expect("rows");
+        assert!(rows.iter().any(|row| {
+            row["label"].as_str() == Some("Работают прямо сейчас")
+                && row["value"]
+                    .as_str()
+                    .is_some_and(|value| value.contains("art::continuity::default"))
+        }));
+        assert!(rows.iter().any(|row| {
+            row["label"].as_str() == Some("Работали за 24ч")
+                && row["value"]
+                    .as_str()
+                    .is_some_and(|value| value.contains("bug_bounty::continuity::default"))
+        }));
+        assert_eq!(
+            card["back_panel"]["kind"].as_str(),
+            Some("hierarchy_tree")
+        );
+        assert!(card["back_panel"]["projects"]
+            .as_array()
+            .is_some_and(|projects| !projects.is_empty()));
     }
 
     #[test]

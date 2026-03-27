@@ -162,19 +162,17 @@ fn evaluate_startup_execution_gate_consistency(
     let must_follow_startup_next_action =
         startup_execution_gate["must_follow_startup_next_action"].as_bool();
     let unrelated_work_allowed = startup_execution_gate["unrelated_work_allowed"].as_bool();
-    let must_read_prompt_text_before_reply = startup_execution_gate
-        ["must_read_prompt_text_before_reply"]
-        .as_bool();
-    let required_action_kind_when_resume_required = startup_execution_gate
-        ["required_action_kind_when_resume_required"]
-        .as_str();
+    let must_read_prompt_text_before_reply =
+        startup_execution_gate["must_read_prompt_text_before_reply"].as_bool();
+    let required_action_kind_when_resume_required =
+        startup_execution_gate["required_action_kind_when_resume_required"].as_str();
     let no_silent_drop = startup_execution_gate["no_silent_drop"].as_bool();
     let gate_required_return_task_present =
         startup_execution_gate["required_return_task_present"].as_bool();
-    let gate_required_return_task_headline = startup_execution_gate["required_return_task_headline"]
-        .as_str();
-    let gate_required_return_task_next_step = startup_execution_gate["required_return_task_next_step"]
-        .as_str();
+    let gate_required_return_task_headline =
+        startup_execution_gate["required_return_task_headline"].as_str();
+    let gate_required_return_task_next_step =
+        startup_execution_gate["required_return_task_next_step"].as_str();
     let blocking = startup_execution_gate["blocking"].as_bool();
     let required_return_task_headline = summary["required_return_task"]["headline"].as_str();
     let required_return_task_next_step = summary["required_return_task"]["next_step"].as_str();
@@ -206,14 +204,25 @@ fn evaluate_startup_execution_gate_consistency(
             Some(blocking_value),
         ) => {
             let mut ok = true;
+            if gate_enforcement["blocking_true_requires_must_follow"].as_bool() == Some(true)
+                && blocking_value
+                && !must_follow
+            {
+                ok = false;
+            }
+            if gate_enforcement["blocking_true_blocks_unrelated_work"].as_bool() == Some(true)
+                && blocking_value
+                && unrelated_allowed
+            {
+                ok = false;
+            }
             if gate_enforcement["must_follow_true_blocks_unrelated_work"].as_bool() == Some(true)
                 && must_follow
                 && unrelated_allowed
             {
                 ok = false;
             }
-            if gate_enforcement["must_read_prompt_text_true_requires_prompt_before_reply"]
-                .as_bool()
+            if gate_enforcement["must_read_prompt_text_true_requires_prompt_before_reply"].as_bool()
                 == Some(true)
                 && must_read_prompt
                 && prompt_text_present != Some(true)
@@ -341,23 +350,25 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
     let lease_owner_state = summary["execctl_active_lease"]["lease_owner_state"]
         .as_str()
         .map(ToOwned::to_owned);
-    let must_follow_startup_next_action = payload["startup_execution_gate"]
-        ["must_follow_startup_next_action"]
-        .as_bool();
-    let unrelated_work_allowed = payload["startup_execution_gate"]["unrelated_work_allowed"]
-        .as_bool();
-    let must_read_prompt_text_before_reply = payload["startup_execution_gate"]
-        ["must_read_prompt_text_before_reply"]
-        .as_bool();
-    let required_action_kind_when_resume_required = payload["startup_execution_gate"]
-        ["required_action_kind_when_resume_required"]
-        .as_str()
-        .map(ToOwned::to_owned);
+    let must_follow_startup_next_action =
+        payload["startup_execution_gate"]["must_follow_startup_next_action"].as_bool();
+    let unrelated_work_allowed =
+        payload["startup_execution_gate"]["unrelated_work_allowed"].as_bool();
+    let must_read_prompt_text_before_reply =
+        payload["startup_execution_gate"]["must_read_prompt_text_before_reply"].as_bool();
+    let required_action_kind_when_resume_required =
+        payload["startup_execution_gate"]["required_action_kind_when_resume_required"]
+            .as_str()
+            .map(ToOwned::to_owned);
     let no_silent_drop = payload["startup_execution_gate"]["no_silent_drop"].as_bool();
-    let gate_semantics_consistent =
-        evaluate_startup_execution_gate_consistency(summary, &payload["startup_execution_gate"], prompt_text_present);
+    let gate_semantics_consistent = evaluate_startup_execution_gate_consistency(
+        summary,
+        &payload["startup_execution_gate"],
+        prompt_text_present,
+    );
     let artifact_gate_semantics_consistent = payload["gate_semantics_consistent"].as_bool();
-    let artifact_gate_semantics_consistent_present = Some(artifact_gate_semantics_consistent.is_some());
+    let artifact_gate_semantics_consistent_present =
+        Some(artifact_gate_semantics_consistent.is_some());
     let artifact_gate_semantics_consistent_matches_recomputed = match (
         artifact_gate_semantics_consistent,
         gate_semantics_consistent,
@@ -509,7 +520,9 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
     );
     println!(
         "project_task_tree_summary field present: {}",
-        audit.project_task_tree_summary_field_present.unwrap_or(false)
+        audit
+            .project_task_tree_summary_field_present
+            .unwrap_or(false)
     );
     println!(
         "project_task_ledger field present: {}",
@@ -517,7 +530,9 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
     );
     println!(
         "project_task_ledger_summary field present: {}",
-        audit.project_task_ledger_summary_field_present.unwrap_or(false)
+        audit
+            .project_task_ledger_summary_field_present
+            .unwrap_or(false)
     );
     println!(
         "Resume state: {}",
@@ -550,13 +565,12 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
             .as_deref()
             .unwrap_or("n/a")
     );
-    println!(
-        "No silent drop: {}",
-        audit.no_silent_drop.unwrap_or(false)
-    );
+    println!("No silent drop: {}", audit.no_silent_drop.unwrap_or(false));
     println!(
         "Artifact gate_semantics_consistent present: {}",
-        audit.artifact_gate_semantics_consistent_present.unwrap_or(false)
+        audit
+            .artifact_gate_semantics_consistent_present
+            .unwrap_or(false)
     );
     println!(
         "Artifact gate_semantics_consistent matches recomputed audit: {}",
@@ -1181,27 +1195,29 @@ fn build_startup_execution_gate(payload: &Value) -> Value {
     let action_kind = payload["chat_start_restore"]["startup_next_action"]["action_kind"]
         .as_str()
         .unwrap_or("continue_active_workline");
-    let lease_owner_state = payload["chat_start_restore"]["execctl_active_lease"]["lease_owner_state"]
-        .as_str();
+    let lease_owner_state =
+        payload["chat_start_restore"]["execctl_active_lease"]["lease_owner_state"].as_str();
     let previous_session_owner_value = resume_enforcement["previous_session_owner_value"]
         .as_str()
         .unwrap_or("previous_session_owner");
-    let must_resume_before_unrelated = resume_enforcement
-        ["must_resume_required_return_task_before_unrelated_work"]
-        .as_bool()
-        .unwrap_or(false);
+    let must_resume_before_unrelated =
+        resume_enforcement["must_resume_required_return_task_before_unrelated_work"]
+            .as_bool()
+            .unwrap_or(false);
     let required_action_kind = resume_enforcement["required_action_kind_when_resume_required"]
         .as_str()
         .unwrap_or("resume_required_return_task");
-    let must_follow = (must_resume_before_unrelated && action_kind == required_action_kind)
+    let blocking = payload["chat_start_restore"]["startup_next_action"]["blocking"]
+        .as_bool()
+        .unwrap_or(false);
+    let must_follow = blocking
+        || (must_resume_before_unrelated && action_kind == required_action_kind)
         || lease_owner_state == Some(previous_session_owner_value);
 
     json!({
         "gate_version": "startup-execution-gate-v1",
         "action_kind": action_kind,
-        "blocking": payload["chat_start_restore"]["startup_next_action"]["blocking"]
-            .as_bool()
-            .unwrap_or(false),
+        "blocking": blocking,
         "resume_state": payload["chat_start_restore"]["execctl_resume_state"]
             .as_str()
             .unwrap_or("clear"),
@@ -2856,7 +2872,12 @@ fn build_chat_start_restore(
         .filter(|value| value["startup_next_action"].is_object())
         .map(|value| value["startup_next_action"].clone())
         .unwrap_or_else(|| {
-            default_startup_next_action(&current_goal, &next_step, &execctl_resume_obligation)
+            default_startup_next_action(
+                &current_goal,
+                &next_step,
+                &execctl_resume_obligation,
+                restore_node.and_then(|value| value.get("client_budget_guard")),
+            )
         });
     let startup_next_action_summary = restore_node
         .and_then(|value| value["startup_next_action_summary"].as_str())
@@ -3028,6 +3049,7 @@ fn default_startup_next_action(
     current_goal: &str,
     next_step: &str,
     execctl_resume_obligation: &Value,
+    client_budget_guard: Option<&Value>,
 ) -> Value {
     let resume_state = execctl_resume_obligation["resume_state"]
         .as_str()
@@ -3045,7 +3067,34 @@ fn default_startup_next_action(
     let required_next_step = execctl_resume_obligation["required_return_next_step"]
         .as_str()
         .filter(|value| !value.is_empty());
-    if resume_state != "clear" && required_headline.is_some() {
+    let should_rotate_chat = client_budget_guard
+        .map(|guard| {
+            guard["should_rotate_chat_now"].as_bool() == Some(true)
+                || guard["should_rotate_chat_soon"].as_bool() == Some(true)
+        })
+        .unwrap_or(false);
+    let client_budget_status = client_budget_guard
+        .and_then(|guard| guard["status_label"].as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("новый чат рекомендован");
+    let client_budget_note = client_budget_guard
+        .and_then(|guard| guard["note"].as_str())
+        .filter(|value| !value.is_empty());
+    if should_rotate_chat {
+        json!({
+            "action_version": "startup-next-action-v1",
+            "action_kind": "rotate_chat_for_client_budget",
+            "blocking": true,
+            "reason": "client_budget_guard_pressure",
+            "resume_state": resume_state,
+            "no_silent_drop": no_silent_drop,
+            "headline": format!("Клиентский лимит: {client_budget_status}"),
+            "next_step": "сохрани handoff и продолжай только в свежем чате через continuity startup",
+            "client_budget_status_label": client_budget_status,
+            "client_budget_note": client_budget_note,
+            "preserves_return_obligation": resume_state != "clear",
+        })
+    } else if resume_state != "clear" && required_headline.is_some() {
         json!({
             "action_version": "startup-next-action-v1",
             "action_kind": "resume_required_return_task",
@@ -3130,8 +3179,9 @@ fn render_chat_start_prompt(
     let compact_current_goal = compact_prompt_fragment(current_goal, 80);
     let materialized_summary =
         restore_node.and_then(|value| summarize_materialized_notes(&value["materialized_notes"]));
-    let compact_materialized_summary =
-        materialized_summary.as_deref().map(|value| compact_prompt_fragment(value, 88));
+    let compact_materialized_summary = materialized_summary
+        .as_deref()
+        .map(|value| compact_prompt_fragment(value, 88));
     let execctl_resume_obligation = restore_node
         .map(|value| summarize_execctl_resume_obligation(&value["execctl_resume_contract"]))
         .unwrap_or_else(|| default_execctl_resume_obligation(None, "clear"));
@@ -3139,7 +3189,12 @@ fn render_chat_start_prompt(
         .filter(|value| value["startup_next_action"].is_object())
         .map(|value| value["startup_next_action"].clone())
         .unwrap_or_else(|| {
-            default_startup_next_action(current_goal, &next_step, &execctl_resume_obligation)
+            default_startup_next_action(
+                current_goal,
+                &next_step,
+                &execctl_resume_obligation,
+                restore_node.and_then(|value| value.get("client_budget_guard")),
+            )
         });
     let execctl_resume_state = restore_node
         .and_then(|value| value["execctl_resume_state"].as_str())
@@ -4912,13 +4967,9 @@ mod tests {
             prompt.contains("Шаг: Сделать auto-injection restore pack прямо в chat-start prompt.")
         );
         assert!(prompt.contains("Сделано: Enriched temporal summaries теперь пишутся upstream."));
-        assert!(prompt.contains(
-            "Сначала: вернись к линии: Same-meter spend control"
-        ));
+        assert!(prompt.contains("Сначала: вернись к линии: Same-meter spend control"));
         assert!(prompt.contains("Не переключайся до возврата."));
-        assert!(
-            prompt.contains("Правило: follow pack; continuity не поднимай.")
-        );
+        assert!(prompt.contains("Правило: follow pack; continuity не поднимай."));
         assert!(!prompt.contains("Недавнее:"));
         assert!(!prompt.contains("Файлы:"));
         assert!(!prompt.contains("Задачи:"));
@@ -5071,10 +5122,7 @@ mod tests {
             artifact["startup_execution_gate"]["required_return_task_next_step"],
             json!("Close same-meter live gap.")
         );
-        assert_eq!(
-            artifact["gate_semantics_consistent"],
-            json!(true)
-        );
+        assert_eq!(artifact["gate_semantics_consistent"], json!(true));
         assert_eq!(
             artifact["continuity_startup_summary"]["startup_next_action"]["action_kind"],
             json!("resume_required_return_task")
@@ -5161,9 +5209,8 @@ mod tests {
                 }
             }
         });
-        let artifact =
-            build_startup_runtime_state_artifact(repo.as_path(), &payload, 42)
-                .expect("startup runtime state artifact");
+        let artifact = build_startup_runtime_state_artifact(repo.as_path(), &payload, 42)
+            .expect("startup runtime state artifact");
         fs::write(
             startup_runtime_state_artifact_path(repo.as_path()),
             serde_json::to_string_pretty(&artifact).expect("serialize artifact"),

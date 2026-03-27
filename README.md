@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 18:31 MSK
-Ручная сверка guide/docs: 2026-03-27 18:31 MSK
+modified_at: 2026-03-27 20:34 MSK
+Ручная сверка guide/docs: 2026-03-27 20:34 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -46,6 +46,22 @@ modified_at: 2026-03-27 18:31 MSK
 - меньше тратятся токены на повторный ввод контекста;
 - проще подключить один и тот же внешний инструмент к разным IDE;
 - важные решения и правила не пропадают между сессиями.
+
+## Как `Amai` теперь считает активных агентов
+
+Раньше dashboard мог показать только один самый свежий `working state`.
+Для multi-agent работы этого недостаточно.
+
+Теперь truth-source разделён на два слоя:
+- `работают прямо сейчас`
+  - считаются только живые `ExecCtl lease`;
+- `работали недавно`
+  - считаются distinct `working_state_restore` scopes за последнее окно.
+
+Это нужно затем, чтобы:
+- один последний `handoff` не подменял всю картину;
+- недавно завершённый агент не выглядел как живой прямо сейчас;
+- пользователь видел не «какой scope был последним», а сколько агентов реально работает и сколько разных рабочих контуров было активно недавно.
 
 ## Как `Amai` продолжает работу в новом чате
 
@@ -1264,9 +1280,15 @@ preview, а не только raw count.
     как summary-строки;
   - если `startup_next_action.action_kind = resume_required_return_task`, клиент обязан
     выполнить именно этот return path до unrelated work;
+  - если `startup_next_action.action_kind = rotate_chat_for_client_budget`, клиент обязан
+    сохранить return obligation через handoff и продолжать только в свежем чате через
+    continuity startup; продолжать в раздутом live-thread нельзя;
   - если `execctl_active_lease.lease_owner_state = previous_session_owner`, клиент не имеет права
     тихо захватывать линию и обязан follow `startup_next_action` first;
   - `no_silent_drop = true` запрещает тихо переключаться на unrelated work.
+  - `working_state_restore.client_budget_guard` теперь обязан опираться на тот же full-turn
+    source of truth, что и живая current-session card; slice-only tracked savings нельзя
+    использовать как основание для startup verdict по клиентскому лимиту.
 
 Следующий practical contour теперь тоже materialized не только в docs, но и в onboarding:
 - `VS Code` получает managed workspace startup instructions
@@ -1301,6 +1323,8 @@ preview, а не только raw count.
   - `startup_execution_gate.must_read_prompt_text_before_reply = true`;
   - `startup_execution_gate.required_action_kind_when_resume_required = "resume_required_return_task"`;
   - `startup_execution_gate.no_silent_drop = true`;
+  - `startup_execution_gate.blocking_true_requires_must_follow = true`;
+  - `startup_execution_gate.blocking_true_blocks_unrelated_work = true`;
   это нужно затем, чтобы supported client читал не только факт наличия gate, но и literal meaning
   каждого обязательного поля без prompt-guessing.
 - truthful пример:
@@ -1679,6 +1703,73 @@ preview, а не только raw count.
 - overlays и analyzers не могут подменять main truth line;
 - карточка не имеет права намекать на `full session economics`, пока backend честно не
   materialize-ил такой слой.
+
+Этот же interaction contract теперь считается общим законом для всех dashboard-карточек,
+а не только для token-terminal:
+
+- double left click по карточке переключает `front/back`;
+- double right click по карточке переключает `full-screen`;
+- mobile path повторяет тот же контракт:
+  - двойной тап одним пальцем = flip;
+  - двойной тап двумя пальцами = full-screen toggle;
+- live-refresh не имеет права сбрасывать текущий `front/back/full-screen` state;
+- back side и full-screen по-прежнему не имеют права показывать больше truth, чем уже
+  materialized backend.
+
+## Agent Hierarchy Card Contract
+
+Для новой карточки живой агентной структуры каноническая иерархия теперь такая:
+
+- `Проект -> Пространства -> Инстансы агентов -> Сессии -> Thread/turn -> Модель`
+
+Имя карточки теперь фиксируется так:
+
+- label на front-side: `Amai WorkSpace`
+- русская tooltip-подсказка к label: `Структура проектов`
+
+Жёсткие правила этой иерархии:
+
+- `агент` не равен `модели`;
+- `agent instance` не равен `thread`;
+- `модель` — это runtime-атрибут нижнего уровня, а не сущность верхнего уровня;
+- в одном `пространстве` может одновременно работать несколько `инстансов агента`;
+- один и тот же агент может менять модель, не теряя своей идентичности.
+
+Что обязана показывать front-side этой карточки:
+
+- только сухую проверяемую статистику;
+- сколько client-thread реально шевелилось недавно;
+- сколько active lease `Amai` держит прямо сейчас;
+- сколько distinct working-state scopes materialized недавно;
+- честный статус, если raw client truth шире, чем текущая durable `Amai`-видимость.
+
+Что обязана показывать back-side этой карточки:
+
+- вложенную схему сущностей строго по иерархии `Проект -> Пространства -> Инстансы агентов -> Сессии -> Thread/turn -> Модель`;
+- только уже materialized поля;
+- source badges для разных truth-layers:
+  - raw client thread;
+  - live lease;
+  - working-state session.
+
+Жёсткий запрет на перегрузку оборотной стороны:
+
+- back-side не должен дублировать front-side KPI;
+- back-side не должен показывать отдельные summary-списки вида:
+  - сколько пространств;
+  - сколько агентов;
+  - сколько сессий;
+  - сколько thread;
+  - сколько моделей;
+- если каждая сущность уже показана как подписанный блок внутри схемы, этого достаточно;
+- оборотная сторона должна быть именно читаемой схемой сущностей, а не сводкой поверх схемы.
+
+Fail-closed правило для расхождений:
+
+- если raw client thread уже виден, а `Amai` ещё не связала его с пространством/сессией,
+  такой thread запрещено `guess`-ить внутрь иерархии;
+- он обязан показываться отдельно как `pending binding`, а не как якобы уже известный
+  `инстанс агента`.
 
 Главное правило:
 - headline-метрика у `Amai` теперь не raw и не synthetic;

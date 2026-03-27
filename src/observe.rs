@@ -786,6 +786,12 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         },
     )
     .await?;
+    let agent_scope_activity = timed_future(
+        &mut observe_refresh_stage_ms,
+        "agent_scope_activity",
+        collect_agent_scope_activity(&db),
+    )
+    .await?;
     let latest_degradation_verification = timed_future(
         &mut observe_refresh_stage_ms,
         "latest_degradation_verification",
@@ -841,6 +847,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "cold_path_benchmark_progress": cold_path_benchmark_progress,
         "latest_working_state_restore": latest_working_state_restore,
         "latest_repo_working_state_restore": latest_repo_working_state_restore,
+        "agent_scope_activity": agent_scope_activity,
         "latest_degradation_verification": latest_degradation_verification,
         "latest_continuity_verification": latest_continuity_verification,
         "token_budget_report": token_budget_report,
@@ -872,6 +879,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "cold_path_benchmark_progress": payload["cold_path_benchmark_progress"].clone(),
         "latest_working_state_restore": payload["latest_working_state_restore"].clone(),
         "latest_repo_working_state_restore": payload["latest_repo_working_state_restore"].clone(),
+        "agent_scope_activity": payload["agent_scope_activity"].clone(),
         "latest_degradation_verification": payload["latest_degradation_verification"].clone(),
         "latest_continuity_verification": payload["latest_continuity_verification"].clone(),
         "token_budget_report": payload["token_budget_report"].clone(),
@@ -889,6 +897,132 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         let _ = postgres::insert_observability_snapshot(&db, "system_snapshot", &snapshot).await?;
     }
     Ok(snapshot)
+}
+
+async fn collect_agent_scope_activity(db: &Client) -> Result<Value> {
+    let now_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as i64;
+    let recent_window_hours = 24_i64;
+    let recent_window_start_epoch_ms = now_epoch_ms - recent_window_hours * 60 * 60 * 1000;
+    let client_recent_window_minutes = 30_i64;
+    let client_recent_threads =
+        codex_threads::recent_client_thread_records(client_recent_window_minutes * 60)?
+            .into_iter()
+            .map(|item| {
+                json!({
+                    "thread_id": item.thread_id,
+                    "cwd": item.cwd,
+                    "rollout_path": item.rollout_path,
+                    "title": item.title,
+                    "agent_nickname": item.agent_nickname,
+                    "agent_role": item.agent_role,
+                    "model_provider": item.model_provider,
+                    "model": item.model,
+                    "reasoning_effort": item.reasoning_effort,
+                    "updated_at_epoch_ms": item.updated_at_epoch_s.saturating_mul(1000),
+                })
+            })
+            .collect::<Vec<_>>();
+
+    let active_rows = db
+        .query(
+            r#"
+            SELECT
+                agent_scope,
+                owner_thread_id,
+                heartbeat_at_epoch_ms,
+                expires_at_epoch_ms
+            FROM ami.execctl_task_leases
+            WHERE lease_state = 'active'
+              AND expires_at_epoch_ms > $1
+            ORDER BY heartbeat_at_epoch_ms DESC, agent_scope ASC
+            LIMIT 64
+            "#,
+            &[&now_epoch_ms],
+        )
+        .await
+        .context("failed to query active execctl task leases for agent scope activity")?;
+    let active_now_scopes = active_rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "agent_scope": row.get::<_, String>(0),
+                "owner_thread_id": row.get::<_, Option<String>>(1),
+                "heartbeat_at_epoch_ms": row.get::<_, i64>(2),
+                "expires_at_epoch_ms": row.get::<_, i64>(3),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let recent_rows = db
+        .query(
+            r#"
+            WITH recent AS (
+                SELECT DISTINCT ON (
+                    payload #>> '{working_state_restore,project,code}',
+                    payload #>> '{working_state_restore,namespace,code}',
+                    payload #>> '{working_state_restore,agent_scope}',
+                    COALESCE(payload #>> '{working_state_restore,thread_id}', '')
+                )
+                    payload #>> '{working_state_restore,project,code}' AS project_code,
+                    payload #>> '{working_state_restore,namespace,code}' AS namespace_code,
+                    payload #>> '{working_state_restore,agent_scope}' AS agent_scope,
+                    NULLIF(payload #>> '{working_state_restore,thread_id}', '') AS thread_id,
+                    payload #>> '{working_state_restore,current_goal}' AS current_goal,
+                    captured_at_epoch_ms
+                FROM ami.observability_snapshots
+                WHERE snapshot_kind = 'working_state_restore'
+                  AND captured_at_epoch_ms >= $1
+                ORDER BY
+                    payload #>> '{working_state_restore,project,code}',
+                    payload #>> '{working_state_restore,namespace,code}',
+                    payload #>> '{working_state_restore,agent_scope}',
+                    COALESCE(payload #>> '{working_state_restore,thread_id}', ''),
+                    captured_at_epoch_ms DESC
+            )
+            SELECT
+                project_code,
+                namespace_code,
+                agent_scope,
+                thread_id,
+                current_goal,
+                captured_at_epoch_ms
+            FROM recent
+            ORDER BY captured_at_epoch_ms DESC
+            LIMIT 64
+            "#,
+            &[&recent_window_start_epoch_ms],
+        )
+        .await
+        .context("failed to query recent working_state_restore scopes for agent scope activity")?;
+    let recent_scopes = recent_rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "project_code": row.get::<_, Option<String>>(0),
+                "namespace_code": row.get::<_, Option<String>>(1),
+                "agent_scope": row.get::<_, Option<String>>(2),
+                "thread_id": row.get::<_, Option<String>>(3),
+                "current_goal": row.get::<_, Option<String>>(4),
+                "captured_at_epoch_ms": row.get::<_, i64>(5),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "source": "observe_agent_scope_activity_v2",
+        "captured_at_epoch_ms": now_epoch_ms,
+        "client_recent_window_minutes": client_recent_window_minutes,
+        "client_recent_thread_count": client_recent_threads.len(),
+        "client_recent_threads": client_recent_threads,
+        "active_now_count": active_now_scopes.len(),
+        "active_now_scopes": active_now_scopes,
+        "recent_scope_window_hours": recent_window_hours,
+        "recent_scope_count": recent_scopes.len(),
+        "recent_scopes": recent_scopes,
+    }))
 }
 
 async fn timed_future<T, F>(

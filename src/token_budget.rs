@@ -6,6 +6,7 @@ use crate::cli::{
 };
 use crate::codex_threads;
 use crate::config::{self, AppConfig};
+use crate::dashboard;
 use crate::language;
 use crate::postgres::{self, ObservabilitySnapshotRecord};
 use crate::retrieval;
@@ -7495,6 +7496,19 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     }
     store_dashboard_report(&repo_root, &report_signature, &report_components, &report);
     Ok(report)
+}
+
+pub async fn collect_startup_client_budget_guard(db: &Client) -> Result<Value> {
+    let report = collect_dashboard_report(db).await?;
+    let mut guard =
+        dashboard::current_session_budget_guard_from_report(&report["token_budget_report"]);
+    if let Some(node) = guard.as_object_mut() {
+        node.insert(
+            "source".to_string(),
+            Value::from("token_budget_startup_client_budget_guard_v2"),
+        );
+    }
+    Ok(guard)
 }
 
 pub async fn collect_default_report_with_overrides(

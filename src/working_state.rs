@@ -325,6 +325,10 @@ pub async fn build_restore_bundle(
     )
     .await?;
     overlay_execctl_active_lease(&mut bundle, active_lease.as_ref());
+    let client_budget_guard = token_budget::collect_startup_client_budget_guard(db)
+        .await
+        .unwrap_or_else(|error| fallback_client_budget_guard_from_error(&error.to_string()));
+    overlay_client_budget_guard(&mut bundle, &client_budget_guard);
     Ok(Some(bundle))
 }
 
@@ -646,8 +650,13 @@ fn compose_restore_bundle(
         build_execctl_resume_contract(&project_task_tree, &pending_return_queue);
     let execctl_resume_contract_summary =
         summarize_execctl_resume_contract(&execctl_resume_contract);
-    let startup_next_action =
-        build_startup_next_action(&current_goal, &next_step, &execctl_resume_contract);
+    let client_budget_guard = default_client_budget_guard();
+    let startup_next_action = build_startup_next_action(
+        &current_goal,
+        &next_step,
+        &execctl_resume_contract,
+        &client_budget_guard,
+    );
     let startup_next_action_summary = summarize_startup_next_action(&startup_next_action);
 
     json!({
@@ -676,6 +685,7 @@ fn compose_restore_bundle(
             "execctl_resume_state": execctl_resume_state,
             "execctl_resume_contract": execctl_resume_contract,
             "execctl_resume_contract_summary": execctl_resume_contract_summary,
+            "client_budget_guard": client_budget_guard,
             "startup_next_action": startup_next_action,
             "startup_next_action_summary": startup_next_action_summary,
             "project_task_tree": project_task_tree,
@@ -1942,6 +1952,66 @@ fn overlay_execctl_active_lease(bundle: &mut Value, active_lease: Option<&ExecCt
     }
 }
 
+fn overlay_client_budget_guard(bundle: &mut Value, client_budget_guard: &Value) {
+    let Some(restore) = bundle
+        .get_mut("working_state_restore")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    restore.insert(
+        "client_budget_guard".to_string(),
+        client_budget_guard.clone(),
+    );
+    let current_goal = restore["current_goal"]
+        .as_str()
+        .unwrap_or("ещё нет данных")
+        .to_string();
+    let next_step = restore["next_step"]
+        .as_str()
+        .unwrap_or("ещё нет данных")
+        .to_string();
+    let contract = restore
+        .get("execctl_resume_contract")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let startup_next_action = build_startup_next_action(
+        &current_goal,
+        &next_step,
+        &contract,
+        client_budget_guard,
+    );
+    let startup_next_action_summary = summarize_startup_next_action(&startup_next_action);
+    restore.insert("startup_next_action".to_string(), startup_next_action);
+    if let Some(summary) = startup_next_action_summary {
+        restore.insert("startup_next_action_summary".to_string(), json!(summary));
+    }
+}
+
+fn default_client_budget_guard() -> Value {
+    json!({
+        "source": "token_budget_startup_client_budget_guard_v2",
+        "status": "unknown",
+        "status_label": "нет данных",
+        "should_rotate_chat_now": false,
+        "should_rotate_chat_soon": false,
+        "full_turn_savings_proven": false,
+        "note": "client-budget guard ещё не materialized"
+    })
+}
+
+fn fallback_client_budget_guard_from_error(error: &str) -> Value {
+    let mut guard = default_client_budget_guard();
+    if let Some(node) = guard.as_object_mut() {
+        node.insert("status".to_string(), json!("unknown"));
+        node.insert(
+            "note".to_string(),
+            json!(format!("client-budget guard не materialized: {error}")),
+        );
+    }
+    guard
+}
+
 fn build_durable_project_task_ledger(
     project: &Value,
     namespace: &Value,
@@ -2095,7 +2165,12 @@ fn summarize_execctl_resume_contract(value: &Value) -> Option<String> {
     ))
 }
 
-fn build_startup_next_action(current_goal: &str, next_step: &str, contract: &Value) -> Value {
+fn build_startup_next_action(
+    current_goal: &str,
+    next_step: &str,
+    contract: &Value,
+    client_budget_guard: &Value,
+) -> Value {
     let resume_state = contract["resume_state"].as_str().unwrap_or("clear");
     let no_silent_drop = contract["no_silent_drop"].as_bool().unwrap_or(true);
     let active_task = &contract["active_task"];
@@ -2114,7 +2189,30 @@ fn build_startup_next_action(current_goal: &str, next_step: &str, contract: &Val
     let required_next_step = required_return_task["next_step"]
         .as_str()
         .filter(|value| !value.is_empty());
-    if resume_state != "clear" && required_headline.is_some() {
+    let should_rotate_chat = client_budget_guard["should_rotate_chat_now"].as_bool() == Some(true)
+        || client_budget_guard["should_rotate_chat_soon"].as_bool() == Some(true);
+    let client_budget_status = client_budget_guard["status_label"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("новый чат рекомендован");
+    let client_budget_note = client_budget_guard["note"]
+        .as_str()
+        .filter(|value| !value.is_empty());
+    if should_rotate_chat {
+        json!({
+            "action_version": "startup-next-action-v1",
+            "action_kind": "rotate_chat_for_client_budget",
+            "blocking": true,
+            "reason": "client_budget_guard_pressure",
+            "resume_state": resume_state,
+            "no_silent_drop": no_silent_drop,
+            "headline": format!("Клиентский лимит: {client_budget_status}"),
+            "next_step": "сохрани handoff и продолжай только в свежем чате через continuity startup",
+            "client_budget_status_label": client_budget_status,
+            "client_budget_note": client_budget_note,
+            "preserves_return_obligation": resume_state != "clear",
+        })
+    } else if resume_state != "clear" && required_headline.is_some() {
         json!({
             "action_version": "startup-next-action-v1",
             "action_kind": "resume_required_return_task",
