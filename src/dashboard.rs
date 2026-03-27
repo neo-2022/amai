@@ -3355,6 +3355,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         current_session_statement,
         current_session_alignment,
     ));
+    if let Some(row) = exact_pair_status_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
     if let Some(row) = exact_model_component_delta_metric_row(current_session_alignment) {
         session_rows.push(row);
     }
@@ -3485,6 +3488,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         rolling_window_statement,
         rolling_window_alignment,
     ));
+    if let Some(row) = exact_pair_status_metric_row(rolling_window_alignment) {
+        rolling_rows.push(row);
+    }
     if let Some(row) = historical_startup_drag_metric_row(rolling_historical_startup_drag) {
         rolling_rows.push(row);
     }
@@ -3614,6 +3620,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         lifetime_statement,
         lifetime_alignment,
     ));
+    if let Some(row) = exact_pair_status_metric_row(lifetime_alignment) {
+        lifetime_rows.push(row);
+    }
     if let Some(row) = exact_model_component_delta_metric_row(lifetime_alignment) {
         lifetime_rows.push(row);
     }
@@ -6622,6 +6631,59 @@ fn exact_pair_card_status_override(alignment: &Value) -> Option<(&'static str, &
     ))
 }
 
+fn exact_pair_status_metric_row(alignment: &Value) -> Option<Value> {
+    let exact_pair_status = &alignment["exact_pair_status"];
+    if exact_pair_status["exact_pair_available"].as_bool() == Some(true) {
+        return Some(metric_row(
+            "Точность модели",
+            "exact pair materialized".to_string(),
+            Some(
+                "Этот ряд показывает, materialized ли уже exact same-meter pair для корреляции model tokens без Amai и с Amai. Здесь exact pair уже materialized.",
+            ),
+        ));
+    }
+    if exact_pair_status["state"].as_str() != Some("exact_pair_blocked") {
+        return None;
+    }
+    let blocker = exact_pair_status["blockers"].as_array()?.first()?;
+    let missing_live_events = blocker["missing_live_events"].as_u64().unwrap_or(0);
+    let irrecoverable_missing_live_events = blocker["irrecoverable_missing_live_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let recoverable_missing_live_events = missing_live_events
+        .saturating_sub(irrecoverable_missing_live_events);
+    if blocker["frozen_gap_candidate"].as_bool() == Some(true) {
+        let tooltip = format!(
+            "Этот ряд показывает, materialized ли уже exact same-meter pair для model tokens. Сейчас exact pair недоступен не из-за временного lag, а из-за irrecoverable historical debt.\n- Missing live events: {}\n- Irrecoverable: {}\n- Recoverable: {}\n- Пока frozen-gap решение не принято, lifetime correlation обязана оставаться non-exact.",
+            format_u64(Some(missing_live_events)),
+            format_u64(Some(irrecoverable_missing_live_events)),
+            format_u64(Some(recoverable_missing_live_events))
+        );
+        return Some(metric_row(
+            "Точность модели",
+            format!(
+                "не exact: frozen debt review, {} irrecoverable rows",
+                format_u64(Some(irrecoverable_missing_live_events))
+            ),
+            Some(tooltip.as_str()),
+        ));
+    }
+    let tooltip = format!(
+        "Этот ряд показывает, materialized ли уже exact same-meter pair для model tokens. Exact pair пока ещё не materialized.\n- Missing live events: {}\n- Irrecoverable: {}\n- Recoverable: {}\n- Здесь blocker ещё выглядит recoverable и не считается frozen debt.",
+        format_u64(Some(missing_live_events)),
+        format_u64(Some(irrecoverable_missing_live_events)),
+        format_u64(Some(recoverable_missing_live_events))
+    );
+    Some(metric_row(
+        "Точность модели",
+        format!(
+            "ждём exact pair: {} missing rows",
+            format_u64(Some(missing_live_events))
+        ),
+        Some(tooltip.as_str()),
+    ))
+}
+
 fn model_token_savings_metric_row(scope_summary: &Value, alignment: &Value) -> Value {
     let observed_with_amai = scope_summary["verified_observed_whole_cycle_with_amai_tokens"]
         .as_u64()
@@ -9483,6 +9545,48 @@ mod tests {
         assert_eq!(status, "waiting");
         assert_eq!(label, "ждём exact pair");
         assert!(tooltip.contains("same-meter pair"));
+    }
+
+    #[test]
+    fn exact_pair_status_metric_row_surfaces_frozen_debt_review() {
+        let alignment = json!({
+            "exact_pair_status": {
+                "state": "exact_pair_blocked",
+                "exact_pair_available": false,
+                "blockers": [{
+                    "code": "tool_overhead_outside_retrieval",
+                    "frozen_gap_candidate": true,
+                    "missing_live_events": 13,
+                    "irrecoverable_missing_live_events": 13
+                }]
+            }
+        });
+
+        let row = super::exact_pair_status_metric_row(&alignment).expect("exact pair row");
+        assert_eq!(row["label"], "Точность модели");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("не exact: frozen debt review, 13 irrecoverable rows")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("irrecoverable historical debt")
+        );
+    }
+
+    #[test]
+    fn exact_pair_status_metric_row_surfaces_exact_materialized() {
+        let alignment = json!({
+            "exact_pair_status": {
+                "state": "exact_pair_materialized",
+                "exact_pair_available": true
+            }
+        });
+
+        let row = super::exact_pair_status_metric_row(&alignment).expect("exact pair row");
+        assert_eq!(row["value"].as_str(), Some("exact pair materialized"));
     }
 
     #[test]
