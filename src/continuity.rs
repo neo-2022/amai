@@ -469,6 +469,9 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
                     "artifact_gate_semantics_consistent_present": audit.artifact_gate_semantics_consistent_present,
                     "artifact_gate_semantics_consistent_matches_recomputed": audit.artifact_gate_semantics_consistent_matches_recomputed,
                     "gate_semantics_consistent": audit.gate_semantics_consistent,
+                    "client_budget_guard": artifact_payload.as_ref().map(|payload| payload["client_budget_guard"].clone()).unwrap_or(Value::Null),
+                    "reply_execution_gate": artifact_payload.as_ref().map(|payload| payload["reply_execution_gate"].clone()).unwrap_or(Value::Null),
+                    "blocking_reply_contract": artifact_payload.as_ref().map(|payload| payload["blocking_reply_contract"].clone()).unwrap_or(Value::Null),
                     "startup_execution_gate": artifact_payload.as_ref().map(|payload| payload["startup_execution_gate"].clone()).unwrap_or(Value::Null),
                     "startup_next_action": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["startup_next_action"].clone()).unwrap_or(Value::Null),
                     "required_return_task": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["required_return_task"].clone()).unwrap_or(Value::Null),
@@ -1171,6 +1174,22 @@ fn build_startup_runtime_state_artifact(
         &startup_execution_gate,
         prompt_text_present,
     );
+    let client_budget_guard = if payload["working_state_restore"]["client_budget_guard"].is_object()
+    {
+        payload["working_state_restore"]["client_budget_guard"].clone()
+    } else {
+        Value::Null
+    };
+    let reply_execution_gate = if client_budget_guard["reply_execution_gate"].is_object() {
+        client_budget_guard["reply_execution_gate"].clone()
+    } else {
+        Value::Null
+    };
+    let blocking_reply_contract = if reply_execution_gate["blocking_reply_contract"].is_object() {
+        reply_execution_gate["blocking_reply_contract"].clone()
+    } else {
+        Value::Null
+    };
     Ok(json!({
         "artifact_version": "workspace-startup-runtime-state-v3",
         "repo_root": repo_root.display().to_string(),
@@ -1181,6 +1200,9 @@ fn build_startup_runtime_state_artifact(
         "continuity_startup_summary": continuity_startup_summary,
         "startup_execution_gate": startup_execution_gate,
         "gate_semantics_consistent": gate_semantics_consistent,
+        "client_budget_guard": client_budget_guard,
+        "reply_execution_gate": reply_execution_gate,
+        "blocking_reply_contract": blocking_reply_contract,
         "chat_start_restore": {
             "headline": payload["chat_start_restore"]["headline"].clone(),
             "next_step": payload["chat_start_restore"]["next_step"].clone(),
@@ -5616,6 +5638,18 @@ mod tests {
                 "project_task_ledger_summary": "active: Current active line; historical_handoffs(1)"
             },
             "working_state_restore": {
+                "client_budget_guard": {
+                    "status_label": "новый чат нужен сейчас",
+                    "reply_execution_gate": {
+                        "gate_version": "client-reply-budget-gate-v1",
+                        "must_rotate_before_reply": true,
+                        "blocking_reply_contract": {
+                            "contract_version": "client-budget-blocked-reply-v1",
+                            "response_kind": "rotate_chat_only",
+                            "template": "Лимит клиента почти исчерпан. Сохрани handoff и продолжай только в свежем чате через continuity startup."
+                        }
+                    }
+                },
                 "state_lineage": {
                     "authoritative_event_id": "evt_123",
                     "session_id": "sess_123"
@@ -5671,6 +5705,22 @@ mod tests {
         assert_eq!(
             artifact["startup_execution_gate"]["required_return_task_next_step"],
             json!("Close same-meter live gap.")
+        );
+        assert_eq!(
+            artifact["client_budget_guard"]["status_label"],
+            json!("новый чат нужен сейчас")
+        );
+        assert_eq!(
+            artifact["reply_execution_gate"]["gate_version"],
+            json!("client-reply-budget-gate-v1")
+        );
+        assert_eq!(
+            artifact["reply_execution_gate"]["must_rotate_before_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["blocking_reply_contract"]["response_kind"],
+            json!("rotate_chat_only")
         );
         assert_eq!(artifact["gate_semantics_consistent"], json!(true));
         assert_eq!(
