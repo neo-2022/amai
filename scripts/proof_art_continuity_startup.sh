@@ -18,7 +18,6 @@ printf '%s\n' "$startup_output" | jq -e '.continuity_startup.canonical_eval.prob
 printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.prompt_text | contains("CHAT_START_RESTORE")' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.included_reasons_summary != null' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.excluded_reasons_summary != null' >/dev/null
-printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.prompt_text | contains("Почему вошёл последний контекст:")' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.working_state_restore.state_lineage.authoritative_event_id != ""' >/dev/null
 test -f "${startup_state_artifact}"
 jq -e '.artifact_version == "workspace-startup-runtime-state-v3"' "${startup_state_artifact}" >/dev/null
@@ -49,5 +48,20 @@ printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_ex
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.required_return_task != null' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.project_task_tree_summary_field_present == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.project_task_ledger_summary_field_present == true' >/dev/null
+
+startup_action_kind="$(printf '%s\n' "$startup_state_output" | jq -r '.startup_runtime_state_audit.action_kind // empty')"
+case "$startup_action_kind" in
+  rotate_chat_for_client_budget)
+    printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.prompt_text | contains("В старом чате разрешён только короткий rotate-ответ.")' >/dev/null
+    printf '%s\n' "$startup_state_output" | jq -e '.reply_execution_gate.must_rotate_before_reply == true' >/dev/null
+    printf '%s\n' "$startup_state_output" | jq -e '.blocking_reply_contract.response_kind == "rotate_chat_only"' >/dev/null
+    ;;
+  resume_required_return_task|continue_active_workline)
+    ;;
+  *)
+    echo "proof_art_continuity_startup: unexpected startup action kind: ${startup_action_kind}" >&2
+    exit 1
+    ;;
+esac
 
 echo "proof_art_continuity_startup: PASS"

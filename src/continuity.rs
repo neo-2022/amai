@@ -6254,6 +6254,51 @@ mod tests {
     }
 
     #[test]
+    fn default_startup_next_action_prioritizes_rotate_and_preserves_return_obligation() {
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "art".to_string(),
+            display_name: "Art".to_string(),
+            repo_root: "/home/art/Art".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let execctl_resume_obligation = json!({
+            "resume_state": "return_required",
+            "no_silent_drop": true,
+            "active_task_headline": "Project relocation contour",
+            "required_return_headline": "Same-meter spend control",
+            "required_return_next_step": "Materialize live assistant generation source."
+        });
+        let client_budget_guard = json!({
+            "should_rotate_chat_now": true,
+            "should_rotate_chat_soon": true,
+            "status_label": "новый чат нужен сейчас",
+            "note": "live client budget is already under pressure"
+        });
+
+        let action = super::default_startup_next_action(
+            "Project relocation contour",
+            "Dovetail runtime auto-start guarantees.",
+            &project,
+            &namespace,
+            &execctl_resume_obligation,
+            Some(&client_budget_guard),
+        );
+
+        assert_eq!(action["action_kind"], json!("rotate_chat_for_client_budget"));
+        assert_eq!(action["blocking"], json!(true));
+        assert_eq!(action["resume_state"], json!("return_required"));
+        assert_eq!(action["preserves_return_obligation"], json!(true));
+        assert_eq!(action["action_bundle"]["preserves_return_obligation"], json!(true));
+    }
+
+    #[test]
     fn enrich_thread_index_file_writes_compact_summary_fields() {
         let temp_root =
             std::env::temp_dir().join(format!("amai-thread-index-{}", std::process::id()));
