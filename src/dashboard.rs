@@ -6524,6 +6524,40 @@ fn exact_model_component_delta_note_sentence(alignment: &Value) -> Option<String
     })
 }
 
+fn exact_pair_primary_blocker_note_sentence(alignment: &Value) -> Option<String> {
+    let blocker = alignment["exact_pair_status"]["blockers"]
+        .as_array()?
+        .first()?;
+    let code = blocker["code"].as_str().unwrap_or_default();
+    match code {
+        "tool_overhead_outside_retrieval" => {
+            let missing_live_events = blocker["missing_live_events"].as_u64().unwrap_or(0);
+            let irrecoverable_missing_live_events = blocker["irrecoverable_missing_live_events"]
+                .as_u64()
+                .unwrap_or(0);
+            let recoverable_missing_live_events = missing_live_events
+                .saturating_sub(irrecoverable_missing_live_events);
+            Some(format!(
+                "Exact pair сейчас удерживает tool-overhead outside retrieval: missing {} live events, из них {} irrecoverable и {} ещё recoverable.",
+                format_u64(Some(missing_live_events)),
+                format_u64(Some(irrecoverable_missing_live_events)),
+                format_u64(Some(recoverable_missing_live_events))
+            ))
+        }
+        "assistant_generation" => Some(
+            "Exact pair сейчас удерживает assistant-generation baseline semantics: observed output tokens уже видны, но deduplicated same-meter baseline для этого scope ещё не materialized."
+                .to_string(),
+        ),
+        "continuity_restore_outside_retrieval" => Some(
+            "Exact pair сейчас удерживает continuity-restore boundary: truthful pre-Amai baseline для этого scope ещё не materialized."
+                .to_string(),
+        ),
+        _ => blocker["blocking_reason"]
+            .as_str()
+            .map(|reason| format!("Exact pair сейчас удерживает blocker `{reason}`.")),
+    }
+}
+
 fn model_token_savings_metric_row(scope_summary: &Value, alignment: &Value) -> Value {
     let observed_with_amai = scope_summary["verified_observed_whole_cycle_with_amai_tokens"]
         .as_u64()
@@ -6570,17 +6604,25 @@ fn model_token_savings_note_sentence(scope_summary: &Value, alignment: &Value) -
     }
 
     if observed_with_amai > 0 {
-        return Some(if observed_with_amai > 0 {
-            format!(
-                "Точный процент экономии токенов модели здесь пока не показан: с Amai уже честно видно {} observed токенов, но exact same-meter pair «без Amai / с Amai» для этого scope ещё не materialized.",
-                format_u64(Some(observed_with_amai))
-            )
-        } else {
-            "Точный процент экономии токенов модели здесь пока не показан: у этого scope ещё нет exact same-meter пары «без Amai / с Amai».".to_string()
-        });
+        let mut note = format!(
+            "Точный процент экономии токенов модели здесь пока не показан: с Amai уже честно видно {} observed токенов, но exact same-meter pair «без Amai / с Amai» для этого scope ещё не materialized.",
+            format_u64(Some(observed_with_amai))
+        );
+        if let Some(blocker_sentence) = exact_pair_primary_blocker_note_sentence(alignment) {
+            note.push(' ');
+            note.push_str(&blocker_sentence);
+        }
+        return Some(note);
     }
 
-    Some("Точный процент экономии токенов модели здесь пока не показан: exact same-meter pair для этого scope ещё не materialized.".to_string())
+    let mut note = String::from(
+        "Точный процент экономии токенов модели здесь пока не показан: exact same-meter pair для этого scope ещё не materialized.",
+    );
+    if let Some(blocker_sentence) = exact_pair_primary_blocker_note_sentence(alignment) {
+        note.push(' ');
+        note.push_str(&blocker_sentence);
+    }
+    Some(note)
 }
 
 fn model_token_savings_tooltip(statement_preview: &Value, alignment: &Value) -> String {
@@ -9309,10 +9351,33 @@ mod tests {
                 .contains("exact pair для этого scope ещё не materialized")
         );
 
-        let note = super::model_token_savings_note_sentence(&statement_preview, &alignment)
-            .expect("note");
+        let note =
+            super::model_token_savings_note_sentence(&statement_preview, &alignment).expect("note");
         assert!(note.contains("Точный процент"));
         assert!(note.contains("exact same-meter pair"));
+    }
+
+    #[test]
+    fn model_token_note_surfaces_primary_exact_pair_blocker() {
+        let statement_preview = json!({
+            "verified_observed_whole_cycle_with_amai_tokens": 3524046
+        });
+        let alignment = json!({
+            "same_meter_as_client_limit": false,
+            "exact_pair_status": {
+                "blockers": [{
+                    "code": "tool_overhead_outside_retrieval",
+                    "missing_live_events": 36,
+                    "irrecoverable_missing_live_events": 13
+                }]
+            }
+        });
+
+        let note =
+            super::model_token_savings_note_sentence(&statement_preview, &alignment).expect("note");
+        assert!(note.contains("missing 36 live events"));
+        assert!(note.contains("13 irrecoverable"));
+        assert!(note.contains("23 ещё recoverable"));
     }
 
     #[test]
