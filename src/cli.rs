@@ -1,8 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
-pub const DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND: &str =
-    "operator_continuity_startup";
+pub const DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND: &str = "operator_continuity_startup";
 
 #[derive(Debug, Parser)]
 #[command(name = "amai")]
@@ -168,6 +167,7 @@ pub enum ObserveCommand {
     Snapshot,
     SlaCheck,
     Guardrails,
+    ClientBudgetGuard,
     TokenReport(ObserveTokenReportArgs),
     TokenEvidencePack(ObserveTokenEvidencePackArgs),
     TokenContractualSources(ObserveTokenContractualSourcesArgs),
@@ -959,13 +959,7 @@ mod tests {
 
     #[test]
     fn continuity_startup_cli_defaults_to_operator_safe_token_source_kind() {
-        let cli = Cli::parse_from([
-            "amai",
-            "continuity",
-            "startup",
-            "--project",
-            "art",
-        ]);
+        let cli = Cli::parse_from(["amai", "continuity", "startup", "--project", "art"]);
         let Command::Continuity { command } = cli.command else {
             panic!("expected continuity command");
         };
@@ -999,5 +993,14 @@ mod tests {
             args.startup.token_source_kind,
             DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND
         );
+    }
+
+    #[test]
+    fn observe_client_budget_guard_cli_parses() {
+        let cli = Cli::parse_from(["amai", "observe", "client-budget-guard"]);
+        let Command::Observe { command } = cli.command else {
+            panic!("expected observe command");
+        };
+        assert!(matches!(command, ObserveCommand::ClientBudgetGuard));
     }
 }

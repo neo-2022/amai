@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 17:40 MSK
-Ручная сверка guide/docs: 2026-03-27 17:40 MSK
+modified_at: 2026-03-27 18:31 MSK
+Ручная сверка guide/docs: 2026-03-27 18:31 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1731,6 +1731,14 @@ preview, а не только raw count.
     `новый чат нужен сейчас`, либо полный live-turn помечен как `не доказано` на раздутом
     turn, агент не должен дожигать текущий thread и обязан продолжать через fresh chat +
     continuity startup;
+  - для этого в observe-layer теперь есть отдельный machine-readable truth-source:
+    `cargo run -- observe client-budget-guard`;
+  - этот contour обязан говорить не prose-эвфемизмами, а прямыми полями вроде
+    `should_rotate_chat_now`, `should_rotate_chat_soon`, `full_turn_savings_proven`,
+    `next_action`, `last_request`, `client_limits`.
+  - строки `Последний запрос клиента` и `Лимит клиента сейчас` теперь обязаны показывать
+    не только процент/токены, но и короткую метку свежести `· raw HH:MM:SS MSK`, чтобы
+    оператор видел прямо на карточке, из какого raw `token_count` пришёл текущий live meter;
   - human dashboard service теперь тоже обязан уметь materialize-ить этот live client meter:
     если service запущен вне `CODEX_THREAD_ID`, он не должен брать просто самый свежий
     repo-thread из SQLite; сначала он обязан попытаться привязаться к `thread_id` из

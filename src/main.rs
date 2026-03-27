@@ -385,6 +385,11 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 observe::print_guardrails(&cfg).await?;
             }
+            ObserveCommand::ClientBudgetGuard => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                observe::print_client_budget_guard(&cfg).await?;
+            }
             ObserveCommand::TokenReport(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

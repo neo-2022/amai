@@ -230,6 +230,14 @@ pub async fn print_guardrails(cfg: &AppConfig) -> Result<()> {
     }
 }
 
+pub async fn print_client_budget_guard(cfg: &AppConfig) -> Result<()> {
+    maybe_cleanup_local_artifacts().await?;
+    let snapshot = collect_snapshot_preview(cfg).await?;
+    let guard = dashboard::current_session_budget_guard(&snapshot);
+    println!("{}", serde_json::to_string_pretty(&guard)?);
+    Ok(())
+}
+
 pub async fn print_retention_cleanup(
     cfg: &AppConfig,
     apply: bool,
@@ -867,6 +875,7 @@ async fn build_snapshot(cfg: &AppConfig, persist_snapshot: bool) -> Result<Value
         "latest_degradation_verification": payload["latest_degradation_verification"].clone(),
         "latest_continuity_verification": payload["latest_continuity_verification"].clone(),
         "token_budget_report": payload["token_budget_report"].clone(),
+        "client_budget_guard": dashboard::current_session_budget_guard(&payload),
         "artifact_cleanup": payload["artifact_cleanup"].clone(),
         "observe_refresh": {
             "total_ms": snapshot_started.elapsed().as_millis() as u64,

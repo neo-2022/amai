@@ -2155,6 +2155,78 @@ pub fn build_payload(
     }))
 }
 
+pub fn current_session_budget_guard(snapshot: &Value) -> Value {
+    let report = &snapshot["token_budget_report"]["token_budget_report"];
+    let client_live_meter = &report["client_live_meter"];
+    let current_session_summary = &report["current_session"];
+    let current_session_statement = &report["statement_previews"]["current_session"];
+    let current_session_alignment = &current_session_statement["client_limit_meter_alignment"];
+    let cards = build_hero_cards(snapshot);
+    let Some(session_card) = cards.into_iter().next() else {
+        return json!({
+            "source": "dashboard_current_session_budget_guard_v1",
+            "status": "unknown",
+            "status_label": "нет данных",
+            "full_turn_savings_proven": false,
+            "should_rotate_chat_now": false,
+            "should_rotate_chat_soon": false,
+            "next_action": null,
+            "reason": "current_session hero card is unavailable"
+        });
+    };
+    let compact = compact_token_hero_card(session_card);
+    let status = compact["status"].as_str().unwrap_or("unknown");
+    let status_label = compact["status_label"]
+        .as_str()
+        .unwrap_or(status);
+    let value = compact["value"].as_str().unwrap_or_default();
+    let rows = compact["rows"].as_array().cloned().unwrap_or_default();
+    let last_request = client_live_context_metric_row(client_live_meter)
+        .and_then(|row| row["value"].as_str().map(str::to_string));
+    let client_limits = client_live_limit_metric_row(client_live_meter)
+        .and_then(|row| row["value"].as_str().map(str::to_string));
+    let row_value = |label: &str| {
+        rows.iter()
+            .find(|row| row["label"].as_str() == Some(label))
+            .and_then(|row| row["value"].as_str())
+            .map(str::to_string)
+    };
+    let row_tooltip = |label: &str| {
+        rows.iter()
+            .find(|row| row["label"].as_str() == Some(label))
+            .and_then(|row| row["tooltip"].as_str())
+            .map(str::to_string)
+    };
+    let tracked_slice = row_value("Экономия на учтённой части").or_else(|| {
+        Some(humanize_tracked_slice_savings_value(
+            model_token_savings_metric_row(current_session_summary, current_session_alignment)["value"]
+                .as_str()
+                .unwrap_or_default(),
+        ))
+    });
+    let tracked_slice_truth = row_value("Точность учтённой части").or_else(|| {
+        exact_pair_status_metric_row(current_session_alignment)
+            .and_then(|row| row["value"].as_str().map(humanize_tracked_slice_exactness_value))
+    });
+    json!({
+        "source": "dashboard_current_session_budget_guard_v1",
+        "status": status,
+        "status_label": status_label,
+        "status_tooltip": compact["status_tooltip"].as_str(),
+        "full_turn_savings_proven": value != "не доказано",
+        "full_turn_savings_percent": if value == "не доказано" { None } else { Some(value.to_string()) },
+        "should_rotate_chat_now": status_label == "новый чат нужен сейчас",
+        "should_rotate_chat_soon": status_label == "новый чат рекомендован" || status_label == "новый чат нужен сейчас",
+        "next_action": row_value("Следующее действие"),
+        "last_request": last_request,
+        "client_limits": client_limits,
+        "tracked_slice": tracked_slice,
+        "tracked_slice_truth": tracked_slice_truth,
+        "tracked_slice_tooltip": row_tooltip("Экономия на учтённой части"),
+        "reason": compact["note"].as_str(),
+    })
+}
+
 fn slowest_observe_refresh_stage(snapshot: &Value) -> (Option<String>, Option<u64>) {
     let mut slowest: Option<(&str, u64)> = None;
     for (label, value) in snapshot["observe_refresh"]["stage_ms"]
@@ -7147,19 +7219,38 @@ fn client_live_context_metric_row(client_live_meter: &Value) -> Option<Value> {
         .as_f64()
         .map(|value| 100.0 - value)
         .unwrap_or_default();
+    let observed_at = client_live_meter["ended_at_epoch_ms"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .map(human_timestamp);
+    let observed_at_short = client_live_meter["ended_at_epoch_ms"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .map(human_timestamp_clock);
     let tooltip = format!(
-        "Этот ряд показывает последний observed запрос клиента из rollout token_count.\n- Последний запрос: {} из {}\n- Остаётся в окне: {}\n- Источник: rollout token_count.last_token_usage.total_tokens / model_context_window",
+        "Этот ряд показывает последний observed запрос клиента из rollout token_count.\n- Последний запрос: {} из {}\n- Остаётся в окне: {}\n- Источник: rollout token_count.last_token_usage.total_tokens / model_context_window{}\n- Снято из raw token_count: {}",
         format_u64(Some(turn_total_tokens)),
         format_u64(Some(model_context_window)),
         format_percent(Some(context_remaining_percent)),
+        observed_at_short
+            .as_ref()
+            .map(|stamp| format!(" ({stamp})"))
+            .unwrap_or_default(),
+        observed_at
+            .clone()
+            .unwrap_or_else(|| "ещё нет данных".to_string()),
     );
     Some(metric_row(
         "Последний запрос клиента",
         format!(
-            "{} из {}, остаётся {}",
+            "{} из {}, остаётся {}{}",
             format_u64(Some(turn_total_tokens)),
             format_u64(Some(model_context_window)),
-            format_percent(Some(context_remaining_percent))
+            format_percent(Some(context_remaining_percent)),
+            observed_at_short
+                .as_ref()
+                .map(|stamp| format!(" · raw {stamp}"))
+                .unwrap_or_default()
         ),
         Some(tooltip.as_str()),
     ))
@@ -7171,23 +7262,46 @@ fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
     }
     let primary_remaining_percent = client_live_meter["primary_limit_remaining_percent"]
         .as_u64()
+        .or_else(|| {
+            client_live_meter["primary_limit_remaining_percent"]
+                .as_f64()
+                .map(|value| value.round() as u64)
+        })
         .unwrap_or(0);
     let secondary_remaining_percent = client_live_meter["secondary_limit_remaining_percent"]
         .as_u64()
+        .or_else(|| {
+            client_live_meter["secondary_limit_remaining_percent"]
+                .as_f64()
+                .map(|value| value.round() as u64)
+        })
         .unwrap_or(0);
+    let observed_at = client_live_meter["ended_at_epoch_ms"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .map(human_timestamp);
+    let observed_at_short = client_live_meter["ended_at_epoch_ms"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .map(human_timestamp_clock);
     let tooltip = format!(
-        "Этот ряд показывает live rate-limit contour клиента из rollout token_count/rate_limits.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})",
+        "Этот ряд показывает live rate-limit contour клиента из rollout token_count/rate_limits.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- Снято из raw token_count: {}",
         format_percent(Some(primary_remaining_percent as f64)),
         format_percent(client_live_meter["primary_limit_used_percent"].as_f64()),
         format_percent(Some(secondary_remaining_percent as f64)),
         format_percent(client_live_meter["secondary_limit_used_percent"].as_f64()),
+        observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
     );
     Some(metric_row(
         "Лимит клиента сейчас",
         format!(
-            "5ч остаётся {}, 7д остаётся {}",
+            "5ч остаётся {}, 7д остаётся {}{}",
             format_percent(Some(primary_remaining_percent as f64)),
-            format_percent(Some(secondary_remaining_percent as f64))
+            format_percent(Some(secondary_remaining_percent as f64)),
+            observed_at_short
+                .as_ref()
+                .map(|stamp| format!(" · raw {stamp}"))
+                .unwrap_or_default()
         ),
         Some(tooltip.as_str()),
     ))
@@ -8524,6 +8638,24 @@ fn human_timestamp(epoch_ms: u64) -> String {
         return "ещё нет данных".to_string();
     };
     let format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second] MSK");
+    datetime
+        .to_offset(offset)
+        .format(&format)
+        .unwrap_or_else(|_| "ещё нет данных".to_string())
+}
+
+fn human_timestamp_clock(epoch_ms: u64) -> String {
+    if epoch_ms == 0 {
+        return "ещё нет данных".to_string();
+    }
+    let nanos = (epoch_ms as i128) * 1_000_000;
+    let Ok(offset) = UtcOffset::from_hms(3, 0, 0) else {
+        return "ещё нет данных".to_string();
+    };
+    let Ok(datetime) = OffsetDateTime::from_unix_timestamp_nanos(nanos) else {
+        return "ещё нет данных".to_string();
+    };
+    let format = format_description!("[hour]:[minute]:[second] MSK");
     datetime
         .to_offset(offset)
         .format(&format)
@@ -10513,7 +10645,8 @@ mod tests {
             "primary_limit_remaining_percent": 31,
             "primary_limit_used_percent": 69,
             "secondary_limit_remaining_percent": 79,
-            "secondary_limit_used_percent": 21
+            "secondary_limit_used_percent": 21,
+            "ended_at_epoch_ms": 1774625102000u64
         });
         let row = super::client_live_limit_metric_row(&meter).expect("limit row");
         assert_eq!(row["label"], "Лимит клиента сейчас");
@@ -10521,6 +10654,10 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("5ч остаётся 31.00%"));
+        assert!(row["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("raw"));
     }
 
     #[test]
@@ -10529,7 +10666,8 @@ mod tests {
             "status": "observed",
             "client_turn_total_tokens": 133419,
             "latest_model_context_window": 258400,
-            "context_used_percent": 51.633359133126934
+            "context_used_percent": 51.633359133126934,
+            "ended_at_epoch_ms": 1774625102000u64
         });
         let row = super::client_live_context_metric_row(&meter).expect("context row");
         assert_eq!(row["label"].as_str(), Some("Последний запрос клиента"));
@@ -10537,6 +10675,10 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("133419 из 258400"));
+        assert!(row["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("raw"));
     }
 
     #[test]
@@ -10763,6 +10905,86 @@ mod tests {
             compact["source_label"].as_str(),
             Some("Источник: подтверждённая учтённая история плюс отдельно отмеченный старый долг точности. Это не полный raw spend всей истории.")
         );
+    }
+
+    #[test]
+    fn current_session_budget_guard_surfaces_machine_readable_rotate_flags() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "events_total": 1,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 138,
+                        "verified_effective_savings_pct": 56.56,
+                        "started_at_epoch_ms": 1774622516860u64,
+                        "ended_at_epoch_ms": 1774622516860u64,
+                        "verified_baseline_tokens": 240,
+                        "verified_observed_whole_cycle_with_amai_tokens": 106
+                    },
+                    "rolling_window": {"events_total": 0, "counted_events": 0},
+                    "lifetime": {"events_total": 0, "counted_events": 0},
+                    "statement_previews": {
+                        "current_session": {
+                            "verified_observed_whole_cycle_with_amai_tokens": 106,
+                            "client_limit_meter_alignment": {
+                                "same_meter_as_client_limit": true,
+                                "exact_pair_status": {"exact_pair_available": true},
+                                "strict_client_meter_slice": {"lower_bound_tokens": 240},
+                                "explicit_boundary_surface": {
+                                    "blocks_full_same_meter_equivalence": false
+                                }
+                            }
+                        },
+                        "rolling_window": {},
+                        "lifetime": {}
+                    },
+                    "statement_export_previews": {"lifetime": {}},
+                    "client_live_meter": {
+                        "status": "observed",
+                        "client_turn_total_tokens": 140921,
+                        "latest_model_context_window": 258400,
+                        "context_used_percent": 54.54,
+                        "primary_limit_remaining_percent": 61.0,
+                        "secondary_limit_remaining_percent": 88.0,
+                        "started_at_epoch_ms": 1774622174000u64,
+                        "ended_at_epoch_ms": 1774622949000u64
+                    },
+                    "profile": {"display_name": "Обычная рабочая машина"}
+                }
+            }
+        });
+
+        let guard = super::current_session_budget_guard(&snapshot);
+        assert_eq!(guard["source"], json!("dashboard_current_session_budget_guard_v1"));
+        assert_eq!(guard["full_turn_savings_proven"], json!(false));
+        assert_eq!(guard["should_rotate_chat_now"], json!(true));
+        assert_eq!(guard["should_rotate_chat_soon"], json!(true));
+        assert_eq!(guard["status_label"], json!("новый чат нужен сейчас"));
+        assert!(guard["last_request"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("140921 из 258400, остаётся 45.46%"));
+        assert!(guard["last_request"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("raw"));
+        assert!(guard["client_limits"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("5ч остаётся 61.00%, 7д остаётся 88.00%"));
+        assert!(guard["client_limits"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("raw"));
+        assert!(guard["tracked_slice"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("55.83%"));
+        assert!(guard["next_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("continuity startup"));
     }
 
     #[test]
