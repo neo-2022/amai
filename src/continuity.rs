@@ -442,44 +442,10 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
     if args.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({
-                "startup_runtime_state": {
-                    "status": audit.status,
-                    "output_path": audit.output_path.display().to_string(),
-                    "artifact_exists": audit.artifact_exists,
-                    "startup_contract_sha_matches_current_contract": audit.startup_contract_sha_matches_current_contract,
-                    "source_summary_field_matches": audit.source_summary_field_matches,
-                    "prompt_text_present": audit.prompt_text_present,
-                    "startup_next_action_present": audit.startup_next_action_present,
-                    "startup_execution_gate_present": audit.startup_execution_gate_present,
-                    "required_return_task_field_present": audit.required_return_task_field_present,
-                    "execctl_active_lease_field_present": audit.execctl_active_lease_field_present,
-                    "project_task_tree_field_present": audit.project_task_tree_field_present,
-                    "project_task_tree_summary_field_present": audit.project_task_tree_summary_field_present,
-                    "project_task_ledger_field_present": audit.project_task_ledger_field_present,
-                    "project_task_ledger_summary_field_present": audit.project_task_ledger_summary_field_present,
-                    "resume_state": audit.resume_state,
-                    "action_kind": audit.action_kind,
-                    "lease_owner_state": audit.lease_owner_state,
-                    "must_follow_startup_next_action": audit.must_follow_startup_next_action,
-                    "unrelated_work_allowed": audit.unrelated_work_allowed,
-                    "must_read_prompt_text_before_reply": audit.must_read_prompt_text_before_reply,
-                    "required_action_kind_when_resume_required": audit.required_action_kind_when_resume_required,
-                    "no_silent_drop": audit.no_silent_drop,
-                    "artifact_gate_semantics_consistent_present": audit.artifact_gate_semantics_consistent_present,
-                    "artifact_gate_semantics_consistent_matches_recomputed": audit.artifact_gate_semantics_consistent_matches_recomputed,
-                    "gate_semantics_consistent": audit.gate_semantics_consistent,
-                    "client_budget_guard": artifact_payload.as_ref().map(|payload| payload["client_budget_guard"].clone()).unwrap_or(Value::Null),
-                    "reply_execution_gate": artifact_payload.as_ref().map(|payload| payload["reply_execution_gate"].clone()).unwrap_or(Value::Null),
-                    "blocking_reply_contract": artifact_payload.as_ref().map(|payload| payload["blocking_reply_contract"].clone()).unwrap_or(Value::Null),
-                    "startup_execution_gate": artifact_payload.as_ref().map(|payload| payload["startup_execution_gate"].clone()).unwrap_or(Value::Null),
-                    "startup_next_action": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["startup_next_action"].clone()).unwrap_or(Value::Null),
-                    "required_return_task": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["required_return_task"].clone()).unwrap_or(Value::Null),
-                    "execctl_active_lease": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["execctl_active_lease"].clone()).unwrap_or(Value::Null),
-                    "project_task_tree": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["project_task_tree"].clone()).unwrap_or(Value::Null),
-                    "project_task_ledger": artifact_payload.as_ref().map(|payload| payload["continuity_startup_summary"]["project_task_ledger"].clone()).unwrap_or(Value::Null),
-                }
-            }))?
+            serde_json::to_string_pretty(&build_startup_runtime_state_cli_json(
+                &audit,
+                artifact_payload.as_ref(),
+            ))?
         );
         return Ok(());
     }
@@ -607,6 +573,63 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
         );
     }
     Ok(())
+}
+
+fn startup_runtime_state_audit_json(
+    audit: &StartupRuntimeStateAudit,
+    artifact_payload: Option<&Value>,
+) -> Value {
+    json!({
+        "status": audit.status,
+        "output_path": audit.output_path.display().to_string(),
+        "artifact_exists": audit.artifact_exists,
+        "startup_contract_sha_matches_current_contract": audit.startup_contract_sha_matches_current_contract,
+        "source_summary_field_matches": audit.source_summary_field_matches,
+        "prompt_text_present": audit.prompt_text_present,
+        "startup_next_action_present": audit.startup_next_action_present,
+        "startup_execution_gate_present": audit.startup_execution_gate_present,
+        "required_return_task_field_present": audit.required_return_task_field_present,
+        "execctl_active_lease_field_present": audit.execctl_active_lease_field_present,
+        "project_task_tree_field_present": audit.project_task_tree_field_present,
+        "project_task_tree_summary_field_present": audit.project_task_tree_summary_field_present,
+        "project_task_ledger_field_present": audit.project_task_ledger_field_present,
+        "project_task_ledger_summary_field_present": audit.project_task_ledger_summary_field_present,
+        "resume_state": audit.resume_state,
+        "action_kind": audit.action_kind,
+        "lease_owner_state": audit.lease_owner_state,
+        "must_follow_startup_next_action": audit.must_follow_startup_next_action,
+        "unrelated_work_allowed": audit.unrelated_work_allowed,
+        "must_read_prompt_text_before_reply": audit.must_read_prompt_text_before_reply,
+        "required_action_kind_when_resume_required": audit.required_action_kind_when_resume_required,
+        "no_silent_drop": audit.no_silent_drop,
+        "artifact_gate_semantics_consistent_present": audit.artifact_gate_semantics_consistent_present,
+        "artifact_gate_semantics_consistent_matches_recomputed": audit.artifact_gate_semantics_consistent_matches_recomputed,
+        "gate_semantics_consistent": audit.gate_semantics_consistent,
+        "client_budget_guard": artifact_payload.map(|payload| payload["client_budget_guard"].clone()).unwrap_or(Value::Null),
+        "reply_execution_gate": artifact_payload.map(|payload| payload["reply_execution_gate"].clone()).unwrap_or(Value::Null),
+        "blocking_reply_contract": artifact_payload.map(|payload| payload["blocking_reply_contract"].clone()).unwrap_or(Value::Null),
+        "startup_execution_gate": artifact_payload.map(|payload| payload["startup_execution_gate"].clone()).unwrap_or(Value::Null),
+        "startup_next_action": artifact_payload.map(|payload| payload["continuity_startup_summary"]["startup_next_action"].clone()).unwrap_or(Value::Null),
+        "required_return_task": artifact_payload.map(|payload| payload["continuity_startup_summary"]["required_return_task"].clone()).unwrap_or(Value::Null),
+        "execctl_active_lease": artifact_payload.map(|payload| payload["continuity_startup_summary"]["execctl_active_lease"].clone()).unwrap_or(Value::Null),
+        "project_task_tree": artifact_payload.map(|payload| payload["continuity_startup_summary"]["project_task_tree"].clone()).unwrap_or(Value::Null),
+        "project_task_ledger": artifact_payload.map(|payload| payload["continuity_startup_summary"]["project_task_ledger"].clone()).unwrap_or(Value::Null),
+    })
+}
+
+fn build_startup_runtime_state_cli_json(
+    audit: &StartupRuntimeStateAudit,
+    artifact_payload: Option<&Value>,
+) -> Value {
+    let audit_json = startup_runtime_state_audit_json(audit, artifact_payload);
+    let mut root = artifact_payload
+        .cloned()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let root_object = root.as_object_mut().expect("startup runtime cli root object");
+    root_object.insert("startup_runtime_state".to_string(), audit_json.clone());
+    root_object.insert("startup_runtime_state_audit".to_string(), audit_json);
+    root
 }
 
 pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<()> {
@@ -4569,6 +4592,7 @@ mod tests {
         ContinuityStartupContext, build_chat_start_restore, build_continuity_answer_payload,
         build_continuity_canonical_eval, build_continuity_restore_payload,
         build_continuity_startup_payload, build_startup_runtime_state_artifact,
+        build_startup_runtime_state_cli_json, StartupRuntimeStateAudit,
         continuity_replay_guard_probes, continuity_snapshot_semantic_epoch_ms,
         continuity_temporal_lookup_probes, degradation_proof_scenarios, enrich_thread_index_file,
         extract_next_step_from_text, fake_continuity_handoff_snapshot,
@@ -4579,9 +4603,9 @@ mod tests {
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
     use crate::postgres::{NamespaceRecord, ProjectRecord};
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn render_direct_answer_prefers_concise_restore_bundle() {
@@ -5899,6 +5923,96 @@ mod tests {
         assert_eq!(audit.project_task_ledger_summary_field_present, Some(true));
 
         fs::remove_dir_all(&repo).expect("cleanup temp repo");
+    }
+
+    #[test]
+    fn startup_state_cli_json_surfaces_raw_artifact_fields_at_top_level() {
+        let audit = StartupRuntimeStateAudit {
+            status: "ok".to_string(),
+            output_path: PathBuf::from("/tmp/project-chat-startup-state.json"),
+            artifact_exists: true,
+            startup_contract_sha_matches_current_contract: Some(true),
+            source_summary_field_matches: Some(true),
+            prompt_text_present: Some(true),
+            startup_next_action_present: Some(true),
+            startup_execution_gate_present: Some(true),
+            required_return_task_field_present: Some(false),
+            execctl_active_lease_field_present: Some(true),
+            project_task_tree_field_present: Some(true),
+            project_task_tree_summary_field_present: Some(true),
+            project_task_ledger_field_present: Some(true),
+            project_task_ledger_summary_field_present: Some(true),
+            resume_state: Some("clear".to_string()),
+            action_kind: Some("rotate_chat_for_client_budget".to_string()),
+            lease_owner_state: Some("same_session_owner".to_string()),
+            must_follow_startup_next_action: Some(true),
+            unrelated_work_allowed: Some(false),
+            must_read_prompt_text_before_reply: Some(true),
+            required_action_kind_when_resume_required: Some(
+                "resume_required_return_task".to_string(),
+            ),
+            no_silent_drop: Some(true),
+            artifact_gate_semantics_consistent_present: Some(true),
+            artifact_gate_semantics_consistent_matches_recomputed: Some(true),
+            gate_semantics_consistent: Some(true),
+        };
+        let artifact = json!({
+            "artifact_version": "workspace-startup-runtime-state-v3",
+            "client_budget_guard": {
+                "status_label": "новый чат нужен сейчас"
+            },
+            "reply_execution_gate": {
+                "gate_version": "client-reply-budget-gate-v1"
+            },
+            "blocking_reply_contract": {
+                "response_kind": "rotate_chat_only"
+            },
+            "startup_execution_gate": {
+                "gate_version": "startup-execution-gate-v1"
+            },
+            "continuity_startup_summary": {
+                "startup_next_action": {
+                    "action_kind": "rotate_chat_for_client_budget"
+                },
+                "required_return_task": Value::Null,
+                "execctl_active_lease": {
+                    "lease_owner_state": "same_session_owner"
+                },
+                "project_task_tree": {
+                    "open_tasks_count": 1
+                },
+                "project_task_ledger": {
+                    "open_tasks_count": 1
+                }
+            }
+        });
+
+        let payload = build_startup_runtime_state_cli_json(&audit, Some(&artifact));
+
+        assert_eq!(
+            payload["client_budget_guard"]["status_label"],
+            json!("новый чат нужен сейчас")
+        );
+        assert_eq!(
+            payload["reply_execution_gate"]["gate_version"],
+            json!("client-reply-budget-gate-v1")
+        );
+        assert_eq!(
+            payload["blocking_reply_contract"]["response_kind"],
+            json!("rotate_chat_only")
+        );
+        assert_eq!(
+            payload["startup_execution_gate"]["gate_version"],
+            json!("startup-execution-gate-v1")
+        );
+        assert_eq!(
+            payload["startup_runtime_state"]["startup_execution_gate"]["gate_version"],
+            json!("startup-execution-gate-v1")
+        );
+        assert_eq!(
+            payload["startup_runtime_state_audit"]["action_kind"],
+            json!("rotate_chat_for_client_budget")
+        );
     }
 
     #[test]
