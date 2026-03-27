@@ -3383,6 +3383,8 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_note.push(' ');
         session_note.push_str(&sentence);
     }
+    let session_full_turn_savings_pct =
+        full_turn_savings_pct_from_live_meter(client_live_meter, current_session_exact_pair);
     let session_client_turn_pressure =
         client_turn_pressure_guard(client_live_meter, current_session_exact_pair);
     if let Some(sentence) = client_turn_pressure_note_sentence(session_client_turn_pressure) {
@@ -3445,12 +3447,16 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         continuity_boundary_pressure_is_alert(session_saved, boundary_tokens, strict_tokens)
     }) {
         "alert"
+    } else if session_full_turn_savings_pct.is_some_and(|value| value < 90.0) {
+        "alert"
     } else {
         savings_status(session_saved, session_events, session_events_total)
     };
     let mut session_card = card_with_rows(
         "Экономия токенов за текущую сессию",
-        format_signed_count(session_saved),
+        session_full_turn_savings_pct
+            .map(|value| format_percent(Some(value)))
+            .unwrap_or_else(|| format_signed_count(session_saved)),
         session_note,
         session_status,
         None,
@@ -3460,6 +3466,17 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if let Some(guard) = session_client_turn_pressure {
         session_card = with_status_label(session_card, guard.status_label);
         session_card = with_status_tooltip(session_card, &client_turn_pressure_tooltip(guard));
+    } else if let Some(full_turn_savings_pct) =
+        session_full_turn_savings_pct.filter(|value| *value < 90.0)
+    {
+        session_card = with_status_label(session_card, "цель >90% не достигнута");
+        session_card = with_status_tooltip(
+            session_card,
+            &format!(
+                "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- Целевая реальная экономия для Amai задана как более 90%.\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и раньше переводить работу в новый чат через continuity startup.",
+                format_percent(Some(full_turn_savings_pct))
+            ),
+        );
     } else if let Some((boundary_tokens, strict_tokens)) =
         session_boundary_pressure.filter(|(boundary_tokens, strict_tokens)| {
             continuity_boundary_pressure_is_alert(session_saved, *boundary_tokens, *strict_tokens)
@@ -7149,6 +7166,31 @@ fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
     ))
 }
 
+fn full_turn_savings_pct_from_live_meter(
+    client_live_meter: &Value,
+    exact_pair: Option<(u64, u64, i64, f64)>,
+) -> Option<f64> {
+    if client_live_meter["status"].as_str() != Some("observed") {
+        return None;
+    }
+    let (_, _, saved_tokens, _) = exact_pair?;
+    let turn_total_tokens = client_live_meter["client_turn_total_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    if turn_total_tokens == 0 {
+        return None;
+    }
+    let without_amai_total_tokens = if saved_tokens >= 0 {
+        turn_total_tokens.saturating_add(saved_tokens as u64)
+    } else {
+        turn_total_tokens.saturating_sub(saved_tokens.unsigned_abs())
+    };
+    if without_amai_total_tokens == 0 {
+        return None;
+    }
+    Some((saved_tokens as f64 * 100.0) / without_amai_total_tokens as f64)
+}
+
 fn client_full_turn_savings_metric_row(
     client_live_meter: &Value,
     exact_pair: Option<(u64, u64, i64, f64)>,
@@ -7171,7 +7213,8 @@ fn client_full_turn_savings_metric_row(
     if without_amai_total_tokens == 0 {
         return None;
     }
-    let full_turn_savings_pct = (saved_tokens as f64 * 100.0) / without_amai_total_tokens as f64;
+    let full_turn_savings_pct =
+        full_turn_savings_pct_from_live_meter(client_live_meter, exact_pair)?;
     let tooltip = format!(
         "Этот ряд показывает реальный вклад Amai в полный live-turn клиента, а не только во внутренний Amai-side slice.\n- Без Amai: {}\n- С Amai: {}\n- Delta Amai: {}\n- Процент от полного turn: {}\n- Источник observed full turn: rollout token_count.last_token_usage.total_tokens",
         format_u64(Some(without_amai_total_tokens)),
