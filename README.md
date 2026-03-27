@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 20:48 MSK
-Ручная сверка guide/docs: 2026-03-27 20:48 MSK
+modified_at: 2026-03-27 21:00 MSK
+Ручная сверка guide/docs: 2026-03-27 21:00 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1825,6 +1825,10 @@ Fail-closed правило для расхождений:
     ещё не materialized, а live-turn уже раздут настолько, что честный full-scale effect
     теряется в размере самого thread/context, operator должен увидеть ранний переход в свежий чат
     ещё до того, как 5h лимит почти выгорел;
+  - и даже когда exact same-turn pair уже materialized, current-session card обязана раньше
+    поднимать `новый чат рекомендован` или `новый чат нужен сейчас`, если полный live-turn уже
+    раздут, а доля `Amai в полном live-turn` остаётся микроскопической; иначе exact proof сам по
+    себе маскирует реальный burn внешней шкалы клиента;
   - managed startup instructions теперь тоже обязаны повторять этот закон в plain language:
     если dashboard/current-session contour уже говорит `новый чат рекомендован` или
     `новый чат нужен сейчас`, либо полный live-turn помечен как `не доказано` на раздутом

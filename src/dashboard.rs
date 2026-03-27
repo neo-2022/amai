@@ -1,8 +1,8 @@
 use crate::config::{self, AppConfig};
-use crate::hardware_telemetry::{collect_machine_summary, AcceleratorSummary, MachineSummary};
+use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary, collect_machine_summary};
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -2780,7 +2780,9 @@ pub fn build_payload(
 }
 
 pub fn current_session_budget_guard(snapshot: &Value) -> Value {
-    current_session_budget_guard_from_report(&snapshot["token_budget_report"]["token_budget_report"])
+    current_session_budget_guard_from_report(
+        &snapshot["token_budget_report"]["token_budget_report"],
+    )
 }
 
 pub fn current_session_budget_guard_from_report(report: &Value) -> Value {
@@ -2809,9 +2811,7 @@ pub fn current_session_budget_guard_from_report(report: &Value) -> Value {
     };
     let compact = compact_token_hero_card(session_card);
     let status = compact["status"].as_str().unwrap_or("unknown");
-    let status_label = compact["status_label"]
-        .as_str()
-        .unwrap_or(status);
+    let status_label = compact["status_label"].as_str().unwrap_or(status);
     let value = compact["value"].as_str().unwrap_or_default();
     let rows = compact["rows"].as_array().cloned().unwrap_or_default();
     let last_request = client_live_context_metric_row(client_live_meter)
@@ -2830,16 +2830,21 @@ pub fn current_session_budget_guard_from_report(report: &Value) -> Value {
             .and_then(|row| row["tooltip"].as_str())
             .map(str::to_string)
     };
-    let tracked_slice = row_value("Экономия на учтённой части").or_else(|| {
-        Some(humanize_tracked_slice_savings_value(
-            model_token_savings_metric_row(current_session_summary, current_session_alignment)["value"]
-                .as_str()
-                .unwrap_or_default(),
-        ))
-    });
+    let tracked_slice =
+        row_value("Экономия на учтённой части").or_else(|| {
+            Some(humanize_tracked_slice_savings_value(
+                model_token_savings_metric_row(current_session_summary, current_session_alignment)
+                    ["value"]
+                    .as_str()
+                    .unwrap_or_default(),
+            ))
+        });
     let tracked_slice_truth = row_value("Точность учтённой части").or_else(|| {
-        exact_pair_status_metric_row(current_session_alignment)
-            .and_then(|row| row["value"].as_str().map(humanize_tracked_slice_exactness_value))
+        exact_pair_status_metric_row(current_session_alignment).and_then(|row| {
+            row["value"]
+                .as_str()
+                .map(humanize_tracked_slice_exactness_value)
+        })
     });
     json!({
         "source": "dashboard_current_session_budget_guard_v1",
@@ -3656,11 +3661,13 @@ fn agent_scope_activity_card(snapshot: &Value) -> Value {
     };
     let note = format!(
         "Эта карточка считает три разных truth-source: raw client thread registry за последние {} мин, active ExecCtl leases для `работают прямо сейчас` и distinct working-state scopes за последние {}ч для `работали недавно`. Поэтому один последний handoff больше не подменяет всю картину.",
-        client_recent_window_minutes,
-        recent_scope_window_hours
+        client_recent_window_minutes, recent_scope_window_hours
     );
-    let hierarchy_back_panel =
-        build_agent_scope_hierarchy_back_panel(&client_recent_threads, &active_now_scopes, &recent_scopes);
+    let hierarchy_back_panel = build_agent_scope_hierarchy_back_panel(
+        &client_recent_threads,
+        &active_now_scopes,
+        &recent_scopes,
+    );
     let mut card = with_back_panel(
         card_with_rows(
         "Агенты сейчас",
@@ -3801,18 +3808,21 @@ fn build_agent_scope_hierarchy_back_panel(
         }
         let project_label = project_display_label(None, thread["cwd"].as_str());
         let project_key = project_bucket_key(None, &project_label);
-        let bucket = project_buckets
-            .entry(project_key)
-            .or_insert_with(|| AgentHierarchyProjectBucket {
-                label: project_label.clone(),
-                project_code: None,
-                spaces: Vec::new(),
-                pending_threads: Vec::new(),
-            });
+        let bucket =
+            project_buckets
+                .entry(project_key)
+                .or_insert_with(|| AgentHierarchyProjectBucket {
+                    label: project_label.clone(),
+                    project_code: None,
+                    spaces: Vec::new(),
+                    pending_threads: Vec::new(),
+                });
         if bucket.label.is_empty() {
             bucket.label = project_label.clone();
         }
-        bucket.pending_threads.push(build_unbound_client_thread_node(thread));
+        bucket
+            .pending_threads
+            .push(build_unbound_client_thread_node(thread));
     }
 
     let projects = project_buckets
@@ -3829,8 +3839,18 @@ fn build_agent_scope_hierarchy_back_panel(
             };
             let summary = format!(
                 "{} • {}",
-                format_count_with_word(spaces_count as u64, "пространство", "пространства", "пространств"),
-                format_count_with_word(pending_count as u64, "raw thread без Amai binding", "raw thread без Amai binding", "raw threads без Amai binding")
+                format_count_with_word(
+                    spaces_count as u64,
+                    "пространство",
+                    "пространства",
+                    "пространств"
+                ),
+                format_count_with_word(
+                    pending_count as u64,
+                    "raw thread без Amai binding",
+                    "raw thread без Amai binding",
+                    "raw threads без Amai binding"
+                )
             );
             json!({
                 "label": bucket.label,
@@ -3878,21 +3898,24 @@ fn push_agent_hierarchy_space(
     let recent_namespace_code = recent_scope["namespace_code"].as_str();
     let recent_agent_scope = recent_scope["agent_scope"].as_str();
     let recent_thread_id = recent_scope["thread_id"].as_str();
-    let scope_source = recent_agent_scope.or_else(|| active_scope.and_then(|value| value["agent_scope"].as_str()));
+    let scope_source =
+        recent_agent_scope.or_else(|| active_scope.and_then(|value| value["agent_scope"].as_str()));
     let (parsed_project_code, parsed_namespace_code, parsed_agent_leaf) =
         parse_agent_scope_parts(scope_source);
     let project_code = recent_project_code.or(parsed_project_code.as_deref());
     let namespace_code = recent_namespace_code.or(parsed_namespace_code.as_deref());
-    let project_label = project_display_label(project_code, thread.and_then(|value| value["cwd"].as_str()));
+    let project_label =
+        project_display_label(project_code, thread.and_then(|value| value["cwd"].as_str()));
     let project_key = project_bucket_key(project_code, &project_label);
-    let bucket = project_buckets
-        .entry(project_key)
-        .or_insert_with(|| AgentHierarchyProjectBucket {
-            label: project_label.clone(),
-            project_code: project_code.map(str::to_string),
-            spaces: Vec::new(),
-            pending_threads: Vec::new(),
-        });
+    let bucket =
+        project_buckets
+            .entry(project_key)
+            .or_insert_with(|| AgentHierarchyProjectBucket {
+                label: project_label.clone(),
+                project_code: project_code.map(str::to_string),
+                spaces: Vec::new(),
+                pending_threads: Vec::new(),
+            });
     if bucket.label.is_empty() {
         bucket.label = project_label;
     }
@@ -4029,7 +4052,9 @@ fn build_unbound_client_thread_node(thread: &Value) -> Value {
     })
 }
 
-fn parse_agent_scope_parts(scope: Option<&str>) -> (Option<String>, Option<String>, Option<String>) {
+fn parse_agent_scope_parts(
+    scope: Option<&str>,
+) -> (Option<String>, Option<String>, Option<String>) {
     let Some(scope) = scope.map(str::trim).filter(|value| !value.is_empty()) else {
         return (None, None, None);
     };
@@ -4052,7 +4077,8 @@ fn project_bucket_key(project_code: Option<&str>, project_label: &str) -> String
 }
 
 fn project_display_label(project_code: Option<&str>, cwd: Option<&str>) -> String {
-    if let Some(cwd) = cwd.and_then(|value| Path::new(value).file_name().and_then(|part| part.to_str()))
+    if let Some(cwd) =
+        cwd.and_then(|value| Path::new(value).file_name().and_then(|part| part.to_str()))
     {
         return humanize_identifier(cwd);
     }
@@ -4637,8 +4663,11 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_note.push(' ');
         session_note.push_str(&sentence);
     }
-    let session_live_turn_exact_pair =
-        live_turn_exact_pair(current_session, client_live_meter, current_session_exact_pair);
+    let session_live_turn_exact_pair = live_turn_exact_pair(
+        current_session,
+        client_live_meter,
+        current_session_exact_pair,
+    );
     if let Some(sentence) =
         client_live_meter_note_sentence(client_live_meter, session_live_turn_exact_pair)
     {
@@ -5080,9 +5109,8 @@ fn compact_token_hero_card(mut card: Value) -> Value {
                     Value::String(humanize_token_card_row_label(&title, label).to_string());
             }
             if let (Some(label), Some(value)) = (row["label"].as_str(), row["value"].as_str()) {
-                row["value"] = Value::String(
-                    humanize_token_card_row_value(&title, label, value).to_string(),
-                );
+                row["value"] =
+                    Value::String(humanize_token_card_row_value(&title, label, value).to_string());
             }
         }
     }
@@ -5151,7 +5179,9 @@ fn humanize_token_card_row_value(title: &str, label: &str, value: &str) -> Strin
         | ("Экономия токенов за всё время записи", "Экономия на учтённой части") => {
             humanize_tracked_slice_savings_value(value)
         }
-        (_, "Точность учтённой части") => humanize_tracked_slice_exactness_value(value),
+        (_, "Точность учтённой части") => {
+            humanize_tracked_slice_exactness_value(value)
+        }
         (_, "Исторический долг точности") => {
             if let Some((_, rows)) = value.rsplit_once(", ") {
                 return format!(
@@ -5206,10 +5236,12 @@ fn humanize_tracked_slice_savings_value(value: &str) -> String {
 }
 
 fn humanize_tracked_slice_exactness_value(value: &str) -> String {
-    if value == "цифра точная: полностью совпадает со шкалой лимита модели" {
+    if value == "цифра точная: полностью совпадает со шкалой лимита модели"
+    {
         return "учтённая часть посчитана точно по той же шкале клиента".to_string();
     }
-    if let Some(rest) = value.strip_prefix("цифра пока не полностью точная: ") {
+    if let Some(rest) = value.strip_prefix("цифра пока не полностью точная: ")
+    {
         return format!("учтённая часть пока не сведена полностью: {rest}");
     }
     if let Some(rest) = value.strip_prefix("цифра пока предварительная: ") {
@@ -5267,19 +5299,25 @@ fn truth_only_token_card_note(card: &Value) -> String {
         .as_str()
         .unwrap_or(card["status"].as_str().unwrap_or("неизвестно"));
     match title {
-        "Экономия токенов за текущую сессию" => match card["value"].as_str() {
-            Some("не доказано") => format!(
-                "Короткая карточка только с проверяемыми цифрами по текущей сессии: реальная экономия на полной шкале клиента пока не доказана, ниже остаётся только точная учтённая часть. Статус: {status_label}."
-            ),
-            _ => format!(
-                "Короткая карточка только с проверяемыми цифрами по текущей сессии: сверху реальная доля Amai на полной шкале текущего turn, ниже точность учтённой части. Статус: {status_label}."
-            ),
-        },
+        "Экономия токенов за текущую сессию" => {
+            match card["value"].as_str() {
+                Some("не доказано") => format!(
+                    "Короткая карточка только с проверяемыми цифрами по текущей сессии: реальная экономия на полной шкале клиента пока не доказана, ниже остаётся только точная учтённая часть. Статус: {status_label}."
+                ),
+                _ => format!(
+                    "Короткая карточка только с проверяемыми цифрами по текущей сессии: сверху реальная доля Amai на полной шкале текущего turn, ниже точность учтённой части. Статус: {status_label}."
+                ),
+            }
+        }
         "Экономия токенов за рабочее окно" => {
-            format!("Короткая карточка только с проверяемыми цифрами по рабочему окну. Процент здесь относится к подтверждённой учтённой части, а не ко всему полному расходу модели за окно. Статус: {status_label}.")
+            format!(
+                "Короткая карточка только с проверяемыми цифрами по рабочему окну. Процент здесь относится к подтверждённой учтённой части, а не ко всему полному расходу модели за окно. Статус: {status_label}."
+            )
         }
         "Экономия токенов за всё время записи" => {
-            format!("Короткая карточка только с подтверждёнными цифрами за всё время записи. Процент здесь относится к подтверждённой учтённой части, а старый долг точности вынесен отдельно. Статус: {status_label}.")
+            format!(
+                "Короткая карточка только с подтверждёнными цифрами за всё время записи. Процент здесь относится к подтверждённой учтённой части, а старый долг точности вынесен отдельно. Статус: {status_label}."
+            )
         }
         _ => return card["note"].as_str().unwrap_or_default().to_string(),
     }
@@ -8247,6 +8285,9 @@ fn client_turn_pressure_guard(
     let tiny_amai_share = full_turn_savings_pct
         .map(|value| value <= 1.0)
         .unwrap_or(true);
+    let negligible_amai_share = full_turn_savings_pct
+        .map(|value| value <= 0.5)
+        .unwrap_or(false);
     let early_context_pressure = context_used_percent >= 35.0;
     let moderate_context_pressure = context_used_percent >= 45.0;
     let extreme_context_pressure = context_used_percent >= 80.0;
@@ -8259,20 +8300,23 @@ fn client_turn_pressure_guard(
     let critical_primary_limit = primary_remaining_percent <= 20.0;
     let low_primary_limit = primary_remaining_percent <= 35.0;
     let softened_primary_limit = primary_remaining_percent <= 65.0;
+    let early_primary_limit = primary_remaining_percent <= 75.0;
+    let generous_primary_limit = primary_remaining_percent <= 85.0;
 
     let (severity, status_label) = if (exact_pair_missing
         && inflation_locking_in_burn
         && softened_primary_limit)
         || (exact_pair_missing && large_live_thread)
-        || (((extreme_context_pressure && critical_primary_limit)
-        || context_used_percent >= 90.0)
-        && tiny_amai_share)
+        || (inflation_locking_in_burn && tiny_amai_share && early_primary_limit)
+        || (((extreme_context_pressure && critical_primary_limit) || context_used_percent >= 90.0)
+            && tiny_amai_share)
         || (emergency_primary_limit && huge_live_thread && weak_amai_share)
     {
         ("critical", "новый чат нужен сейчас")
     } else if (exact_pair_missing && early_large_live_thread)
+        || (early_large_live_thread && negligible_amai_share && generous_primary_limit)
         || (((high_context_pressure && low_primary_limit) || extreme_context_pressure)
-        && weak_amai_share)
+            && weak_amai_share)
         || (critical_primary_limit && large_live_thread && weak_amai_share)
     {
         ("alert", "новый чат рекомендован")
@@ -8516,7 +8560,9 @@ fn live_turn_exact_pair(
     }
     let session_started = current_session["started_at_epoch_ms"].as_i64().unwrap_or(0);
     let session_ended = current_session["ended_at_epoch_ms"].as_i64().unwrap_or(0);
-    let live_started = client_live_meter["started_at_epoch_ms"].as_i64().unwrap_or(0);
+    let live_started = client_live_meter["started_at_epoch_ms"]
+        .as_i64()
+        .unwrap_or(0);
     let live_ended = client_live_meter["ended_at_epoch_ms"].as_i64().unwrap_or(0);
     if session_started <= 0 || session_ended <= 0 || live_started <= 0 || live_ended <= 0 {
         return None;
@@ -8731,14 +8777,16 @@ fn exact_pair_frozen_debt_metric_row(alignment: &Value) -> Option<Value> {
     let missing_live_events = frozen_gap_review_surface["missing_live_events"]
         .as_u64()
         .unwrap_or(0);
-    let irrecoverable_missing_live_events = frozen_gap_review_surface
-        ["irrecoverable_missing_live_events"]
-        .as_u64()
-        .unwrap_or(0);
-    let recoverable_missing_live_events = frozen_gap_review_surface
-        ["recoverable_missing_live_events"]
-        .as_u64()
-        .unwrap_or_else(|| missing_live_events.saturating_sub(irrecoverable_missing_live_events));
+    let irrecoverable_missing_live_events =
+        frozen_gap_review_surface["irrecoverable_missing_live_events"]
+            .as_u64()
+            .unwrap_or(0);
+    let recoverable_missing_live_events =
+        frozen_gap_review_surface["recoverable_missing_live_events"]
+            .as_u64()
+            .unwrap_or_else(|| {
+                missing_live_events.saturating_sub(irrecoverable_missing_live_events)
+            });
     let resolution_condition = frozen_gap_review_surface["resolution_condition"]
         .as_str()
         .unwrap_or("freeze_irrecoverable_gap_or_keep_exact_pair_unavailable");
@@ -8807,10 +8855,10 @@ fn historical_frozen_debt_metric_row(
     let blocker_code = frozen_gap_review_surface["blocking_component"]
         .as_str()
         .unwrap_or("unknown_blocker");
-    let irrecoverable_missing_live_events = frozen_gap_review_surface
-        ["irrecoverable_missing_live_events"]
-        .as_u64()
-        .unwrap_or(0);
+    let irrecoverable_missing_live_events =
+        frozen_gap_review_surface["irrecoverable_missing_live_events"]
+            .as_u64()
+            .unwrap_or(0);
     let tooltip = format!(
         "Этот ряд показывает, что frozen debt сейчас уже не растёт в активных live scopes.\n- Current session: exact pair materialized\n- Working window: exact pair materialized\n- Lifetime blocker: {}\n- Lifetime irrecoverable rows: {}\n- Значит irrecoverable debt сейчас выглядит как исторический хвост, а не как новый live drift.",
         blocker_code,
@@ -10273,11 +10321,11 @@ fn human_elapsed_ms(value_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_cleanup_warning, benchmark_qdrant_live_card, browser_base_url,
-        build_benchmark_cards, build_continuity_correctness_card, build_degradation_model_card,
-        build_hero_cards, build_links, build_machine_cards, build_top_cards, format_ms,
-        format_time_compare_pair, human_elapsed_ms, live_latency_compare_card, monitoring_url,
-        agent_scope_activity_card, working_state_live_card, worst_status,
+        agent_scope_activity_card, artifact_cleanup_warning, benchmark_qdrant_live_card,
+        browser_base_url, build_benchmark_cards, build_continuity_correctness_card,
+        build_degradation_model_card, build_hero_cards, build_links, build_machine_cards,
+        build_top_cards, format_ms, format_time_compare_pair, human_elapsed_ms,
+        live_latency_compare_card, monitoring_url, working_state_live_card, worst_status,
     };
     use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary};
     use serde_json::json;
@@ -10435,10 +10483,12 @@ mod tests {
         assert_eq!(card["status"].as_str(), Some("unknown"));
         assert_eq!(card["status_label"].as_str(), Some("тест не запущен"));
         assert_eq!(card["value"].as_str(), Some("402.57 MiB"));
-        assert!(card["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("последний сохранённый срез"));
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("последний сохранённый срез")
+        );
         let empty_rows = Vec::new();
         let labels = card["rows"]
             .as_array()
@@ -10513,10 +10563,12 @@ mod tests {
         assert_eq!(card["status"].as_str(), Some("unknown"));
         assert_eq!(card["status_label"].as_str(), Some("тест не запущен"));
         assert_eq!(card["value"].as_str(), Some("209.53 MiB"));
-        assert!(card["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Тест сейчас не запущен"));
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Тест сейчас не запущен")
+        );
     }
 
     #[test]
@@ -10580,14 +10632,18 @@ mod tests {
             card["status_label"].as_str(),
             Some("идёт накопление выборки")
         );
-        assert!(card["metrics"][0]["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("ещё не накопилась живая выборка"));
-        assert!(card["metrics"][1]["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Пока рано делать строгий вывод"));
+        assert!(
+            card["metrics"][0]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ещё не накопилась живая выборка")
+        );
+        assert!(
+            card["metrics"][1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Пока рано делать строгий вывод")
+        );
     }
 
     #[test]
@@ -10717,10 +10773,12 @@ mod tests {
             card["table"]["rows"].as_array().map(|rows| rows.len()),
             Some(1)
         );
-        assert!(card["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("общий live поток"));
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("общий live поток")
+        );
     }
 
     #[test]
@@ -10865,27 +10923,35 @@ mod tests {
         assert_eq!(cards[0]["title"].as_str(), Some("Скорость ответа"));
         assert_eq!(cards[1]["title"].as_str(), Some("Агенты сейчас"));
         assert_eq!(cards[2]["title"].as_str(), Some("Текущая работа"));
-        assert!(cards[0]["status_tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .is_empty());
+        assert!(
+            cards[0]["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+        );
         assert_eq!(cards[1]["status"].as_str(), Some("pass"));
-        assert!(cards[1]["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("active ExecCtl leases"));
+        assert!(
+            cards[1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("active ExecCtl leases")
+        );
         assert!(cards[1]["rows"].as_array().is_some_and(|rows| {
             rows.iter()
                 .any(|row| row["label"].as_str() == Some("Работают прямо сейчас"))
         }));
-        assert!(cards[2]["status_tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Уверенность в этом рабочем снимке пока"));
-        assert!(cards[2]["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Сейчас Amai ведёт такую работу"));
+        assert!(
+            cards[2]["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Уверенность в этом рабочем снимке пока")
+        );
+        assert!(
+            cards[2]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Сейчас Amai ведёт такую работу")
+        );
         assert!(cards[2]["rows"].as_array().is_some_and(|rows| {
             rows.iter()
                 .any(|row| row["label"].as_str() == Some("Последний снимок"))
@@ -10962,15 +11028,17 @@ mod tests {
 
         let card = agent_scope_activity_card(&snapshot);
         assert_eq!(card["status"].as_str(), Some("alert"));
+        assert_eq!(card["status_label"].as_str(), Some("Amai видит не всех"));
         assert_eq!(
-            card["status_label"].as_str(),
-            Some("Amai видит не всех")
+            card["value"].as_str(),
+            Some("2 чата за 30м • 1 живой агент сейчас в Amai")
         );
-        assert_eq!(card["value"].as_str(), Some("2 чата за 30м • 1 живой агент сейчас в Amai"));
-        assert!(card["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("active ExecCtl leases"));
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("active ExecCtl leases")
+        );
         let rows = card["rows"].as_array().expect("rows");
         assert!(rows.iter().any(|row| {
             row["label"].as_str() == Some("Работают прямо сейчас")
@@ -10984,13 +11052,12 @@ mod tests {
                     .as_str()
                     .is_some_and(|value| value.contains("bug_bounty::continuity::default"))
         }));
-        assert_eq!(
-            card["back_panel"]["kind"].as_str(),
-            Some("hierarchy_tree")
+        assert_eq!(card["back_panel"]["kind"].as_str(), Some("hierarchy_tree"));
+        assert!(
+            card["back_panel"]["projects"]
+                .as_array()
+                .is_some_and(|projects| !projects.is_empty())
         );
-        assert!(card["back_panel"]["projects"]
-            .as_array()
-            .is_some_and(|projects| !projects.is_empty()));
     }
 
     #[test]
@@ -11024,26 +11091,32 @@ mod tests {
             Some("ждём устойчивый снимок")
         );
         let rows = card["rows"].as_array().expect("rows");
-        assert!(rows
-            .iter()
-            .all(|row| row["label"].as_str() != Some("Почему включено")));
-        assert!(rows
-            .iter()
-            .all(|row| row["label"].as_str() != Some("Почему не вошло")));
-        assert!(card["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("причины включения и исключения здесь пока не показываются"));
+        assert!(
+            rows.iter()
+                .all(|row| row["label"].as_str() != Some("Почему включено"))
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row["label"].as_str() != Some("Почему не вошло"))
+        );
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("причины включения и исключения здесь пока не показываются")
+        );
 
         let unknown_card = working_state_live_card(&json!({
             "captured_at_epoch_ms": 1774239286880u64,
             "latest_repo_working_state_restore": null
         }));
         assert_eq!(unknown_card["status"], json!("unknown"));
-        assert!(unknown_card["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("не подмешивает сюда более свежую рабочую линию другого проекта"));
+        assert!(
+            unknown_card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("не подмешивает сюда более свежую рабочую линию другого проекта")
+        );
     }
 
     #[test]
@@ -11075,7 +11148,10 @@ mod tests {
         assert!(note.contains("реальная экономия на полной шкале клиента пока не доказана"));
         let rows = cards[0]["rows"].as_array().expect("rows");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["label"].as_str(), Some("Экономия на учтённой части"));
+        assert_eq!(
+            rows[0]["label"].as_str(),
+            Some("Экономия на учтённой части")
+        );
     }
 
     #[test]
@@ -11153,14 +11229,18 @@ mod tests {
         assert!(cards[2]["title_tooltip"].as_str().is_some_and(|value| {
             value.contains("только подтверждённые цифры за всё время")
         }));
-        assert!(cards[1]["source_label"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("подтверждённый хвост прошлых стартов"));
-        assert!(cards[2]["source_label"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("старый долг точности"));
+        assert!(
+            cards[1]["source_label"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("подтверждённый хвост прошлых стартов")
+        );
+        assert!(
+            cards[2]["source_label"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("старый долг точности")
+        );
     }
 
     #[test]
@@ -11211,14 +11291,18 @@ mod tests {
             cards[0]["status_label"].as_str(),
             Some("ждём подтверждённую выборку")
         );
-        assert!(cards[0]["status_tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("ни один из них ещё не подтвердился"));
-        assert!(cards[0]["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии"));
+        assert!(
+            cards[0]["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ни один из них ещё не подтвердился")
+        );
+        assert!(
+            cards[0]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии")
+        );
     }
 
     #[test]
@@ -11305,16 +11389,20 @@ mod tests {
 
         let cards = build_hero_cards(&snapshot);
         for card in &cards {
-            assert!(card["rows"]
-                .as_array()
-                .expect("rows")
-                .iter()
-                .all(|row| row["label"].as_str() != Some("Связь с лимитом клиента")));
+            assert!(
+                card["rows"]
+                    .as_array()
+                    .expect("rows")
+                    .iter()
+                    .all(|row| row["label"].as_str() != Some("Связь с лимитом клиента"))
+            );
         }
-        assert!(cards[0]["source_label"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("живая шкала клиента"));
+        assert!(
+            cards[0]["source_label"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("живая шкала клиента")
+        );
     }
 
     #[test]
@@ -11459,20 +11547,24 @@ mod tests {
             cards[0]["status_label"].as_str(),
             Some("burn в continuity startup")
         );
-        assert!(cards[0]["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии"));
+        assert!(
+            cards[0]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии")
+        );
         let model_row = cards[0]["rows"]
             .as_array()
             .expect("session rows")
             .iter()
             .find(|row| row["label"].as_str() == Some("Экономия на учтённой части"))
             .expect("model-token row");
-        assert!(model_row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Точного процента пока нет"));
+        assert!(
+            model_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Точного процента пока нет")
+        );
     }
 
     #[test]
@@ -11495,10 +11587,12 @@ mod tests {
             row["value"].as_str(),
             Some("Amai сэкономил 25.00% токенов модели: без Amai 320, с Amai 240, экономия 80")
         );
-        assert!(row["tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("тот же meter, которым клиент считает лимит"));
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("тот же meter, которым клиент считает лимит")
+        );
 
         let note =
             super::model_token_savings_note_sentence(&statement_preview, &alignment).expect("note");
@@ -11558,10 +11652,12 @@ mod tests {
             row["value"].as_str(),
             Some("continuity-restore overhead вне retrieval: 8228 -> 8456 (+228 к расходу)")
         );
-        assert!(row["tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("исходный запрос клиента: 48 -> 48 (без разницы)"));
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("исходный запрос клиента: 48 -> 48 (без разницы)")
+        );
     }
 
     #[test]
@@ -11717,10 +11813,12 @@ mod tests {
             cards[1]["status_label"].as_str(),
             Some("исторический startup drag")
         );
-        assert!(cards[1]["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Короткая карточка только с проверяемыми цифрами по рабочему окну."));
+        assert!(
+            cards[1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Короткая карточка только с проверяемыми цифрами по рабочему окну.")
+        );
         let row = cards[1]["rows"]
             .as_array()
             .expect("rolling rows")
@@ -11759,10 +11857,12 @@ mod tests {
             row["value"].as_str(),
             Some("Точного процента пока нет; с Amai уже видно 609")
         );
-        assert!(row["tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("exact pair для этого scope ещё не materialized"));
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("exact pair для этого scope ещё не materialized")
+        );
 
         let note =
             super::model_token_savings_note_sentence(&statement_preview, &alignment).expect("note");
@@ -11855,10 +11955,12 @@ mod tests {
             row["value"].as_str(),
             Some("цифра пока не полностью точная: в старой истории потеряно 13 строк")
         );
-        assert!(row["tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("старой исторической потери данных"));
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("старой исторической потери данных")
+        );
     }
 
     #[test]
@@ -11907,10 +12009,12 @@ mod tests {
             row["value"].as_str(),
             Some("tool_overhead_outside_retrieval: 13 irrecoverable rows")
         );
-        assert!(row["tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("freeze_irrecoverable_gap_or_keep_exact_pair_unavailable"));
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("freeze_irrecoverable_gap_or_keep_exact_pair_unavailable")
+        );
     }
 
     #[test]
@@ -11944,10 +12048,12 @@ mod tests {
             row["value"].as_str(),
             Some("tool_overhead_outside_retrieval: historical-only, 13 rows")
         );
-        assert!(row["tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Current session: exact pair materialized"));
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Current session: exact pair materialized")
+        );
     }
 
     #[test]
@@ -11959,14 +12065,18 @@ mod tests {
         let row = super::client_full_turn_savings_metric_row(&meter, Some((550, 127, 423, 76.91)))
             .expect("full turn row");
         assert_eq!(row["label"], "Amai в полном live-turn");
-        assert!(row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("без Amai 35957"));
-        assert!(row["tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("rollout token_count.last_token_usage.total_tokens"));
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("без Amai 35957")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("rollout token_count.last_token_usage.total_tokens")
+        );
     }
 
     #[test]
@@ -11981,14 +12091,13 @@ mod tests {
         });
         let row = super::client_live_limit_metric_row(&meter).expect("limit row");
         assert_eq!(row["label"], "Лимит клиента сейчас");
-        assert!(row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("5ч остаётся 31.00%"));
-        assert!(row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("raw"));
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("5ч остаётся 31.00%")
+        );
+        assert!(row["value"].as_str().unwrap_or_default().contains("raw"));
     }
 
     #[test]
@@ -12002,14 +12111,13 @@ mod tests {
         });
         let row = super::client_live_context_metric_row(&meter).expect("context row");
         assert_eq!(row["label"].as_str(), Some("Последний запрос клиента"));
-        assert!(row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("133419 из 258400"));
-        assert!(row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("raw"));
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("133419 из 258400")
+        );
+        assert!(row["value"].as_str().unwrap_or_default().contains("raw"));
     }
 
     #[test]
@@ -12088,24 +12196,30 @@ mod tests {
             cards[0]["status_label"].as_str(),
             Some("новый чат нужен сейчас")
         );
-        assert!(cards[0]["status_tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("внешний лимит клиента уже горит быстрее"));
+        assert!(
+            cards[0]["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("внешний лимит клиента уже горит быстрее")
+        );
         let row = cards[0]["rows"]
             .as_array()
             .expect("rows")
             .iter()
             .find(|row| row["label"].as_str() == Some("Следующее действие"))
             .expect("next action row");
-        assert!(row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("новый чат"));
-        assert!(row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("continuity startup"));
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("новый чат")
+        );
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("continuity startup")
+        );
     }
 
     #[test]
@@ -12133,9 +12247,8 @@ mod tests {
             "primary_limit_remaining_percent": 3.0,
             "secondary_limit_remaining_percent": 71.0
         });
-        let guard =
-            super::client_turn_pressure_guard(&meter, Some((179416, 178971, 445, 0.25)))
-                .expect("pressure guard");
+        let guard = super::client_turn_pressure_guard(&meter, Some((179416, 178971, 445, 0.25)))
+            .expect("pressure guard");
         assert_eq!(guard.severity, "critical");
         assert_eq!(guard.status_label, "новый чат нужен сейчас");
     }
@@ -12153,8 +12266,39 @@ mod tests {
         let guard = super::client_turn_pressure_guard(&meter, None).expect("pressure guard");
         assert_eq!(guard.severity, "critical");
         assert_eq!(guard.status_label, "новый чат нужен сейчас");
-        assert!(super::client_turn_pressure_tooltip(guard)
-            .contains("слишком раздут"));
+        assert!(super::client_turn_pressure_tooltip(guard).contains("слишком раздут"));
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_triggers_when_exact_full_turn_savings_are_tiny() {
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 140921,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 54.54,
+            "primary_limit_remaining_percent": 61.0,
+            "secondary_limit_remaining_percent": 88.0
+        });
+        let guard = super::client_turn_pressure_guard(&meter, Some((141366, 140921, 445, 0.31)))
+            .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_early_rotate_for_negligible_exact_savings() {
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 90000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 34.83,
+            "primary_limit_remaining_percent": 82.0,
+            "secondary_limit_remaining_percent": 95.0
+        });
+        let guard = super::client_turn_pressure_guard(&meter, Some((90452, 90000, 452, 0.50)))
+            .expect("pressure guard");
+        assert_eq!(guard.severity, "alert");
+        assert_eq!(guard.status_label, "новый чат рекомендован");
     }
 
     #[test]
@@ -12193,12 +12337,16 @@ mod tests {
         );
         assert_eq!(
             compact["source_label"].as_str(),
-            Some("Источник: живая шкала клиента из rollout token_count и отдельно сведённая учтённая часть Amai.")
+            Some(
+                "Источник: живая шкала клиента из rollout token_count и отдельно сведённая учтённая часть Amai."
+            )
         );
-        assert!(compact["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии"));
+        assert!(
+            compact["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии")
+        );
     }
 
     #[test]
@@ -12234,7 +12382,9 @@ mod tests {
         );
         assert_eq!(
             compact["source_label"].as_str(),
-            Some("Источник: подтверждённая учтённая история плюс отдельно отмеченный старый долг точности. Это не полный raw spend всей истории.")
+            Some(
+                "Источник: подтверждённая учтённая история плюс отдельно отмеченный старый долг точности. Это не полный raw spend всей истории."
+            )
         );
     }
 
@@ -12287,35 +12437,50 @@ mod tests {
         });
 
         let guard = super::current_session_budget_guard(&snapshot);
-        assert_eq!(guard["source"], json!("dashboard_current_session_budget_guard_v1"));
+        assert_eq!(
+            guard["source"],
+            json!("dashboard_current_session_budget_guard_v1")
+        );
         assert_eq!(guard["full_turn_savings_proven"], json!(false));
         assert_eq!(guard["should_rotate_chat_now"], json!(true));
         assert_eq!(guard["should_rotate_chat_soon"], json!(true));
         assert_eq!(guard["status_label"], json!("новый чат нужен сейчас"));
-        assert!(guard["last_request"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("140921 из 258400, остаётся 45.46%"));
-        assert!(guard["last_request"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("raw"));
-        assert!(guard["client_limits"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("5ч остаётся 61.00%, 7д остаётся 88.00%"));
-        assert!(guard["client_limits"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("raw"));
-        assert!(guard["tracked_slice"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("55.83%"));
-        assert!(guard["next_action"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("continuity startup"));
+        assert!(
+            guard["last_request"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("140921 из 258400, остаётся 45.46%")
+        );
+        assert!(
+            guard["last_request"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("raw")
+        );
+        assert!(
+            guard["client_limits"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("5ч остаётся 61.00%, 7д остаётся 88.00%")
+        );
+        assert!(
+            guard["client_limits"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("raw")
+        );
+        assert!(
+            guard["tracked_slice"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("55.83%")
+        );
+        assert!(
+            guard["next_action"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("continuity startup")
+        );
     }
 
     #[test]
@@ -12350,14 +12515,18 @@ mod tests {
             row["value"].as_str(),
             Some("reviewed_frozen_debt_report_only: 13 irrecoverable rows")
         );
-        assert!(row["tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("claim_raw_exact_history"));
-        assert!(row["tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("token-statement-export --scope lifetime"));
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("claim_raw_exact_history")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("token-statement-export --scope lifetime")
+        );
     }
 
     #[test]
@@ -12423,22 +12592,28 @@ mod tests {
             strict_row["label"].as_str(),
             Some("Строгий same-meter срез")
         );
-        assert!(strict_row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("320"));
-        assert!(strict_row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("исходный запрос клиента"));
+        assert!(
+            strict_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("320")
+        );
+        assert!(
+            strict_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("исходный запрос клиента")
+        );
 
         let boundary_row =
             super::client_limit_explicit_boundary_metric_row(&alignment).expect("boundary row");
         assert_eq!(boundary_row["label"].as_str(), Some("Граница continuity"));
-        assert!(boundary_row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("continuity-restore overhead вне retrieval"));
+        assert!(
+            boundary_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("continuity-restore overhead вне retrieval")
+        );
 
         let boundary_tokens_row = super::client_limit_boundary_tokens_metric_row(&json!({
             "explicit_boundary_surface": {
@@ -12460,10 +12635,12 @@ mod tests {
             boundary_tokens_row["label"].as_str(),
             Some("Токены continuity boundary")
         );
-        assert!(boundary_tokens_row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("50329"));
+        assert!(
+            boundary_tokens_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("50329")
+        );
     }
 
     #[test]
@@ -12655,10 +12832,12 @@ mod tests {
             .iter()
             .find(|row| row["label"].as_str() == Some("Operator reclaim next"))
             .expect("operator reclaim row");
-        assert!(operator_row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("observe cleanup-artifacts --target target/debug --aggressive --apply"));
+        assert!(
+            operator_row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("observe cleanup-artifacts --target target/debug --aggressive --apply")
+        );
         let warning = artifact_cleanup_warning(&snapshot, None).expect("warning");
         assert!(warning.contains("policy-covered"));
         assert!(warning.contains("TTL/keep-latest"));
@@ -12775,10 +12954,12 @@ mod tests {
             .iter()
             .find(|card| card["title"].as_str() == Some("Локальный мусор и retention"))
             .expect("cleanup card");
-        assert!(cleanup_card["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("best-effort lower bound"));
+        assert!(
+            cleanup_card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("best-effort lower bound")
+        );
         let unreadable_row = cleanup_card["rows"]
             .as_array()
             .expect("cleanup rows")
@@ -12832,17 +13013,21 @@ mod tests {
         let card = build_degradation_model_card(&snapshot);
         assert_eq!(card["title"], json!("Поведение при сбоях"));
         assert_eq!(card["status"], json!("unknown"));
-        assert!(card["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("без свежего доказательства"));
+        assert!(
+            card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("без свежего доказательства")
+        );
         assert_eq!(card["rows"][0]["value"], json!("1 из 5 подтверждены"));
         assert_eq!(card["rows"][1]["value"], json!("0 из 6 подтверждены"));
         assert_eq!(card["rows"][2]["value"], json!("9"));
-        assert!(card["status_tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Устаревший handoff"));
+        assert!(
+            card["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Устаревший handoff")
+        );
     }
 
     #[test]
@@ -13017,14 +13202,18 @@ mod tests {
             cards[1]["title"].as_str(),
             Some("Hot Retrieval Benchmark / latest_retrieval_hot")
         );
-        assert!(cards[0]["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Он не равен retrieval.hot_p95_ms"));
-        assert!(cards[1]["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("источник SLA-метрики retrieval.hot_p95_ms"));
+        assert!(
+            cards[0]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Он не равен retrieval.hot_p95_ms")
+        );
+        assert!(
+            cards[1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("источник SLA-метрики retrieval.hot_p95_ms")
+        );
         assert_eq!(
             cards[0]["table"]["rows"][0]["values"][0].as_str(),
             Some("> 1200000\nBurst QPS")
@@ -13228,10 +13417,12 @@ mod tests {
         let cold_card = &cards[2];
         assert_eq!(cold_card["status"].as_str(), Some("waiting"));
         assert_eq!(cold_card["status_label"].as_str(), Some("идёт прогон"));
-        assert!(cold_card["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("обновляются по мере прогона"));
+        assert!(
+            cold_card["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("обновляются по мере прогона")
+        );
         assert_eq!(
             cold_card["table"]["columns"][2]["label"].as_str(),
             Some("Онлайн\nсейчас")
@@ -13264,9 +13455,11 @@ mod tests {
             cold_card["table"]["rows"][13]["values"][1].as_str(),
             Some("9.5 s")
         );
-        assert!(cold_card["status_tooltip"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Сейчас индексируется репозиторий Amai"));
+        assert!(
+            cold_card["status_tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Сейчас индексируется репозиторий Amai")
+        );
     }
 }
