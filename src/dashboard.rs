@@ -3415,6 +3415,14 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             ),
         );
     }
+    if session_card["status"].as_str() == Some("pass") {
+        if let Some((status, label, tooltip)) = exact_pair_card_status_override(current_session_alignment)
+        {
+            session_card = with_status(session_card, status);
+            session_card = with_status_label(session_card, label);
+            session_card = with_status_tooltip(session_card, &tooltip);
+        }
+    }
 
     let mut rolling_note = if rolling_events > 0 {
         format!(
@@ -3556,6 +3564,15 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             ),
         );
     }
+    if rolling_card["status"].as_str() == Some("pass") {
+        if let Some((status, label, tooltip)) =
+            exact_pair_card_status_override(rolling_window_alignment)
+        {
+            rolling_card = with_status(rolling_card, status);
+            rolling_card = with_status_label(rolling_card, label);
+            rolling_card = with_status_tooltip(rolling_card, &tooltip);
+        }
+    }
 
     let mut lifetime_note = if lifetime_events > 0 {
         format!(
@@ -3634,6 +3651,14 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                 format_signed_count(lifetime_saved)
             ),
         );
+    }
+    if lifetime_card["status"].as_str() == Some("pass") {
+        if let Some((status, label, tooltip)) = exact_pair_card_status_override(lifetime_alignment)
+        {
+            lifetime_card = with_status(lifetime_card, status);
+            lifetime_card = with_status_label(lifetime_card, label);
+            lifetime_card = with_status_tooltip(lifetime_card, &tooltip);
+        }
     }
 
     vec![session_card, rolling_card, lifetime_card]
@@ -5221,6 +5246,13 @@ fn with_status_tooltip(mut card: Value, status_tooltip: &str) -> Value {
     card
 }
 
+fn with_status(mut card: Value, status: &str) -> Value {
+    if let Some(object) = card.as_object_mut() {
+        object.insert("status".to_string(), Value::from(status.to_string()));
+    }
+    card
+}
+
 fn with_status_label(mut card: Value, status_label: &str) -> Value {
     if let Some(object) = card.as_object_mut() {
         object.insert(
@@ -6556,6 +6588,38 @@ fn exact_pair_primary_blocker_note_sentence(alignment: &Value) -> Option<String>
             .as_str()
             .map(|reason| format!("Exact pair сейчас удерживает blocker `{reason}`.")),
     }
+}
+
+fn exact_pair_card_status_override(alignment: &Value) -> Option<(&'static str, &'static str, String)> {
+    let exact_pair_status = &alignment["exact_pair_status"];
+    if exact_pair_status["state"].as_str() != Some("exact_pair_blocked") {
+        return None;
+    }
+    let blocker = exact_pair_status["blockers"].as_array()?.first()?;
+    let blocker_code = blocker["code"].as_str().unwrap_or_default();
+    let irrecoverable_missing_live_events = blocker["irrecoverable_missing_live_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let missing_live_events = blocker["missing_live_events"].as_u64().unwrap_or(0);
+    let recoverable_missing_live_events = missing_live_events
+        .saturating_sub(irrecoverable_missing_live_events);
+    if blocker_code == "tool_overhead_outside_retrieval" && irrecoverable_missing_live_events > 0 {
+        return Some((
+            "alert",
+            "не exact: frozen debt",
+            format!(
+                "Карточка не может считаться exact по следующим причинам:\n- exact same-meter pair для этого scope ещё не materialized.\n- Главный blocker: tool-overhead outside retrieval.\n- Missing live events: {}.\n- Irrecoverable: {}.\n- Recoverable: {}.\n- Это уже не временный lag, а исторический source-loss, поэтому optimistic pass здесь запрещён до отдельного frozen-gap решения или восстановления source.",
+                format_u64(Some(missing_live_events)),
+                format_u64(Some(irrecoverable_missing_live_events)),
+                format_u64(Some(recoverable_missing_live_events))
+            ),
+        ));
+    }
+    Some((
+        "waiting",
+        "ждём exact pair",
+        "Карточка пока не может считаться exact: same-meter pair для этого scope ещё не materialized, поэтому optimistic pass здесь запрещён до снятия truth-gap.".to_string(),
+    ))
 }
 
 fn model_token_savings_metric_row(scope_summary: &Value, alignment: &Value) -> Value {
@@ -9378,6 +9442,47 @@ mod tests {
         assert!(note.contains("missing 36 live events"));
         assert!(note.contains("13 irrecoverable"));
         assert!(note.contains("23 ещё recoverable"));
+    }
+
+    #[test]
+    fn exact_pair_status_override_marks_irrecoverable_gap_as_alert() {
+        let alignment = json!({
+            "exact_pair_status": {
+                "state": "exact_pair_blocked",
+                "blockers": [{
+                    "code": "tool_overhead_outside_retrieval",
+                    "missing_live_events": 13,
+                    "irrecoverable_missing_live_events": 13
+                }]
+            }
+        });
+
+        let (status, label, tooltip) =
+            super::exact_pair_card_status_override(&alignment).expect("status override");
+        assert_eq!(status, "alert");
+        assert_eq!(label, "не exact: frozen debt");
+        assert!(tooltip.contains("Missing live events: 13"));
+        assert!(tooltip.contains("Irrecoverable: 13"));
+    }
+
+    #[test]
+    fn exact_pair_status_override_marks_recoverable_gap_as_waiting() {
+        let alignment = json!({
+            "exact_pair_status": {
+                "state": "exact_pair_blocked",
+                "blockers": [{
+                    "code": "tool_overhead_outside_retrieval",
+                    "missing_live_events": 7,
+                    "irrecoverable_missing_live_events": 0
+                }]
+            }
+        });
+
+        let (status, label, tooltip) =
+            super::exact_pair_card_status_override(&alignment).expect("status override");
+        assert_eq!(status, "waiting");
+        assert_eq!(label, "ждём exact pair");
+        assert!(tooltip.contains("same-meter pair"));
     }
 
     #[test]
