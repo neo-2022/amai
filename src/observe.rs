@@ -1,7 +1,7 @@
 use crate::config::{AppConfig, discover_repo_root};
 use crate::{
-    artifact_cleanup, compatibility, dashboard, external_benchmark, nats, observability_policy,
-    postgres, retrieval_science, s3, token_budget,
+    artifact_cleanup, codex_threads, compatibility, dashboard, external_benchmark, nats,
+    observability_policy, postgres, retrieval_science, s3, token_budget,
 };
 use anyhow::{Context, Result, anyhow};
 use axum::{
@@ -27,6 +27,8 @@ use uuid::Uuid;
 #[derive(Clone)]
 struct ObserveState {
     dashboard_refresh_ms: u64,
+    cfg: AppConfig,
+    bind: String,
     cache: Arc<RwLock<ObserveCache>>,
 }
 
@@ -39,6 +41,17 @@ struct ObserveCache {
     last_refresh_duration_ms: Option<u64>,
     refresh_in_progress: bool,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CachedClientLiveMeterState {
+    working_state_thread_id: Option<String>,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    ended_at_epoch_ms: Option<i64>,
+    client_turn_total_tokens: Option<u64>,
+    primary_limit_used_percent: Option<u64>,
+    secondary_limit_used_percent: Option<u64>,
 }
 
 const SNAPSHOT_RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
@@ -314,6 +327,8 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
         .route("/healthz", get(healthz_handler))
         .with_state(ObserveState {
             dashboard_refresh_ms: profile.dashboard.refresh_ms,
+            cfg: cfg.clone(),
+            bind: bind.to_string(),
             cache,
         });
     let listener = tokio::net::TcpListener::bind(addr)
@@ -1768,6 +1783,7 @@ async fn favicon_handler() -> impl IntoResponse {
 }
 
 async fn dashboard_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+    refresh_client_live_meter_on_request(&state).await;
     match cached_dashboard_payload(&state).await {
         Ok(payload) => {
             let headers = [(
@@ -1790,6 +1806,7 @@ async fn dashboard_api_handler(State(state): State<ObserveState>) -> impl IntoRe
 }
 
 async fn snapshot_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+    refresh_client_live_meter_on_request(&state).await;
     match cached_snapshot_with_meta(&state).await {
         Ok(snapshot) => {
             let headers = [(
@@ -1812,6 +1829,7 @@ async fn snapshot_api_handler(State(state): State<ObserveState>) -> impl IntoRes
 }
 
 async fn healthz_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+    refresh_client_live_meter_on_request(&state).await;
     match cached_snapshot_with_meta(&state).await {
         Ok(snapshot) => {
             let summary = &snapshot["sla"]["summary"];
@@ -1903,6 +1921,120 @@ async fn cached_snapshot_with_meta(state: &ObserveState) -> Result<Value> {
         &cache,
         state.dashboard_refresh_ms,
     ))
+}
+
+async fn refresh_client_live_meter_on_request(state: &ObserveState) {
+    if let Err(error) = maybe_refresh_client_live_meter(state).await {
+        eprintln!("observe request-side client meter refresh failed: {error:#}");
+    }
+}
+
+async fn maybe_refresh_client_live_meter(state: &ObserveState) -> Result<()> {
+    let cache_snapshot = {
+        let cache = state.cache.read().await;
+        if observe_cache_stale(&cache, state.dashboard_refresh_ms) {
+            None
+        } else {
+            Some((
+                cache.snapshot.clone(),
+                cache.last_refresh_completed_epoch_ms,
+                cache.refresh_in_progress,
+            ))
+        }
+    };
+
+    let Some((snapshot, _last_refresh_completed_epoch_ms, refresh_in_progress)) = cache_snapshot
+    else {
+        return refresh_observe_cache(
+            state.cache.clone(),
+            state.cfg.clone(),
+            state.bind.clone(),
+            state.dashboard_refresh_ms,
+        )
+        .await;
+    };
+
+    let Some(snapshot) = snapshot else {
+        return refresh_observe_cache(
+            state.cache.clone(),
+            state.cfg.clone(),
+            state.bind.clone(),
+            state.dashboard_refresh_ms,
+        )
+        .await;
+    };
+
+    let cached_meter = cached_client_live_meter_state(&snapshot);
+    let preferred_thread_id = codex_threads::current_thread_id()
+        .or_else(|| cached_meter.working_state_thread_id.clone())
+        .or_else(|| cached_meter.thread_id.clone());
+    let Some(thread_id) = preferred_thread_id else {
+        return Ok(());
+    };
+    let latest_rollout =
+        codex_threads::latest_rollout_client_meter_observation_for_thread(&thread_id)?;
+    if !client_live_meter_refresh_needed(&cached_meter, latest_rollout.as_ref()) {
+        return Ok(());
+    }
+    if refresh_in_progress {
+        return Ok(());
+    }
+    refresh_observe_cache(
+        state.cache.clone(),
+        state.cfg.clone(),
+        state.bind.clone(),
+        state.dashboard_refresh_ms,
+    )
+    .await
+}
+
+fn cached_client_live_meter_state(snapshot: &Value) -> CachedClientLiveMeterState {
+    let meter = &snapshot["token_budget_report"]["client_live_meter"];
+    let working_state_thread_id = snapshot["latest_repo_working_state_restore"]
+        ["working_state_restore"]["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    CachedClientLiveMeterState {
+        working_state_thread_id,
+        thread_id: meter["thread_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        turn_id: meter["turn_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        ended_at_epoch_ms: meter["ended_at_epoch_ms"].as_i64(),
+        client_turn_total_tokens: meter["client_turn_total_tokens"].as_u64(),
+        primary_limit_used_percent: meter["primary_limit_used_percent"].as_u64(),
+        secondary_limit_used_percent: meter["secondary_limit_used_percent"].as_u64(),
+    }
+}
+
+fn client_live_meter_refresh_needed(
+    cached: &CachedClientLiveMeterState,
+    rollout: Option<&codex_threads::RolloutClientMeterObservation>,
+) -> bool {
+    if let Some(working_state_thread_id) = cached.working_state_thread_id.as_deref() {
+        if cached.thread_id.as_deref() != Some(working_state_thread_id) {
+            return true;
+        }
+    }
+
+    let Some(rollout) = rollout else {
+        return cached.thread_id.is_none();
+    };
+
+    cached.thread_id.as_deref() != Some(rollout.thread_id.as_str())
+        || cached.turn_id.as_deref() != Some(rollout.turn_id.as_str())
+        || cached.ended_at_epoch_ms.unwrap_or_default() < rollout.ended_at_epoch_ms
+        || cached.client_turn_total_tokens != Some(rollout.client_turn_total_tokens)
+        || cached.primary_limit_used_percent != Some(rollout.latest_primary_limit_used_percent)
+        || cached.secondary_limit_used_percent != Some(rollout.latest_secondary_limit_used_percent)
 }
 
 fn attach_observe_cache_to_dashboard_payload(
@@ -3456,9 +3588,11 @@ fn push_metric(output: &mut String, name: &str, help: &str, value: Option<f64>) 
 mod tests {
     use super::{
         benchmark_contamination_value, build_continuity_correctness_model, build_degradation_model,
-        evaluate_sla, expired_retention_candidates, load_profile, profile_thresholds_json,
+        cached_client_live_meter_state, client_live_meter_refresh_needed, evaluate_sla,
+        expired_retention_candidates, load_profile, profile_thresholds_json,
         render_prometheus_metrics, select_latest_clean_benchmark_snapshot,
     };
+    use crate::codex_threads::RolloutClientMeterObservation;
     use crate::postgres::ObservabilityRetentionCandidate;
     use serde_json::json;
     use uuid::Uuid;
@@ -3590,6 +3724,71 @@ mod tests {
         assert_eq!(model["summary"]["status"], json!("unknown"));
         assert_eq!(model["summary"]["probe_count"], json!(0));
         assert_eq!(model["summary"]["evidence_gap"], json!(true));
+    }
+
+    #[test]
+    fn client_live_meter_refresh_needed_when_rollout_is_newer_than_cache() {
+        let snapshot = json!({
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "thread_id": "thread-1"
+                }
+            },
+            "token_budget_report": {
+                "client_live_meter": {
+                    "thread_id": "thread-1",
+                    "turn_id": "turn-1",
+                    "ended_at_epoch_ms": 1000,
+                    "client_turn_total_tokens": 120000,
+                    "primary_limit_used_percent": 91,
+                    "secondary_limit_used_percent": 28
+                }
+            }
+        });
+        let cached = cached_client_live_meter_state(&snapshot);
+        let rollout = RolloutClientMeterObservation {
+            thread_id: "thread-1".to_string(),
+            rollout_path: "/tmp/rollout.jsonl".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_epoch_ms: 900,
+            ended_at_epoch_ms: 1100,
+            client_turn_total_tokens: 122000,
+            client_turn_input_tokens: 0,
+            client_turn_cached_input_tokens: 0,
+            client_turn_output_tokens: 0,
+            client_turn_reasoning_output_tokens: 0,
+            latest_cumulative_total_tokens: 200000,
+            latest_model_context_window: 258400,
+            latest_primary_limit_used_percent: 93,
+            latest_secondary_limit_used_percent: 29,
+            observation_source: "codex_rollout_client_meter_v1".to_string(),
+        };
+
+        assert!(client_live_meter_refresh_needed(&cached, Some(&rollout)));
+    }
+
+    #[test]
+    fn client_live_meter_refresh_needed_when_cached_thread_drifted_from_working_state() {
+        let snapshot = json!({
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "thread_id": "thread-2"
+                }
+            },
+            "token_budget_report": {
+                "client_live_meter": {
+                    "thread_id": "thread-1",
+                    "turn_id": "turn-1",
+                    "ended_at_epoch_ms": 1000,
+                    "client_turn_total_tokens": 120000,
+                    "primary_limit_used_percent": 91,
+                    "secondary_limit_used_percent": 28
+                }
+            }
+        });
+        let cached = cached_client_live_meter_state(&snapshot);
+
+        assert!(client_live_meter_refresh_needed(&cached, None));
     }
 
     #[test]

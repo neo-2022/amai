@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 15:27 MSK
-Ручная сверка guide/docs: 2026-03-27 15:27 MSK
+modified_at: 2026-03-27 15:46 MSK
+Ручная сверка guide/docs: 2026-03-27 15:46 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -641,6 +641,7 @@ scripts\human_dashboard_down.cmd
 - там же теперь выводится и самый дорогой stage последнего snapshot-refresh, чтобы operator сразу видел узкое место без отдельного raw JSON разбора.
 - сами карточки при этом больше не тянут полный contractual `observe token-report`: для `observe serve` они используют отдельный `dashboard_read_only` token report без full contractual/export path на каждый refresh;
 - этот dashboard contour при этом разрешает только ограниченный quiet same-meter sync/write-back для active live scope текущей сессии и рабочего окна, а не полный write-side settlement/export контур.
+- если свежий `rollout token_count` для того же thread уже появился, а process-local cache ещё держит старый `client_live_meter`, request-side freshness guard обязан принудительно обновить `client_live_meter` и limit-row до ответа, а не ждать только фонового тика.
 
 После запуска откройте в браузере:
 
