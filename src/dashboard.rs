@@ -3358,6 +3358,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if let Some(row) = exact_pair_status_metric_row(current_session_alignment) {
         session_rows.push(row);
     }
+    if let Some(row) = exact_pair_frozen_debt_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
     if let Some(row) = exact_model_component_delta_metric_row(current_session_alignment) {
         session_rows.push(row);
     }
@@ -3491,6 +3494,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if let Some(row) = exact_pair_status_metric_row(rolling_window_alignment) {
         rolling_rows.push(row);
     }
+    if let Some(row) = exact_pair_frozen_debt_metric_row(rolling_window_alignment) {
+        rolling_rows.push(row);
+    }
     if let Some(row) = historical_startup_drag_metric_row(rolling_historical_startup_drag) {
         rolling_rows.push(row);
     }
@@ -3621,6 +3627,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         lifetime_alignment,
     ));
     if let Some(row) = exact_pair_status_metric_row(lifetime_alignment) {
+        lifetime_rows.push(row);
+    }
+    if let Some(row) = exact_pair_frozen_debt_metric_row(lifetime_alignment) {
         lifetime_rows.push(row);
     }
     if let Some(row) = exact_model_component_delta_metric_row(lifetime_alignment) {
@@ -6684,6 +6693,45 @@ fn exact_pair_status_metric_row(alignment: &Value) -> Option<Value> {
     ))
 }
 
+fn exact_pair_frozen_debt_metric_row(alignment: &Value) -> Option<Value> {
+    let exact_pair_status = &alignment["exact_pair_status"];
+    if exact_pair_status["state"].as_str() != Some("exact_pair_blocked") {
+        return None;
+    }
+    let blocker = exact_pair_status["blockers"].as_array()?.first()?;
+    if blocker["frozen_gap_candidate"].as_bool() != Some(true) {
+        return None;
+    }
+    let blocker_code = blocker["code"].as_str().unwrap_or("unknown_blocker");
+    let missing_live_events = blocker["missing_live_events"].as_u64().unwrap_or(0);
+    let irrecoverable_missing_live_events = blocker["irrecoverable_missing_live_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let recoverable_missing_live_events = blocker["recoverable_missing_live_events"]
+        .as_u64()
+        .unwrap_or_else(|| missing_live_events.saturating_sub(irrecoverable_missing_live_events));
+    let resolution_condition = blocker["resolution_condition"]
+        .as_str()
+        .unwrap_or("freeze_irrecoverable_gap_or_keep_exact_pair_unavailable");
+    let tooltip = format!(
+        "Этот ряд показывает отдельный review-only contour для irrecoverable historical debt, который блокирует raw exact history.\n- Blocker component: {}\n- Missing live events: {}\n- Irrecoverable: {}\n- Recoverable: {}\n- Resolution law: {}\n- Пока frozen-gap решение не принято, `Точность модели` обязана оставаться non-exact и не имеет права притворяться raw exact history.",
+        blocker_code,
+        format_u64(Some(missing_live_events)),
+        format_u64(Some(irrecoverable_missing_live_events)),
+        format_u64(Some(recoverable_missing_live_events)),
+        resolution_condition
+    );
+    Some(metric_row(
+        "Frozen debt exact-пары",
+        format!(
+            "{}: {} irrecoverable rows",
+            blocker_code,
+            format_u64(Some(irrecoverable_missing_live_events))
+        ),
+        Some(tooltip.as_str()),
+    ))
+}
+
 fn model_token_savings_metric_row(scope_summary: &Value, alignment: &Value) -> Value {
     let observed_with_amai = scope_summary["verified_observed_whole_cycle_with_amai_tokens"]
         .as_u64()
@@ -9587,6 +9635,36 @@ mod tests {
 
         let row = super::exact_pair_status_metric_row(&alignment).expect("exact pair row");
         assert_eq!(row["value"].as_str(), Some("exact pair materialized"));
+    }
+
+    #[test]
+    fn exact_pair_frozen_debt_metric_row_surfaces_resolution_law() {
+        let alignment = json!({
+            "exact_pair_status": {
+                "state": "exact_pair_blocked",
+                "blockers": [{
+                    "code": "tool_overhead_outside_retrieval",
+                    "frozen_gap_candidate": true,
+                    "missing_live_events": 13,
+                    "irrecoverable_missing_live_events": 13,
+                    "recoverable_missing_live_events": 0,
+                    "resolution_condition": "freeze_irrecoverable_gap_or_keep_exact_pair_unavailable"
+                }]
+            }
+        });
+
+        let row = super::exact_pair_frozen_debt_metric_row(&alignment).expect("frozen debt row");
+        assert_eq!(row["label"], "Frozen debt exact-пары");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("tool_overhead_outside_retrieval: 13 irrecoverable rows")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("freeze_irrecoverable_gap_or_keep_exact_pair_unavailable")
+        );
     }
 
     #[test]

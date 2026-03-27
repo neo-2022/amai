@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 13:22 MSK
-Ручная сверка guide/docs: 2026-03-27 13:22 MSK
+modified_at: 2026-03-27 13:40 MSK
+Ручная сверка guide/docs: 2026-03-27 13:40 MSK
 
 # Token Ledger
 
@@ -1439,6 +1439,12 @@ client-limit-pre-amai-baseline-source-v2` этот status уже не advisory-o
   - `blocking_reason = tool_overhead_outside_retrieval_irrecoverable_debt`
   - `frozen_gap_candidate = true`
   - `resolution_condition = freeze_irrecoverable_gap_or_keep_exact_pair_unavailable`
+- customer-facing dashboard при таком хвосте обязан разделять:
+  - row `Точность модели` для самого exactness state;
+  - row `Frozen debt exact-пары` как review-only surface для
+    irrecoverable historical debt;
+- этот frozen-debt row не становится raw exact history и не разрешает
+  показывать exact-процент, пока separate frozen-gap decision не принят.
 
 ## Preliminary vs stable
 

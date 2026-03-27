@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 13:22 MSK
-Ручная сверка guide/docs: 2026-03-27 13:22 MSK
+modified_at: 2026-03-27 13:40 MSK
+Ручная сверка guide/docs: 2026-03-27 13:40 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1861,6 +1861,12 @@ preview, а не только raw count.
     он поднимает `tool_overhead_outside_retrieval_irrecoverable_debt`,
     `frozen_gap_candidate = true` и
     `resolution_condition = freeze_irrecoverable_gap_or_keep_exact_pair_unavailable`;
+  - dashboard token cards теперь разделяют это user-facing:
+    - row `Точность модели` показывает, materialized ли exact pair;
+    - отдельный row `Frozen debt exact-пары` появляется только для
+      irrecoverable historical debt и остаётся review-only контуром;
+    - этот row не имеет права притворяться raw exact history и существует
+      только чтобы явно отделить historical source-loss от обычного lag;
   - `contractual_statement_summary`, `statement_export_preview.json`,
     `settlement_report_preview.json` и
     `contractual_evidence_pack.json` теперь отдельно несут
