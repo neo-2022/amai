@@ -10482,7 +10482,12 @@ fn live_usage_identity_shadow_key(event: &TokenBudgetEvent) -> Option<String> {
     if event.traffic_class != "live" {
         return None;
     }
-    let correlation_id = event_context_pack_id(event)?;
+    let correlation_id = event_context_pack_id(event)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| event.event_id.clone());
+    if correlation_id.is_empty() {
+        return None;
+    }
     Some(format!(
         "{}:{}:{}:{}:{}",
         event.project, event.namespace, event.measurement_scope, event.source_kind, correlation_id
@@ -16789,6 +16794,51 @@ mod tests {
             refreshed.created_at_epoch_ms
         );
         assert_eq!(filtered[0].tool_overhead_tokens, Some(33));
+    }
+
+    #[test]
+    fn suppress_shadowed_live_events_falls_back_to_event_id_without_context_pack_identity() {
+        let stale = token_event! {
+            created_at_epoch_ms: 100,
+            ingested_at_epoch_ms: 100,
+            event_id: "legacy-live-event".to_string(),
+            correlation_id: "legacy-live-event".to_string(),
+            context_pack_id: None,
+            source_kind: "live_context_pack".to_string(),
+            traffic_class: "live".to_string(),
+            payload_origin: "context_pack_token_budget".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+            tool_overhead_tokens: None,
+            tool_overhead_source: Some(json!({
+                "state": "missing_context_pack_identity_irrecoverable",
+            })),
+        };
+        let refreshed = token_event! {
+            created_at_epoch_ms: 200,
+            ingested_at_epoch_ms: 200,
+            event_id: "legacy-live-event".to_string(),
+            correlation_id: "legacy-live-event".to_string(),
+            context_pack_id: None,
+            source_kind: "live_context_pack".to_string(),
+            traffic_class: "live".to_string(),
+            payload_origin: "context_pack_token_budget".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+            tool_overhead_tokens: None,
+            tool_overhead_source: Some(json!({
+                "state": "missing_context_pack_identity_irrecoverable",
+            })),
+        };
+
+        let filtered = suppress_shadowed_live_events(vec![stale, refreshed.clone()]);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(
+            filtered[0].created_at_epoch_ms,
+            refreshed.created_at_epoch_ms
+        );
+        assert_eq!(
+            filtered[0].tool_overhead_source.as_ref().unwrap()["state"],
+            "missing_context_pack_identity_irrecoverable"
+        );
     }
 
     #[test]
