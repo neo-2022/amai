@@ -3103,6 +3103,8 @@ fn default_startup_next_action(
                 Some(namespace.code.as_str()),
                 Some(project.repo_root.as_str()),
                 preserves_return_obligation,
+                Some(current_goal),
+                Some(next_step),
             ),
         })
     } else if resume_state != "clear" && required_headline.is_some() {

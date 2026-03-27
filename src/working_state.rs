@@ -29,6 +29,17 @@ const EXECCTL_LEASE_TTL_MS: u64 = SESSION_GAP_MS;
 const PROJECT_TASK_TREE_VERSION: &str = "project-task-tree-v1";
 const PROJECT_TASK_LEDGER_VERSION: &str = "project-task-ledger-v2";
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn shell_join_command(args: &[&str]) -> String {
+    args.iter()
+        .map(|value| shell_quote(value))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub async fn record_handoff_event(
     db: &Client,
     project: &ProjectRecord,
@@ -2176,10 +2187,18 @@ pub(crate) fn build_rotate_chat_action_bundle(
     namespace_code: Option<&str>,
     repo_root: Option<&str>,
     preserves_return_obligation: bool,
+    recommended_headline: Option<&str>,
+    recommended_next_step: Option<&str>,
 ) -> Value {
     let project_code = project_code.filter(|value| !value.is_empty());
     let namespace_code = namespace_code.filter(|value| !value.is_empty());
     let repo_root = repo_root.filter(|value| !value.is_empty());
+    let recommended_headline = recommended_headline
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let recommended_next_step = recommended_next_step
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let mut missing_inputs = Vec::new();
     if project_code.is_none() {
         missing_inputs.push("project_code");
@@ -2193,11 +2212,62 @@ pub(crate) fn build_rotate_chat_action_bundle(
     let project_arg = project_code.unwrap_or("<project_code_required>");
     let namespace_arg = namespace_code.unwrap_or("<namespace_code_required>");
     let repo_root_arg = repo_root.unwrap_or("<repo_root_required>");
+    let handoff_command = match (
+        project_code,
+        namespace_code,
+        recommended_headline,
+        recommended_next_step,
+    ) {
+        (Some(project), Some(namespace), Some(headline), Some(next_step)) => Some(
+            shell_join_command(&[
+                "amai",
+                "continuity",
+                "handoff",
+                "--project",
+                project,
+                "--namespace",
+                namespace,
+                "--headline",
+                headline,
+                "--next-step",
+                next_step,
+            ]),
+        ),
+        _ => None,
+    };
+    let startup_command = match (project_code, namespace_code, repo_root) {
+        (Some(project), Some(namespace), Some(root)) => Some(shell_join_command(&[
+            "amai",
+            "continuity",
+            "startup",
+            "--project",
+            project,
+            "--namespace",
+            namespace,
+            "--repo-root",
+            root,
+            "--token-source-kind",
+            "live_continuity_startup",
+            "--json",
+        ])),
+        _ => None,
+    };
     json!({
         "bundle_version": "rotate-chat-action-bundle-v1",
         "ready_for_automation": missing_inputs.is_empty(),
         "missing_inputs": missing_inputs,
         "preserves_return_obligation": preserves_return_obligation,
+        "recommended_handoff": {
+            "available": recommended_headline.is_some() && recommended_next_step.is_some(),
+            "headline": recommended_headline,
+            "next_step": recommended_next_step,
+        },
+        "operator_flow": {
+            "copy_paste_ready": handoff_command.is_some() && startup_command.is_some(),
+            "handoff_command": handoff_command,
+            "open_fresh_chat_summary": "открой свежий чат клиента вручную",
+            "startup_command": startup_command,
+        },
         "order": [
             "capture_continuity_handoff",
             "open_fresh_chat",
@@ -2306,6 +2376,8 @@ fn build_startup_next_action(
                 namespace_code,
                 repo_root,
                 preserves_return_obligation,
+                Some(active_headline),
+                Some(active_next_step),
             ),
         })
     } else if resume_state != "clear" && required_headline.is_some() {
@@ -3489,6 +3561,8 @@ mod tests {
             Some("continuity"),
             Some("/tmp/amai"),
             true,
+            Some("Same-meter spend control"),
+            Some("Materialize live assistant generation source."),
         );
         assert_eq!(
             bundle["bundle_version"],
@@ -3511,6 +3585,24 @@ mod tests {
         assert_eq!(
             bundle["run_continuity_startup"]["token_source_kind"],
             json!("live_continuity_startup")
+        );
+        assert_eq!(
+            bundle["recommended_handoff"]["headline"],
+            json!("Same-meter spend control")
+        );
+        assert_eq!(
+            bundle["recommended_handoff"]["next_step"],
+            json!("Materialize live assistant generation source.")
+        );
+        assert_eq!(
+            bundle["operator_flow"]["copy_paste_ready"],
+            json!(true)
+        );
+        assert!(
+            bundle["operator_flow"]["handoff_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("--headline")
         );
     }
 

@@ -2810,6 +2810,8 @@ fn current_session_budget_guard_with_restore_context(
                     None,
                     None,
                     false,
+                    None,
+                    None,
                 )
             },
             "reason": "current_session hero card is unavailable",
@@ -2842,6 +2844,12 @@ fn current_session_budget_guard_with_restore_context(
     let should_rotate_chat_now = status_label == "новый чат нужен сейчас";
     let should_rotate_chat_soon =
         status_label == "новый чат рекомендован" || should_rotate_chat_now;
+    let recommended_headline = restore_context["current_goal"]
+        .as_str()
+        .filter(|value| !value.is_empty());
+    let recommended_next_step = restore_context["next_step"]
+        .as_str()
+        .filter(|value| !value.is_empty());
     let preserves_return_obligation = restore_context["execctl_resume_state"]
         .as_str()
         .is_some_and(|value| value != "clear");
@@ -2856,6 +2864,8 @@ fn current_session_budget_guard_with_restore_context(
         restore_context["project"]["code"].as_str(),
         restore_context["namespace"]["code"].as_str(),
         restore_context["project"]["repo_root"].as_str(),
+        recommended_headline,
+        recommended_next_step,
     );
     let tracked_slice =
         row_value("Экономия на учтённой части").or_else(|| {
@@ -2907,6 +2917,8 @@ fn build_client_budget_reply_execution_gate(
     project_code: Option<&str>,
     namespace_code: Option<&str>,
     repo_root: Option<&str>,
+    recommended_headline: Option<&str>,
+    recommended_next_step: Option<&str>,
 ) -> Value {
     let blocking = should_rotate_chat_now || should_rotate_chat_soon;
     let action_kind = if blocking {
@@ -2943,6 +2955,8 @@ fn build_client_budget_reply_execution_gate(
             namespace_code,
             repo_root,
             preserves_return_obligation,
+            recommended_headline,
+            recommended_next_step,
         ),
     })
 }
@@ -4749,6 +4763,19 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         client_live_meter,
         current_session_exact_pair,
     );
+    let restore_context = &snapshot["latest_repo_working_state_restore"]["working_state_restore"];
+    let session_rotate_bundle = restore_context.is_object().then(|| {
+        working_state::build_rotate_chat_action_bundle(
+            restore_context["project"]["code"].as_str(),
+            restore_context["namespace"]["code"].as_str(),
+            restore_context["project"]["repo_root"].as_str(),
+            restore_context["execctl_resume_state"]
+                .as_str()
+                .is_some_and(|value| value != "clear"),
+            restore_context["current_goal"].as_str(),
+            restore_context["next_step"].as_str(),
+        )
+    });
     if let Some(sentence) =
         client_live_meter_note_sentence(client_live_meter, session_live_turn_exact_pair)
     {
@@ -4798,7 +4825,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if let Some(row) = client_live_limit_metric_row(client_live_meter) {
         session_rows.push(row);
     }
-    if let Some(row) = client_turn_pressure_metric_row(session_client_turn_pressure) {
+    if let Some(row) =
+        client_turn_pressure_metric_row(session_client_turn_pressure, session_rotate_bundle.as_ref())
+    {
         session_rows.push(row);
     }
     if let Some(row) = client_limit_alignment_metric_row(current_session_alignment) {
@@ -4837,7 +4866,10 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     );
     if let Some(guard) = session_client_turn_pressure {
         session_card = with_status_label(session_card, guard.status_label);
-        session_card = with_status_tooltip(session_card, &client_turn_pressure_tooltip(guard));
+        session_card = with_status_tooltip(
+            session_card,
+            &client_turn_pressure_tooltip(guard, session_rotate_bundle.as_ref()),
+        );
     } else if session_full_turn_savings_pct.is_none()
         && client_live_meter["status"].as_str() == Some("observed")
     {
@@ -8441,7 +8473,10 @@ fn client_turn_pressure_note_sentence(guard: Option<ClientTurnPressureGuard>) ->
     ))
 }
 
-fn client_turn_pressure_metric_row(guard: Option<ClientTurnPressureGuard>) -> Option<Value> {
+fn client_turn_pressure_metric_row(
+    guard: Option<ClientTurnPressureGuard>,
+    action_bundle: Option<&Value>,
+) -> Option<Value> {
     let guard = guard?;
     Some(metric_row(
         "Следующее действие",
@@ -8450,11 +8485,14 @@ fn client_turn_pressure_metric_row(guard: Option<ClientTurnPressureGuard>) -> Op
         } else {
             "сохрани handoff и продолжай в новом чате через continuity startup".to_string()
         },
-        Some(client_turn_pressure_tooltip(guard).as_str()),
+        Some(client_turn_pressure_tooltip(guard, action_bundle).as_str()),
     ))
 }
 
-fn client_turn_pressure_tooltip(guard: ClientTurnPressureGuard) -> String {
+fn client_turn_pressure_tooltip(
+    guard: ClientTurnPressureGuard,
+    action_bundle: Option<&Value>,
+) -> String {
     let mut tooltip = format!(
         "Этот guard показывает, что внешний лимит клиента уже горит быстрее, чем Amai успевает экономить в полном live-turn.\n- Последний observed запрос клиента: {} из {} ({})\n- По лимиту 5ч остаётся {}\n- По лимиту 7д остаётся {}",
         format_u64(Some(guard.turn_total_tokens)),
@@ -8476,6 +8514,14 @@ fn client_turn_pressure_tooltip(guard: ClientTurnPressureGuard) -> String {
     tooltip.push_str(
         "\n- При таком соотношении продолжение в том же thread жжёт внешний клиентский лимит в основном размером самого thread/context, а не Amai-delta\n- Следующее действие: сохранить continuity handoff и продолжить в свежем чате через continuity startup",
     );
+    if let Some(bundle) = action_bundle {
+        if let Some(command) = bundle["operator_flow"]["handoff_command"].as_str() {
+            tooltip.push_str(&format!("\n- Готовая команда handoff: {command}"));
+        }
+        if let Some(command) = bundle["operator_flow"]["startup_command"].as_str() {
+            tooltip.push_str(&format!("\n- После открытия нового чата запусти startup: {command}"));
+        }
+    }
     tooltip
 }
 
@@ -12356,7 +12402,9 @@ mod tests {
         let guard = super::client_turn_pressure_guard(&meter, None).expect("pressure guard");
         assert_eq!(guard.severity, "critical");
         assert_eq!(guard.status_label, "новый чат нужен сейчас");
-        assert!(super::client_turn_pressure_tooltip(guard).contains("слишком раздут"));
+        assert!(
+            super::client_turn_pressure_tooltip(guard, None).contains("слишком раздут")
+        );
     }
 
     #[test]
@@ -12535,7 +12583,9 @@ mod tests {
 	                        "code": "continuity",
 	                        "display_name": "Continuity"
 	                    },
-	                    "execctl_resume_state": "pending_return_queue_present"
+	                    "execctl_resume_state": "pending_return_queue_present",
+                        "current_goal": "Same-meter spend control",
+                        "next_step": "Materialize live assistant generation source."
 	                }
 	            }
 	        });
@@ -12566,10 +12616,18 @@ mod tests {
             guard["reply_execution_gate"]["action_bundle"]["bundle_version"],
             json!("rotate-chat-action-bundle-v1")
         );
-	        assert_eq!(
+        assert_eq!(
 	            guard["reply_execution_gate"]["action_bundle"]["run_continuity_startup"]["project"],
 	            json!("amai")
 	        );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_bundle"]["recommended_handoff"]["headline"],
+            json!("Same-meter spend control")
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_bundle"]["operator_flow"]["copy_paste_ready"],
+            json!(true)
+        );
         assert_eq!(guard["max_guard_age_seconds"], json!(10));
         assert_eq!(guard["observed_at_epoch_ms"], json!(1774622949000u64));
         assert!(
