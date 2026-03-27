@@ -5533,6 +5533,7 @@ fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Valu
     let explicit_boundary_surface = alignment["explicit_boundary_surface"].clone();
     let continuity_boundary_rollup = alignment["continuity_boundary_rollup"].clone();
     let pre_amai_baseline_source_status = alignment["pre_amai_baseline_source_status"].clone();
+    let exact_pair_status = alignment["exact_pair_status"].clone();
     let strict_client_meter_slice = alignment["strict_client_meter_slice"].clone();
     let same_meter_as_client_limit =
         alignment["same_meter_as_client_limit"].as_bool() == Some(true);
@@ -5598,6 +5599,7 @@ fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Valu
         "explicit_boundary_surface": explicit_boundary_surface,
         "continuity_boundary_rollup": continuity_boundary_rollup,
         "pre_amai_baseline_source_status": pre_amai_baseline_source_status,
+        "exact_pair_status": exact_pair_status,
         "note": note,
     })
 }
@@ -13334,6 +13336,153 @@ fn build_client_limit_pre_amai_baseline_source_status(
     })
 }
 
+fn baseline_equivalence_component_semantics<'a>(
+    baseline_equivalence: &'a Value,
+    code: &str,
+) -> Option<&'a Value> {
+    baseline_equivalence["component_semantics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["code"].as_str() == Some(code))
+}
+
+fn build_client_limit_exact_pair_status(
+    contract: &TokenBudgetContractConfig,
+    baseline_equivalence: &Value,
+    tool_overhead_observation_source: &Value,
+    explicit_boundary_surface: &Value,
+    pre_amai_baseline_source_status: &Value,
+    blocking_reasons: &[String],
+    same_meter_as_client_limit: bool,
+) -> Value {
+    let mut blockers = Vec::new();
+    let mut covered_reasons = BTreeSet::new();
+    let incomplete_components = baseline_equivalence["incomplete_components"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    if incomplete_components
+        .iter()
+        .any(|item| item.as_str() == Some("tool_overhead_outside_retrieval"))
+    {
+        let observed_live_events = tool_overhead_observation_source["observed_live_events"]
+            .as_u64()
+            .unwrap_or(0);
+        let target_live_events = tool_overhead_observation_source["target_live_events"]
+            .as_u64()
+            .unwrap_or(0);
+        let blocking_reason = if observed_live_events > 0 {
+            "tool_overhead_outside_retrieval_partially_measured"
+        } else {
+            "tool_overhead_outside_retrieval_unmeasured"
+        };
+        covered_reasons.insert(blocking_reason.to_string());
+        blockers.push(json!({
+            "code": "tool_overhead_outside_retrieval",
+            "blocker_kind": "whole_cycle_observation_gap",
+            "state": tool_overhead_observation_source["state"].clone(),
+            "blocking_reason": blocking_reason,
+            "observed_live_events": observed_live_events,
+            "target_live_events": target_live_events,
+            "missing_live_events": tool_overhead_observation_source["missing_live_events"].clone(),
+            "resolution_condition": "tool_overhead_source_covers_missing_scope",
+            "note": "Whole-cycle exact pair по этому компоненту ещё не materialized: retrieval live scope имеет missing tool_overhead attach и пока даёт только partial same-meter coverage."
+        }));
+    }
+
+    if let Some(component) =
+        baseline_equivalence_component_semantics(baseline_equivalence, "assistant_generation")
+    {
+        let semantics_state = component["baseline_semantics_state"]
+            .as_str()
+            .unwrap_or_default();
+        if component["whole_cycle_observed_complete"].as_bool() == Some(true)
+            && !component["baseline_measured_tokens"].is_u64()
+            && semantics_state == "baseline_semantics_unmaterialized"
+        {
+            let blocking_reason = "assistant_generation_baseline_semantics_unmaterialized";
+            covered_reasons.insert(blocking_reason.to_string());
+            blockers.push(json!({
+                "code": "assistant_generation",
+                "blocker_kind": "baseline_semantics_gap",
+                "state": semantics_state,
+                "blocking_reason": blocking_reason,
+                "observed_live_events": component["observed_live_events"].clone(),
+                "target_live_events": component["target_live_events_count"].clone(),
+                "observed_tokens": component["observed_tokens"].clone(),
+                "resolution_condition": "assistant_generation_baseline_semantics_materialized",
+                "note": component["note"].clone(),
+            }));
+        }
+    }
+
+    if explicit_boundary_surface["state"].as_str() == Some("amai_continuity_boundary")
+        && pre_amai_baseline_source_status["state"].as_str() == Some("required_not_materialized")
+    {
+        let blocking_reason = pre_amai_baseline_source_status["blocking_reason"]
+            .as_str()
+            .unwrap_or("missing_truthful_pre_amai_baseline_source");
+        covered_reasons.insert(blocking_reason.to_string());
+        covered_reasons.insert("same_meter_baseline_explicit_boundary".to_string());
+        blockers.push(json!({
+            "code": "continuity_restore_outside_retrieval",
+            "blocker_kind": "explicit_truth_boundary",
+            "state": pre_amai_baseline_source_status["state"].clone(),
+            "blocking_reason": blocking_reason,
+            "resolution_condition": explicit_boundary_surface["equivalence_resume_condition"].clone(),
+            "resolution_state": explicit_boundary_surface["resolution_state"].clone(),
+            "guessed_baseline_prohibited": explicit_boundary_surface["guessed_baseline_prohibited"].clone(),
+            "note": pre_amai_baseline_source_status["note"].clone(),
+        }));
+    }
+
+    for reason in blocking_reasons {
+        if covered_reasons.contains(reason) {
+            continue;
+        }
+        blockers.push(json!({
+            "code": Value::Null,
+            "blocker_kind": "generic_alignment_gap",
+            "state": "reported_by_alignment_blocking_reasons",
+            "blocking_reason": reason,
+            "resolution_condition": Value::Null,
+            "note": "Этот blocker уже surfaced top-level alignment blocking_reasons и остаётся общим exact-pair gap без отдельного per-component explainer."
+        }));
+    }
+
+    let (state, primary_blocking_reason, note) = if same_meter_as_client_limit {
+        (
+            "exact_pair_materialized",
+            Value::Null,
+            "В этом scope exact same-meter pair уже materialized: процент model-token savings можно читать как точный client-limit correlation.",
+        )
+    } else if blockers.is_empty() {
+        (
+            "exact_pair_blocked_unknown",
+            Value::Null,
+            "Exact same-meter pair ещё не materialized, но отдельный blocker surface пока не смог разложить причину детальнее текущего alignment state.",
+        )
+    } else {
+        (
+            "exact_pair_blocked",
+            blockers[0]["blocking_reason"].clone(),
+            "Exact same-meter pair ещё не materialized: этот surface перечисляет именно те truth-gaps, которые сейчас держат scope вне точной correlation с client-limit meter.",
+        )
+    };
+
+    json!({
+        "model_version": contract.client_limit_meter_alignment_version.clone(),
+        "state": state,
+        "exact_pair_available": same_meter_as_client_limit,
+        "blocking_reason_count": blockers.len(),
+        "primary_blocking_reason": primary_blocking_reason,
+        "blockers": blockers,
+        "note": note,
+    })
+}
+
 fn build_client_limit_meter_alignment(
     contract: &TokenBudgetContractConfig,
     surface_kind: &str,
@@ -13427,6 +13576,15 @@ fn build_client_limit_meter_alignment(
     }
     let same_meter_as_client_limit = blocking_reasons.is_empty()
         && baseline_equivalence["baseline_equivalent_to_client_limit"].as_bool() == Some(true);
+    let exact_pair_status = build_client_limit_exact_pair_status(
+        contract,
+        &baseline_equivalence,
+        &tool_overhead_observation_source,
+        &explicit_boundary_surface,
+        &pre_amai_baseline_source_status,
+        &blocking_reasons,
+        same_meter_as_client_limit,
+    );
     json!({
         "model_version": contract.client_limit_meter_alignment_version.clone(),
         "surface_kind": surface_kind,
@@ -13455,6 +13613,7 @@ fn build_client_limit_meter_alignment(
         "explicit_boundary_surface": explicit_boundary_surface,
         "continuity_boundary_rollup": continuity_boundary_rollup,
         "pre_amai_baseline_source_status": pre_amai_baseline_source_status,
+        "exact_pair_status": exact_pair_status,
         "note": "Этот слой честно показывает, что текущие savings пока считаются как lower-bound части агентного цикла. Whole-cycle observed components могут постепенно materialize-иться, но same meter с клиентским лимитом нельзя объявлять раньше, чем появится и полное observed покрытие, и baseline-equivalent semantics."
     })
 }
@@ -20329,6 +20488,20 @@ effective_to_epoch_ms = 2000
             alignment["pre_amai_baseline_source_status"]["same_meter_resume_possible"],
             json!(false)
         );
+        assert_eq!(alignment["exact_pair_status"]["state"], "exact_pair_blocked");
+        assert_eq!(alignment["exact_pair_status"]["blocking_reason_count"], 1);
+        assert_eq!(
+            alignment["exact_pair_status"]["primary_blocking_reason"],
+            "missing_truthful_pre_amai_baseline_source"
+        );
+        assert_eq!(
+            alignment["exact_pair_status"]["blockers"][0]["code"],
+            "continuity_restore_outside_retrieval"
+        );
+        assert_eq!(
+            alignment["exact_pair_status"]["blockers"][0]["blocker_kind"],
+            "explicit_truth_boundary"
+        );
         assert!(
             alignment["blocking_reasons"]
                 .as_array()
@@ -20417,7 +20590,103 @@ effective_to_epoch_ms = 2000
             alignment["pre_amai_baseline_source_status"]["same_meter_resume_possible"],
             json!(true)
         );
+        assert_eq!(
+            alignment["exact_pair_status"]["state"],
+            "exact_pair_materialized"
+        );
+        assert_eq!(alignment["exact_pair_status"]["exact_pair_available"], json!(true));
         assert_eq!(alignment["blocking_reasons"], json!([]));
+    }
+
+    #[test]
+    fn client_limit_exact_pair_status_surfaces_tool_and_assistant_gaps_together() {
+        let summary = json!({
+            "events_total": 2,
+            "live_events_count": 2,
+            "non_live_events_count": 0,
+            "counted_events": 2,
+            "observed_client_prompt_tokens": 30,
+            "observed_assistant_generation_tokens": 11,
+            "observed_tool_overhead_tokens": 7,
+            "observed_continuity_restore_tokens": 0,
+            "observed_client_prompt_live_events": 2,
+            "observed_assistant_generation_live_events": 1,
+            "observed_tool_overhead_live_events": 1,
+            "observed_continuity_restore_live_events": 0
+        });
+        let events = vec![
+            token_event! {
+                event_id: "event-retrieval-1".to_string(),
+                context_pack_id: Some("cp-1".to_string()),
+                correlation_id: "cp-1".to_string(),
+                measurement_scope: "retrieval_lower_bound".to_string(),
+                traffic_class: "live".to_string(),
+                client_prompt_tokens: Some(10),
+                tool_overhead_tokens: Some(7),
+            },
+            token_event! {
+                event_id: "event-retrieval-2".to_string(),
+                context_pack_id: Some("cp-2".to_string()),
+                correlation_id: "cp-2".to_string(),
+                measurement_scope: "retrieval_lower_bound".to_string(),
+                traffic_class: "live".to_string(),
+                client_prompt_tokens: Some(20),
+                tool_overhead_tokens: None,
+            },
+        ];
+        let assistant_scope = super::AssistantGenerationScopeObservation {
+            target_group_count: 1,
+            observed_group_count: 1,
+            observed_tokens: 11,
+            helper_only_context_pack_ids: std::collections::BTreeSet::new(),
+            helper_only_non_model_visible_context_pack_ids: std::collections::BTreeSet::new(),
+            target_context_pack_ids: ["cp-1".to_string()].into_iter().collect(),
+            matched_context_pack_ids: ["cp-1".to_string()].into_iter().collect(),
+            unmatched_context_pack_ids: std::collections::BTreeSet::new(),
+            matched_turn_ids: ["thread-1:turn-1".to_string()].into_iter().collect(),
+            available_turns: 1,
+            available_direct_turns: 1,
+            available_rollout_turns: 0,
+            matched_direct_turn_ids: ["thread-1:turn-1".to_string()].into_iter().collect(),
+            matched_rollout_turn_ids: std::collections::BTreeSet::new(),
+        };
+
+        let alignment = super::build_client_limit_meter_alignment(
+            &contract_fixture(),
+            "statement_preview",
+            &summary,
+            Some(&events),
+            None,
+            Some(&assistant_scope),
+        );
+
+        assert_eq!(alignment["same_meter_as_client_limit"], json!(false));
+        assert_eq!(alignment["exact_pair_status"]["state"], "exact_pair_blocked");
+        assert_eq!(alignment["exact_pair_status"]["blocking_reason_count"], 2);
+        assert_eq!(
+            alignment["exact_pair_status"]["primary_blocking_reason"],
+            "tool_overhead_outside_retrieval_partially_measured"
+        );
+        assert_eq!(
+            alignment["exact_pair_status"]["blockers"][0]["code"],
+            "tool_overhead_outside_retrieval"
+        );
+        assert_eq!(
+            alignment["exact_pair_status"]["blockers"][0]["blocker_kind"],
+            "whole_cycle_observation_gap"
+        );
+        assert_eq!(
+            alignment["exact_pair_status"]["blockers"][1]["code"],
+            "assistant_generation"
+        );
+        assert_eq!(
+            alignment["exact_pair_status"]["blockers"][1]["blocking_reason"],
+            "assistant_generation_baseline_semantics_unmaterialized"
+        );
+        assert_eq!(
+            alignment["exact_pair_status"]["blockers"][1]["resolution_condition"],
+            "assistant_generation_baseline_semantics_materialized"
+        );
     }
 
     #[test]
