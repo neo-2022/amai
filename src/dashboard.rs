@@ -2798,13 +2798,33 @@ pub fn current_session_budget_guard_from_report(report: &Value) -> Value {
     let cards = build_hero_cards(&snapshot);
     let Some(session_card) = cards.into_iter().next() else {
         return json!({
-            "source": "dashboard_current_session_budget_guard_v1",
+            "source": "dashboard_current_session_budget_guard_v2",
             "status": "unknown",
             "status_label": "нет данных",
             "full_turn_savings_proven": false,
             "should_rotate_chat_now": false,
             "should_rotate_chat_soon": false,
             "next_action": null,
+            "observed_at_epoch_ms": null,
+            "max_guard_age_seconds": 10,
+            "reply_execution_gate": {
+                "gate_version": "client-reply-budget-gate-v1",
+                "status": "unknown",
+                "status_label": "нет данных",
+                "action_kind": "continue_current_chat",
+                "reason": "client_budget_guard_unavailable",
+                "blocking": false,
+                "must_rotate_before_reply": false,
+                "unrelated_reply_allowed": true,
+                "save_handoff_before_rotate": false,
+                "fresh_chat_requires_continuity_startup": false,
+                "full_scale_client_truth_required": true,
+                "guard_observed_at_epoch_ms": null,
+                "max_guard_age_seconds": 10,
+                "guard_fresh_until_epoch_ms": null,
+                "rotate_now": false,
+                "rotate_soon": false
+            },
             "reason": "current_session hero card is unavailable",
             "note": "current_session hero card is unavailable"
         });
@@ -2830,6 +2850,19 @@ pub fn current_session_budget_guard_from_report(report: &Value) -> Value {
             .and_then(|row| row["tooltip"].as_str())
             .map(str::to_string)
     };
+    let observed_at_epoch_ms = client_live_meter["ended_at_epoch_ms"].as_u64();
+    let max_guard_age_seconds = 10_u64;
+    let should_rotate_chat_now = status_label == "новый чат нужен сейчас";
+    let should_rotate_chat_soon =
+        status_label == "новый чат рекомендован" || should_rotate_chat_now;
+    let reply_execution_gate = build_client_budget_reply_execution_gate(
+        status,
+        status_label,
+        observed_at_epoch_ms,
+        max_guard_age_seconds,
+        should_rotate_chat_now,
+        should_rotate_chat_soon,
+    );
     let tracked_slice =
         row_value("Экономия на учтённой части").or_else(|| {
             Some(humanize_tracked_slice_savings_value(
@@ -2847,22 +2880,66 @@ pub fn current_session_budget_guard_from_report(report: &Value) -> Value {
         })
     });
     json!({
-        "source": "dashboard_current_session_budget_guard_v1",
+        "source": "dashboard_current_session_budget_guard_v2",
         "status": status,
         "status_label": status_label,
         "status_tooltip": compact["status_tooltip"].as_str(),
         "full_turn_savings_proven": value != "не доказано",
         "full_turn_savings_percent": if value == "не доказано" { None } else { Some(value.to_string()) },
-        "should_rotate_chat_now": status_label == "новый чат нужен сейчас",
-        "should_rotate_chat_soon": status_label == "новый чат рекомендован" || status_label == "новый чат нужен сейчас",
+        "should_rotate_chat_now": should_rotate_chat_now,
+        "should_rotate_chat_soon": should_rotate_chat_soon,
         "next_action": row_value("Следующее действие"),
         "last_request": last_request,
         "client_limits": client_limits,
+        "observed_at_epoch_ms": observed_at_epoch_ms,
+        "max_guard_age_seconds": max_guard_age_seconds,
+        "reply_execution_gate": reply_execution_gate,
         "tracked_slice": tracked_slice,
         "tracked_slice_truth": tracked_slice_truth,
         "tracked_slice_tooltip": row_tooltip("Экономия на учтённой части"),
         "reason": compact["note"].as_str(),
         "note": compact["note"].as_str(),
+    })
+}
+
+fn build_client_budget_reply_execution_gate(
+    status: &str,
+    status_label: &str,
+    observed_at_epoch_ms: Option<u64>,
+    max_guard_age_seconds: u64,
+    should_rotate_chat_now: bool,
+    should_rotate_chat_soon: bool,
+) -> Value {
+    let blocking = should_rotate_chat_now || should_rotate_chat_soon;
+    let action_kind = if blocking {
+        "rotate_chat_for_client_budget"
+    } else {
+        "continue_current_chat"
+    };
+    let reason = if blocking {
+        "client_budget_guard_pressure"
+    } else {
+        "client_budget_guard_clear"
+    };
+    let gate_fresh_until_epoch_ms =
+        observed_at_epoch_ms.map(|value| value.saturating_add(max_guard_age_seconds * 1000));
+    json!({
+        "gate_version": "client-reply-budget-gate-v1",
+        "status": status,
+        "status_label": status_label,
+        "action_kind": action_kind,
+        "reason": reason,
+        "blocking": blocking,
+        "must_rotate_before_reply": blocking,
+        "unrelated_reply_allowed": !blocking,
+        "save_handoff_before_rotate": blocking,
+        "fresh_chat_requires_continuity_startup": blocking,
+        "full_scale_client_truth_required": true,
+        "guard_observed_at_epoch_ms": observed_at_epoch_ms,
+        "max_guard_age_seconds": max_guard_age_seconds,
+        "guard_fresh_until_epoch_ms": gate_fresh_until_epoch_ms,
+        "rotate_now": should_rotate_chat_now,
+        "rotate_soon": should_rotate_chat_soon,
     })
 }
 
@@ -12439,12 +12516,27 @@ mod tests {
         let guard = super::current_session_budget_guard(&snapshot);
         assert_eq!(
             guard["source"],
-            json!("dashboard_current_session_budget_guard_v1")
+            json!("dashboard_current_session_budget_guard_v2")
         );
         assert_eq!(guard["full_turn_savings_proven"], json!(false));
         assert_eq!(guard["should_rotate_chat_now"], json!(true));
         assert_eq!(guard["should_rotate_chat_soon"], json!(true));
         assert_eq!(guard["status_label"], json!("новый чат нужен сейчас"));
+        assert_eq!(
+            guard["reply_execution_gate"]["gate_version"],
+            json!("client-reply-budget-gate-v1")
+        );
+        assert_eq!(guard["reply_execution_gate"]["blocking"], json!(true));
+        assert_eq!(
+            guard["reply_execution_gate"]["must_rotate_before_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_kind"],
+            json!("rotate_chat_for_client_budget")
+        );
+        assert_eq!(guard["max_guard_age_seconds"], json!(10));
+        assert_eq!(guard["observed_at_epoch_ms"], json!(1774622949000u64));
         assert!(
             guard["last_request"]
                 .as_str()

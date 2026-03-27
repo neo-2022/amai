@@ -572,6 +572,16 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract lost live_client_budget_enforcement.guard_summary_field"
         ));
     }
+    if startup_contract["live_client_budget_enforcement"]["reply_execution_gate_field"].as_str()
+        != Some("reply_execution_gate")
+        || startup_contract["live_client_budget_enforcement"]["reply_execution_gate_version"]
+            .as_str()
+            != Some("client-reply-budget-gate-v1")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement reply_execution_gate mapping"
+        ));
+    }
     if startup_contract["live_client_budget_enforcement"]
         ["must_check_before_each_substantive_reply"]
         .as_bool()
@@ -2742,7 +2752,7 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v10",
+                "contract_version": "continuity-startup-contract-v11",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore plus live client-budget discipline before each substantive reply in a new, resumed, or ongoing chat",
@@ -2807,6 +2817,8 @@ fn protocol_manifest() -> Value {
                 "live_client_budget_enforcement": {
                     "guard_command": "observe client-budget-guard",
                     "guard_summary_field": "client_budget_guard",
+                    "reply_execution_gate_field": "reply_execution_gate",
+                    "reply_execution_gate_version": "client-reply-budget-gate-v1",
                     "must_check_before_each_substantive_reply": true,
                     "max_guard_age_seconds": 10,
                     "stale_guard_requires_refresh": true,
@@ -4925,7 +4937,7 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v10")
+            Some("continuity-startup-contract-v11")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["must_call_before_substantive_work"].as_bool(),
@@ -5261,13 +5273,25 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v10")
+            Some("continuity-startup-contract-v11")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
                 ["guard_command"]
                 .as_str(),
             Some("observe client-budget-guard")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["reply_execution_gate_field"]
+                .as_str(),
+            Some("reply_execution_gate")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["reply_execution_gate_version"]
+                .as_str(),
+            Some("client-reply-budget-gate-v1")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]

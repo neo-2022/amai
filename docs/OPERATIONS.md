@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 21:00 MSK
-Ручная сверка guide/docs: 2026-03-27 21:00 MSK
+modified_at: 2026-03-27 21:08 MSK
+Ручная сверка guide/docs: 2026-03-27 21:08 MSK
 
 # Operations
 
@@ -941,6 +941,8 @@ cargo run -- mcp serve
   и live raw limits, а не только internal tracked slice Amai.
 - `project_chat_startup` contract теперь отдельно несёт `live_client_budget_enforcement`:
   - `must_check_before_each_substantive_reply = true`;
+  - `reply_execution_gate_field = reply_execution_gate`;
+  - `reply_execution_gate_version = client-reply-budget-gate-v1`;
   - `max_guard_age_seconds = 10`;
   - `stale_guard_requires_refresh = true`;
   - `rotate_status_labels = ["новый чат рекомендован", "новый чат нужен сейчас"]`;
@@ -949,6 +951,10 @@ cargo run -- mcp serve
 - Это значит, что supported client обязан recheck-ить `cargo run -- observe client-budget-guard`
   не только при startup нового/resumed чата, но и перед каждым следующим содержательным ответом,
   если последняя проверка старше `10` секунд или её нет.
+- После такого recheck automation больше не должна читать только human rows или `status_label`:
+  source-of-truth для решения о следующем ответе теперь `client_budget_guard.reply_execution_gate`
+  с explicit `blocking`, `must_rotate_before_reply`, `action_kind`,
+  `guard_observed_at_epoch_ms` и `guard_fresh_until_epoch_ms`.
 - status/runtime audit теперь ещё отдельно публикует `gate_semantics_consistent`;
   он обязан падать в `false`, если live gate противоречит:
   - pinned contract semantics;

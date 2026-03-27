@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 21:00 MSK
-Ручная сверка guide/docs: 2026-03-27 21:00 MSK
+modified_at: 2026-03-27 21:08 MSK
+Ручная сверка guide/docs: 2026-03-27 21:08 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1292,6 +1292,8 @@ preview, а не только raw count.
     использовать как основание для startup verdict по клиентскому лимиту.
   - отдельный `live_client_budget_enforcement` contour теперь machine-readable pin-ит:
     - `must_check_before_each_substantive_reply = true`;
+    - `reply_execution_gate_field = reply_execution_gate`;
+    - `reply_execution_gate_version = client-reply-budget-gate-v1`;
     - `max_guard_age_seconds = 10`;
     - `stale_guard_requires_refresh = true`;
     - `rotate_status_labels = ["новый чат рекомендован", "новый чат нужен сейчас"]`;
@@ -1837,6 +1839,10 @@ Fail-closed правило для расхождений:
   - этот же закон теперь требует recheck не реже, чем раз в `10` секунд:
     если последняя machine-readable проверка старше `max_guard_age_seconds`, supported client
     обязан сначала обновить `cargo run -- observe client-budget-guard`, а уже потом отвечать;
+  - после такого recheck клиент больше не должен разбирать только prose/status-label:
+    `client_budget_guard.reply_execution_gate` теперь даёт pinned object для следующего ответа
+    с полями вроде `blocking`, `must_rotate_before_reply`, `action_kind`,
+    `guard_observed_at_epoch_ms` и `guard_fresh_until_epoch_ms`.
   - для этого в observe-layer теперь есть отдельный machine-readable truth-source:
     `cargo run -- observe client-budget-guard`;
   - этот contour обязан говорить не prose-эвфемизмами, а прямыми полями вроде
