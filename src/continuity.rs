@@ -3085,6 +3085,21 @@ fn summarize_startup_next_action(value: &Value) -> Option<String> {
     Some(format!("{action_kind}: {headline} -> {next_step}"))
 }
 
+fn summarize_startup_next_action_for_prompt(value: &Value) -> Option<String> {
+    let action_kind = value["action_kind"]
+        .as_str()
+        .filter(|item| !item.is_empty())?;
+    let headline = value["headline"]
+        .as_str()
+        .filter(|item| !item.is_empty())
+        .unwrap_or("ещё нет данных");
+    match action_kind {
+        "resume_required_return_task" => Some(format!("Сначала: вернись к линии: {headline}")),
+        "continue_active_workline" => None,
+        _ => Some(format!("Сначала: {action_kind} -> {headline}")),
+    }
+}
+
 fn render_chat_start_prompt(
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
@@ -3105,16 +3120,6 @@ fn render_chat_start_prompt(
         .unwrap_or(headline);
     let materialized_summary =
         restore_node.and_then(|value| summarize_materialized_notes(&value["materialized_notes"]));
-    let recent_actions_summary =
-        restore_node.and_then(|value| summarize_recent_actions(&value["recent_actions"]));
-    let active_files_summary =
-        restore_node.and_then(|value| summarize_path_tail_list(&value["active_files"], 3));
-    let open_questions_summary =
-        restore_node.and_then(|value| summarize_string_list(&value["open_questions"], 2));
-    let pending_return_summary = restore_node
-        .and_then(|value| value["pending_return_summary"].as_str())
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
     let execctl_resume_obligation = restore_node
         .map(|value| summarize_execctl_resume_obligation(&value["execctl_resume_contract"]))
         .unwrap_or_else(|| default_execctl_resume_obligation(None, "clear"));
@@ -3124,19 +3129,6 @@ fn render_chat_start_prompt(
         .unwrap_or_else(|| {
             default_startup_next_action(current_goal, &next_step, &execctl_resume_obligation)
         });
-    let startup_next_action_summary = restore_node
-        .and_then(|value| value["startup_next_action_summary"].as_str())
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| summarize_startup_next_action(&startup_next_action));
-    let _execctl_active_lease_summary = restore_node
-        .and_then(|value| value["execctl_active_lease_summary"].as_str())
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    let project_task_tree_summary = restore_node
-        .and_then(|value| value["project_task_tree_summary"].as_str())
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
     let execctl_resume_state = restore_node
         .and_then(|value| value["execctl_resume_state"].as_str())
         .unwrap_or("clear");
@@ -3156,33 +3148,16 @@ fn render_chat_start_prompt(
     if let Some(value) = materialized_summary {
         lines.push(format!("Сделано: {value}"));
     }
-    if let Some(value) = recent_actions_summary {
-        lines.push(format!("Недавнее: {value}"));
-    }
-    if let Some(value) = active_files_summary {
-        lines.push(format!("Файлы: {value}"));
-    }
-    if let Some(value) = project_task_tree_summary {
-        lines.push(format!("Задачи: {value}"));
-    }
-    if let Some(value) = pending_return_summary {
-        lines.push(format!("Возврат: {value}"));
-    }
-    if let Some(value) = startup_next_action_summary {
-        lines.push(format!("Действие: {value}"));
-    }
-    if let Some(value) = open_questions_summary {
-        lines.push(format!("Вопросы: {value}"));
+    if let Some(value) = summarize_startup_next_action_for_prompt(&startup_next_action) {
+        lines.push(value);
     }
     if execctl_resume_state == "pending_return_queue_present" {
-        lines.push(
-            "ExecCtl: есть незавершённые линии к возврату; не делай silent preemption.".to_string(),
-        );
+        lines.push("Не переключайся на другую линию до обязательного возврата.".to_string());
     }
     if restore_confidence == "preliminary" {
         lines.push("Recovery: preliminary.".to_string());
     }
-    lines.push("Правило: продолжай с этого пакета; continuity заново не поднимай.".to_string());
+    lines.push("Правило: follow startup pack; continuity повторно не поднимай.".to_string());
     lines.join("\n")
 }
 
@@ -3438,23 +3413,6 @@ fn summarize_string_list(value: &Value, limit: usize) -> Option<String> {
         None
     } else {
         Some(values.join("; "))
-    }
-}
-
-fn summarize_path_tail_list(value: &Value, limit: usize) -> Option<String> {
-    let items = value.as_array()?;
-    let values = items
-        .iter()
-        .filter_map(|item| item.as_str())
-        .filter(|item| !item.is_empty())
-        .take(limit)
-        .filter_map(|item| Path::new(item).file_name().and_then(|name| name.to_str()))
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        None
-    } else {
-        Some(values.join(", "))
     }
 }
 
@@ -4942,24 +4900,18 @@ mod tests {
             prompt.contains("Шаг: Сделать auto-injection restore pack прямо в chat-start prompt.")
         );
         assert!(prompt.contains("Сделано: Enriched temporal summaries теперь пишутся upstream."));
+        assert!(prompt.contains(
+            "Сначала: вернись к линии: Same-meter spend control"
+        ));
+        assert!(prompt.contains("Не переключайся на другую линию до обязательного возврата."));
         assert!(
-            prompt
-                .contains("Недавнее: Проверили previous chat lookup; Проверили exact-time lookup")
+            prompt.contains("Правило: follow startup pack; continuity повторно не поднимай.")
         );
-        assert!(prompt.contains("Файлы: continuity.rs, amai_art_continuity_startup.sh"));
-        assert!(prompt.contains(
-            "Задачи: active: Amai upstream thread-index enrich materialized; pending_return(1): Same-meter spend control -> Materialize live assistant generation source."
-        ));
-        assert!(prompt.contains(
-            "Возврат: Same-meter spend control -> Materialize live assistant generation source."
-        ));
-        assert!(prompt.contains(
-            "Действие: resume_required_return_task: Same-meter spend control -> Materialize live assistant generation source."
-        ));
-        assert!(prompt.contains("ExecCtl: есть незавершённые линии к возврату"));
-        assert!(
-            prompt.contains("Правило: продолжай с этого пакета; continuity заново не поднимай.")
-        );
+        assert!(!prompt.contains("Недавнее:"));
+        assert!(!prompt.contains("Файлы:"));
+        assert!(!prompt.contains("Задачи:"));
+        assert!(!prompt.contains("Возврат:"));
+        assert!(!prompt.contains("Вопросы:"));
         assert!(!prompt.contains("Thread count in continuity index"));
         assert!(!prompt.contains("Контракт возврата ExecCtl"));
         assert!(!prompt.contains("Активный lease ExecCtl"));
