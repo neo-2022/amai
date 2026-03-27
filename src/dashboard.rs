@@ -3745,7 +3745,167 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         }
     }
 
-    vec![session_card, rolling_card, lifetime_card]
+    vec![
+        compact_token_hero_card(session_card),
+        compact_token_hero_card(rolling_card),
+        compact_token_hero_card(lifetime_card),
+    ]
+}
+
+fn compact_token_hero_card(mut card: Value) -> Value {
+    let title = card["title"].as_str().unwrap_or_default().to_string();
+    if let Some(rows) = card["rows"].as_array_mut() {
+        let allowed = truth_only_token_card_labels(&title);
+        rows.retain(|row| {
+            row["label"]
+                .as_str()
+                .is_some_and(|label| allowed.iter().any(|allowed_label| label == *allowed_label))
+        });
+        for row in rows {
+            if let Some(label) = row["label"].as_str() {
+                row["label"] = Value::String(humanize_token_card_row_label(label).to_string());
+            }
+            if let (Some(label), Some(value)) = (row["label"].as_str(), row["value"].as_str()) {
+                row["value"] =
+                    Value::String(humanize_token_card_row_value(label, value).to_string());
+            }
+        }
+    }
+    if let Some(source_label) = truth_only_token_card_source_label(&card) {
+        card["source_label"] = Value::String(source_label);
+    }
+    card["note"] = Value::String(truth_only_token_card_note(&card));
+    if let Some(title_tooltip) = truth_only_token_card_title_tooltip(&title) {
+        card["title_tooltip"] = Value::String(title_tooltip);
+    }
+    card
+}
+
+fn truth_only_token_card_labels(title: &str) -> &'static [&'static str] {
+    match title {
+        "Экономия токенов за текущую сессию" => &[
+            "Экономия токенов модели",
+            "Совпадение с реальным лимитом",
+            "Последний запрос клиента",
+            "Лимит клиента сейчас",
+            "Следующее действие",
+        ],
+        "Экономия токенов за рабочее окно" => &[
+            "Экономия токенов модели",
+            "Совпадение с реальным лимитом",
+            "Исторический startup-хвост",
+            "Следующее действие",
+        ],
+        "Экономия токенов за всё время записи" => &[
+            "Экономия токенов модели",
+            "Совпадение с реальным лимитом",
+            "Исторический frozen debt",
+            "Review-only export",
+        ],
+        _ => &[],
+    }
+}
+
+fn humanize_token_card_row_label(label: &str) -> &str {
+    match label {
+        "Последний запрос клиента" => "Последний запрос в модель",
+        "Исторический startup-хвост" => "Хвост от прошлых стартов",
+        "Исторический frozen debt" => "Исторический долг точности",
+        "Review-only export" => "Отчёт для ручной сверки",
+        _ => label,
+    }
+}
+
+fn humanize_token_card_row_value(label: &str, value: &str) -> String {
+    match label {
+        "Исторический долг точности" => {
+            if let Some((_, rows)) = value.rsplit_once(", ") {
+                return format!(
+                    "старый исторический хвост: {}",
+                    humanize_history_row_count(rows)
+                );
+            }
+            if let Some((_, rows)) = value.rsplit_once(": ") {
+                return format!(
+                    "старый исторический хвост: {}",
+                    humanize_history_row_count(rows)
+                );
+            }
+            "старый исторический хвост".to_string()
+        }
+        "Отчёт для ручной сверки" => {
+            if let Some((_, rows)) = value.rsplit_once(": ") {
+                return format!(
+                    "есть отдельный отчёт для ручной сверки: {}",
+                    humanize_review_row_count(rows)
+                );
+            }
+            "есть отдельный отчёт для ручной сверки".to_string()
+        }
+        _ => value.to_string(),
+    }
+}
+
+fn humanize_history_row_count(value: &str) -> String {
+    value.replace(" rows", " строк")
+}
+
+fn humanize_review_row_count(value: &str) -> String {
+    value
+        .replace(" irrecoverable rows", " строк без восстановления")
+        .replace(" rows", " строк")
+}
+
+fn truth_only_token_card_title_tooltip(title: &str) -> Option<String> {
+    let text = match title {
+        "Экономия токенов за текущую сессию" => {
+            "Показывает только проверяемые цифры по текущей сессии: расход модели, остаток лимита и следующее действие."
+        }
+        "Экономия токенов за рабочее окно" => {
+            "Показывает только проверяемые цифры по рабочему окну и подтверждённые причины перерасхода."
+        }
+        "Экономия токенов за всё время записи" => {
+            "Показывает только подтверждённые цифры за всё время и отдельно помечает старый неполный исторический хвост."
+        }
+        _ => return None,
+    };
+    Some(text.to_string())
+}
+
+fn truth_only_token_card_source_label(card: &Value) -> Option<String> {
+    let title = card["title"].as_str()?;
+    let source = match title {
+        "Экономия токенов за текущую сессию" => {
+            "Источник: точная пара токенов модели и живой лимит клиента из текущего чата."
+        }
+        "Экономия токенов за рабочее окно" => {
+            "Источник: точная пара токенов модели и подтверждённый хвост прошлых стартов в этом окне."
+        }
+        "Экономия токенов за всё время записи" => {
+            "Источник: подтверждённая история плюс отдельно отмеченный старый долг точности."
+        }
+        _ => return None,
+    };
+    Some(source.to_string())
+}
+
+fn truth_only_token_card_note(card: &Value) -> String {
+    let title = card["title"].as_str().unwrap_or_default();
+    let status_label = card["status_label"]
+        .as_str()
+        .unwrap_or(card["status"].as_str().unwrap_or("неизвестно"));
+    match title {
+        "Экономия токенов за текущую сессию" => {
+            format!("Короткая карточка только с проверяемыми цифрами по текущей сессии. Статус: {status_label}.")
+        }
+        "Экономия токенов за рабочее окно" => {
+            format!("Короткая карточка только с проверяемыми цифрами по рабочему окну. Статус: {status_label}.")
+        }
+        "Экономия токенов за всё время записи" => {
+            format!("Короткая карточка только с подтверждёнными цифрами за всё время записи. Статус: {status_label}.")
+        }
+        _ => return card["note"].as_str().unwrap_or_default().to_string(),
+    }
 }
 
 fn build_machine_cards(
@@ -7000,9 +7160,9 @@ fn exact_pair_card_status_override(
     if blocker_code == "tool_overhead_outside_retrieval" && irrecoverable_missing_live_events > 0 {
         return Some((
             "alert",
-            "не exact: frozen debt",
+            "есть старый долг точности",
             format!(
-                "Карточка не может считаться exact по следующим причинам:\n- exact same-meter pair для этого scope ещё не materialized.\n- Главный blocker: tool-overhead outside retrieval.\n- Missing live events: {}.\n- Irrecoverable: {}.\n- Recoverable: {}.\n- Это уже не временный lag, а исторический source-loss, поэтому optimistic pass здесь запрещён до отдельного frozen-gap решения или восстановления source.",
+                "Карточка пока не может считаться полностью точной по следующим причинам:\n- Полное совпадение с реальной шкалой лимита модели ещё не собрано.\n- Главный blocker: tool-overhead outside retrieval.\n- Не хватает строк: {}.\n- Потеряно без восстановления: {}.\n- Ещё можно восстановить: {}.\n- Это уже не временный лаг, а старый исторический хвост, поэтому зелёный точный статус здесь запрещён.",
                 format_u64(Some(missing_live_events)),
                 format_u64(Some(irrecoverable_missing_live_events)),
                 format_u64(Some(recoverable_missing_live_events))
@@ -7011,8 +7171,8 @@ fn exact_pair_card_status_override(
     }
     Some((
         "waiting",
-        "ждём exact pair",
-        "Карточка пока не может считаться exact: same-meter pair для этого scope ещё не materialized, поэтому optimistic pass здесь запрещён до снятия truth-gap.".to_string(),
+        "ждём полного совпадения",
+        "Карточка пока не может считаться полностью точной: совпадение с реальной шкалой лимита модели ещё не собрано.".to_string(),
     ))
 }
 
@@ -7020,10 +7180,10 @@ fn exact_pair_status_metric_row(alignment: &Value) -> Option<Value> {
     let exact_pair_status = &alignment["exact_pair_status"];
     if exact_pair_status["exact_pair_available"].as_bool() == Some(true) {
         return Some(metric_row(
-            "Точность модели",
-            "exact pair materialized".to_string(),
+            "Совпадение с реальным лимитом",
+            "цифра точная: полностью совпадает со шкалой лимита модели".to_string(),
             Some(
-                "Этот ряд показывает, materialized ли уже exact same-meter pair для корреляции model tokens без Amai и с Amai. Здесь exact pair уже materialized.",
+                "Этот ряд показывает, совпадает ли процент экономии с той же шкалой токенов, по которой клиент считает лимит. Здесь совпадение полное.",
             ),
         ));
     }
@@ -7039,30 +7199,30 @@ fn exact_pair_status_metric_row(alignment: &Value) -> Option<Value> {
         missing_live_events.saturating_sub(irrecoverable_missing_live_events);
     if blocker["frozen_gap_candidate"].as_bool() == Some(true) {
         let tooltip = format!(
-            "Этот ряд показывает, materialized ли уже exact same-meter pair для model tokens. Сейчас exact pair недоступен не из-за временного lag, а из-за irrecoverable historical debt.\n- Missing live events: {}\n- Irrecoverable: {}\n- Recoverable: {}\n- Пока frozen-gap решение не принято, lifetime correlation обязана оставаться non-exact.",
+            "Этот ряд показывает, совпадает ли процент экономии с реальной шкалой лимита модели. Сейчас совпадение неполное не из-за временного лага, а из-за старой исторической потери данных.\n- Не хватает строк: {}\n- Потеряно без восстановления: {}\n- Ещё можно восстановить: {}\n- Пока не принято отдельное решение по старому хвосту, lifetime-корреляция обязана оставаться неточной.",
             format_u64(Some(missing_live_events)),
             format_u64(Some(irrecoverable_missing_live_events)),
             format_u64(Some(recoverable_missing_live_events))
         );
         return Some(metric_row(
-            "Точность модели",
+            "Совпадение с реальным лимитом",
             format!(
-                "не exact: frozen debt review, {} irrecoverable rows",
+                "цифра пока не полностью точная: в старой истории потеряно {} строк",
                 format_u64(Some(irrecoverable_missing_live_events))
             ),
             Some(tooltip.as_str()),
         ));
     }
     let tooltip = format!(
-        "Этот ряд показывает, materialized ли уже exact same-meter pair для model tokens. Exact pair пока ещё не materialized.\n- Missing live events: {}\n- Irrecoverable: {}\n- Recoverable: {}\n- Здесь blocker ещё выглядит recoverable и не считается frozen debt.",
+        "Этот ряд показывает, совпадает ли процент экономии с реальной шкалой лимита модели. Полное совпадение пока ещё не собрано.\n- Не хватает строк: {}\n- Потеряно без восстановления: {}\n- Ещё можно восстановить: {}\n- Это пока выглядит как временный и восстановимый хвост.",
         format_u64(Some(missing_live_events)),
         format_u64(Some(irrecoverable_missing_live_events)),
         format_u64(Some(recoverable_missing_live_events))
     );
     Some(metric_row(
-        "Точность модели",
+        "Совпадение с реальным лимитом",
         format!(
-            "ждём exact pair: {} missing rows",
+            "цифра пока предварительная: ждём ещё {} строк для полного совпадения",
             format_u64(Some(missing_live_events))
         ),
         Some(tooltip.as_str()),
@@ -7258,7 +7418,7 @@ fn model_token_savings_metric_row(scope_summary: &Value, alignment: &Value) -> V
         exact_model_token_pair(scope_summary, alignment)
     {
         format!(
-            "{}: без Amai {}, с Amai {}, экономия {}",
+            "Amai сэкономил {} токенов модели: без Amai {}, с Amai {}, экономия {}",
             format_percent(Some(verified_pct)),
             format_u64(Some(verified_without)),
             format_u64(Some(verified_with)),
@@ -7266,11 +7426,11 @@ fn model_token_savings_metric_row(scope_summary: &Value, alignment: &Value) -> V
         )
     } else if observed_with_amai > 0 {
         format!(
-            "ещё нет exact pair; с Amai уже видно {}",
+            "Точного процента пока нет; с Amai уже видно {}",
             format_u64(Some(observed_with_amai))
         )
     } else {
-        "ещё нет exact pair".to_string()
+        "Точного процента пока нет".to_string()
     };
 
     metric_row("Экономия токенов модели", value, Some(tooltip.as_str()))
@@ -7285,7 +7445,7 @@ fn model_token_savings_note_sentence(scope_summary: &Value, alignment: &Value) -
         exact_model_token_pair(scope_summary, alignment)
     {
         return Some(format!(
-            "Здесь уже materialized exact model-token pair: без Amai было {}, с Amai стало {}, экономия {}, точный процент {} в том же meter, которым клиент считает лимит.",
+            "Здесь уже есть полное совпадение с реальной шкалой лимита модели: без Amai было {}, с Amai стало {}, экономия {}, точный процент {}.",
             format_u64(Some(verified_without)),
             format_u64(Some(verified_with)),
             format_signed_count(Some(verified_saved)),
@@ -7295,7 +7455,7 @@ fn model_token_savings_note_sentence(scope_summary: &Value, alignment: &Value) -
 
     if observed_with_amai > 0 {
         let mut note = format!(
-            "Точный процент экономии токенов модели здесь пока не показан: с Amai уже честно видно {} observed токенов, но exact same-meter pair «без Amai / с Amai» для этого scope ещё не materialized.",
+            "Точный процент экономии токенов модели здесь пока не показан: с Amai уже честно видно {}, но полного совпадения с реальной шкалой лимита модели для этого scope ещё нет.",
             format_u64(Some(observed_with_amai))
         );
         if let Some(blocker_sentence) = exact_pair_primary_blocker_note_sentence(alignment) {
@@ -7306,7 +7466,7 @@ fn model_token_savings_note_sentence(scope_summary: &Value, alignment: &Value) -
     }
 
     let mut note = String::from(
-        "Точный процент экономии токенов модели здесь пока не показан: exact same-meter pair для этого scope ещё не materialized.",
+        "Точный процент экономии токенов модели здесь пока не показан: полное совпадение с реальной шкалой лимита модели для этого scope ещё не собрано.",
     );
     if let Some(blocker_sentence) = exact_pair_primary_blocker_note_sentence(alignment) {
         note.push(' ');
@@ -9266,14 +9426,10 @@ mod tests {
 
         let cards = build_hero_cards(&snapshot);
         let note = cards[0]["note"].as_str().unwrap_or_default();
-        assert!(note.contains("ни один случай ещё не подтвердился"));
-        assert!(note.contains("без Amai было бы"));
-        assert!(note.contains("Это не процент от лимита этого чата"));
+        assert!(note.contains("Короткая карточка только с проверяемыми цифрами по текущей сессии."));
         let rows = cards[0]["rows"].as_array().expect("rows");
-        assert_eq!(rows.len(), 4);
-        assert_eq!(rows[0]["label"].as_str(), Some("Главный итог"));
-        assert_eq!(rows[1]["label"].as_str(), Some("Весь живой поток"));
-        assert_eq!(rows[3]["label"].as_str(), Some("Экономия токенов модели"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["label"].as_str(), Some("Экономия токенов модели"));
     }
 
     #[test]
@@ -9342,23 +9498,23 @@ mod tests {
         assert_eq!(
             cards[0]["title_tooltip"].as_str(),
             Some(
-                "Эта карточка показывает, сколько токенов Amai сэкономил в текущем непрерывном заходе работы. Новый заход начинается после паузы дольше 30 минут. В главный итог попадают только те живые запросы, которые уже подтвердились как полезные без потери качества. Нижние строки нужны, чтобы показать разницу между главным итогом и всем живым потоком."
+                "Показывает только проверяемые цифры по текущей сессии: расход модели, остаток лимита и следующее действие."
             )
         );
         assert!(cards[1]["title_tooltip"].as_str().is_some_and(|value| {
-            value.contains("не одну сессию, а текущее скользящее рабочее окно")
+            value.contains("только проверяемые цифры по рабочему окну")
         }));
         assert!(cards[2]["title_tooltip"].as_str().is_some_and(|value| {
-            value.contains("накопительный итог с первого записанного запроса Amai")
+            value.contains("только подтверждённые цифры за всё время")
         }));
-        assert!(cards[1]["note"]
+        assert!(cards[1]["source_label"]
             .as_str()
             .unwrap_or_default()
-            .contains("6 из 12"));
-        assert!(cards[2]["note"]
+            .contains("подтверждённый хвост прошлых стартов"));
+        assert!(cards[2]["source_label"]
             .as_str()
             .unwrap_or_default()
-            .contains("22 из 56"));
+            .contains("старый долг точности"));
     }
 
     #[test]
@@ -9416,7 +9572,7 @@ mod tests {
         assert!(cards[0]["note"]
             .as_str()
             .unwrap_or_default()
-            .contains("ни один случай ещё не подтвердился"));
+            .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии."));
     }
 
     #[test]
@@ -9502,44 +9658,17 @@ mod tests {
         });
 
         let cards = build_hero_cards(&snapshot);
-        assert!(cards[0]["note"]
+        for card in &cards {
+            assert!(card["rows"]
+                .as_array()
+                .expect("rows")
+                .iter()
+                .all(|row| row["label"].as_str() != Some("Связь с лимитом клиента")));
+        }
+        assert!(cards[0]["source_label"]
             .as_str()
             .unwrap_or_default()
-            .contains("только non-live активность"));
-        let session_alignment = cards[0]["rows"]
-            .as_array()
-            .expect("session rows")
-            .iter()
-            .find(|row| row["label"].as_str() == Some("Связь с лимитом клиента"))
-            .expect("session alignment row");
-        assert_eq!(
-            session_alignment["label"].as_str(),
-            Some("Связь с лимитом клиента")
-        );
-        assert_eq!(
-            session_alignment["value"].as_str(),
-            Some("нет: только non-live (live 0 / non-live 4)")
-        );
-        let rolling_alignment = cards[1]["rows"]
-            .as_array()
-            .expect("rolling rows")
-            .iter()
-            .find(|row| row["label"].as_str() == Some("Связь с лимитом клиента"))
-            .expect("rolling alignment row");
-        assert!(rolling_alignment["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("live ещё не подтверждено"));
-        let lifetime_alignment = cards[2]["rows"]
-            .as_array()
-            .expect("lifetime rows")
-            .iter()
-            .find(|row| row["label"].as_str() == Some("Связь с лимитом клиента"))
-            .expect("lifetime alignment row");
-        assert!(lifetime_alignment["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("lower bound части цикла"));
+            .contains("точная пара токенов модели"));
     }
 
     #[test]
@@ -9687,7 +9816,7 @@ mod tests {
         assert!(cards[0]["note"]
             .as_str()
             .unwrap_or_default()
-            .contains("живой расход уже уходит в continuity startup"));
+            .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии."));
         let model_row = cards[0]["rows"]
             .as_array()
             .expect("session rows")
@@ -9697,7 +9826,7 @@ mod tests {
         assert!(model_row["value"]
             .as_str()
             .unwrap_or_default()
-            .contains("ещё нет"));
+            .contains("Точного процента пока нет"));
     }
 
     #[test]
@@ -9718,7 +9847,7 @@ mod tests {
         assert_eq!(row["label"].as_str(), Some("Экономия токенов модели"));
         assert_eq!(
             row["value"].as_str(),
-            Some("25.00%: без Amai 320, с Amai 240, экономия 80")
+            Some("Amai сэкономил 25.00% токенов модели: без Amai 320, с Amai 240, экономия 80")
         );
         assert!(row["tooltip"]
             .as_str()
@@ -9752,7 +9881,7 @@ mod tests {
         let row = super::model_token_savings_metric_row(&statement_preview, &alignment);
         assert_eq!(
             row["value"].as_str(),
-            Some("0.66%: без Amai 609, с Amai 605, экономия 4")
+            Some("Amai сэкономил 0.66% токенов модели: без Amai 609, с Amai 605, экономия 4")
         );
     }
 
@@ -9945,12 +10074,12 @@ mod tests {
         assert!(cards[1]["note"]
             .as_str()
             .unwrap_or_default()
-            .contains("исторический startup-хвост"));
+            .contains("Короткая карточка только с проверяемыми цифрами по рабочему окну."));
         let row = cards[1]["rows"]
             .as_array()
             .expect("rolling rows")
             .iter()
-            .find(|row| row["label"].as_str() == Some("Исторический startup-хвост"))
+            .find(|row| row["label"].as_str() == Some("Хвост от прошлых стартов"))
             .expect("historical startup drag row");
         assert_eq!(
             row["value"].as_str(),
@@ -9982,7 +10111,7 @@ mod tests {
         let row = super::model_token_savings_metric_row(&statement_preview, &alignment);
         assert_eq!(
             row["value"].as_str(),
-            Some("ещё нет exact pair; с Amai уже видно 609")
+            Some("Точного процента пока нет; с Amai уже видно 609")
         );
         assert!(row["tooltip"]
             .as_str()
@@ -9992,7 +10121,7 @@ mod tests {
         let note =
             super::model_token_savings_note_sentence(&statement_preview, &alignment).expect("note");
         assert!(note.contains("Точный процент"));
-        assert!(note.contains("exact same-meter pair"));
+        assert!(note.contains("реальной шкалой лимита модели"));
     }
 
     #[test]
@@ -10034,9 +10163,9 @@ mod tests {
         let (status, label, tooltip) =
             super::exact_pair_card_status_override(&alignment).expect("status override");
         assert_eq!(status, "alert");
-        assert_eq!(label, "не exact: frozen debt");
-        assert!(tooltip.contains("Missing live events: 13"));
-        assert!(tooltip.contains("Irrecoverable: 13"));
+        assert_eq!(label, "есть старый долг точности");
+        assert!(tooltip.contains("Не хватает строк: 13"));
+        assert!(tooltip.contains("Потеряно без восстановления: 13"));
     }
 
     #[test]
@@ -10055,8 +10184,8 @@ mod tests {
         let (status, label, tooltip) =
             super::exact_pair_card_status_override(&alignment).expect("status override");
         assert_eq!(status, "waiting");
-        assert_eq!(label, "ждём exact pair");
-        assert!(tooltip.contains("same-meter pair"));
+        assert_eq!(label, "ждём полного совпадения");
+        assert!(tooltip.contains("совпадение с реальной шкалой лимита модели ещё не собрано"));
     }
 
     #[test]
@@ -10075,15 +10204,15 @@ mod tests {
         });
 
         let row = super::exact_pair_status_metric_row(&alignment).expect("exact pair row");
-        assert_eq!(row["label"], "Точность модели");
+        assert_eq!(row["label"], "Совпадение с реальным лимитом");
         assert_eq!(
             row["value"].as_str(),
-            Some("не exact: frozen debt review, 13 irrecoverable rows")
+            Some("цифра пока не полностью точная: в старой истории потеряно 13 строк")
         );
         assert!(row["tooltip"]
             .as_str()
             .unwrap_or_default()
-            .contains("irrecoverable historical debt"));
+            .contains("старой исторической потери данных"));
     }
 
     #[test]
@@ -10096,7 +10225,10 @@ mod tests {
         });
 
         let row = super::exact_pair_status_metric_row(&alignment).expect("exact pair row");
-        assert_eq!(row["value"].as_str(), Some("exact pair materialized"));
+        assert_eq!(
+            row["value"].as_str(),
+            Some("цифра точная: полностью совпадает со шкалой лимита модели")
+        );
     }
 
     #[test]
@@ -10300,10 +10432,6 @@ mod tests {
             cards[0]["status_label"].as_str(),
             Some("новый чат рекомендован")
         );
-        assert!(cards[0]["note"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Сейчас выгоднее завершить этот thread"));
         assert!(cards[0]["status_tooltip"]
             .as_str()
             .unwrap_or_default()
@@ -10314,6 +10442,10 @@ mod tests {
             .iter()
             .find(|row| row["label"].as_str() == Some("Следующее действие"))
             .expect("next action row");
+        assert!(row["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("новом чате"));
         assert!(row["value"]
             .as_str()
             .unwrap_or_default()
@@ -10350,6 +10482,85 @@ mod tests {
                 .expect("pressure guard");
         assert_eq!(guard.severity, "critical");
         assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn compact_token_hero_card_keeps_truth_only_rows_for_current_session() {
+        let card = json!({
+            "title": "Экономия токенов за текущую сессию",
+            "status": "critical",
+            "status_label": "новый чат нужен сейчас",
+            "note": "long note",
+            "rows": [
+                {"label": "Главный итог", "value": "x"},
+                {"label": "Экономия токенов модели", "value": "y"},
+                {"label": "Совпадение с реальным лимитом", "value": "z"},
+                {"label": "Лимит клиента сейчас", "value": "l"},
+                {"label": "Следующее действие", "value": "n"},
+                {"label": "Строгий same-meter срез", "value": "drop"}
+            ]
+        });
+        let compact = super::compact_token_hero_card(card);
+        let labels = compact["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter_map(|row| row["label"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "Экономия токенов модели",
+                "Совпадение с реальным лимитом",
+                "Лимит клиента сейчас",
+                "Следующее действие"
+            ]
+        );
+        assert_eq!(
+            compact["source_label"].as_str(),
+            Some("Источник: точная пара токенов модели и живой лимит клиента из текущего чата.")
+        );
+        assert!(compact["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии."));
+    }
+
+    #[test]
+    fn compact_token_hero_card_keeps_truth_only_rows_for_lifetime() {
+        let card = json!({
+            "title": "Экономия токенов за всё время записи",
+            "status": "alert",
+            "status_label": "есть старый долг точности",
+            "note": "long note",
+            "rows": [
+                {"label": "Экономия токенов модели", "value": "a"},
+                {"label": "Совпадение с реальным лимитом", "value": "b"},
+                {"label": "Review-only export", "value": "c"},
+                {"label": "Связь с лимитом клиента", "value": "drop"},
+                {"label": "Исторический frozen debt", "value": "d"}
+            ]
+        });
+        let compact = super::compact_token_hero_card(card);
+        let labels = compact["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter_map(|row| row["label"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "Экономия токенов модели",
+                "Совпадение с реальным лимитом",
+                "Отчёт для ручной сверки",
+                "Исторический долг точности"
+            ]
+        );
+        assert_eq!(
+            compact["source_label"].as_str(),
+            Some("Источник: подтверждённая история плюс отдельно отмеченный старый долг точности.")
+        );
     }
 
     #[test]

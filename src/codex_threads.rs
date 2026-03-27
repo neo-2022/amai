@@ -109,6 +109,22 @@ struct RolloutTurnParseState {
     helper_only_context_pack_ids: BTreeSet<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct LatestRolloutTokenCountSnapshot {
+    turn_id: String,
+    started_at_epoch_ms: i64,
+    ended_at_epoch_ms: i64,
+    client_turn_total_tokens: u64,
+    client_turn_input_tokens: u64,
+    client_turn_cached_input_tokens: u64,
+    client_turn_output_tokens: u64,
+    client_turn_reasoning_output_tokens: u64,
+    latest_cumulative_total_tokens: u64,
+    latest_model_context_window: u64,
+    latest_primary_limit_used_percent: u64,
+    latest_secondary_limit_used_percent: u64,
+}
+
 #[derive(Debug, Clone)]
 struct CachedRolloutTurnObservations {
     file_signature: String,
@@ -1043,11 +1059,31 @@ pub fn latest_rollout_client_meter_observation(
     repo_root: &str,
     explicit_rollout_path: Option<&Path>,
 ) -> Result<Option<RolloutClientMeterObservation>> {
-    Ok(
-        rollout_client_meter_observations(repo_root, explicit_rollout_path)?
-            .into_iter()
-            .last(),
-    )
+    let (thread_id, rollout_path) = if let Some(path) = explicit_rollout_path {
+        let path = path.to_path_buf();
+        let thread_id = rollout_thread_id_from_path(&path).unwrap_or_default();
+        (thread_id, path)
+    } else {
+        let current_thread_id = current_thread_id();
+        let record = current_thread_record(repo_root, current_thread_id.as_deref())?.or_else(|| {
+            if current_thread_id.is_some() {
+                None
+            } else {
+                latest_thread_record().ok().flatten()
+            }
+        });
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        if record.rollout_path.is_empty() {
+            return Ok(None);
+        }
+        (record.thread_id, PathBuf::from(record.rollout_path))
+    };
+    if !rollout_path.exists() {
+        return Ok(None);
+    }
+    latest_rollout_client_meter_observation_from_path(&thread_id, &rollout_path)
 }
 
 pub fn rollout_assistant_generation_observations(
@@ -1107,9 +1143,17 @@ pub fn rollout_client_meter_observations(
 pub fn latest_rollout_client_meter_observation_for_thread(
     thread_id: &str,
 ) -> Result<Option<RolloutClientMeterObservation>> {
-    Ok(rollout_client_meter_observations_for_thread(thread_id)?
-        .into_iter()
-        .last())
+    let Some(record) = thread_record_by_id(thread_id)? else {
+        return Ok(None);
+    };
+    if record.rollout_path.is_empty() {
+        return Ok(None);
+    }
+    let rollout_path = PathBuf::from(record.rollout_path);
+    if !rollout_path.exists() {
+        return Ok(None);
+    }
+    latest_rollout_client_meter_observation_from_path(thread_id, &rollout_path)
 }
 
 pub fn rollout_client_meter_observations_for_thread(
@@ -1873,6 +1917,207 @@ fn parse_rollout_client_meter_observations(
     )
 }
 
+fn latest_rollout_client_meter_observation_from_path(
+    thread_id: &str,
+    rollout_path: &Path,
+) -> Result<Option<RolloutClientMeterObservation>> {
+    let parsed = parse_rollout_client_meter_observations(thread_id, rollout_path)?
+        .into_iter()
+        .last();
+    let latest_snapshot = latest_rollout_token_count_snapshot(rollout_path)?;
+    Ok(match (parsed, latest_snapshot) {
+        (None, None) => None,
+        (Some(observation), None) => Some(observation),
+        (None, Some(snapshot)) => Some(client_meter_observation_from_latest_snapshot(
+            thread_id,
+            rollout_path,
+            &snapshot,
+        )),
+        (Some(observation), Some(snapshot)) => Some(
+            merge_client_meter_observation_with_latest_snapshot(
+                observation,
+                thread_id,
+                rollout_path,
+                &snapshot,
+            ),
+        ),
+    })
+}
+
+fn latest_rollout_token_count_snapshot(
+    rollout_path: &Path,
+) -> Result<Option<LatestRolloutTokenCountSnapshot>> {
+    let (size_bytes, _) = rollout_file_version(rollout_path);
+    if size_bytes == 0 {
+        return Ok(None);
+    }
+    let tail_offset = size_bytes.saturating_sub(512 * 1024);
+    let tail_text = read_rollout_window_from_offset_lossy(rollout_path, tail_offset)?;
+    if let Some(snapshot) = latest_rollout_token_count_snapshot_from_text(&tail_text)? {
+        return Ok(Some(snapshot));
+    }
+    if tail_offset == 0 {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(rollout_path)
+        .with_context(|| format!("failed to read {}", rollout_path.display()))?;
+    latest_rollout_token_count_snapshot_from_text(&text)
+}
+
+fn latest_rollout_token_count_snapshot_from_text(
+    text: &str,
+) -> Result<Option<LatestRolloutTokenCountSnapshot>> {
+    let mut token_row: Option<Value> = None;
+    let mut task_started_row: Option<Value> = None;
+    let mut seen_token = false;
+    for line in text.lines().rev() {
+        let row: Value = serde_json::from_str(line).context("failed to parse rollout jsonl line")?;
+        let row_type = row["type"].as_str().unwrap_or_default();
+        let payload_type = row["payload"]["type"].as_str().unwrap_or_default();
+        if !seen_token {
+            if row_type == "event_msg" && payload_type == "token_count" {
+                token_row = Some(row);
+                seen_token = true;
+            }
+            continue;
+        }
+        if row_type == "event_msg" && payload_type == "task_started" {
+            task_started_row = Some(row);
+            break;
+        }
+    }
+    let Some(token_row) = token_row else {
+        return Ok(None);
+    };
+    let payload = &token_row["payload"];
+    let last_token_usage = &payload["info"]["last_token_usage"];
+    let total_token_usage = &payload["info"]["total_token_usage"];
+    Ok(Some(LatestRolloutTokenCountSnapshot {
+        turn_id: task_started_row
+            .as_ref()
+            .and_then(|row| row["payload"]["turn_id"].as_str())
+            .unwrap_or_default()
+            .to_string(),
+        started_at_epoch_ms: task_started_row
+            .as_ref()
+            .map(timestamp_epoch_ms_from_rollout_row)
+            .unwrap_or_default(),
+        ended_at_epoch_ms: timestamp_epoch_ms_from_rollout_row(&token_row),
+        client_turn_total_tokens: last_token_usage["total_tokens"].as_u64().unwrap_or_default(),
+        client_turn_input_tokens: last_token_usage["input_tokens"].as_u64().unwrap_or_default(),
+        client_turn_cached_input_tokens: last_token_usage["cached_input_tokens"]
+            .as_u64()
+            .unwrap_or_default(),
+        client_turn_output_tokens: last_token_usage["output_tokens"].as_u64().unwrap_or_default(),
+        client_turn_reasoning_output_tokens: last_token_usage["reasoning_output_tokens"]
+            .as_u64()
+            .unwrap_or_default(),
+        latest_cumulative_total_tokens: total_token_usage["total_tokens"]
+            .as_u64()
+            .unwrap_or_default(),
+        latest_model_context_window: payload["info"]["model_context_window"]
+            .as_u64()
+            .unwrap_or_default(),
+        latest_primary_limit_used_percent: payload["rate_limits"]["primary"]["used_percent"]
+            .as_f64()
+            .map(|value| value.round() as u64)
+            .unwrap_or_default(),
+        latest_secondary_limit_used_percent: payload["rate_limits"]["secondary"]["used_percent"]
+            .as_f64()
+            .map(|value| value.round() as u64)
+            .unwrap_or_default(),
+    }))
+}
+
+fn timestamp_epoch_ms_from_rollout_row(row: &Value) -> i64 {
+    row["timestamp"]
+        .as_str()
+        .and_then(|value| parse_rfc3339_epoch_s(value).ok())
+        .map(|value| value.saturating_mul(1000))
+        .unwrap_or_default()
+}
+
+fn client_meter_observation_from_latest_snapshot(
+    thread_id: &str,
+    rollout_path: &Path,
+    snapshot: &LatestRolloutTokenCountSnapshot,
+) -> RolloutClientMeterObservation {
+    RolloutClientMeterObservation {
+        thread_id: thread_id.to_string(),
+        rollout_path: rollout_path.display().to_string(),
+        turn_id: snapshot.turn_id.clone(),
+        started_at_epoch_ms: if snapshot.started_at_epoch_ms > 0 {
+            snapshot.started_at_epoch_ms
+        } else {
+            snapshot.ended_at_epoch_ms
+        },
+        ended_at_epoch_ms: snapshot.ended_at_epoch_ms,
+        client_turn_total_tokens: snapshot.client_turn_total_tokens,
+        client_turn_input_tokens: snapshot.client_turn_input_tokens,
+        client_turn_cached_input_tokens: snapshot.client_turn_cached_input_tokens,
+        client_turn_output_tokens: snapshot.client_turn_output_tokens,
+        client_turn_reasoning_output_tokens: snapshot.client_turn_reasoning_output_tokens,
+        latest_cumulative_total_tokens: snapshot.latest_cumulative_total_tokens,
+        latest_model_context_window: snapshot.latest_model_context_window,
+        latest_primary_limit_used_percent: snapshot.latest_primary_limit_used_percent,
+        latest_secondary_limit_used_percent: snapshot.latest_secondary_limit_used_percent,
+        observation_source: "codex_rollout_client_meter_v2".to_string(),
+    }
+}
+
+fn merge_client_meter_observation_with_latest_snapshot(
+    mut observation: RolloutClientMeterObservation,
+    thread_id: &str,
+    rollout_path: &Path,
+    snapshot: &LatestRolloutTokenCountSnapshot,
+) -> RolloutClientMeterObservation {
+    if observation.thread_id.is_empty() {
+        observation.thread_id = thread_id.to_string();
+    }
+    if observation.rollout_path.is_empty() {
+        observation.rollout_path = rollout_path.display().to_string();
+    }
+    if !snapshot.turn_id.is_empty() {
+        observation.turn_id = snapshot.turn_id.clone();
+    }
+    if snapshot.started_at_epoch_ms > 0 {
+        observation.started_at_epoch_ms = snapshot.started_at_epoch_ms;
+    }
+    if snapshot.ended_at_epoch_ms > 0 {
+        observation.ended_at_epoch_ms = observation.ended_at_epoch_ms.max(snapshot.ended_at_epoch_ms);
+    }
+    if snapshot.client_turn_total_tokens > 0 {
+        observation.client_turn_total_tokens = snapshot.client_turn_total_tokens;
+    }
+    if snapshot.client_turn_input_tokens > 0 {
+        observation.client_turn_input_tokens = snapshot.client_turn_input_tokens;
+    }
+    if snapshot.client_turn_cached_input_tokens > 0 {
+        observation.client_turn_cached_input_tokens = snapshot.client_turn_cached_input_tokens;
+    }
+    if snapshot.client_turn_output_tokens > 0 {
+        observation.client_turn_output_tokens = snapshot.client_turn_output_tokens;
+    }
+    if snapshot.client_turn_reasoning_output_tokens > 0 {
+        observation.client_turn_reasoning_output_tokens =
+            snapshot.client_turn_reasoning_output_tokens;
+    }
+    if snapshot.latest_cumulative_total_tokens > 0 {
+        observation.latest_cumulative_total_tokens = snapshot.latest_cumulative_total_tokens;
+    }
+    if snapshot.latest_model_context_window > 0 {
+        observation.latest_model_context_window = snapshot.latest_model_context_window;
+    }
+    if snapshot.latest_primary_limit_used_percent > 0 {
+        observation.latest_primary_limit_used_percent = snapshot.latest_primary_limit_used_percent;
+    }
+    if snapshot.latest_secondary_limit_used_percent > 0 {
+        observation.latest_secondary_limit_used_percent = snapshot.latest_secondary_limit_used_percent;
+    }
+    observation.observation_source = "codex_rollout_client_meter_v2".to_string();
+    observation
+}
+
 fn load_rollout_turn_observations(rollout_path: &Path) -> Result<Vec<RolloutTurnObservation>> {
     Ok(snapshot_rollout_turn_observations(
         &load_rollout_turn_parse_state(rollout_path)?,
@@ -2165,6 +2410,34 @@ fn read_rollout_tail_from_offset(rollout_path: &Path, offset: u64) -> Result<Str
     file.read_to_end(&mut bytes)
         .with_context(|| format!("failed to read tail {}", rollout_path.display()))?;
     String::from_utf8(bytes).context("failed to decode rollout tail as utf-8")
+}
+
+fn read_rollout_window_from_offset_lossy(rollout_path: &Path, offset: u64) -> Result<String> {
+    let mut file = fs::File::open(rollout_path)
+        .with_context(|| format!("failed to open {}", rollout_path.display()))?;
+    let trim_partial_first_line = if offset > 0 {
+        file.seek(SeekFrom::Start(offset.saturating_sub(1)))
+            .with_context(|| format!("failed to seek {}", rollout_path.display()))?;
+        let mut previous = [0_u8; 1];
+        file.read_exact(&mut previous)
+            .with_context(|| format!("failed to read {}", rollout_path.display()))?;
+        previous[0] != b'\n'
+    } else {
+        false
+    };
+    file.seek(SeekFrom::Start(offset))
+        .with_context(|| format!("failed to seek {}", rollout_path.display()))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read tail {}", rollout_path.display()))?;
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if trim_partial_first_line {
+        text = text
+            .split_once('\n')
+            .map(|(_, tail)| tail.to_string())
+            .unwrap_or_default();
+    }
+    Ok(text)
 }
 
 fn rollout_function_call_is_context_pack(name: &str, arguments: &str) -> bool {
@@ -3473,6 +3746,40 @@ mod tests {
         assert_eq!(observation.latest_model_context_window, 258400);
         assert_eq!(observation.latest_primary_limit_used_percent, 69);
         assert_eq!(observation.latest_secondary_limit_used_percent, 21);
+    }
+
+    #[test]
+    fn latest_rollout_client_meter_observation_uses_latest_token_count_after_task_complete() {
+        let rollout_path = std::env::temp_dir().join(format!(
+            "amai-rollout-client-meter-late-token-{}.jsonl",
+            Uuid::new_v4()
+        ));
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-03-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":62909,"cached_input_tokens":34176,"output_tokens":1415,"reasoning_output_tokens":870,"total_tokens":64324},"last_token_usage":{"input_tokens":34855,"cached_input_tokens":28672,"output_tokens":679,"reasoning_output_tokens":354,"total_tokens":35534},"model_context_window":258400},"rate_limits":{"primary":{"used_percent":69.0},"secondary":{"used_percent":21.0}}}}
+{"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":63500,"cached_input_tokens":34500,"output_tokens":1500,"reasoning_output_tokens":900,"total_tokens":65000},"last_token_usage":{"input_tokens":36000,"cached_input_tokens":29000,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":36000},"model_context_window":258400},"rate_limits":{"primary":{"used_percent":70.0},"secondary":{"used_percent":22.0}}}}
+"#,
+        )
+        .expect("write rollout");
+
+        let observation =
+            super::latest_rollout_client_meter_observation("/home/art/Art", Some(&rollout_path))
+                .expect("observation")
+                .expect("candidate");
+        let _ = fs::remove_file(&rollout_path);
+
+        assert_eq!(observation.turn_id, "turn-1");
+        assert_eq!(observation.client_turn_total_tokens, 36000);
+        assert_eq!(observation.client_turn_input_tokens, 36000);
+        assert_eq!(observation.client_turn_cached_input_tokens, 29000);
+        assert_eq!(observation.client_turn_output_tokens, 679);
+        assert_eq!(observation.client_turn_reasoning_output_tokens, 354);
+        assert_eq!(observation.latest_cumulative_total_tokens, 65000);
+        assert_eq!(observation.latest_primary_limit_used_percent, 70);
+        assert_eq!(observation.latest_secondary_limit_used_percent, 22);
+        assert_eq!(observation.observation_source, "codex_rollout_client_meter_v2");
     }
 
     #[test]
