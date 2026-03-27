@@ -1,6 +1,9 @@
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
+pub const DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND: &str =
+    "operator_continuity_startup";
+
 #[derive(Debug, Parser)]
 #[command(name = "amai")]
 #[command(bin_name = "amai")]
@@ -279,8 +282,8 @@ pub struct ContinuityStartupArgs {
     pub json: bool,
     #[arg(
         long,
-        default_value = "live_continuity_startup",
-        help = "Token ledger source kind for continuity-startup observed whole-cycle events. Use proof_/verify_ prefixes for engineering runs."
+        default_value = DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND,
+        help = "Token ledger source kind for continuity-startup observed whole-cycle events. Plain CLI startup is operator-safe by default; pass live_continuity_startup only for real chat-start flows."
     )]
     pub token_source_kind: String,
 }
@@ -948,4 +951,53 @@ pub struct BootstrapDisconnectArgs {
     pub cwd: Option<PathBuf>,
     #[arg(long, default_value_t = true)]
     pub purge_empty_file: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn continuity_startup_cli_defaults_to_operator_safe_token_source_kind() {
+        let cli = Cli::parse_from([
+            "amai",
+            "continuity",
+            "startup",
+            "--project",
+            "art",
+        ]);
+        let Command::Continuity { command } = cli.command else {
+            panic!("expected continuity command");
+        };
+        let ContinuityCommand::Startup(args) = command else {
+            panic!("expected continuity startup command");
+        };
+        assert_eq!(
+            args.token_source_kind,
+            DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND
+        );
+    }
+
+    #[test]
+    fn continuity_answer_cli_inherits_operator_safe_startup_default() {
+        let cli = Cli::parse_from([
+            "amai",
+            "continuity",
+            "answer",
+            "--project",
+            "art",
+            "--question",
+            "на чем остановились",
+        ]);
+        let Command::Continuity { command } = cli.command else {
+            panic!("expected continuity command");
+        };
+        let ContinuityCommand::Answer(args) = command else {
+            panic!("expected continuity answer command");
+        };
+        assert_eq!(
+            args.startup.token_source_kind,
+            DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND
+        );
+    }
 }
