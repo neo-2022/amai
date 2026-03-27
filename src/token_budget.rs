@@ -113,6 +113,8 @@ struct TokenBudgetContractConfig {
     client_limit_pre_amai_baseline_source_version: String,
     #[serde(default = "default_client_limit_frozen_gap_review_surface_version")]
     client_limit_frozen_gap_review_surface_version: String,
+    #[serde(default = "default_client_limit_reviewed_frozen_debt_export_surface_version")]
+    client_limit_reviewed_frozen_debt_export_surface_version: String,
     #[serde(default = "default_excluded_taxonomy_version")]
     excluded_taxonomy_version: String,
     #[serde(default = "default_dedup_contract_version")]
@@ -204,6 +206,8 @@ impl Default for TokenBudgetContractConfig {
                 default_client_limit_pre_amai_baseline_source_version(),
             client_limit_frozen_gap_review_surface_version:
                 default_client_limit_frozen_gap_review_surface_version(),
+            client_limit_reviewed_frozen_debt_export_surface_version:
+                default_client_limit_reviewed_frozen_debt_export_surface_version(),
             excluded_taxonomy_version: default_excluded_taxonomy_version(),
             dedup_contract_version: default_dedup_contract_version(),
             backfill_policy_version: default_backfill_policy_version(),
@@ -727,6 +731,10 @@ fn default_client_limit_frozen_gap_review_surface_version() -> String {
     "client-limit-frozen-gap-review-surface-v1".to_string()
 }
 
+fn default_client_limit_reviewed_frozen_debt_export_surface_version() -> String {
+    "client-limit-reviewed-frozen-debt-export-surface-v1".to_string()
+}
+
 fn default_excluded_taxonomy_version() -> String {
     "token-excluded-usage-v1".to_string()
 }
@@ -832,15 +840,15 @@ fn default_infra_cost_profile_version() -> String {
 }
 
 fn default_contractual_evidence_pack_version() -> String {
-    "contractual-evidence-pack-v20".to_string()
+    "contractual-evidence-pack-v21".to_string()
 }
 
 fn default_contractual_statement_export_version() -> String {
-    "contractual-statement-export-v20".to_string()
+    "contractual-statement-export-v21".to_string()
 }
 
 fn default_settlement_report_preview_version() -> String {
-    "settlement-report-preview-v11".to_string()
+    "settlement-report-preview-v12".to_string()
 }
 
 fn default_rate_card_version() -> String {
@@ -881,6 +889,12 @@ fn report_contract_json(contract: &TokenBudgetContractConfig) -> Value {
             .clone(),
         "client_limit_pre_amai_baseline_source_version": contract
             .client_limit_pre_amai_baseline_source_version
+            .clone(),
+        "client_limit_frozen_gap_review_surface_version": contract
+            .client_limit_frozen_gap_review_surface_version
+            .clone(),
+        "client_limit_reviewed_frozen_debt_export_surface_version": contract
+            .client_limit_reviewed_frozen_debt_export_surface_version
             .clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
@@ -945,6 +959,12 @@ fn token_contract_metadata_json(contract: &TokenBudgetContractConfig) -> Value {
             .clone(),
         "client_limit_pre_amai_baseline_source_version": contract
             .client_limit_pre_amai_baseline_source_version
+            .clone(),
+        "client_limit_frozen_gap_review_surface_version": contract
+            .client_limit_frozen_gap_review_surface_version
+            .clone(),
+        "client_limit_reviewed_frozen_debt_export_surface_version": contract
+            .client_limit_reviewed_frozen_debt_export_surface_version
             .clone(),
         "excluded_taxonomy_version": contract.excluded_taxonomy_version.clone(),
         "dedup_contract_version": contract.dedup_contract_version.clone(),
@@ -5368,9 +5388,15 @@ fn build_contractual_statement_summary(
         "currency_profile",
         statement_preview["currency_profile"].clone(),
     );
+    let client_limit_boundary_semantics =
+        build_client_limit_boundary_review_surface(statement_preview);
     insert(
         "client_limit_boundary_semantics",
-        build_client_limit_boundary_review_surface(statement_preview),
+        client_limit_boundary_semantics.clone(),
+    );
+    insert(
+        "reviewed_frozen_debt_export_surface",
+        build_reviewed_frozen_debt_export_surface(contract, &client_limit_boundary_semantics),
     );
     insert(
         "note",
@@ -5805,6 +5831,15 @@ fn build_settlement_report_preview(
     let period = &statement_preview["period"];
     let adjustment_preview = &statement_preview["adjustment_preview"];
     let external_truth_manifest = &statement_export_preview["external_truth_manifest"];
+    let reviewed_frozen_debt_export_surface =
+        if statement_export_preview["reviewed_frozen_debt_export_surface"].is_null() {
+            build_reviewed_frozen_debt_export_surface(
+                contract,
+                &statement_export_preview["client_limit_boundary_semantics"],
+            )
+        } else {
+            statement_export_preview["reviewed_frozen_debt_export_surface"].clone()
+        };
     let settlement_report_identity = format!(
         "{}:{}:{}:{}:{}:{}:{}:{}",
         statement_export_preview["scope_code"]
@@ -5880,6 +5915,7 @@ fn build_settlement_report_preview(
         "currency_profile": statement_export_preview["currency_profile"].clone(),
         "external_truth_manifest_hash": external_truth_manifest["manifest_hash"].clone(),
         "client_limit_boundary_semantics": statement_export_preview["client_limit_boundary_semantics"].clone(),
+        "reviewed_frozen_debt_export_surface": reviewed_frozen_debt_export_surface,
         "customer_contractual_boundary": build_customer_contractual_boundary_from_export(
             contract,
             "customer_settlement_report_preview_report_only",
@@ -6240,6 +6276,7 @@ fn build_statement_export_preview(
                 "statement_preview_id",
                 "settlement_report_preview",
                 "client_limit_boundary_semantics",
+                "reviewed_frozen_debt_export_surface",
                 "contractual_state",
                 "coverage_state",
                 "external_truth_manifest",
@@ -6287,7 +6324,11 @@ fn build_statement_export_preview(
     insert("line_item_surfaces", line_item_surfaces);
     insert(
         "client_limit_boundary_semantics",
-        client_limit_boundary_semantics,
+        client_limit_boundary_semantics.clone(),
+    );
+    insert(
+        "reviewed_frozen_debt_export_surface",
+        build_reviewed_frozen_debt_export_surface(contract, &client_limit_boundary_semantics),
     );
     insert(
         "note",
@@ -6330,6 +6371,15 @@ fn build_contractual_evidence_pack(
     let mut customer_contractual_boundary =
         statement_export_preview["customer_contractual_boundary"].clone();
     customer_contractual_boundary["surface_kind"] = json!("customer_evidence_pack_report_only");
+    let reviewed_frozen_debt_export_surface =
+        if statement_export_preview["reviewed_frozen_debt_export_surface"].is_null() {
+            build_reviewed_frozen_debt_export_surface(
+                contract,
+                &statement_export_preview["client_limit_boundary_semantics"],
+            )
+        } else {
+            statement_export_preview["reviewed_frozen_debt_export_surface"].clone()
+        };
     let settlement_report_preview =
         settlement_report_preview_from_export(contract, &statement_export_preview);
 
@@ -6387,6 +6437,7 @@ fn build_contractual_evidence_pack(
         "margin_readiness_state": report["token_budget_report"]["contractual_statement_summaries"][scope_code]["margin_readiness_state"].clone(),
         "external_truth_manifest": report["token_budget_report"]["external_truth_manifest"].clone(),
         "client_limit_boundary_semantics": statement_export_preview["client_limit_boundary_semantics"].clone(),
+        "reviewed_frozen_debt_export_surface": reviewed_frozen_debt_export_surface,
         "settlement_report_preview": settlement_report_preview,
         "customer_contractual_boundary": customer_contractual_boundary,
         "settlement_activation_governance": statement_export_preview["settlement_activation_governance"].clone(),
@@ -13854,6 +13905,112 @@ fn build_client_limit_frozen_gap_review_surface(
     })
 }
 
+fn build_reviewed_frozen_debt_export_surface(
+    contract: &TokenBudgetContractConfig,
+    client_limit_boundary_semantics: &Value,
+) -> Value {
+    let exact_pair_status = &client_limit_boundary_semantics["exact_pair_status"];
+    let frozen_gap_review_surface = &client_limit_boundary_semantics["frozen_gap_review_surface"];
+    let review_required = frozen_gap_review_surface["review_required"].as_bool() == Some(true)
+        || frozen_gap_review_surface["state"].as_str() == Some("review_required");
+    let exact_pair_available = exact_pair_status["exact_pair_available"].as_bool() == Some(true)
+        || client_limit_boundary_semantics["same_meter_as_client_limit"].as_bool() == Some(true);
+    let export_ready_report_only = review_required && !exact_pair_available;
+    let state = if export_ready_report_only {
+        "reviewed_frozen_debt_export_ready_report_only"
+    } else if exact_pair_available {
+        "not_applicable_exact_pair_materialized"
+    } else if review_required {
+        "review_required_but_export_not_ready"
+    } else if exact_pair_status["state"].as_str() == Some("exact_pair_blocked") {
+        "not_applicable_without_frozen_gap_candidate"
+    } else {
+        "not_applicable"
+    };
+    let allowed_claims = if export_ready_report_only {
+        json!([
+            "reviewed_frozen_debt_report_only",
+            "historical_source_loss_disclosed_non_exact",
+            "raw_exact_history_unavailable"
+        ])
+    } else {
+        json!([])
+    };
+    let forbidden_claims = if review_required {
+        json!([
+            "claim_raw_exact_history",
+            "claim_exact_same_meter_pair_materialized"
+        ])
+    } else {
+        json!([])
+    };
+    let required_disclosures = if export_ready_report_only {
+        json!([
+            "irrecoverable_historical_debt_present",
+            "raw_exact_history_unavailable",
+            "review_only_non_exact_surface"
+        ])
+    } else {
+        json!([])
+    };
+    let propagated_surfaces = if export_ready_report_only {
+        json!([
+            "contractual_statement_summary",
+            "statement_export_preview",
+            "settlement_report_preview",
+            "contractual_evidence_pack"
+        ])
+    } else {
+        json!([])
+    };
+    let note = match state {
+        "reviewed_frozen_debt_export_ready_report_only" => {
+            "Этот surface materialize-ит отдельный reviewed frozen-debt export: historical source-loss можно показывать только как report-only review contour с явным раскрытием debt и без притворства raw exact history."
+        }
+        "not_applicable_exact_pair_materialized" => {
+            "Exact same-meter pair уже materialized, поэтому отдельный reviewed frozen-debt export не нужен."
+        }
+        "review_required_but_export_not_ready" => {
+            "Frozen-gap review уже требуется, но report-only export contour ещё не готов к честной публикации."
+        }
+        "not_applicable_without_frozen_gap_candidate" => {
+            "Exact pair ещё blocked, но blocker пока не классифицирован как irrecoverable frozen debt candidate."
+        }
+        _ => {
+            "Reviewed frozen-debt export surface здесь не требуется."
+        }
+    };
+    json!({
+        "model_version": contract
+            .client_limit_reviewed_frozen_debt_export_surface_version
+            .clone(),
+        "state": state,
+        "review_required": review_required,
+        "export_ready_report_only": export_ready_report_only,
+        "surface_kind": if export_ready_report_only {
+            json!("reviewed_frozen_debt_report_only")
+        } else {
+            Value::Null
+        },
+        "exact_pair_available": exact_pair_available,
+        "raw_exact_history_available": exact_pair_available,
+        "blocking_component": frozen_gap_review_surface["blocking_component"].clone(),
+        "missing_live_events": frozen_gap_review_surface["missing_live_events"].clone(),
+        "irrecoverable_missing_live_events": frozen_gap_review_surface
+            ["irrecoverable_missing_live_events"]
+            .clone(),
+        "recoverable_missing_live_events": frozen_gap_review_surface
+            ["recoverable_missing_live_events"]
+            .clone(),
+        "resolution_condition": frozen_gap_review_surface["resolution_condition"].clone(),
+        "allowed_claims": allowed_claims,
+        "forbidden_claims": forbidden_claims,
+        "required_disclosures": required_disclosures,
+        "propagated_surfaces": propagated_surfaces,
+        "note": note,
+    })
+}
+
 fn build_client_limit_meter_alignment(
     contract: &TokenBudgetContractConfig,
     surface_kind: &str,
@@ -17647,7 +17804,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["contractual_evidence_pack_version"],
-            "contractual-evidence-pack-v20"
+            "contractual-evidence-pack-v21"
         );
         assert_eq!(
             token_event["contract"]["settlement_lifecycle_model_version"],
@@ -19996,7 +20153,7 @@ effective_to_epoch_ms = 2000
         )
         .expect("statement export preview");
 
-        assert_eq!(preview["model_version"], "contractual-statement-export-v20");
+        assert_eq!(preview["model_version"], "contractual-statement-export-v21");
         assert_eq!(preview["export_status"], "review_ready_report_only");
         assert_eq!(preview["settlement_stage"], "measured_open_report_only");
         assert_eq!(preview["settlement_stage_family"], "measured_report_only");
@@ -20173,6 +20330,14 @@ effective_to_epoch_ms = 2000
             preview["client_limit_boundary_semantics"]["continuity_boundary_rollup"]["observed_tokens"],
             50329
         );
+        assert_eq!(
+            preview["reviewed_frozen_debt_export_surface"]["model_version"],
+            "client-limit-reviewed-frozen-debt-export-surface-v1"
+        );
+        assert_eq!(
+            preview["reviewed_frozen_debt_export_surface"]["state"],
+            "not_applicable"
+        );
         assert_eq!(preview["included_events_count"], 1);
         assert_eq!(preview["excluded_events_count"], 1);
         assert_eq!(
@@ -20184,7 +20349,7 @@ effective_to_epoch_ms = 2000
         assert_eq!(preview["evidence_pack_available"], true);
         assert_eq!(
             preview["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v11"
+            "settlement-report-preview-v12"
         );
         assert_eq!(
             preview["settlement_report_preview"]["client_limit_boundary_semantics"]["continuity_boundary_rollup"]
@@ -20333,7 +20498,7 @@ effective_to_epoch_ms = 2000
                             }
                         },
                         "settlement_report_preview": {
-                            "model_version": "settlement-report-preview-v11",
+                            "model_version": "settlement-report-preview-v12",
                             "settlement_report_id": "preview-hash"
                         },
                         "customer_contractual_boundary": {
@@ -20433,7 +20598,7 @@ effective_to_epoch_ms = 2000
         .expect("evidence pack");
 
         let payload = &pack["contractual_evidence_pack"];
-        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v20");
+        assert_eq!(payload["pack_version"], "contractual-evidence-pack-v21");
         assert_eq!(
             payload["settlement_stage"],
             "measured_review_ready_report_only"
@@ -20579,7 +20744,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             payload["settlement_report_preview"]["model_version"],
-            "settlement-report-preview-v11"
+            "settlement-report-preview-v12"
         );
         assert_eq!(
             payload["client_limit_boundary_semantics"]["review_state"],
@@ -20588,6 +20753,10 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             payload["client_limit_boundary_semantics"]["continuity_boundary_rollup"]["observed_tokens"],
             50329
+        );
+        assert_eq!(
+            payload["reviewed_frozen_debt_export_surface"]["model_version"],
+            "client-limit-reviewed-frozen-debt-export-surface-v1"
         );
         assert_eq!(
             payload["settlement_report_preview"]["customer_contractual_boundary"]["surface_kind"],
@@ -20847,6 +21016,45 @@ effective_to_epoch_ms = 2000
                 .as_str()
                 .unwrap_or_default()
                 .contains("raw exact history")
+        );
+    }
+
+    #[test]
+    fn reviewed_frozen_debt_export_surface_is_report_only_when_review_required() {
+        let contract = contract_fixture();
+        let surface = super::build_reviewed_frozen_debt_export_surface(
+            &contract,
+            &json!({
+                "same_meter_as_client_limit": false,
+                "exact_pair_status": {
+                    "state": "exact_pair_blocked",
+                    "exact_pair_available": false
+                },
+                "frozen_gap_review_surface": {
+                    "state": "review_required",
+                    "review_required": true,
+                    "blocking_component": "tool_overhead_outside_retrieval",
+                    "missing_live_events": 13,
+                    "irrecoverable_missing_live_events": 13,
+                    "recoverable_missing_live_events": 0,
+                    "resolution_condition": "freeze_irrecoverable_gap_or_keep_exact_pair_unavailable"
+                }
+            }),
+        );
+        assert_eq!(
+            surface["state"],
+            "reviewed_frozen_debt_export_ready_report_only"
+        );
+        assert_eq!(
+            surface["surface_kind"],
+            "reviewed_frozen_debt_report_only"
+        );
+        assert_eq!(
+            surface["forbidden_claims"],
+            json!([
+                "claim_raw_exact_history",
+                "claim_exact_same_meter_pair_materialized"
+            ])
         );
     }
 

@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 13:45 MSK
-Ручная сверка guide/docs: 2026-03-27 13:45 MSK
+modified_at: 2026-03-27 14:03 MSK
+Ручная сверка guide/docs: 2026-03-27 14:03 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1831,9 +1831,9 @@ preview, а не только raw count.
   - это уже customer-facing review surface с hashes и contract states, но всё ещё строго
     `report_only`, а не invoice.
   - export/evidence surface versions теперь подняты до:
-    - `contractual-statement-export-v20`
-    - `settlement-report-preview-v11`
-    - `contractual-evidence-pack-v20`
+    - `contractual-statement-export-v21`
+    - `settlement-report-preview-v12`
+    - `contractual-evidence-pack-v21`
   потому что customer-facing payload теперь уже явно различает:
     - `customer review ready`
     - `internal money arithmetic ready`
@@ -1852,6 +1852,7 @@ preview, а не только raw count.
   - `client_limit_continuity_boundary_rollup_version = client-limit-continuity-boundary-rollup-v2`
   - `client_limit_pre_amai_baseline_source_version = client-limit-pre-amai-baseline-source-v2`
   - `client_limit_frozen_gap_review_surface_version = client-limit-frozen-gap-review-surface-v1`
+  - `client_limit_reviewed_frozen_debt_export_surface_version = client-limit-reviewed-frozen-debt-export-surface-v1`
   - начиная с `client-limit-meter-alignment-v12` `tool_overhead_observation_source` и
     `exact_pair_status` различают:
     - временный recoverable measurement lag;
@@ -1871,6 +1872,12 @@ preview, а не только raw count.
   - тот же decision point теперь materialized и machine-readable:
     `frozen_gap_review_surface` фиксирует neutral `review_required` state,
     allowed paths и запрет `claim_raw_exact_history` без отдельного решения;
+  - поверх него теперь materialized и отдельный
+    `reviewed_frozen_debt_export_surface`:
+    - он разрешает только report-only historical debt review;
+    - он отдельно запрещает `claim_raw_exact_history` и
+      `claim_exact_same_meter_pair_materialized`;
+    - этот surface не чинит lifetime exactness, а только даёт честный export contour;
   - `contractual_statement_summary`, `statement_export_preview.json`,
     `settlement_report_preview.json` и
     `contractual_evidence_pack.json` теперь отдельно несут
@@ -1878,6 +1885,9 @@ preview, а не только raw count.
     - measured `strict_client_meter_slice`
     - explicit `continuity_boundary_rollup`
     - без притворства, что этот boundary уже эквивалентен full client-limit meter
+  - те же review/export surfaces теперь дополнительно несут
+    `reviewed_frozen_debt_export_surface`, чтобы lifetime historical debt можно было
+    вынести в отдельный report-only export без подмены raw exact history;
   - тот же compact surface теперь поднимается и в top-level `headline` token-report'а;
     headline остаётся savings-KPI, но если в scope есть explicit continuity boundary или
     only-partial strict slice, его `note` теперь прямо говорит, что headline нельзя читать

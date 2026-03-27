@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 13:45 MSK
-Ручная сверка guide/docs: 2026-03-27 13:45 MSK
+modified_at: 2026-03-27 14:03 MSK
+Ручная сверка guide/docs: 2026-03-27 14:03 MSK
 
 # Token Ledger
 
@@ -1352,9 +1352,10 @@ Hashes по line items нужны затем, чтобы:
 - и только потом, в будущем, settlement/dispute workflow.
 
 Текущие surface versions для этого слоя:
-- `contractual-statement-export-v20`
-- `settlement-report-preview-v11`
-- `contractual-evidence-pack-v20`
+- `contractual-statement-export-v21`
+- `settlement-report-preview-v12`
+- `contractual-evidence-pack-v21`
+- `client-limit-reviewed-frozen-debt-export-surface-v1`
 - `client-limit-meter-alignment-v9`
 - `client-limit-baseline-equivalence-v3`
 - `client-limit-strict-meter-slice-v1`
@@ -1452,6 +1453,14 @@ client-limit-pre-amai-baseline-source-v2` этот status уже не advisory-o
   - `forbidden_paths = [claim_raw_exact_history]`
   - surface не выбирает продуктовую политику сам, а только фиксирует,
     что raw exact history уже недоступна и требуется отдельное решение.
+- следующий слой теперь materialized как
+  `reviewed_frozen_debt_export_surface`:
+  - `state = reviewed_frozen_debt_export_ready_report_only`, если frozen gap уже признан review-required;
+  - surface разрешает только report-only export historical debt;
+  - `forbidden_claims` отдельно запрещают `claim_raw_exact_history` и
+    `claim_exact_same_meter_pair_materialized`;
+  - этот contour обязан жить только в review/export surfaces и не имеет права
+    превращать lifetime-карточку в exact.
 
 ## Preliminary vs stable
 
