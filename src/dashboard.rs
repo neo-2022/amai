@@ -6702,18 +6702,23 @@ fn client_turn_pressure_guard(
     let tiny_amai_share = full_turn_savings_pct
         .map(|value| value <= 1.0)
         .unwrap_or(true);
-    let extreme_context_pressure = context_used_percent >= 85.0;
-    let high_context_pressure = context_used_percent >= 70.0;
+    let extreme_context_pressure = context_used_percent >= 80.0;
+    let high_context_pressure = context_used_percent >= 65.0;
+    let large_live_thread = turn_total_tokens >= 120_000 || context_used_percent >= 50.0;
+    let huge_live_thread = turn_total_tokens >= 150_000 || context_used_percent >= 60.0;
+    let emergency_primary_limit = primary_remaining_percent <= 10.0;
     let critical_primary_limit = primary_remaining_percent <= 20.0;
     let low_primary_limit = primary_remaining_percent <= 35.0;
 
-    let (severity, status_label) = if ((extreme_context_pressure && critical_primary_limit)
+    let (severity, status_label) = if (((extreme_context_pressure && critical_primary_limit)
         || context_used_percent >= 90.0)
-        && tiny_amai_share
+        && tiny_amai_share)
+        || (emergency_primary_limit && huge_live_thread && weak_amai_share)
     {
         ("critical", "новый чат нужен сейчас")
-    } else if ((high_context_pressure && low_primary_limit) || extreme_context_pressure)
-        && weak_amai_share
+    } else if (((high_context_pressure && low_primary_limit) || extreme_context_pressure)
+        && weak_amai_share)
+        || (critical_primary_limit && large_live_thread && weak_amai_share)
     {
         ("alert", "новый чат рекомендован")
     } else {
@@ -10328,6 +10333,23 @@ mod tests {
         assert!(
             super::client_turn_pressure_guard(&meter, Some((22420, 22000, 420, 1.87))).is_none()
         );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_triggers_on_nearly_exhausted_primary_limit_even_below_70pct() {
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 178971,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 69.26,
+            "primary_limit_remaining_percent": 3.0,
+            "secondary_limit_remaining_percent": 71.0
+        });
+        let guard =
+            super::client_turn_pressure_guard(&meter, Some((179416, 178971, 445, 0.25)))
+                .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
     }
 
     #[test]
