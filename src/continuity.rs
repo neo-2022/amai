@@ -3085,6 +3085,10 @@ fn summarize_startup_next_action(value: &Value) -> Option<String> {
     Some(format!("{action_kind}: {headline} -> {next_step}"))
 }
 
+fn compact_prompt_fragment(value: &str, max_chars: usize) -> String {
+    collapse_answer_text(value, max_chars)
+}
+
 fn summarize_startup_next_action_for_prompt(value: &Value) -> Option<String> {
     let action_kind = value["action_kind"]
         .as_str()
@@ -3093,10 +3097,13 @@ fn summarize_startup_next_action_for_prompt(value: &Value) -> Option<String> {
         .as_str()
         .filter(|item| !item.is_empty())
         .unwrap_or("ещё нет данных");
+    let compact_headline = compact_prompt_fragment(headline, 64);
     match action_kind {
-        "resume_required_return_task" => Some(format!("Сначала: вернись к линии: {headline}")),
+        "resume_required_return_task" => {
+            Some(format!("Сначала: вернись к линии: {compact_headline}"))
+        }
         "continue_active_workline" => None,
-        _ => Some(format!("Сначала: {action_kind} -> {headline}")),
+        _ => Some(format!("Сначала: {action_kind} -> {compact_headline}")),
     }
 }
 
@@ -3110,16 +3117,21 @@ fn render_chat_start_prompt(
     let headline = handoff_summary["headline"]
         .as_str()
         .unwrap_or("ещё нет данных");
+    let compact_headline = compact_prompt_fragment(headline, 80);
     let next_step = handoff_summary["next_step"]
         .as_str()
         .and_then(normalize_next_step_value)
         .unwrap_or_else(|| "ещё нет данных".to_string());
+    let compact_next_step = compact_prompt_fragment(&next_step, 120);
     let current_goal = restore_node
         .and_then(|value| value["current_goal"].as_str())
         .filter(|value| !value.is_empty())
         .unwrap_or(headline);
+    let compact_current_goal = compact_prompt_fragment(current_goal, 80);
     let materialized_summary =
         restore_node.and_then(|value| summarize_materialized_notes(&value["materialized_notes"]));
+    let compact_materialized_summary =
+        materialized_summary.as_deref().map(|value| compact_prompt_fragment(value, 88));
     let execctl_resume_obligation = restore_node
         .map(|value| summarize_execctl_resume_obligation(&value["execctl_resume_contract"]))
         .unwrap_or_else(|| default_execctl_resume_obligation(None, "clear"));
@@ -3139,25 +3151,25 @@ fn render_chat_start_prompt(
         "CHAT_START_RESTORE".to_string(),
         format!("Project: {} ({})", project.display_name, project.code),
         format!("Namespace: {}", namespace.code),
-        format!("Линия: {headline}"),
-        format!("Шаг: {next_step}"),
+        format!("Линия: {compact_headline}"),
+        format!("Шаг: {compact_next_step}"),
     ];
-    if current_goal != headline {
-        lines.push(format!("Цель: {current_goal}"));
+    if compact_current_goal != compact_headline {
+        lines.push(format!("Цель: {compact_current_goal}"));
     }
-    if let Some(value) = materialized_summary {
+    if let Some(value) = compact_materialized_summary {
         lines.push(format!("Сделано: {value}"));
     }
     if let Some(value) = summarize_startup_next_action_for_prompt(&startup_next_action) {
         lines.push(value);
     }
     if execctl_resume_state == "pending_return_queue_present" {
-        lines.push("Не переключайся на другую линию до обязательного возврата.".to_string());
+        lines.push("Не переключайся до возврата.".to_string());
     }
     if restore_confidence == "preliminary" {
         lines.push("Recovery: preliminary.".to_string());
     }
-    lines.push("Правило: follow startup pack; continuity повторно не поднимай.".to_string());
+    lines.push("Правило: follow pack; continuity не поднимай.".to_string());
     lines.join("\n")
 }
 
@@ -4903,9 +4915,9 @@ mod tests {
         assert!(prompt.contains(
             "Сначала: вернись к линии: Same-meter spend control"
         ));
-        assert!(prompt.contains("Не переключайся на другую линию до обязательного возврата."));
+        assert!(prompt.contains("Не переключайся до возврата."));
         assert!(
-            prompt.contains("Правило: follow startup pack; continuity повторно не поднимай.")
+            prompt.contains("Правило: follow pack; continuity не поднимай.")
         );
         assert!(!prompt.contains("Недавнее:"));
         assert!(!prompt.contains("Файлы:"));
@@ -4949,6 +4961,14 @@ mod tests {
             node["execctl_active_lease"]["storage_lane"],
             json!("ami.execctl_task_leases")
         );
+    }
+
+    #[test]
+    fn compact_prompt_fragment_truncates_long_text() {
+        let value = "Rolling-window token card now isolates historical startup drag from fresh profitable startup";
+        let compact = super::compact_prompt_fragment(value, 36);
+        assert!(compact.ends_with("..."));
+        assert!(compact.chars().count() <= 39);
     }
 
     #[test]
