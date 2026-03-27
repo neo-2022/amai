@@ -1454,20 +1454,6 @@ pub fn render_html(refresh_ms: u64) -> String {
     const tooltipLayer = document.getElementById("tooltip-layer");
     const tooltipLayerContent = document.getElementById("tooltip-layer-content");
     const tooltipCopyBtn = document.getElementById("tooltip-copy-btn");
-    const INTERACTION_HOLD_SELECTOR = [
-      ".has-tooltip:hover",
-      ".tooltip-layer.visible:hover",
-      ".tooltip-layer.visible:focus-within",
-      ".side-block:hover",
-      ".metric-card:hover",
-      ".service-card:hover",
-      ".glossary-card:hover",
-      ".link-card:hover",
-      ".compare-card:hover",
-      ".compare-metric:hover",
-      ".hero-main:hover",
-      ".hero-side:hover",
-    ].join(", ");
     let refreshInFlight = false;
     let interactionHoldUntil = 0;
     let activeTooltipTarget = null;
@@ -1798,11 +1784,6 @@ pub fn render_html(refresh_ms: u64) -> String {
       );
     }
 
-    function hasInteractiveFocus() {
-      const active = document.activeElement;
-      return Boolean(active && active !== document.body && active.closest(".shell"));
-    }
-
     function isRefreshPaused() {
       if (Date.now() < interactionHoldUntil) {
         return true;
@@ -1810,10 +1791,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       if (hasActiveSelection()) {
         return true;
       }
-      if (hasInteractiveFocus()) {
-        return true;
-      }
-      return Boolean(document.querySelector(INTERACTION_HOLD_SELECTOR));
+      return false;
     }
 
     const cardInteractionState = new Map();
@@ -2620,7 +2598,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       }
     }
 
-    document.addEventListener("pointerdown", () => extendInteractionHold(6), true);
+    document.addEventListener("pointerdown", () => extendInteractionHold(2), true);
     document.addEventListener("selectionchange", () => {
       updateTooltipCopyButton();
       if (hasActiveSelection()) {
@@ -2632,9 +2610,6 @@ pub fn render_html(refresh_ms: u64) -> String {
         event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
       if (tooltipTarget) {
         showTooltip(tooltipTarget);
-      }
-      if (event.target && event.target.closest && event.target.closest(".shell")) {
-        extendInteractionHold(8);
       }
     }, true);
     document.addEventListener("focusout", (event) => {
@@ -2650,15 +2625,6 @@ pub fn render_html(refresh_ms: u64) -> String {
         event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
       if (tooltipTarget) {
         showTooltip(tooltipTarget);
-      }
-      if (
-        event.target &&
-        event.target.closest &&
-        event.target.closest(
-          ".has-tooltip, .side-block, .metric-card, .service-card, .glossary-card, .link-card, .compare-card, .compare-metric, .hero-main, .hero-side"
-        )
-      ) {
-        extendInteractionHold(5);
       }
     }, true);
     document.addEventListener("mouseout", (event) => {
@@ -2679,7 +2645,6 @@ pub fn render_html(refresh_ms: u64) -> String {
     document.addEventListener("scroll", () => positionTooltip(), true);
 
     if (tooltipLayer) {
-      tooltipLayer.addEventListener("mouseenter", () => extendInteractionHold(8), true);
       tooltipLayer.addEventListener("mouseleave", (event) => {
         if (
           tooltipContainsNode(event.relatedTarget) ||
@@ -2724,6 +2689,13 @@ pub fn render_html(refresh_ms: u64) -> String {
         applyMasonryGrid(machineCards);
       }
     });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        loadDashboard(true);
+      }
+    });
+    window.addEventListener("focus", () => loadDashboard(true));
+    window.addEventListener("pageshow", () => loadDashboard(true));
 
     loadDashboard(true);
     setInterval(() => loadDashboard(false), REFRESH_MS);
@@ -10433,7 +10405,7 @@ mod tests {
         agent_scope_activity_card, artifact_cleanup_warning, benchmark_qdrant_live_card,
         browser_base_url, build_benchmark_cards, build_continuity_correctness_card,
         build_degradation_model_card, build_hero_cards, build_links, build_machine_cards,
-        build_top_cards, format_ms, format_time_compare_pair, human_elapsed_ms,
+        build_top_cards, format_ms, format_time_compare_pair, human_elapsed_ms, render_html,
         live_latency_compare_card, monitoring_url, working_state_live_card, worst_status,
     };
     use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary};
@@ -10479,6 +10451,15 @@ mod tests {
     #[test]
     fn browser_url_rewrites_unspecified_v4() {
         assert_eq!(browser_base_url("0.0.0.0:9464"), "http://127.0.0.1:9464");
+    }
+
+    #[test]
+    fn dashboard_html_refresh_contract_is_live_on_focus_and_visibility() {
+        let html = render_html(1000);
+        assert!(html.contains("document.addEventListener(\"visibilitychange\""));
+        assert!(html.contains("window.addEventListener(\"focus\", () => loadDashboard(true));"));
+        assert!(html.contains("window.addEventListener(\"pageshow\", () => loadDashboard(true));"));
+        assert!(!html.contains("INTERACTION_HOLD_SELECTOR"));
     }
 
     #[test]
