@@ -608,6 +608,12 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
 }
 
 pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<()> {
+    let payload = import_sources_payload(cfg, args).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+async fn import_sources_payload(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<Value> {
     let mut db = postgres::connect_admin(cfg).await?;
     let s3_client = s3::connect(cfg).await?;
     let repo_root = canonical_string(&args.repo_root)?;
@@ -833,8 +839,7 @@ pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Res
         }
     });
     let _ = postgres::insert_observability_snapshot(&db, "continuity_import", &payload).await?;
-    println!("{}", serde_json::to_string_pretty(&payload)?);
-    Ok(())
+    Ok(payload)
 }
 
 pub fn enrich_thread_index_file(args: &ContinuityThreadIndexEnrichArgs) -> Result<()> {
@@ -1829,20 +1834,22 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
 
     let recommended_headline = restore_node
         .and_then(|value| value["current_goal"].as_str())
-        .filter(|value| !value.is_empty())
+        .filter(|value| is_meaningful_restore_value(value))
         .or_else(|| {
             context.handoff_summary["headline"]
                 .as_str()
-                .filter(|value| !value.is_empty())
+                .filter(|value| is_meaningful_restore_value(value))
         })
         .unwrap_or("Продолжить активную рабочую линию");
     let recommended_next_step = restore_node
         .and_then(|value| value["next_step"].as_str())
         .and_then(normalize_next_step_value)
+        .filter(|value| is_meaningful_restore_value(value))
         .or_else(|| {
             context.handoff_summary["next_step"]
                 .as_str()
                 .and_then(normalize_next_step_value)
+                .filter(|value| is_meaningful_restore_value(value))
         })
         .unwrap_or_else(|| "продолжить работу в свежем чате через continuity startup".to_string());
     let headline = args
@@ -1899,12 +1906,20 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
         .as_str()
         .map(ToOwned::to_owned);
     let continuity_import = if continuity_import_missing {
-        build_rotate_chat_import_step(
-            &context.project.code,
-            &context.project.display_name,
-            &context.project.repo_root,
-            &context.namespace.code,
-        )?
+        let bootstrap_file =
+            write_project_bootstrap_snapshot(&context.project.code, &context.project.repo_root)?;
+        let import_args = ContinuityImportArgs {
+            project: context.project.code.clone(),
+            display_name: context.project.display_name.clone(),
+            repo_root: PathBuf::from(&context.project.repo_root),
+            namespace: context.namespace.code.clone(),
+            bootstrap_file,
+            thread_index_file: None,
+            active_workline_file: None,
+            memory_dir: None,
+            transcript_limit: Some(3),
+        };
+        Some(import_sources_payload(cfg, &import_args).await?["continuity_import"].clone())
     } else {
         None
     };
@@ -1926,7 +1941,7 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
             "blocked_reply_text": blocked_reply_text,
             "action_bundle": action_bundle,
             "handoff": handoff_payload["continuity_handoff"].clone(),
-            "startup_requires_continuity_import": continuity_import_missing,
+            "startup_requires_continuity_import": false,
             "continuity_import": continuity_import,
             "operator_flow": {
                 "rotate_helper_command": rotate_helper_command,
@@ -1971,10 +1986,13 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
     );
     println!();
     println!("Готовые действия:");
-    if let Some(command) = payload["continuity_rotate_chat"]["continuity_import"]["import_command"]
-        .as_str()
+    if let Some(imported_at) = payload["continuity_rotate_chat"]["continuity_import"]["imported_at_epoch_ms"]
+        .as_u64()
     {
-        println!("- Сначала materialize continuity import: {command}");
+        println!(
+            "- Continuity import materialized: {}",
+            human_epoch_ms(Some(imported_at))
+        );
     }
     if let Some(command) = payload["continuity_rotate_chat"]["operator_flow"]["startup_command"]
         .as_str()
@@ -2032,32 +2050,7 @@ fn build_rotate_chat_details(client_budget_guard: &Value, headline: &str, next_s
     lines.join("\n")
 }
 
-fn build_rotate_chat_import_step(
-    project_code: &str,
-    display_name: &str,
-    repo_root: &str,
-    namespace_code: &str,
-) -> Result<Option<Value>> {
-    let bootstrap_file = write_project_bootstrap_snapshot(project_code, repo_root)?;
-    let Some(bootstrap_file) = bootstrap_file else {
-        return Ok(None);
-    };
-    let import_command = format!(
-        "./scripts/import_continuity.sh --project {} --display-name {} --repo-root {} --namespace {} --bootstrap-file {} --transcript-limit 3",
-        shell_quote(project_code),
-        shell_quote(display_name),
-        shell_quote(repo_root),
-        shell_quote(namespace_code),
-        shell_quote(&bootstrap_file.display().to_string()),
-    );
-    Ok(Some(json!({
-        "required": true,
-        "bootstrap_file": bootstrap_file.display().to_string(),
-        "import_command": import_command,
-    })))
-}
-
-fn write_project_bootstrap_snapshot(project_code: &str, repo_root: &str) -> Result<Option<PathBuf>> {
+fn write_project_bootstrap_snapshot(project_code: &str, repo_root: &str) -> Result<PathBuf> {
     let memory_home = std::env::var("MEMORY_HOME")
         .ok()
         .map(PathBuf::from)
@@ -2070,18 +2063,19 @@ fn write_project_bootstrap_snapshot(project_code: &str, repo_root: &str) -> Resu
         .join("transcripts")
         .join("codex")
         .join("thread_index.json");
-    if !thread_index_path.is_file() {
-        return Ok(None);
-    }
-    let raw = fs::read_to_string(&thread_index_path)
-        .with_context(|| format!("failed to read {}", thread_index_path.display()))?;
-    let mut index: ContinuityThreadIndexFile = serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse {}", thread_index_path.display()))?;
-    index.threads.retain(|entry| entry.cwd.starts_with(repo_root));
-    if index.threads.is_empty() {
-        return Ok(None);
-    }
-    index.threads.sort_by(|left, right| right.source_rollout.cmp(&left.source_rollout));
+    let index = if thread_index_path.is_file() {
+        let raw = fs::read_to_string(&thread_index_path)
+            .with_context(|| format!("failed to read {}", thread_index_path.display()))?;
+        let mut index: ContinuityThreadIndexFile = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse {}", thread_index_path.display()))?;
+        index.threads.retain(|entry| entry.cwd.starts_with(repo_root));
+        index.threads.sort_by(|left, right| right.source_rollout.cmp(&left.source_rollout));
+        index
+    } else {
+        ContinuityThreadIndexFile {
+            threads: Vec::new(),
+        }
+    };
     let amai_repo_root = crate::config::discover_repo_root(None)?;
     let output_path = amai_repo_root
         .join("state")
@@ -2138,7 +2132,7 @@ fn write_project_bootstrap_snapshot(project_code: &str, repo_root: &str) -> Resu
     }
     fs::write(&output_path, lines.join("\n") + "\n")
         .with_context(|| format!("failed to write {}", output_path.display()))?;
-    Ok(Some(output_path))
+    Ok(output_path)
 }
 
 fn slugify_repo_root(value: &str) -> String {
@@ -2160,6 +2154,11 @@ fn slugify_repo_root(value: &str) -> String {
     } else {
         slug
     }
+}
+
+fn is_meaningful_restore_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed != "ещё нет данных"
 }
 
 async fn capture_handoff_payload(
@@ -5467,6 +5466,16 @@ mod tests {
         let compact = super::compact_prompt_fragment(value, 36);
         assert!(compact.ends_with("..."));
         assert!(compact.chars().count() <= 39);
+    }
+
+    #[test]
+    fn meaningful_restore_value_rejects_placeholder_text() {
+        assert!(!super::is_meaningful_restore_value(""));
+        assert!(!super::is_meaningful_restore_value("   "));
+        assert!(!super::is_meaningful_restore_value("ещё нет данных"));
+        assert!(super::is_meaningful_restore_value(
+            "Продолжить активную рабочую линию"
+        ));
     }
 
     #[test]
