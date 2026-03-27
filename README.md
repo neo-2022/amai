@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 12:52 MSK
-Ручная сверка guide/docs: 2026-03-27 12:52 MSK
+modified_at: 2026-03-27 13:22 MSK
+Ручная сверка guide/docs: 2026-03-27 13:22 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1845,12 +1845,22 @@ preview, а не только raw count.
     direct turn attach или rollout turn timeline и не может быть честно разложено
     по каждому retrieval event без дублирования токенов.
   - operational metering contract теперь ещё несёт:
-  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v10`
+  - `client_limit_meter_alignment_version = client-limit-meter-alignment-v11`
   - `client_limit_baseline_equivalence_version = client-limit-baseline-equivalence-v4`
   - `client_limit_strict_meter_slice_version = client-limit-strict-meter-slice-v1`
   - `client_limit_explicit_boundary_surface_version = client-limit-explicit-boundary-surface-v2`
   - `client_limit_continuity_boundary_rollup_version = client-limit-continuity-boundary-rollup-v2`
   - `client_limit_pre_amai_baseline_source_version = client-limit-pre-amai-baseline-source-v2`
+  - начиная с `client-limit-meter-alignment-v11` `tool_overhead_observation_source` и
+    `exact_pair_status` различают:
+    - временный recoverable measurement lag;
+    - mixed lag + irrecoverable debt;
+    - pure `irrecoverable historical debt only`;
+  - если recoverable lag уже снят и остаётся только irrecoverable historical debt,
+    blocker больше не притворяется обычным `partially_measured`:
+    он поднимает `tool_overhead_outside_retrieval_irrecoverable_debt`,
+    `frozen_gap_candidate = true` и
+    `resolution_condition = freeze_irrecoverable_gap_or_keep_exact_pair_unavailable`;
   - `contractual_statement_summary`, `statement_export_preview.json`,
     `settlement_report_preview.json` и
     `contractual_evidence_pack.json` теперь отдельно несут

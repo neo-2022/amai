@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 12:52 MSK
-Ручная сверка guide/docs: 2026-03-27 12:52 MSK
+modified_at: 2026-03-27 13:22 MSK
+Ручная сверка guide/docs: 2026-03-27 13:22 MSK
 
 # Token Ledger
 
@@ -1419,7 +1419,7 @@ contract surface:
 - `same_meter_resume_possible`
 - `current_source_ref`
 
-Начиная с `client-limit-meter-alignment-v10 / client-limit-baseline-equivalence-v4 /
+Начиная с `client-limit-meter-alignment-v11 / client-limit-baseline-equivalence-v4 /
 client-limit-pre-amai-baseline-source-v2` этот status уже не advisory-only:
 - live `current_session / rolling_window` могут materialize-ить truthful pre-Amai baseline
   для continuity из `continuity_import + continuity_handoff` snapshots;
@@ -1427,6 +1427,18 @@ client-limit-pre-amai-baseline-source-v2` этот status уже не advisory-o
   становятся допустимыми без guessed baseline;
 - dashboard получает право показывать exact pair `без Amai / с Amai / экономия / процент`
   по модели именно в том же meter, которым клиент считает лимит.
+- начиная с `client-limit-meter-alignment-v11` tool-overhead blocker дополнительно
+  различает три режима:
+  - `recoverable_measurement_lag_only`;
+  - `mixed_measurement_lag_and_irrecoverable_debt`;
+  - `irrecoverable_historical_debt_only`;
+- когда recoverable lag уже снят и остаётся только irrecoverable historical debt,
+  `exact_pair_status` больше не помечает этот хвост как обычный
+  `tool_overhead_outside_retrieval_partially_measured`;
+  вместо этого поднимаются:
+  - `blocking_reason = tool_overhead_outside_retrieval_irrecoverable_debt`
+  - `frozen_gap_candidate = true`
+  - `resolution_condition = freeze_irrecoverable_gap_or_keep_exact_pair_unavailable`
 
 ## Preliminary vs stable
 

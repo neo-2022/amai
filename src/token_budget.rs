@@ -696,7 +696,7 @@ fn default_agent_cycle_model_version() -> String {
 }
 
 fn default_client_limit_meter_alignment_version() -> String {
-    "client-limit-meter-alignment-v10".to_string()
+    "client-limit-meter-alignment-v11".to_string()
 }
 
 fn default_client_limit_baseline_equivalence_version() -> String {
@@ -12793,6 +12793,8 @@ fn tool_overhead_observation_source_status(
                 .is_some_and(is_irrecoverable_tool_overhead_source_state)
         })
         .count() as u64;
+    let recoverable_missing_live_events =
+        (missing_events.len() as u64).saturating_sub(irrecoverable_missing_live_events);
     let recoverability_state = if missing_events.is_empty() {
         "not_applicable"
     } else if irrecoverable_missing_live_events == 0 {
@@ -12802,6 +12804,17 @@ fn tool_overhead_observation_source_status(
     } else {
         "mixed_recoverable_and_irrecoverable"
     };
+    let gap_semantics = if target_events.is_empty() {
+        "not_applicable"
+    } else if missing_events.is_empty() {
+        "fully_materialized"
+    } else if irrecoverable_missing_live_events == 0 {
+        "recoverable_measurement_lag_only"
+    } else if recoverable_missing_live_events == 0 {
+        "irrecoverable_historical_debt_only"
+    } else {
+        "mixed_measurement_lag_and_irrecoverable_debt"
+    };
 
     json!({
         "source_kind": "context_pack_payload_attach_v1",
@@ -12809,6 +12822,8 @@ fn tool_overhead_observation_source_status(
             "no_tool_overhead_target_scope"
         } else if missing_events.is_empty() {
             "tool_overhead_source_covers_missing_scope"
+        } else if irrecoverable_missing_live_events == missing_events.len() as u64 {
+            "tool_overhead_irrecoverable_debt_only"
         } else {
             "tool_overhead_source_partial_scope_overlap"
         },
@@ -12816,8 +12831,9 @@ fn tool_overhead_observation_source_status(
         "observed_live_events": observed_live_events,
         "missing_live_events": missing_events.len(),
         "recoverability_state": recoverability_state,
+        "gap_semantics": gap_semantics,
         "irrecoverable_missing_live_events": irrecoverable_missing_live_events,
-        "recoverable_missing_live_events": (missing_events.len() as u64).saturating_sub(irrecoverable_missing_live_events),
+        "recoverable_missing_live_events": recoverable_missing_live_events,
         "missing_source_state_sample": missing_source_state_sample.into_iter().take(8).collect::<Vec<_>>(),
         "missing_class_sample": missing_class_sample.into_iter().take(8).collect::<Vec<_>>(),
         "missing_context_pack_id_sample": missing_events
@@ -13606,7 +13622,19 @@ fn build_client_limit_exact_pair_status(
         let target_live_events = tool_overhead_observation_source["target_live_events"]
             .as_u64()
             .unwrap_or(0);
-        let blocking_reason = if observed_live_events > 0 {
+        let irrecoverable_missing_live_events = tool_overhead_observation_source
+            ["irrecoverable_missing_live_events"]
+            .as_u64()
+            .unwrap_or(0);
+        let recoverable_missing_live_events = tool_overhead_observation_source
+            ["recoverable_missing_live_events"]
+            .as_u64()
+            .unwrap_or(0);
+        let blocking_reason = if irrecoverable_missing_live_events > 0
+            && recoverable_missing_live_events == 0
+        {
+            "tool_overhead_outside_retrieval_irrecoverable_debt"
+        } else if observed_live_events > 0 {
             "tool_overhead_outside_retrieval_partially_measured"
         } else {
             "tool_overhead_outside_retrieval_unmeasured"
@@ -13621,13 +13649,22 @@ fn build_client_limit_exact_pair_status(
             "target_live_events": target_live_events,
             "missing_live_events": tool_overhead_observation_source["missing_live_events"].clone(),
             "recoverability_state": tool_overhead_observation_source["recoverability_state"].clone(),
+            "gap_semantics": tool_overhead_observation_source["gap_semantics"].clone(),
             "irrecoverable_missing_live_events": tool_overhead_observation_source["irrecoverable_missing_live_events"].clone(),
-            "resolution_condition": if tool_overhead_observation_source["irrecoverable_missing_live_events"].as_u64().unwrap_or(0) > 0 {
+            "recoverable_missing_live_events": tool_overhead_observation_source["recoverable_missing_live_events"].clone(),
+            "frozen_gap_candidate": irrecoverable_missing_live_events > 0 && recoverable_missing_live_events == 0,
+            "resolution_condition": if irrecoverable_missing_live_events > 0
+                && recoverable_missing_live_events == 0
+            {
+                json!("freeze_irrecoverable_gap_or_keep_exact_pair_unavailable")
+            } else if irrecoverable_missing_live_events > 0 {
                 json!("recover_historical_tool_overhead_source_or_freeze_irrecoverable_gap")
             } else {
                 json!("tool_overhead_source_covers_missing_scope")
             },
-            "note": if tool_overhead_observation_source["irrecoverable_missing_live_events"].as_u64().unwrap_or(0) > 0 {
+            "note": if irrecoverable_missing_live_events > 0 && recoverable_missing_live_events == 0 {
+                Value::String("Whole-cycle exact pair по этому компоненту ещё не materialized: recoverable lag уже снят, но остался только irrecoverable historical source-loss без stored context pack payload. Дальше нужен либо explicit frozen gap, либо exact pair честно остаётся unavailable.".to_string())
+            } else if irrecoverable_missing_live_events > 0 {
                 Value::String("Whole-cycle exact pair по этому компоненту ещё не materialized: часть retrieval live scope уже упирается в irrecoverable source-loss без stored context pack payload, поэтому дальше нужен либо recovery source, либо explicit frozen gap.".to_string())
             } else {
                 Value::String("Whole-cycle exact pair по этому компоненту ещё не materialized: retrieval live scope имеет missing tool_overhead attach и пока даёт только partial same-meter coverage.".to_string())
@@ -17472,7 +17509,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_meter_alignment_version"],
-            "client-limit-meter-alignment-v10"
+            "client-limit-meter-alignment-v11"
         );
         assert_eq!(
             token_event["contract"]["client_limit_baseline_equivalence_version"],
@@ -18077,7 +18114,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v10"
+            "client-limit-meter-alignment-v11"
         );
         assert_eq!(
             preview["client_limit_meter_alignment"]["baseline_equivalence"]["model_version"],
@@ -20829,7 +20866,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["model_version"],
-            "client-limit-meter-alignment-v10"
+            "client-limit-meter-alignment-v11"
         );
         assert_eq!(
             economics["contract"]["client_limit_meter_alignment"]["baseline_equivalence_model_version"],
@@ -21280,26 +21317,33 @@ effective_to_epoch_ms = 2000
             alignment["exact_pair_status"]["state"],
             "exact_pair_blocked"
         );
-        assert_eq!(alignment["exact_pair_status"]["blocking_reason_count"], 1);
+        let blockers = alignment["exact_pair_status"]["blockers"]
+            .as_array()
+            .expect("exact pair blockers");
+        assert!(!blockers
+            .iter()
+            .any(|blocker| blocker["code"].as_str() == Some("assistant_generation")));
+        let tool_blocker = blockers
+            .iter()
+            .find(|blocker| blocker["code"].as_str() == Some("tool_overhead_outside_retrieval"))
+            .expect("tool overhead blocker");
         assert_eq!(
             alignment["exact_pair_status"]["primary_blocking_reason"],
-            "tool_overhead_outside_retrieval_partially_measured"
+            "tool_overhead_outside_retrieval_irrecoverable_debt"
         );
+        assert_eq!(tool_blocker["code"], "tool_overhead_outside_retrieval");
         assert_eq!(
-            alignment["exact_pair_status"]["blockers"][0]["code"],
-            "tool_overhead_outside_retrieval"
-        );
-        assert_eq!(
-            alignment["exact_pair_status"]["blockers"][0]["blocker_kind"],
+            tool_blocker["blocker_kind"],
             "whole_cycle_observation_gap"
         );
         assert_eq!(
-            alignment["exact_pair_status"]["blockers"][0]["recoverability_state"],
+            tool_blocker["recoverability_state"],
             "source_loss_irrecoverable"
         );
+        assert_eq!(tool_blocker["frozen_gap_candidate"], true);
         assert_eq!(
-            alignment["exact_pair_status"]["blockers"][0]["resolution_condition"],
-            "recover_historical_tool_overhead_source_or_freeze_irrecoverable_gap"
+            tool_blocker["resolution_condition"],
+            "freeze_irrecoverable_gap_or_keep_exact_pair_unavailable"
         );
     }
 
@@ -21696,7 +21740,9 @@ effective_to_epoch_ms = 2000
             Some(&super::AssistantGenerationScopeObservation::default()),
         );
 
+        assert_eq!(status["state"], "tool_overhead_irrecoverable_debt_only");
         assert_eq!(status["recoverability_state"], "source_loss_irrecoverable");
+        assert_eq!(status["gap_semantics"], "irrecoverable_historical_debt_only");
         assert_eq!(status["irrecoverable_missing_live_events"], 1);
         assert_eq!(
             status["missing_source_state_sample"][0]["state"],
@@ -21726,7 +21772,9 @@ effective_to_epoch_ms = 2000
             Some(&super::AssistantGenerationScopeObservation::default()),
         );
 
+        assert_eq!(status["state"], "tool_overhead_irrecoverable_debt_only");
         assert_eq!(status["recoverability_state"], "source_loss_irrecoverable");
+        assert_eq!(status["gap_semantics"], "irrecoverable_historical_debt_only");
         assert_eq!(status["irrecoverable_missing_live_events"], 1);
         assert_eq!(
             status["missing_source_state_sample"][0]["state"],
