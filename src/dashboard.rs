@@ -22,6 +22,15 @@ struct InstallState {
     installed_at_epoch_seconds: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HistoricalStartupDrag {
+    older_without_amai_tokens: u64,
+    older_with_amai_tokens: u64,
+    older_delta_tokens: i64,
+    current_continuity_tokens: u64,
+    older_continuity_tokens: u64,
+}
+
 pub fn browser_base_url(bind: &str) -> String {
     let Some((host, port)) = bind.rsplit_once(':') else {
         return format!("http://{bind}");
@@ -3444,6 +3453,16 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         rolling_note.push(' ');
         rolling_note.push_str(&sentence);
     }
+    let rolling_historical_startup_drag = historical_startup_drag(
+        current_session_exact_pair,
+        rolling_window_exact_pair,
+        current_session,
+        rolling_window,
+    );
+    if let Some(sentence) = historical_startup_drag_note_sentence(rolling_historical_startup_drag) {
+        rolling_note.push(' ');
+        rolling_note.push_str(&sentence);
+    }
     let rolling_boundary_pressure =
         continuity_boundary_pressure(rolling_window, rolling_window_alignment);
     if let Some((boundary_tokens, strict_tokens)) = rolling_boundary_pressure {
@@ -3458,6 +3477,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         rolling_window_statement,
         rolling_window_alignment,
     ));
+    if let Some(row) = historical_startup_drag_metric_row(rolling_historical_startup_drag) {
+        rolling_rows.push(row);
+    }
     if let Some(row) = exact_model_component_delta_metric_row(rolling_window_alignment) {
         rolling_rows.push(row);
     }
@@ -3505,6 +3527,19 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                 "Статус требует внимания по следующим причинам:\n- В рабочем окне savings-KPI пока не показывает положительную подтверждённую экономию.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит недавний live budget уходит главным образом в continuity restore, а не в retrieval/workflow effect.",
                 format_u64(Some(boundary_tokens)),
                 format_u64(Some(strict_tokens))
+            ),
+        );
+    } else if let Some(drag) = rolling_historical_startup_drag {
+        rolling_card = with_status_label(rolling_card, "исторический startup drag");
+        rolling_card = with_status_tooltip(
+            rolling_card,
+            &format!(
+                "Статус требует внимания по следующим причинам:\n- Свежая текущая сессия уже profitable и не объясняет минус окна.\n- Вне текущей сессии в рабочем окне остаётся исторический continuity-startup cohort: без Amai было {}, с Amai стало {}, это +{} токенов к расходу.\n- Из observed continuity-restore в окне {} токенов приходятся на этот старший хвост, а на текущую сессию — только {}.",
+                format_u64(Some(drag.older_without_amai_tokens)),
+                format_u64(Some(drag.older_with_amai_tokens)),
+                format_u64(Some(drag.older_delta_tokens as u64)),
+                format_u64(Some(drag.older_continuity_tokens)),
+                format_u64(Some(drag.current_continuity_tokens))
             ),
         );
     } else if rolling_events_total > 0 && rolling_events == 0 {
@@ -6311,6 +6346,78 @@ fn exact_model_token_pair(scope_summary: &Value, alignment: &Value) -> Option<(u
     Some((without_amai, with_amai, saved_tokens, saved_pct))
 }
 
+fn historical_startup_drag(
+    current_exact_pair: Option<(u64, u64, i64, f64)>,
+    rolling_exact_pair: Option<(u64, u64, i64, f64)>,
+    current_summary: &Value,
+    rolling_summary: &Value,
+) -> Option<HistoricalStartupDrag> {
+    let (current_without, current_with, current_saved, _) = current_exact_pair?;
+    let (rolling_without, rolling_with, rolling_saved, _) = rolling_exact_pair?;
+    if current_saved <= 0 || rolling_saved >= 0 {
+        return None;
+    }
+    if rolling_without <= current_without || rolling_with <= current_with {
+        return None;
+    }
+    let older_without_amai_tokens = rolling_without.saturating_sub(current_without);
+    let older_with_amai_tokens = rolling_with.saturating_sub(current_with);
+    if older_without_amai_tokens == 0 && older_with_amai_tokens == 0 {
+        return None;
+    }
+    let older_delta_tokens = older_with_amai_tokens as i64 - older_without_amai_tokens as i64;
+    if older_delta_tokens <= 0 {
+        return None;
+    }
+    let current_continuity_tokens = current_summary["observed_continuity_restore_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    let rolling_continuity_tokens = rolling_summary["observed_continuity_restore_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    let older_continuity_tokens = rolling_continuity_tokens.saturating_sub(current_continuity_tokens);
+    Some(HistoricalStartupDrag {
+        older_without_amai_tokens,
+        older_with_amai_tokens,
+        older_delta_tokens,
+        current_continuity_tokens,
+        older_continuity_tokens,
+    })
+}
+
+fn historical_startup_drag_note_sentence(drag: Option<HistoricalStartupDrag>) -> Option<String> {
+    let drag = drag?;
+    Some(format!(
+        "Свежая текущая сессия уже profitable, но рабочее окно всё ещё тянет исторический startup-хвост вне текущей сессии: без Amai было {}, с Amai стало {}, это +{} токенов к расходу. Из continuity-restore в текущую сессию приходится {}, а на старший хвост окна — ещё {}.",
+        format_u64(Some(drag.older_without_amai_tokens)),
+        format_u64(Some(drag.older_with_amai_tokens)),
+        format_u64(Some(drag.older_delta_tokens as u64)),
+        format_u64(Some(drag.current_continuity_tokens)),
+        format_u64(Some(drag.older_continuity_tokens))
+    ))
+}
+
+fn historical_startup_drag_metric_row(drag: Option<HistoricalStartupDrag>) -> Option<Value> {
+    let drag = drag?;
+    Some(metric_row(
+        "Исторический startup-хвост",
+        format!(
+            "вне текущей сессии: без Amai {}, с Amai {}, +{} к расходу",
+            format_u64(Some(drag.older_without_amai_tokens)),
+            format_u64(Some(drag.older_with_amai_tokens)),
+            format_u64(Some(drag.older_delta_tokens as u64))
+        ),
+        Some(
+            format!(
+                "Этот ряд отделяет свежую текущую сессию от более раннего continuity-startup cohort внутри рабочего окна. Из observed continuity-restore {} токенов приходятся на текущую сессию, а {} остаются в историческом хвосте окна.",
+                format_u64(Some(drag.current_continuity_tokens)),
+                format_u64(Some(drag.older_continuity_tokens))
+            )
+            .as_str(),
+        ),
+    ))
+}
+
 fn exact_model_component_deltas(alignment: &Value) -> Vec<(String, u64, u64, i64)> {
     let mut deltas = alignment["baseline_equivalence"]["component_semantics"]
         .as_array()
@@ -8990,6 +9097,183 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("исходный запрос клиента: 48 -> 48 (без разницы)")
+        );
+    }
+
+    #[test]
+    fn rolling_window_card_surfaces_historical_startup_drag_when_current_session_is_profitable() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "current_session": {
+                        "events_total": 1,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 265,
+                        "verified_effective_savings_pct": 60.91954022988506,
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 0.0,
+                        "answer_like_counted_events": 0,
+                        "verified_answer_like_savings_pct": 0.0,
+                        "excluded_events_count": 0,
+                        "excluded_effective_saved_tokens": 0,
+                        "total_naive_tokens": 0,
+                        "total_context_tokens": 0,
+                        "effective_savings_pct": 0.0,
+                        "total_effective_saved_tokens": 0,
+                        "total_recovery_tokens": 0,
+                        "observed_continuity_restore_tokens": 170
+                    },
+                    "rolling_window": {
+                        "events_total": 15,
+                        "counted_events": 15,
+                        "verified_effective_saved_tokens": -181,
+                        "verified_effective_savings_pct": -1.8986677855869087,
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 0.0,
+                        "answer_like_counted_events": 0,
+                        "verified_answer_like_savings_pct": 0.0,
+                        "observed_continuity_restore_tokens": 9714
+                    },
+                    "lifetime": {
+                        "events_total": 1,
+                        "counted_events": 1,
+                        "verified_effective_saved_tokens": 0,
+                        "verified_effective_savings_pct": 0.0,
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "median_recovery_tokens": 0.0,
+                        "answer_like_rate": 0.0,
+                        "answer_like_counted_events": 0,
+                        "verified_answer_like_savings_pct": 0.0
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "verified_without_amai_measured_tokens": 435,
+                            "verified_with_amai_measured_tokens": 0,
+                            "verified_observed_whole_cycle_with_amai_tokens": 174,
+                            "client_limit_meter_alignment": {
+                                "same_meter_as_client_limit": true,
+                                "continuity_boundary_rollup": {
+                                    "observed_tokens": 0
+                                },
+                                "strict_client_meter_slice": {
+                                    "lower_bound_tokens": 439
+                                },
+                                "baseline_equivalence": {
+                                    "measured_baseline_tokens_lower_bound": 439,
+                                    "component_semantics": [
+                                        {
+                                            "code": "client_prompt",
+                                            "baseline_measured_tokens": 4,
+                                            "observed_tokens": 4,
+                                            "whole_cycle_observed_complete": true
+                                        },
+                                        {
+                                            "code": "continuity_restore_outside_retrieval",
+                                            "baseline_measured_tokens": 435,
+                                            "observed_tokens": 170,
+                                            "whole_cycle_observed_complete": true
+                                        }
+                                    ]
+                                },
+                                "explicit_boundary_surface": {
+                                    "blocks_full_same_meter_equivalence": false
+                                }
+                            }
+                        },
+                        "rolling_window": {
+                            "verified_without_amai_measured_tokens": 9533,
+                            "verified_with_amai_measured_tokens": 0,
+                            "verified_observed_whole_cycle_with_amai_tokens": 9774,
+                            "client_limit_meter_alignment": {
+                                "same_meter_as_client_limit": true,
+                                "continuity_boundary_rollup": {
+                                    "observed_tokens": 0
+                                },
+                                "strict_client_meter_slice": {
+                                    "lower_bound_tokens": 9593
+                                },
+                                "baseline_equivalence": {
+                                    "measured_baseline_tokens_lower_bound": 9593,
+                                    "component_semantics": [
+                                        {
+                                            "code": "client_prompt",
+                                            "baseline_measured_tokens": 60,
+                                            "observed_tokens": 60,
+                                            "whole_cycle_observed_complete": true
+                                        },
+                                        {
+                                            "code": "continuity_restore_outside_retrieval",
+                                            "baseline_measured_tokens": 9533,
+                                            "observed_tokens": 9714,
+                                            "whole_cycle_observed_complete": true
+                                        }
+                                    ]
+                                },
+                                "explicit_boundary_surface": {
+                                    "blocks_full_same_meter_equivalence": false
+                                }
+                            }
+                        },
+                        "lifetime": {
+                            "verified_without_amai_measured_tokens": 8,
+                            "verified_with_amai_measured_tokens": 8,
+                            "verified_observed_whole_cycle_with_amai_tokens": 8,
+                            "client_limit_meter_alignment": {
+                                "same_meter_as_client_limit": true,
+                                "continuity_boundary_rollup": {
+                                    "observed_tokens": 0
+                                },
+                                "strict_client_meter_slice": {
+                                    "lower_bound_tokens": 8
+                                },
+                                "baseline_equivalence": {
+                                    "measured_baseline_tokens_lower_bound": 8
+                                },
+                                "explicit_boundary_surface": {
+                                    "blocks_full_same_meter_equivalence": false
+                                }
+                            }
+                        }
+                    },
+                    "profile": {
+                        "display_name": "Обычная рабочая машина"
+                    }
+                }
+            }
+        });
+
+        let cards = build_hero_cards(&snapshot);
+        assert_eq!(cards[1]["status"].as_str(), Some("alert"));
+        assert_eq!(
+            cards[1]["status_label"].as_str(),
+            Some("исторический startup drag")
+        );
+        assert!(
+            cards[1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("исторический startup-хвост")
+        );
+        let row = cards[1]["rows"]
+            .as_array()
+            .expect("rolling rows")
+            .iter()
+            .find(|row| row["label"].as_str() == Some("Исторический startup-хвост"))
+            .expect("historical startup drag row");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("вне текущей сессии: без Amai 9154, с Amai 9600, +446 к расходу")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("9544")
         );
     }
 
