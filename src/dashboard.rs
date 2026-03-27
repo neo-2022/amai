@@ -3377,16 +3377,18 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_note.push(' ');
         session_note.push_str(&sentence);
     }
+    let session_live_turn_exact_pair =
+        live_turn_exact_pair(current_session, client_live_meter, current_session_exact_pair);
     if let Some(sentence) =
-        client_live_meter_note_sentence(client_live_meter, current_session_exact_pair)
+        client_live_meter_note_sentence(client_live_meter, session_live_turn_exact_pair)
     {
         session_note.push(' ');
         session_note.push_str(&sentence);
     }
     let session_full_turn_savings_pct =
-        full_turn_savings_pct_from_live_meter(client_live_meter, current_session_exact_pair);
+        full_turn_savings_pct_from_live_meter(client_live_meter, session_live_turn_exact_pair);
     let session_client_turn_pressure =
-        client_turn_pressure_guard(client_live_meter, current_session_exact_pair);
+        client_turn_pressure_guard(client_live_meter, session_live_turn_exact_pair);
     if let Some(sentence) = client_turn_pressure_note_sentence(session_client_turn_pressure) {
         session_note.push(' ');
         session_note.push_str(&sentence);
@@ -3403,7 +3405,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let mut session_rows =
         current_session_lane_rows(current_session, current_session_exact_pair.is_some());
     if let Some(row) =
-        client_full_turn_savings_metric_row(client_live_meter, current_session_exact_pair)
+        client_full_turn_savings_metric_row(client_live_meter, session_live_turn_exact_pair)
     {
         session_rows.push(row);
     }
@@ -3456,7 +3458,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         "Экономия токенов за текущую сессию",
         session_full_turn_savings_pct
             .map(|value| format_percent(Some(value)))
-            .unwrap_or_else(|| format_signed_count(session_saved)),
+            .unwrap_or_else(|| "не доказано".to_string()),
         session_note,
         session_status,
         None,
@@ -3466,6 +3468,15 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if let Some(guard) = session_client_turn_pressure {
         session_card = with_status_label(session_card, guard.status_label);
         session_card = with_status_tooltip(session_card, &client_turn_pressure_tooltip(guard));
+    } else if session_full_turn_savings_pct.is_none()
+        && client_live_meter["status"].as_str() == Some("observed")
+    {
+        session_card = with_status(session_card, "alert");
+        session_card = with_status_label(session_card, "реальная экономия не доказана");
+        session_card = with_status_tooltip(
+            session_card,
+            "Статус требует внимания по следующим причинам:\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно раньше переводить работу в свежий чат и собирать exact pair именно на коротком live turn.",
+        );
     } else if let Some(full_turn_savings_pct) =
         session_full_turn_savings_pct.filter(|value| *value < 90.0)
     {
@@ -3996,9 +4007,14 @@ fn truth_only_token_card_note(card: &Value) -> String {
         .as_str()
         .unwrap_or(card["status"].as_str().unwrap_or("неизвестно"));
     match title {
-        "Экономия токенов за текущую сессию" => {
-            format!("Короткая карточка только с проверяемыми цифрами по текущей сессии: сверху реальная доля Amai на полной шкале текущего turn, ниже точность учтённой части. Статус: {status_label}.")
-        }
+        "Экономия токенов за текущую сессию" => match card["value"].as_str() {
+            Some("не доказано") => format!(
+                "Короткая карточка только с проверяемыми цифрами по текущей сессии: реальная экономия на полной шкале клиента пока не доказана, ниже остаётся только точная учтённая часть. Статус: {status_label}."
+            ),
+            _ => format!(
+                "Короткая карточка только с проверяемыми цифрами по текущей сессии: сверху реальная доля Amai на полной шкале текущего turn, ниже точность учтённой части. Статус: {status_label}."
+            ),
+        },
         "Экономия токенов за рабочее окно" => {
             format!("Короткая карточка только с проверяемыми цифрами по рабочему окну. Процент здесь относится к подтверждённой учтённой части, а не ко всему полному расходу модели за окно. Статус: {status_label}.")
         }
@@ -6945,6 +6961,7 @@ fn client_turn_pressure_guard(
                 .map(|used| 100.0 - used)
         })
         .unwrap_or(100.0);
+    let exact_pair_missing = exact_pair.is_none();
     let full_turn_savings_pct = exact_pair.and_then(|(_, _, saved_tokens, _)| {
         let without_amai_total_tokens = if saved_tokens >= 0 {
             turn_total_tokens.saturating_add(saved_tokens as u64)
@@ -6963,21 +6980,31 @@ fn client_turn_pressure_guard(
     let tiny_amai_share = full_turn_savings_pct
         .map(|value| value <= 1.0)
         .unwrap_or(true);
+    let early_context_pressure = context_used_percent >= 35.0;
+    let moderate_context_pressure = context_used_percent >= 45.0;
     let extreme_context_pressure = context_used_percent >= 80.0;
     let high_context_pressure = context_used_percent >= 65.0;
+    let early_large_live_thread = turn_total_tokens >= 80_000 || early_context_pressure;
+    let inflation_locking_in_burn = turn_total_tokens >= 100_000 || moderate_context_pressure;
     let large_live_thread = turn_total_tokens >= 120_000 || context_used_percent >= 50.0;
     let huge_live_thread = turn_total_tokens >= 150_000 || context_used_percent >= 60.0;
     let emergency_primary_limit = primary_remaining_percent <= 10.0;
     let critical_primary_limit = primary_remaining_percent <= 20.0;
     let low_primary_limit = primary_remaining_percent <= 35.0;
+    let softened_primary_limit = primary_remaining_percent <= 65.0;
 
-    let (severity, status_label) = if (((extreme_context_pressure && critical_primary_limit)
+    let (severity, status_label) = if (exact_pair_missing
+        && inflation_locking_in_burn
+        && softened_primary_limit)
+        || (exact_pair_missing && large_live_thread)
+        || (((extreme_context_pressure && critical_primary_limit)
         || context_used_percent >= 90.0)
         && tiny_amai_share)
         || (emergency_primary_limit && huge_live_thread && weak_amai_share)
     {
         ("critical", "новый чат нужен сейчас")
-    } else if (((high_context_pressure && low_primary_limit) || extreme_context_pressure)
+    } else if (exact_pair_missing && early_large_live_thread)
+        || (((high_context_pressure && low_primary_limit) || extreme_context_pressure)
         && weak_amai_share)
         || (critical_primary_limit && large_live_thread && weak_amai_share)
     {
@@ -7009,7 +7036,7 @@ fn client_turn_pressure_note_sentence(guard: Option<ClientTurnPressureGuard>) ->
             )
         })
         .unwrap_or_else(|| {
-            "Amai в полном live-turn пока ещё нельзя честно измерить exact same-meter парой"
+            "Amai в полном live-turn пока ещё нельзя честно измерить exact same-meter парой, а текущий turn уже раздувается быстрее, чем это можно доказать"
                 .to_string()
         });
     Some(format!(
@@ -7051,7 +7078,7 @@ fn client_turn_pressure_tooltip(guard: ClientTurnPressureGuard) -> String {
         ));
     } else {
         tooltip.push_str(
-            "\n- Exact same-meter share Amai в полном live-turn пока ещё не materialized",
+            "\n- Exact same-meter share Amai в полном live-turn пока ещё не materialized, а текущий turn уже слишком раздут, чтобы откладывать переход в свежий чат",
         );
     }
     tooltip.push_str(
@@ -7164,6 +7191,34 @@ fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
         ),
         Some(tooltip.as_str()),
     ))
+}
+
+fn live_turn_exact_pair(
+    current_session: &Value,
+    client_live_meter: &Value,
+    exact_pair: Option<(u64, u64, i64, f64)>,
+) -> Option<(u64, u64, i64, f64)> {
+    let exact_pair = exact_pair?;
+    if current_session["counted_events"].as_u64().unwrap_or(0) != 1 {
+        return None;
+    }
+    if client_live_meter["status"].as_str() != Some("observed") {
+        return None;
+    }
+    let session_started = current_session["started_at_epoch_ms"].as_i64().unwrap_or(0);
+    let session_ended = current_session["ended_at_epoch_ms"].as_i64().unwrap_or(0);
+    let live_started = client_live_meter["started_at_epoch_ms"].as_i64().unwrap_or(0);
+    let live_ended = client_live_meter["ended_at_epoch_ms"].as_i64().unwrap_or(0);
+    if session_started <= 0 || session_ended <= 0 || live_started <= 0 || live_ended <= 0 {
+        return None;
+    }
+    let max_gap_ms = 15_000i64;
+    let started_gap = (session_started - live_started).abs();
+    let ended_gap = (session_ended - live_ended).abs();
+    if started_gap > max_gap_ms || ended_gap > max_gap_ms {
+        return None;
+    }
+    Some(exact_pair)
 }
 
 fn full_turn_savings_pct_from_live_meter(
@@ -9554,7 +9609,7 @@ mod tests {
         let cards = build_hero_cards(&snapshot);
         let note = cards[0]["note"].as_str().unwrap_or_default();
         assert!(note.contains("Короткая карточка только с проверяемыми цифрами по текущей сессии"));
-        assert!(note.contains("реальная доля Amai"));
+        assert!(note.contains("реальная экономия на полной шкале клиента пока не доказана"));
         let rows = cards[0]["rows"].as_array().expect("rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["label"].as_str(), Some("Экономия на учтённой части"));
@@ -10555,10 +10610,10 @@ mod tests {
         });
 
         let cards = build_hero_cards(&snapshot);
-        assert_eq!(cards[0]["status"].as_str(), Some("alert"));
+        assert_eq!(cards[0]["status"].as_str(), Some("critical"));
         assert_eq!(
             cards[0]["status_label"].as_str(),
-            Some("новый чат рекомендован")
+            Some("новый чат нужен сейчас")
         );
         assert!(cards[0]["status_tooltip"]
             .as_str()
@@ -10573,7 +10628,7 @@ mod tests {
         assert!(row["value"]
             .as_str()
             .unwrap_or_default()
-            .contains("новом чате"));
+            .contains("новый чат"));
         assert!(row["value"]
             .as_str()
             .unwrap_or_default()
@@ -10610,6 +10665,23 @@ mod tests {
                 .expect("pressure guard");
         assert_eq!(guard.severity, "critical");
         assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_triggers_early_when_exact_full_turn_pair_is_missing() {
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 118116,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 45.71,
+            "primary_limit_remaining_percent": 61.0,
+            "secondary_limit_remaining_percent": 88.0
+        });
+        let guard = super::client_turn_pressure_guard(&meter, None).expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+        assert!(super::client_turn_pressure_tooltip(guard)
+            .contains("слишком раздут"));
     }
 
     #[test]

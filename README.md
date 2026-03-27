@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 15:46 MSK
-Ручная сверка guide/docs: 2026-03-27 15:46 MSK
+modified_at: 2026-03-27 17:20 MSK
+Ручная сверка guide/docs: 2026-03-27 17:20 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1711,6 +1711,9 @@ preview, а не только raw count.
     - `Лимит клиента сейчас` = live `rate_limits.primary / secondary`;
   - `Amai в полном live-turn` = точная same-meter delta Amai как доля полного observed
       client turn, а не только внутреннего retrieval slice;
+  - если для текущего live-turn нет доказанной same-turn пары `без Amai / с Amai`, current-session
+    card обязана fail-closed показывать `не доказано`, а не подмешивать внутренний Amai-slice
+    в полную клиентскую шкалу;
   - этот слой нужен затем, чтобы оператор видел не только exact savings внутри Amai,
     но и почему внешний 5h лимит клиента может гореть быстрее из-за самого размера
     последнего client turn;
@@ -1719,6 +1722,10 @@ preview, а не только raw count.
     перейти в `новый чат рекомендован` или `новый чат нужен сейчас` и явно советовать
     сохранить handoff и продолжать через continuity startup, а не делать вид, что exact
     internal savings уже достаточно;
+  - тот же early-rotation guard теперь обязан срабатывать и раньше: если exact same-turn pair
+    ещё не materialized, а live-turn уже раздут настолько, что честный full-scale effect
+    теряется в размере самого thread/context, operator должен увидеть ранний переход в свежий чат
+    ещё до того, как 5h лимит почти выгорел;
   - human dashboard service теперь тоже обязан уметь materialize-ить этот live client meter:
     если service запущен вне `CODEX_THREAD_ID`, он не должен брать просто самый свежий
     repo-thread из SQLite; сначала он обязан попытаться привязаться к `thread_id` из
