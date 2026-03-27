@@ -7498,17 +7498,20 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     Ok(report)
 }
 
-pub async fn collect_startup_client_budget_guard(db: &Client) -> Result<Value> {
+pub async fn collect_live_current_session_budget_guard(
+    db: &Client,
+    restore_context: Option<&Value>,
+) -> Result<Value> {
     let report = collect_dashboard_report(db).await?;
-    let mut guard =
-        dashboard::current_session_budget_guard_from_report(&report["token_budget_report"]);
-    if let Some(node) = guard.as_object_mut() {
-        node.insert(
-            "source".to_string(),
-            Value::from("token_budget_startup_client_budget_guard_v2"),
-        );
-    }
-    Ok(guard)
+    let snapshot = json!({
+        "token_budget_report": {
+            "token_budget_report": report["token_budget_report"].clone(),
+        },
+        "latest_repo_working_state_restore": restore_context
+            .cloned()
+            .unwrap_or_else(|| json!({ "working_state_restore": {} })),
+    });
+    Ok(dashboard::current_session_budget_guard(&snapshot))
 }
 
 pub async fn collect_default_report_with_overrides(

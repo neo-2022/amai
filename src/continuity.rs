@@ -6,7 +6,6 @@ use crate::cli::{
 };
 use crate::codex_threads;
 use crate::config::AppConfig;
-use crate::dashboard;
 use crate::eval_verdict::{self, EvalPattern, EvalSignals};
 use crate::mcp;
 use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, ProjectRecord};
@@ -1809,17 +1808,9 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
         .restore
         .as_ref()
         .and_then(|value| value.get("working_state_restore"));
-    let dashboard_report = token_budget::collect_dashboard_report(&db).await?;
-    let client_budget_guard = dashboard::current_session_budget_guard(&json!({
-        "token_budget_report": {
-            "token_budget_report": dashboard_report["token_budget_report"].clone(),
-        },
-        "latest_repo_working_state_restore": context.restore.clone().unwrap_or_else(|| {
-            json!({
-                "working_state_restore": {}
-            })
-        }),
-    }));
+    let client_budget_guard =
+        token_budget::collect_live_current_session_budget_guard(&db, context.restore.as_ref())
+            .await?;
     let should_rotate_chat = client_budget_guard["should_rotate_chat_now"].as_bool() == Some(true)
         || client_budget_guard["should_rotate_chat_soon"].as_bool() == Some(true);
     if !should_rotate_chat && !args.force {

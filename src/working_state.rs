@@ -358,7 +358,10 @@ pub async fn build_restore_bundle(
     )
     .await?;
     overlay_execctl_active_lease(&mut bundle, active_lease.as_ref());
-    let client_budget_guard = token_budget::collect_startup_client_budget_guard(db)
+    let client_budget_guard = token_budget::collect_live_current_session_budget_guard(
+        db,
+        Some(&bundle),
+    )
         .await
         .unwrap_or_else(|error| fallback_client_budget_guard_from_error(&error.to_string()));
     overlay_client_budget_guard(&mut bundle, &client_budget_guard);
@@ -2029,7 +2032,7 @@ fn overlay_client_budget_guard(bundle: &mut Value, client_budget_guard: &Value) 
 
 fn default_client_budget_guard() -> Value {
     json!({
-        "source": "token_budget_startup_client_budget_guard_v2",
+        "source": "dashboard_current_session_budget_guard_v2",
         "status": "unknown",
         "status_label": "нет данных",
         "should_rotate_chat_now": false,
@@ -3646,6 +3649,21 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("--headline")
+        );
+    }
+
+    #[test]
+    fn fallback_client_budget_guard_uses_dashboard_live_source() {
+        let guard = fallback_client_budget_guard_from_error("test drift");
+        assert_eq!(
+            guard["source"],
+            json!("dashboard_current_session_budget_guard_v2")
+        );
+        assert_eq!(guard["status"], json!("unknown"));
+        assert!(
+            guard["note"]
+                .as_str()
+                .is_some_and(|value| value.contains("test drift"))
         );
     }
 

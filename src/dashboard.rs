@@ -2759,10 +2759,6 @@ pub fn current_session_budget_guard(snapshot: &Value) -> Value {
     )
 }
 
-pub fn current_session_budget_guard_from_report(report: &Value) -> Value {
-    current_session_budget_guard_with_restore_context(report, &Value::Null)
-}
-
 fn current_session_budget_guard_with_restore_context(
     report: &Value,
     restore_context: &Value,
