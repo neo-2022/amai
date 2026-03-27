@@ -30,6 +30,7 @@ const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
 const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_generation_turn_observed";
 const CONTINUITY_SNAPSHOT_QUERY_LABEL: &str = "Continuity snapshot";
 const CONTINUITY_PRE_AMAI_BASELINE_STRATEGY: &str = "truthful_pre_amai_continuity_summaries_v1";
+const TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS: i64 = 5_000;
 static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<
     Mutex<Option<DashboardRolloutObservationCache>>,
 > = OnceLock::new();
@@ -466,6 +467,26 @@ struct ContinuityPreAmaiBaselineMaterialization {
     baseline_bytes: usize,
     source_entries: Vec<String>,
     source_ref: Value,
+}
+
+#[derive(Debug, Clone)]
+struct SecondaryContextPackPayloadMatch {
+    context_pack_id: String,
+    payload_json: String,
+    delta_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+enum SecondaryContextPackPayloadLookup {
+    Resolved(SecondaryContextPackPayloadMatch),
+    NoCandidates,
+    AmbiguousNearest {
+        delta_ms: i64,
+        candidate_count: usize,
+    },
+    NearestTooFar {
+        delta_ms: i64,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -7798,56 +7819,143 @@ async fn sync_context_pack_tool_overhead_for_events(
             .as_u64()
             .or_else(|| row.payload["token_budget_event"]["delivered_tokens"].as_u64())
             .unwrap_or(event.context_tokens);
-        let Some(context_pack_id) = event_context_pack_id(event) else {
-            let attached = attach_tool_overhead_source_status_to_snapshot(
-                db,
-                &row,
-                Some(json!({ "event_id": event.event_id })),
+        let (context_pack_id, output_json, source_status) = if let Some(context_pack_id) =
+            event_context_pack_id(event)
+        {
+            let output_json = if let Some(cached) = stored_payloads.get(&context_pack_id) {
+                cached.clone()
+            } else {
+                let loaded = stored_context_pack_payload_json(db, &context_pack_id).await?;
+                stored_payloads.insert(context_pack_id.clone(), loaded.clone());
+                loaded
+            };
+            let Some(output_json) = output_json else {
+                let attached = attach_tool_overhead_source_status_to_snapshot(
+                        db,
+                        &row,
+                        Some(json!({ "context_pack_id": context_pack_id })),
+                        json!({
+                            "state": "context_pack_payload_missing_irrecoverable",
+                            "source_kind": "ami.context_packs",
+                            "resolution_condition": "recover_historical_tool_overhead_source_or_freeze_irrecoverable_gap",
+                            "note": "Stored context pack payload for this context_pack_id is missing, so payload-based tool_overhead reconstruction cannot proceed from ami.context_packs."
+                        }),
+                    )
+                    .await?;
+                if attached
+                    .as_ref()
+                    .and_then(|value| value["tool_overhead_source_attach"]["attached"].as_bool())
+                    .unwrap_or(false)
+                {
+                    changed = true;
+                }
+                continue;
+            };
+            (
+                context_pack_id,
+                output_json,
                 json!({
-                    "state": "missing_context_pack_identity_irrecoverable",
-                    "source_kind": "token_budget_event_identity_v1",
-                    "resolution_condition": "recover_legacy_context_pack_identity_or_freeze_irrecoverable_gap",
-                    "note": "This live retrieval event has no effective context_pack_id or reusable correlation fallback, so payload-based tool_overhead reconstruction cannot be linked to a stored context pack."
-                }),
-            )
-            .await?;
-            if attached
-                .as_ref()
-                .and_then(|value| value["tool_overhead_source_attach"]["attached"].as_bool())
-                .unwrap_or(false)
-            {
-                changed = true;
-            }
-            continue;
-        };
-        let output_json = if let Some(cached) = stored_payloads.get(&context_pack_id) {
-            cached.clone()
-        } else {
-            let loaded = stored_context_pack_payload_json(db, &context_pack_id).await?;
-            stored_payloads.insert(context_pack_id.clone(), loaded.clone());
-            loaded
-        };
-        let Some(output_json) = output_json else {
-            let attached = attach_tool_overhead_source_status_to_snapshot(
-                db,
-                &row,
-                Some(json!({ "context_pack_id": context_pack_id })),
-                json!({
-                    "state": "context_pack_payload_missing_irrecoverable",
+                    "state": "context_pack_payload_materialized",
                     "source_kind": "ami.context_packs",
-                    "resolution_condition": "recover_historical_tool_overhead_source_or_freeze_irrecoverable_gap",
-                    "note": "Stored context pack payload for this context_pack_id is missing, so payload-based tool_overhead reconstruction cannot proceed from ami.context_packs."
+                    "resolution_condition": "already_materialized",
+                    "note": "Tool-overhead payload was recovered directly from the stored context pack referenced by context_pack_id."
                 }),
             )
-            .await?;
-            if attached
-                .as_ref()
-                .and_then(|value| value["tool_overhead_source_attach"]["attached"].as_bool())
-                .unwrap_or(false)
-            {
-                changed = true;
+        } else {
+            match stored_context_pack_payload_json_by_secondary_identity(db, event).await? {
+                SecondaryContextPackPayloadLookup::Resolved(candidate) => (
+                    candidate.context_pack_id,
+                    candidate.payload_json,
+                    json!({
+                        "state": "secondary_context_pack_match_materialized",
+                        "source_kind": "context_pack_query_time_match_v1",
+                        "match_delta_ms": candidate.delta_ms,
+                        "max_allowed_delta_ms": TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS,
+                        "resolution_condition": "already_materialized",
+                        "note": "Tool-overhead payload was recovered by matching the legacy live retrieval event to a stored context pack through project+namespace+retrieval_mode+query_text and a unique nearest created_at timestamp."
+                    }),
+                ),
+                SecondaryContextPackPayloadLookup::NoCandidates => {
+                    let attached = attach_tool_overhead_source_status_to_snapshot(
+                            db,
+                            &row,
+                            Some(json!({ "event_id": event.event_id })),
+                            json!({
+                                "state": "missing_context_pack_identity_irrecoverable",
+                                "source_kind": "token_budget_event_identity_v1",
+                                "resolution_condition": "recover_legacy_context_pack_identity_or_freeze_irrecoverable_gap",
+                                "note": "This live retrieval event has no effective context_pack_id, and no stored context pack could be matched by secondary identity fields."
+                            }),
+                        )
+                        .await?;
+                    if attached
+                        .as_ref()
+                        .and_then(|value| {
+                            value["tool_overhead_source_attach"]["attached"].as_bool()
+                        })
+                        .unwrap_or(false)
+                    {
+                        changed = true;
+                    }
+                    continue;
+                }
+                SecondaryContextPackPayloadLookup::AmbiguousNearest {
+                    delta_ms,
+                    candidate_count,
+                } => {
+                    let attached = attach_tool_overhead_source_status_to_snapshot(
+                            db,
+                            &row,
+                            Some(json!({ "event_id": event.event_id })),
+                            json!({
+                                "state": "secondary_context_pack_match_ambiguous_irrecoverable",
+                                "source_kind": "context_pack_query_time_match_v1",
+                                "match_delta_ms": delta_ms,
+                                "candidate_count": candidate_count,
+                                "max_allowed_delta_ms": TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS,
+                                "resolution_condition": "recover_legacy_context_pack_identity_or_freeze_irrecoverable_gap",
+                                "note": "Secondary context-pack recovery found more than one equally-nearest stored context pack, so payload-based tool_overhead reconstruction remains fail-closed."
+                            }),
+                        )
+                        .await?;
+                    if attached
+                        .as_ref()
+                        .and_then(|value| {
+                            value["tool_overhead_source_attach"]["attached"].as_bool()
+                        })
+                        .unwrap_or(false)
+                    {
+                        changed = true;
+                    }
+                    continue;
+                }
+                SecondaryContextPackPayloadLookup::NearestTooFar { delta_ms } => {
+                    let attached = attach_tool_overhead_source_status_to_snapshot(
+                            db,
+                            &row,
+                            Some(json!({ "event_id": event.event_id })),
+                            json!({
+                                "state": "secondary_context_pack_match_out_of_window_irrecoverable",
+                                "source_kind": "context_pack_query_time_match_v1",
+                                "match_delta_ms": delta_ms,
+                                "max_allowed_delta_ms": TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS,
+                                "resolution_condition": "recover_legacy_context_pack_identity_or_freeze_irrecoverable_gap",
+                                "note": "Secondary context-pack recovery found only far-away stored candidates outside the allowed time window, so payload-based tool_overhead reconstruction remains fail-closed."
+                            }),
+                        )
+                        .await?;
+                    if attached
+                        .as_ref()
+                        .and_then(|value| {
+                            value["tool_overhead_source_attach"]["attached"].as_bool()
+                        })
+                        .unwrap_or(false)
+                    {
+                        changed = true;
+                    }
+                    continue;
+                }
             }
-            continue;
         };
         let tool_overhead_tokens = count_cli_context_pack_output_overhead_tokens(
             &config.measurement,
@@ -7867,6 +7975,20 @@ async fn sync_context_pack_tool_overhead_for_events(
         if attached
             .as_ref()
             .and_then(|value| value["whole_cycle_observed_attach"]["attached"].as_bool())
+            .unwrap_or(false)
+        {
+            changed = true;
+        }
+        let source_attached = attach_tool_overhead_source_status_to_snapshot(
+            db,
+            &row,
+            Some(json!({ "context_pack_id": context_pack_id })),
+            source_status,
+        )
+        .await?;
+        if source_attached
+            .as_ref()
+            .and_then(|value| value["tool_overhead_source_attach"]["attached"].as_bool())
             .unwrap_or(false)
         {
             changed = true;
@@ -14916,6 +15038,106 @@ async fn stored_context_pack_payload_json(
     ))
 }
 
+fn tool_overhead_secondary_match_reference_epoch_ms(event: &TokenBudgetEvent) -> i64 {
+    [
+        event.occurred_at_epoch_ms as i64,
+        event.ingested_at_epoch_ms as i64,
+        event.created_at_epoch_ms as i64,
+    ]
+    .into_iter()
+    .find(|value| *value > 0)
+    .unwrap_or_default()
+}
+
+fn select_secondary_context_pack_payload_match(
+    mut candidates: Vec<SecondaryContextPackPayloadMatch>,
+) -> SecondaryContextPackPayloadLookup {
+    if candidates.is_empty() {
+        return SecondaryContextPackPayloadLookup::NoCandidates;
+    }
+    candidates.sort_by(|left, right| {
+        left.delta_ms
+            .cmp(&right.delta_ms)
+            .then_with(|| left.context_pack_id.cmp(&right.context_pack_id))
+    });
+    let nearest = candidates[0].clone();
+    if nearest.delta_ms > TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS {
+        return SecondaryContextPackPayloadLookup::NearestTooFar {
+            delta_ms: nearest.delta_ms,
+        };
+    }
+    let tied_count = candidates
+        .iter()
+        .take_while(|candidate| candidate.delta_ms == nearest.delta_ms)
+        .count();
+    if tied_count > 1 {
+        return SecondaryContextPackPayloadLookup::AmbiguousNearest {
+            delta_ms: nearest.delta_ms,
+            candidate_count: tied_count,
+        };
+    }
+    SecondaryContextPackPayloadLookup::Resolved(nearest)
+}
+
+async fn stored_context_pack_payload_json_by_secondary_identity(
+    db: &Client,
+    event: &TokenBudgetEvent,
+) -> Result<SecondaryContextPackPayloadLookup> {
+    let query_text = event.query.trim();
+    let project_code = event.project.trim();
+    let namespace_code = event.namespace.trim();
+    let retrieval_mode = event.retrieval_mode.as_deref().unwrap_or_default().trim();
+    let event_epoch_ms = tool_overhead_secondary_match_reference_epoch_ms(event);
+    if query_text.is_empty()
+        || project_code.is_empty()
+        || namespace_code.is_empty()
+        || retrieval_mode.is_empty()
+        || event_epoch_ms <= 0
+    {
+        return Ok(SecondaryContextPackPayloadLookup::NoCandidates);
+    }
+    let rows = db
+        .query(
+            r#"
+            SELECT
+                cp.context_pack_id::text,
+                cp.payload,
+                ABS((EXTRACT(EPOCH FROM cp.created_at) * 1000)::bigint - $5::bigint) AS delta_ms
+            FROM ami.context_packs cp
+            JOIN ami.projects p ON p.project_id = cp.project_id
+            JOIN ami.namespaces n ON n.namespace_id = cp.namespace_id
+            WHERE p.code = $1
+              AND n.code = $2
+              AND cp.retrieval_mode = $3
+              AND cp.query_text = $4
+            ORDER BY delta_ms ASC, cp.context_pack_id ASC
+            LIMIT 8
+            "#,
+            &[
+                &project_code,
+                &namespace_code,
+                &retrieval_mode,
+                &query_text,
+                &event_epoch_ms,
+            ],
+        )
+        .await
+        .context("failed to load secondary context pack payload candidates")?;
+    let candidates = rows
+        .into_iter()
+        .map(|row| {
+            let payload: Value = row.get(1);
+            Ok(SecondaryContextPackPayloadMatch {
+                context_pack_id: row.get::<_, String>(0),
+                payload_json: serde_json::to_string(&payload)
+                    .context("failed to serialize secondary stored context pack")?,
+                delta_ms: row.get::<_, i64>(2),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(select_secondary_context_pack_payload_match(candidates))
+}
+
 async fn attach_context_pack_whole_cycle_observed(
     db: &Client,
     context_pack_id: &str,
@@ -21420,6 +21642,78 @@ effective_to_epoch_ms = 2000
             status["missing_source_state_sample"][0]["state"],
             "missing_context_pack_identity_irrecoverable"
         );
+    }
+
+    #[test]
+    fn secondary_context_pack_selector_accepts_unique_nearest_match() {
+        let selected = super::select_secondary_context_pack_payload_match(vec![
+            super::SecondaryContextPackPayloadMatch {
+                context_pack_id: "ctx-nearest".to_string(),
+                payload_json: "{}".to_string(),
+                delta_ms: 420,
+            },
+            super::SecondaryContextPackPayloadMatch {
+                context_pack_id: "ctx-far".to_string(),
+                payload_json: "{}".to_string(),
+                delta_ms: 1700,
+            },
+        ]);
+
+        match selected {
+            super::SecondaryContextPackPayloadLookup::Resolved(candidate) => {
+                assert_eq!(candidate.context_pack_id, "ctx-nearest");
+                assert_eq!(candidate.delta_ms, 420);
+            }
+            other => panic!("unexpected selector result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn secondary_context_pack_selector_rejects_tied_nearest_matches() {
+        let selected = super::select_secondary_context_pack_payload_match(vec![
+            super::SecondaryContextPackPayloadMatch {
+                context_pack_id: "ctx-a".to_string(),
+                payload_json: "{}".to_string(),
+                delta_ms: 250,
+            },
+            super::SecondaryContextPackPayloadMatch {
+                context_pack_id: "ctx-b".to_string(),
+                payload_json: "{}".to_string(),
+                delta_ms: 250,
+            },
+        ]);
+
+        match selected {
+            super::SecondaryContextPackPayloadLookup::AmbiguousNearest {
+                delta_ms,
+                candidate_count,
+            } => {
+                assert_eq!(delta_ms, 250);
+                assert_eq!(candidate_count, 2);
+            }
+            other => panic!("unexpected selector result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn secondary_context_pack_selector_rejects_far_nearest_match() {
+        let selected = super::select_secondary_context_pack_payload_match(vec![
+            super::SecondaryContextPackPayloadMatch {
+                context_pack_id: "ctx-far".to_string(),
+                payload_json: "{}".to_string(),
+                delta_ms: super::TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS + 1,
+            },
+        ]);
+
+        match selected {
+            super::SecondaryContextPackPayloadLookup::NearestTooFar { delta_ms } => {
+                assert_eq!(
+                    delta_ms,
+                    super::TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS + 1
+                );
+            }
+            other => panic!("unexpected selector result: {other:?}"),
+        }
     }
 
     #[test]

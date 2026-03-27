@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 12:42 MSK
-Ручная сверка guide/docs: 2026-03-27 12:42 MSK
+modified_at: 2026-03-27 12:52 MSK
+Ручная сверка guide/docs: 2026-03-27 12:52 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1960,6 +1960,12 @@ preview, а не только raw count.
     `tool_overhead_tokens`, но corresponding `context_pack` уже сохранён в registry,
     `token-report` сам честно достаёт stored payload по `context_pack_id`,
     пересчитывает CLI-equivalent output overhead и дописывает его в missing scope;
+  - для legacy live rows без `context_pack_id` этот recovery теперь идёт ещё на один
+    truthful шаг дальше: если stored `context_pack` uniquely сопоставляется по
+    `project + namespace + retrieval_mode + query_text` и ближайшему `created_at`
+    внутри жёсткого окна `<= 5s`, `tool_overhead` materialize-ится и для такого события;
+  - если nearest stored match не уникален или выходит за allowed time-window,
+    recovery остаётся fail-closed и событие сохраняет explicit irrecoverable source-state;
   - для этого repair-free auto-sync есть отдельный proof:
     `scripts/proof_token_report_tool_overhead_autosync.sh`;
   - отдельный post-call attach path теперь materialized и для `assistant_generation`:

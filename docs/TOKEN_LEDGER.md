@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 12:42 MSK
-Ручная сверка guide/docs: 2026-03-27 12:42 MSK
+modified_at: 2026-03-27 12:52 MSK
+Ручная сверка guide/docs: 2026-03-27 12:52 MSK
 
 # Token Ledger
 
@@ -603,6 +603,12 @@ whole-cycle компонент на одинаковое число всех liv
     `token-report` теперь может взять stored `context_pack` payload из registry по
     `context_pack_id`, пересчитать CLI-equivalent output overhead и дописать observed
     `tool_overhead_tokens` прямо в missing current scope;
+  - для legacy rows без `context_pack_id` разрешён только один дополнительный truthful
+    recovery path:
+    matching по `project + namespace + retrieval_mode + query_text` и uniquely nearest
+    `context_pack.created_at` внутри fail-closed окна `<= 5s`;
+  - если ближайший stored context pack не единственный или лежит вне allowed window,
+    событие обязано остаться в irrecoverable source-state;
   - это намеренно scoped only:
     auto-sync не бегает по всему lifetime, а работает только по active live scope
     (`current_session / rolling_window`), чтобы same-meter repair не превращался в
