@@ -626,7 +626,9 @@ fn build_startup_runtime_state_cli_json(
         .cloned()
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
-    let root_object = root.as_object_mut().expect("startup runtime cli root object");
+    let root_object = root
+        .as_object_mut()
+        .expect("startup runtime cli root object");
     root_object.insert("startup_runtime_state".to_string(), audit_json.clone());
     root_object.insert("startup_runtime_state_audit".to_string(), audit_json);
     root
@@ -1746,6 +1748,41 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
     } else {
         1
     };
+    if continuity_answer_requires_live_reply_gate(&args.startup.token_source_kind) {
+        let client_budget_guard =
+            token_budget::collect_live_current_session_budget_guard(&db, restore.as_ref()).await?;
+        if client_budget_guard_blocks_reply(&client_budget_guard) {
+            let blocking_reply_contract =
+                client_budget_guard["reply_execution_gate"]["blocking_reply_contract"].clone();
+            let blocked_reply_text = blocking_reply_contract["template"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE)
+                .to_string();
+            if args.startup.json {
+                let payload = build_blocked_continuity_answer_payload(
+                    &project,
+                    &namespace,
+                    &handoff_summary,
+                    restore.as_ref(),
+                    &intent,
+                    args.question.as_deref(),
+                    chat_reference.as_deref(),
+                    at_time_rfc3339.as_deref(),
+                    messages_count,
+                    include_chat_messages,
+                    previous_chat_offset,
+                    &blocked_reply_text,
+                    &client_budget_guard,
+                    &args.startup.token_source_kind,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{blocked_reply_text}");
+            }
+            return Ok(());
+        }
+    }
     let answer_text = render_direct_answer(
         &handoff_summary,
         restore.as_ref(),
@@ -1807,13 +1844,10 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
         json: false,
         token_source_kind: "operator_continuity_rotate_chat".to_string(),
     };
-    let (context, continuity_import_missing) = match load_startup_context(&db, &startup_args).await {
+    let (context, continuity_import_missing) = match load_startup_context(&db, &startup_args).await
+    {
         Ok(context) => (context, false),
-        Err(error)
-            if error
-                .to_string()
-                .contains("no continuity import found for") =>
-        {
+        Err(error) if error.to_string().contains("no continuity import found for") => {
             let project = resolve_project(&db, &startup_args).await?;
             let namespace = postgres::ensure_namespace(
                 &db,
@@ -1925,8 +1959,8 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
         &details,
     )
     .await?;
-    let blocking_reply_contract = client_budget_guard["reply_execution_gate"]["blocking_reply_contract"]
-        .clone();
+    let blocking_reply_contract =
+        client_budget_guard["reply_execution_gate"]["blocking_reply_contract"].clone();
     let blocked_reply_text = blocking_reply_contract["template"]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -2022,21 +2056,21 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
     );
     println!();
     println!("Готовые действия:");
-    if let Some(imported_at) = payload["continuity_rotate_chat"]["continuity_import"]["imported_at_epoch_ms"]
-        .as_u64()
+    if let Some(imported_at) =
+        payload["continuity_rotate_chat"]["continuity_import"]["imported_at_epoch_ms"].as_u64()
     {
         println!(
             "- Continuity import materialized: {}",
             human_epoch_ms(Some(imported_at))
         );
     }
-    if let Some(command) = payload["continuity_rotate_chat"]["operator_flow"]["startup_command"]
-        .as_str()
+    if let Some(command) =
+        payload["continuity_rotate_chat"]["operator_flow"]["startup_command"].as_str()
     {
         println!("- После открытия свежего чата запусти: {command}");
     }
-    if let Some(command) = payload["continuity_rotate_chat"]["operator_flow"]["rotate_helper_command"]
-        .as_str()
+    if let Some(command) =
+        payload["continuity_rotate_chat"]["operator_flow"]["rotate_helper_command"].as_str()
     {
         println!("- One-shot helper: {command}");
     }
@@ -2051,7 +2085,11 @@ fn read_optional_details_file(details_file: Option<&PathBuf>) -> Result<String> 
     Ok(String::new())
 }
 
-fn build_rotate_chat_details(client_budget_guard: &Value, headline: &str, next_step: &str) -> String {
+fn build_rotate_chat_details(
+    client_budget_guard: &Value,
+    headline: &str,
+    next_step: &str,
+) -> String {
     let mut lines = Vec::new();
     if let Some(status_label) = client_budget_guard["status_label"]
         .as_str()
@@ -2077,9 +2115,7 @@ fn build_rotate_chat_details(client_budget_guard: &Value, headline: &str, next_s
     {
         lines.push(format!("Почему rotate обязателен: {note}."));
     }
-    lines.push(format!(
-        "Продолжить ту же рабочую линию: {headline}."
-    ));
+    lines.push(format!("Продолжить ту же рабочую линию: {headline}."));
     lines.push(format!(
         "Ближайший обязательный следующий шаг в свежем чате: {next_step}."
     ));
@@ -2104,8 +2140,12 @@ fn write_project_bootstrap_snapshot(project_code: &str, repo_root: &str) -> Resu
             .with_context(|| format!("failed to read {}", thread_index_path.display()))?;
         let mut index: ContinuityThreadIndexFile = serde_json::from_str(&raw)
             .with_context(|| format!("failed to parse {}", thread_index_path.display()))?;
-        index.threads.retain(|entry| entry.cwd.starts_with(repo_root));
-        index.threads.sort_by(|left, right| right.source_rollout.cmp(&left.source_rollout));
+        index
+            .threads
+            .retain(|entry| entry.cwd.starts_with(repo_root));
+        index
+            .threads
+            .sort_by(|left, right| right.source_rollout.cmp(&left.source_rollout));
         index
     } else {
         ContinuityThreadIndexFile {
@@ -2348,6 +2388,111 @@ fn build_continuity_answer_payload(
                         })
                     }),
             },
+            "answer_text": answer_text,
+            "canonical_eval": canonical_eval,
+        },
+        "retrieval_science": retrieval_science::suite_metadata("continuity_answer")?,
+        "degradation_policy": retrieval_science::degradation_policy_json()?,
+    }))
+}
+
+fn continuity_answer_requires_live_reply_gate(token_source_kind: &str) -> bool {
+    token_source_kind.starts_with("live_")
+}
+
+fn client_budget_guard_blocks_reply(guard: &Value) -> bool {
+    guard["reply_execution_gate"]["must_rotate_before_reply"]
+        .as_bool()
+        .or_else(|| guard["reply_execution_gate"]["blocking"].as_bool())
+        .or_else(|| guard["should_rotate_chat_now"].as_bool())
+        .or_else(|| guard["should_rotate_chat_soon"].as_bool())
+        .unwrap_or(false)
+}
+
+fn build_blocked_continuity_answer_payload(
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    handoff_summary: &Value,
+    restore: Option<&Value>,
+    intent: &str,
+    question: Option<&str>,
+    chat_reference: Option<&str>,
+    at_time_rfc3339: Option<&str>,
+    messages_count: usize,
+    include_chat_messages: bool,
+    previous_chat_offset: usize,
+    answer_text: &str,
+    client_budget_guard: &Value,
+    token_source_kind: &str,
+) -> Result<Value> {
+    let restore_node = restore.map(|value| &value["working_state_restore"]);
+    let included_reasons_summary = restore_node.and_then(|value| {
+        continuity_decision_trace_summary(Some(&value["latest_decision_trace"]), "included")
+    });
+    let excluded_reasons_summary = restore_node.and_then(|value| {
+        continuity_decision_trace_summary(Some(&value["latest_decision_trace"]), "not_included")
+    });
+    let blocking_reply_contract =
+        client_budget_guard["reply_execution_gate"]["blocking_reply_contract"].clone();
+    let expected_reply_text = blocking_reply_contract["template"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE);
+    let fail_closed_ok = answer_text.trim() == expected_reply_text;
+    let probe = build_continuity_eval_probe(
+        "continuity_answer_client_budget_guard_blocked",
+        "hit_correct_target",
+        EvalPattern::IsolationBoundary,
+        false,
+        json!({
+            "boundary_clean": fail_closed_ok,
+            "fail_closed_ok": fail_closed_ok,
+            "unexpected_present": answer_mentions_temporal_match(answer_text),
+            "intent": intent,
+            "source_kind": token_source_kind,
+            "must_rotate_before_reply": client_budget_guard["reply_execution_gate"]["must_rotate_before_reply"],
+            "response_kind": blocking_reply_contract["response_kind"],
+            "answer": answer_text,
+        }),
+    )?;
+    let canonical_eval = build_continuity_canonical_eval(std::slice::from_ref(&probe))?;
+    Ok(json!({
+        "continuity_answer": {
+            "project": {
+                "code": project.code,
+                "display_name": project.display_name,
+                "repo_root": project.repo_root,
+            },
+            "namespace": {
+                "code": namespace.code,
+                "display_name": namespace.display_name,
+            },
+            "question": question,
+            "intent": intent,
+            "chat_reference": chat_reference,
+            "at_time_rfc3339": at_time_rfc3339,
+            "messages_count": messages_count,
+            "include_chat_messages": include_chat_messages,
+            "previous_chat_offset": previous_chat_offset,
+            "handoff_summary": {
+                "headline": handoff_summary["headline"].as_str().unwrap_or("ещё нет данных"),
+                "next_step": handoff_summary["next_step"].as_str().unwrap_or("ещё нет данных"),
+            },
+            "restore_present": restore.is_some(),
+            "included_reasons_summary": included_reasons_summary,
+            "excluded_reasons_summary": excluded_reasons_summary,
+            "chat_lookup": {
+                "found": false,
+                "thread_id": Value::Null,
+                "title": Value::Null,
+                "summary_headline": Value::Null,
+                "summary_next_step": Value::Null,
+                "messages_count": 0,
+                "selected_time_slice": Value::Null,
+            },
+            "blocked_by_client_budget_guard": true,
+            "client_budget_guard": client_budget_guard,
+            "blocking_reply_contract": blocking_reply_contract,
             "answer_text": answer_text,
             "canonical_eval": canonical_eval,
         },
@@ -3314,8 +3459,7 @@ fn build_chat_start_restore(
         .and_then(|value| value["restore_confidence"].as_str())
         .unwrap_or("preliminary")
         .to_string();
-    let materialized_summary =
-        restore_node.and_then(summarize_startup_materialized_notes);
+    let materialized_summary = restore_node.and_then(summarize_startup_materialized_notes);
     let recent_actions_summary =
         restore_node.and_then(|value| summarize_recent_actions(&value["recent_actions"]));
     let active_files_summary =
@@ -3657,8 +3801,7 @@ fn render_chat_start_prompt(
         .filter(|value| !value.is_empty())
         .unwrap_or(headline);
     let compact_current_goal = compact_prompt_fragment(current_goal, 80);
-    let materialized_summary =
-        restore_node.and_then(summarize_startup_materialized_notes);
+    let materialized_summary = restore_node.and_then(summarize_startup_materialized_notes);
     let compact_materialized_summary = materialized_summary
         .as_deref()
         .map(|value| compact_prompt_fragment(value, 88));
@@ -3950,7 +4093,9 @@ fn startup_materialized_notes(restore_node: &Value) -> Vec<String> {
         {
             notes.push(format!("Client-budget guard: {status_label}."));
         }
-        if let Some(last_request) = guard["last_request"].as_str().filter(|value| !value.is_empty())
+        if let Some(last_request) = guard["last_request"]
+            .as_str()
+            .filter(|value| !value.is_empty())
         {
             notes.push(format!("Последний запрос в модель: {last_request}."));
         }
@@ -4589,10 +4734,12 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContinuityStartupContext, build_chat_start_restore, build_continuity_answer_payload,
-        build_continuity_canonical_eval, build_continuity_restore_payload,
-        build_continuity_startup_payload, build_startup_runtime_state_artifact,
-        build_startup_runtime_state_cli_json, StartupRuntimeStateAudit,
+        ContinuityStartupContext, StartupRuntimeStateAudit,
+        build_blocked_continuity_answer_payload, build_chat_start_restore,
+        build_continuity_answer_payload, build_continuity_canonical_eval,
+        build_continuity_restore_payload, build_continuity_startup_payload,
+        build_startup_runtime_state_artifact, build_startup_runtime_state_cli_json,
+        client_budget_guard_blocks_reply, continuity_answer_requires_live_reply_gate,
         continuity_replay_guard_probes, continuity_snapshot_semantic_epoch_ms,
         continuity_temporal_lookup_probes, degradation_proof_scenarios, enrich_thread_index_file,
         extract_next_step_from_text, fake_continuity_handoff_snapshot,
@@ -4603,6 +4750,7 @@ mod tests {
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
     use crate::postgres::{NamespaceRecord, ProjectRecord};
+    use crate::working_state;
     use serde_json::{Value, json};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -5070,6 +5218,96 @@ mod tests {
             &answer,
         )
         .expect("payload");
+        assert_eq!(
+            payload["continuity_answer"]["canonical_eval"]["verdict_counts"]["hit_correct_target"]
+                .as_u64(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn continuity_answer_live_reply_gate_is_only_required_for_live_source_kinds() {
+        assert!(continuity_answer_requires_live_reply_gate(
+            "live_continuity_startup"
+        ));
+        assert!(!continuity_answer_requires_live_reply_gate(
+            "operator_continuity_startup"
+        ));
+        assert!(!continuity_answer_requires_live_reply_gate(
+            "proof_continuity_startup"
+        ));
+        assert!(!continuity_answer_requires_live_reply_gate(
+            "verify_continuity_startup"
+        ));
+    }
+
+    #[test]
+    fn continuity_answer_blocked_payload_surfaces_rotate_only_contract() {
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "art".to_string(),
+            display_name: "Art".to_string(),
+            repo_root: "/home/art/Art".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let handoff = json!({
+            "headline": "Current project line",
+            "next_step": "Current project next step."
+        });
+        let restore = json!({
+            "working_state_restore": {
+                "latest_decision_trace": {
+                    "included": [],
+                    "not_included": []
+                }
+            }
+        });
+        let client_budget_guard = json!({
+            "status_label": "новый чат нужен сейчас",
+            "should_rotate_chat_now": true,
+            "reply_execution_gate": {
+                "must_rotate_before_reply": true,
+                "blocking_reply_contract": {
+                    "response_kind": "rotate_chat_only",
+                    "template": working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE
+                }
+            }
+        });
+
+        assert!(client_budget_guard_blocks_reply(&client_budget_guard));
+
+        let payload = build_blocked_continuity_answer_payload(
+            &project,
+            &namespace,
+            &handoff,
+            Some(&restore),
+            "last_chat",
+            Some("на чем остановились"),
+            None,
+            None,
+            2,
+            false,
+            1,
+            working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE,
+            &client_budget_guard,
+            "live_continuity_startup",
+        )
+        .expect("payload");
+
+        assert_eq!(
+            payload["continuity_answer"]["blocked_by_client_budget_guard"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["continuity_answer"]["blocking_reply_contract"]["response_kind"],
+            json!("rotate_chat_only")
+        );
         assert_eq!(
             payload["continuity_answer"]["canonical_eval"]["verdict_counts"]["hit_correct_target"]
                 .as_u64(),
