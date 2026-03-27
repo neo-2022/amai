@@ -3655,6 +3655,10 @@ fn render_chat_start_prompt(
                 restore_node.and_then(|value| value.get("client_budget_guard")),
             )
         });
+    let blocked_reply_text = restore_node
+        .and_then(|value| value["client_budget_guard"]["reply_execution_gate"]["blocking_reply_contract"]["template"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned);
     let execctl_resume_state = restore_node
         .and_then(|value| value["execctl_resume_state"].as_str())
         .unwrap_or("clear");
@@ -3676,6 +3680,15 @@ fn render_chat_start_prompt(
     }
     if let Some(value) = summarize_startup_next_action_for_prompt(&startup_next_action) {
         lines.push(value);
+    }
+    if startup_next_action["action_kind"].as_str() == Some("rotate_chat_for_client_budget") {
+        lines.push("В старом чате разрешён только короткий rotate-ответ.".to_string());
+        lines.push(format!(
+            "Разрешённый ответ: {}",
+            blocked_reply_text
+                .as_deref()
+                .unwrap_or(working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE)
+        ));
     }
     if execctl_resume_state == "pending_return_queue_present" {
         lines.push("Не переключайся до возврата.".to_string());
@@ -5574,6 +5587,63 @@ mod tests {
         assert!(materialized.contains("162594 из 258400"));
         assert!(materialized.contains("23:27:06 MSK"));
         assert!(!materialized.contains("23:15:46 MSK"));
+    }
+
+    #[test]
+    fn build_chat_start_restore_prompt_includes_blocked_reply_text_for_rotate_path() {
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "amai".to_string(),
+            display_name: "Amai".to_string(),
+            repo_root: "/home/art/agent-memory-index".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let continuity = json!({
+            "bootstrap_summary": {
+                "details": {
+                    "thread_count": 3,
+                    "latest_rendered_transcript": "/tmp/rendered.md"
+                }
+            }
+        });
+        let handoff = json!({
+            "headline": "Продолжить активную рабочую линию",
+            "next_step": "продолжить работу в свежем чате через continuity startup"
+        });
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Продолжить активную рабочую линию",
+                "restore_confidence": "high",
+                "startup_next_action": {
+                    "action_kind": "rotate_chat_for_client_budget",
+                    "blocking": true,
+                    "headline": "Клиентский лимит: новый чат нужен сейчас",
+                    "next_step": "сохрани handoff и продолжай только в свежем чате через continuity startup"
+                },
+                "client_budget_guard": {
+                    "reply_execution_gate": {
+                        "blocking_reply_contract": {
+                            "template": "Этот чат уже жжёт внешний лимит клиента. Сохрани handoff, открой новый чат и запусти continuity startup."
+                        }
+                    }
+                }
+            }
+        });
+
+        let pack =
+            build_chat_start_restore(&project, &namespace, &continuity, &handoff, Some(&restore));
+        let prompt = pack["chat_start_restore"]["prompt_text"]
+            .as_str()
+            .expect("prompt text");
+
+        assert!(prompt.contains("В старом чате разрешён только короткий rotate-ответ."));
+        assert!(prompt.contains("Разрешённый ответ: Этот чат уже жжёт внешний лимит клиента."));
     }
 
     #[test]
