@@ -28,6 +28,7 @@ const CONFIG_RELATIVE_PATH: &str = "config/token_budget_profiles.toml";
 const AGENT_CYCLE_TIMELINE_MAX_POINTS: usize = 256;
 const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
 const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_generation_turn_observed";
+const CONTINUITY_SNAPSHOT_QUERY_LABEL: &str = "Continuity snapshot";
 const CONTINUITY_PRE_AMAI_BASELINE_STRATEGY: &str = "truthful_pre_amai_continuity_summaries_v1";
 static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<
     Mutex<Option<DashboardRolloutObservationCache>>,
@@ -368,6 +369,7 @@ struct TokenBudgetEvent {
     created_at_epoch_ms: i64,
     event_id: String,
     correlation_id: String,
+    context_pack_id: Option<String>,
     payload_origin: String,
     session_id: String,
     rolling_window_profile: String,
@@ -470,6 +472,8 @@ struct AssistantGenerationScopeObservation {
     target_group_count: u64,
     observed_group_count: u64,
     observed_tokens: u64,
+    helper_only_context_pack_ids: BTreeSet<String>,
+    helper_only_non_model_visible_context_pack_ids: BTreeSet<String>,
     target_context_pack_ids: BTreeSet<String>,
     matched_context_pack_ids: BTreeSet<String>,
     unmatched_context_pack_ids: BTreeSet<String>,
@@ -502,6 +506,7 @@ struct DashboardAssistantScopeSourceCache {
     target_context_pack_ids: BTreeSet<String>,
     direct_turns: Vec<AssistantGenerationTurnObservedSnapshot>,
     metadata: BTreeMap<String, WorkingStateContextPackMeta>,
+    helper_only_context_pack_ids_by_thread: BTreeMap<String, BTreeSet<String>>,
     turns_by_thread:
         BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
 }
@@ -5434,8 +5439,7 @@ fn build_statement_preview(
         observed_whole_cycle_with_assistant_scope_tokens(summary, assistant_scope)
             .unwrap_or(internal_delivered_tokens.saturating_add(internal_recovery_tokens));
     let verified_internal_observed_whole_cycle_lower_bound_tokens =
-        summary["verified_observed_whole_cycle_with_amai_tokens"]
-            .as_u64()
+        verified_observed_whole_cycle_with_assistant_scope_tokens(summary, assistant_scope)
             .unwrap_or(
                 summary["verified_delivered_tokens"]
                     .as_u64()
@@ -5530,7 +5534,8 @@ fn build_client_limit_boundary_review_surface(statement_preview: &Value) -> Valu
     let continuity_boundary_rollup = alignment["continuity_boundary_rollup"].clone();
     let pre_amai_baseline_source_status = alignment["pre_amai_baseline_source_status"].clone();
     let strict_client_meter_slice = alignment["strict_client_meter_slice"].clone();
-    let same_meter_as_client_limit = alignment["same_meter_as_client_limit"].as_bool() == Some(true);
+    let same_meter_as_client_limit =
+        alignment["same_meter_as_client_limit"].as_bool() == Some(true);
     let review_state = if same_meter_as_client_limit {
         "same_meter_equivalent"
     } else {
@@ -5618,8 +5623,7 @@ fn build_dashboard_statement_preview(
         observed_whole_cycle_with_assistant_scope_tokens(summary, assistant_scope)
             .unwrap_or(with_amai_measured_tokens);
     let verified_observed_whole_cycle_with_amai_tokens =
-        summary["verified_observed_whole_cycle_with_amai_tokens"]
-            .as_u64()
+        verified_observed_whole_cycle_with_assistant_scope_tokens(summary, assistant_scope)
             .unwrap_or(verified_with_amai_measured_tokens);
     json!({
         "scope_code": scope_code,
@@ -5671,6 +5675,26 @@ fn observed_whole_cycle_with_assistant_scope_tokens(
                 .map(|scope| scope.observed_tokens)
                 .unwrap_or(observed_assistant_generation_tokens)
                 .saturating_sub(observed_assistant_generation_tokens),
+        ),
+    )
+}
+
+fn verified_observed_whole_cycle_with_assistant_scope_tokens(
+    summary: &Value,
+    assistant_scope: Option<&AssistantGenerationScopeObservation>,
+) -> Option<u64> {
+    let verified_observed_whole_cycle_with_amai_tokens =
+        summary["verified_observed_whole_cycle_with_amai_tokens"].as_u64()?;
+    let verified_observed_assistant_generation_tokens =
+        summary["verified_observed_assistant_generation_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+    Some(
+        verified_observed_whole_cycle_with_amai_tokens.saturating_add(
+            assistant_scope
+                .map(|scope| scope.observed_tokens)
+                .unwrap_or(verified_observed_assistant_generation_tokens)
+                .saturating_sub(verified_observed_assistant_generation_tokens),
         ),
     )
 }
@@ -7150,7 +7174,11 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        record_dashboard_precache_stage_ms(&mut pre_cache_timings, "token_events_reload", stage_started_at);
+        record_dashboard_precache_stage_ms(
+            &mut pre_cache_timings,
+            "token_events_reload",
+            stage_started_at,
+        );
     }
 
     let stage_started_at = Instant::now();
@@ -7604,6 +7632,21 @@ fn store_dashboard_rollout_observations(
     });
 }
 
+fn event_context_pack_id(event: &TokenBudgetEvent) -> Option<String> {
+    if let Some(context_pack_id) = event.context_pack_id.as_ref() {
+        let value = context_pack_id.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    let value = event.correlation_id.trim();
+    if value.is_empty() || value == event.event_id {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 async fn sync_rollout_assistant_generation_for_events(
     db: &Client,
     events: &[TokenBudgetEvent],
@@ -7614,10 +7657,11 @@ async fn sync_rollout_assistant_generation_for_events(
         .filter(|event| {
             event.traffic_class == "live"
                 && event.measurement_scope == "retrieval_lower_bound"
+                && event_has_model_visible_with_amai_tokens(event)
+                && !is_legacy_continuity_bootstrap_context_pack(event)
                 && event.assistant_generation_tokens.is_none()
         })
-        .map(|event| event.correlation_id.clone())
-        .filter(|value| !value.is_empty())
+        .filter_map(event_context_pack_id)
         .collect::<BTreeSet<_>>();
     if target_context_pack_ids.is_empty() {
         return Ok(false);
@@ -7676,8 +7720,7 @@ fn dashboard_same_meter_sync_signature(
                 && event.measurement_scope == "retrieval_lower_bound"
                 && event.assistant_generation_tokens.is_none()
         })
-        .map(|event| event.correlation_id.clone())
-        .filter(|value| !value.is_empty())
+        .filter_map(event_context_pack_id)
         .collect::<BTreeSet<_>>();
     let tool_overhead_missing_context_pack_ids = events
         .iter()
@@ -7686,8 +7729,7 @@ fn dashboard_same_meter_sync_signature(
                 && event.measurement_scope == "retrieval_lower_bound"
                 && event.tool_overhead_tokens.is_none()
         })
-        .map(|event| event.correlation_id.clone())
-        .filter(|value| !value.is_empty())
+        .filter_map(event_context_pack_id)
         .collect::<BTreeSet<_>>();
     let payload = json!({
         "assistant_generation_missing_context_pack_ids": assistant_generation_missing_context_pack_ids,
@@ -7727,8 +7769,7 @@ async fn sync_context_pack_tool_overhead_for_events(
                 && event.measurement_scope == "retrieval_lower_bound"
                 && event.tool_overhead_tokens.is_none()
         })
-        .map(|event| event.correlation_id.clone())
-        .filter(|value| !value.is_empty())
+        .filter_map(event_context_pack_id)
         .collect::<BTreeSet<_>>();
     if target_context_pack_ids.is_empty() {
         return Ok(false);
@@ -7784,8 +7825,7 @@ async fn sync_context_pack_tool_overhead_for_events(
 fn is_live_continuity_restore_event(event: &TokenBudgetEvent) -> bool {
     event.traffic_class == "live"
         && event.measurement_scope == "whole_cycle_observed_lower_bound"
-        && (event.query_type == "continuity_restore"
-            || event.target_kind == "continuity_restore")
+        && (event.query_type == "continuity_restore" || event.target_kind == "continuity_restore")
 }
 
 async fn sync_continuity_pre_amai_baseline_for_events(
@@ -7808,10 +7848,8 @@ async fn sync_continuity_pre_amai_baseline_for_events(
 
     let config = load_config(repo_root)?;
     let tokenizer = build_tokenizer(&config.measurement.tokenizer)?;
-    let mut snapshots_by_scope = BTreeMap::<
-        (String, String),
-        Vec<ObservabilitySnapshotRecord>,
-    >::new();
+    let mut snapshots_by_scope =
+        BTreeMap::<(String, String), Vec<ObservabilitySnapshotRecord>>::new();
     let mut changed = false;
 
     for event in targets {
@@ -7883,9 +7921,15 @@ async fn latest_working_state_context_pack_metadata(
     if let Some(metadata) = cached_dashboard_working_state_metadata(&signature) {
         return Ok(filter_context_pack_metadata(&metadata, context_pack_ids));
     }
-    let rows =
-        postgres::list_observability_snapshots_by_kinds(db, &["working_state_event"], Some(4096))
-            .await?;
+    let target_ids = context_pack_ids.iter().cloned().collect::<Vec<_>>();
+    let rows = postgres::list_latest_observability_snapshots_by_payload_string_field(
+        db,
+        "working_state_event",
+        "working_state_event",
+        "context_pack_id",
+        &target_ids,
+    )
+    .await?;
     let mut metadata = BTreeMap::new();
     for row in rows {
         let node = &row.payload["working_state_event"];
@@ -7921,10 +7965,13 @@ async fn assistant_generation_turn_observed_snapshots_for_context_packs(
     if context_pack_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows = postgres::list_observability_snapshots_by_kinds(
+    let target_ids = context_pack_ids.iter().cloned().collect::<Vec<_>>();
+    let rows = postgres::list_observability_snapshots_by_payload_text_array_overlap(
         db,
-        &[ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND],
-        Some(4096),
+        ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND,
+        "assistant_generation_turn_observed",
+        "context_pack_ids",
+        &target_ids,
     )
     .await?;
     let mut latest = BTreeMap::<String, AssistantGenerationTurnObservedSnapshot>::new();
@@ -8188,18 +8235,34 @@ async fn derive_rollout_assistant_generation_scope(
         .collect::<BTreeSet<_>>();
     let mut turns_by_thread =
         BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
+    let mut helper_only_context_pack_ids_by_thread = BTreeMap::<String, BTreeSet<String>>::new();
     for thread_id in thread_ids {
         let turns =
             codex_threads::rollout_assistant_generation_turn_observations_for_thread(&thread_id)?;
         if !turns.is_empty() {
-            turns_by_thread.insert(thread_id, turns);
+            turns_by_thread.insert(thread_id.clone(), turns);
+        }
+        let helper_only_context_pack_ids =
+            codex_threads::rollout_helper_only_context_pack_ids_for_thread(&thread_id)?;
+        if !helper_only_context_pack_ids.is_empty() {
+            helper_only_context_pack_ids_by_thread.insert(thread_id, helper_only_context_pack_ids);
         }
     }
+    let helper_only_context_pack_ids =
+        helper_only_context_pack_ids_for_scope(&metadata, &helper_only_context_pack_ids_by_thread);
+    let helper_only_non_model_visible_context_pack_ids =
+        helper_only_non_model_visible_context_pack_ids(
+            events,
+            &metadata,
+            &helper_only_context_pack_ids_by_thread,
+        );
     Ok(derive_rollout_assistant_generation_scope_from_sources(
         &target_context_pack_ids,
         &direct_turns,
         &metadata,
         &turns_by_thread,
+        &helper_only_context_pack_ids,
+        &helper_only_non_model_visible_context_pack_ids,
     ))
 }
 
@@ -8210,6 +8273,7 @@ async fn dashboard_assistant_scope_sources(
 ) -> Result<(
     Vec<AssistantGenerationTurnObservedSnapshot>,
     BTreeMap<String, WorkingStateContextPackMeta>,
+    BTreeMap<String, BTreeSet<String>>,
     BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
     DashboardAssistantScopeDebug,
 )> {
@@ -8239,7 +8303,7 @@ async fn dashboard_assistant_scope_sources(
         stage_started_at,
     );
     let stage_started_at = Instant::now();
-    if let Some((direct_turns, metadata, turns_by_thread)) =
+    if let Some((direct_turns, metadata, helper_only_context_pack_ids_by_thread, turns_by_thread)) =
         cached_dashboard_assistant_scope_sources(
             repo_root,
             union_target_ids,
@@ -8254,7 +8318,13 @@ async fn dashboard_assistant_scope_sources(
         );
         debug.source_cache_status = "hit".to_string();
         debug.source_total_ms = source_started_at.elapsed().as_millis() as u64;
-        return Ok((direct_turns, metadata, turns_by_thread, debug));
+        return Ok((
+            direct_turns,
+            metadata,
+            helper_only_context_pack_ids_by_thread,
+            turns_by_thread,
+            debug,
+        ));
     }
     record_dashboard_stage_ms(
         &mut debug.source_stage_ms,
@@ -8294,10 +8364,17 @@ async fn dashboard_assistant_scope_sources(
             union_target_ids,
             &direct_turns,
             &empty_metadata,
+            &BTreeMap::new(),
             &empty_turns_by_thread,
         );
         debug.source_total_ms = source_started_at.elapsed().as_millis() as u64;
-        return Ok((direct_turns, empty_metadata, empty_turns_by_thread, debug));
+        return Ok((
+            direct_turns,
+            empty_metadata,
+            BTreeMap::new(),
+            empty_turns_by_thread,
+            debug,
+        ));
     }
     let stage_started_at = Instant::now();
     let metadata = latest_working_state_context_pack_metadata(db, union_target_ids).await?;
@@ -8312,12 +8389,19 @@ async fn dashboard_assistant_scope_sources(
         .collect::<BTreeSet<_>>();
     let mut turns_by_thread =
         BTreeMap::<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>::new();
+    let mut helper_only_context_pack_ids_by_thread = BTreeMap::<String, BTreeSet<String>>::new();
     let stage_started_at = Instant::now();
     for thread_id in &thread_ids {
         let turns =
             codex_threads::rollout_assistant_generation_turn_observations_for_thread(thread_id)?;
         if !turns.is_empty() {
             turns_by_thread.insert(thread_id.clone(), turns);
+        }
+        let helper_only_context_pack_ids =
+            codex_threads::rollout_helper_only_context_pack_ids_for_thread(thread_id)?;
+        if !helper_only_context_pack_ids.is_empty() {
+            helper_only_context_pack_ids_by_thread
+                .insert(thread_id.clone(), helper_only_context_pack_ids);
         }
     }
     record_dashboard_stage_ms(
@@ -8344,10 +8428,17 @@ async fn dashboard_assistant_scope_sources(
         union_target_ids,
         &direct_turns,
         &metadata,
+        &helper_only_context_pack_ids_by_thread,
         &turns_by_thread,
     );
     debug.source_total_ms = source_started_at.elapsed().as_millis() as u64;
-    Ok((direct_turns, metadata, turns_by_thread, debug))
+    Ok((
+        direct_turns,
+        metadata,
+        helper_only_context_pack_ids_by_thread,
+        turns_by_thread,
+        debug,
+    ))
 }
 
 async fn derive_dashboard_rollout_assistant_generation_scopes(
@@ -8383,8 +8474,13 @@ async fn derive_dashboard_rollout_assistant_generation_scopes(
     }
 
     let stage_started_at = Instant::now();
-    let (direct_turns, metadata, turns_by_thread, source_debug) =
-        dashboard_assistant_scope_sources(db, repo_root, &union_target_ids).await?;
+    let (
+        direct_turns,
+        metadata,
+        helper_only_context_pack_ids_by_thread,
+        turns_by_thread,
+        source_debug,
+    ) = dashboard_assistant_scope_sources(db, repo_root, &union_target_ids).await?;
     debug.source_cache_status = source_debug.source_cache_status;
     debug.source_stage_ms = source_debug.source_stage_ms;
     debug.source_total_ms = source_debug.source_total_ms;
@@ -8394,6 +8490,7 @@ async fn derive_dashboard_rollout_assistant_generation_scopes(
         &target_sets,
         &direct_turns,
         &metadata,
+        &helper_only_context_pack_ids_by_thread,
         &turns_by_thread,
     );
     record_dashboard_stage_ms(
@@ -8409,12 +8506,22 @@ async fn derive_dashboard_rollout_assistant_generation_scopes(
     let stage_started_at = Instant::now();
     let scopes = target_sets
         .iter()
-        .map(|target_context_pack_ids| {
+        .zip(events_by_scope.iter())
+        .map(|(target_context_pack_ids, scope_events)| {
             derive_rollout_assistant_generation_scope_from_sources(
                 target_context_pack_ids,
                 &direct_turns,
                 &metadata,
                 &turns_by_thread,
+                &helper_only_context_pack_ids_for_scope(
+                    &metadata,
+                    &helper_only_context_pack_ids_by_thread,
+                ),
+                &helper_only_non_model_visible_context_pack_ids(
+                    scope_events,
+                    &metadata,
+                    &helper_only_context_pack_ids_by_thread,
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -8428,6 +8535,7 @@ fn dashboard_assistant_scope_signature(
     target_sets: &[BTreeSet<String>],
     direct_turns: &[AssistantGenerationTurnObservedSnapshot],
     metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
+    helper_only_context_pack_ids_by_thread: &BTreeMap<String, BTreeSet<String>>,
     turns_by_thread: &BTreeMap<
         String,
         Vec<codex_threads::RolloutAssistantGenerationTurnObservation>,
@@ -8458,6 +8566,15 @@ fn dashboard_assistant_scope_signature(
             })
         })
         .collect::<Vec<_>>();
+    let helper_only_context_pack_ids_by_thread = helper_only_context_pack_ids_by_thread
+        .iter()
+        .map(|(thread_id, context_pack_ids)| {
+            json!({
+                "thread_id": thread_id,
+                "context_pack_ids": context_pack_ids,
+            })
+        })
+        .collect::<Vec<_>>();
     let turns_by_thread = turns_by_thread
         .iter()
         .map(|(thread_id, turns)| {
@@ -8485,6 +8602,7 @@ fn dashboard_assistant_scope_signature(
         "target_sets": target_sets,
         "direct_turns": direct_turns,
         "metadata": metadata,
+        "helper_only_context_pack_ids_by_thread": helper_only_context_pack_ids_by_thread,
         "turns_by_thread": turns_by_thread,
     });
     hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
@@ -8541,6 +8659,7 @@ fn cached_dashboard_assistant_scope_sources(
     Option<(
         Vec<AssistantGenerationTurnObservedSnapshot>,
         BTreeMap<String, WorkingStateContextPackMeta>,
+        BTreeMap<String, BTreeSet<String>>,
         BTreeMap<String, Vec<codex_threads::RolloutAssistantGenerationTurnObservation>>,
     )>,
 > {
@@ -8574,6 +8693,7 @@ fn cached_dashboard_assistant_scope_sources(
     Ok(Some((
         entry.direct_turns.clone(),
         entry.metadata.clone(),
+        entry.helper_only_context_pack_ids_by_thread.clone(),
         entry.turns_by_thread.clone(),
     )))
 }
@@ -8584,6 +8704,7 @@ fn store_dashboard_assistant_scope_sources(
     target_context_pack_ids: &BTreeSet<String>,
     direct_turns: &[AssistantGenerationTurnObservedSnapshot],
     metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
+    helper_only_context_pack_ids_by_thread: &BTreeMap<String, BTreeSet<String>>,
     turns_by_thread: &BTreeMap<
         String,
         Vec<codex_threads::RolloutAssistantGenerationTurnObservation>,
@@ -8599,6 +8720,7 @@ fn store_dashboard_assistant_scope_sources(
         target_context_pack_ids: target_context_pack_ids.clone(),
         direct_turns: direct_turns.to_vec(),
         metadata: metadata.clone(),
+        helper_only_context_pack_ids_by_thread: helper_only_context_pack_ids_by_thread.clone(),
         turns_by_thread: turns_by_thread.clone(),
     });
 }
@@ -8799,11 +8921,21 @@ fn dashboard_report_assistant_scope_signature(
         scope.available_turns.to_string(),
         scope.available_direct_turns.to_string(),
         scope.available_rollout_turns.to_string(),
+        scope.helper_only_context_pack_ids.len().to_string(),
+        scope
+            .helper_only_non_model_visible_context_pack_ids
+            .len()
+            .to_string(),
         scope.target_context_pack_ids.len().to_string(),
     ];
     buffer.push_str(&header.join("\\u{1f}"));
     buffer.push('\u{1f}');
     append_sorted_signature_items(&mut buffer, &scope.target_context_pack_ids);
+    append_sorted_signature_items(&mut buffer, &scope.helper_only_context_pack_ids);
+    append_sorted_signature_items(
+        &mut buffer,
+        &scope.helper_only_non_model_visible_context_pack_ids,
+    );
     append_sorted_signature_items(&mut buffer, &scope.matched_context_pack_ids);
     append_sorted_signature_items(&mut buffer, &scope.unmatched_context_pack_ids);
     append_sorted_signature_items(&mut buffer, &scope.matched_turn_ids);
@@ -8947,9 +9079,43 @@ fn derive_rollout_assistant_generation_scope_from_sources(
         String,
         Vec<codex_threads::RolloutAssistantGenerationTurnObservation>,
     >,
+    helper_only_context_pack_ids: &BTreeSet<String>,
+    helper_only_non_model_visible_context_pack_ids: &BTreeSet<String>,
 ) -> AssistantGenerationScopeObservation {
+    let target_context_pack_ids = target_context_pack_ids
+        .difference(helper_only_context_pack_ids)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let metadata_lineage_context_pack_ids = target_context_pack_ids
+        .iter()
+        .filter(|context_pack_id| {
+            metadata
+                .get(*context_pack_id)
+                .map(|meta| meta.captured_at_epoch_ms > 0)
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let direct_turn_lineage_context_pack_ids = direct_turns
+        .iter()
+        .flat_map(|turn| turn.context_pack_ids.iter())
+        .filter(|context_pack_id| target_context_pack_ids.contains(*context_pack_id))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let target_context_pack_ids = target_context_pack_ids
+        .into_iter()
+        .filter(|context_pack_id| {
+            metadata_lineage_context_pack_ids.contains(context_pack_id)
+                || direct_turn_lineage_context_pack_ids.contains(context_pack_id)
+        })
+        .collect::<BTreeSet<_>>();
     if target_context_pack_ids.is_empty() {
-        return AssistantGenerationScopeObservation::default();
+        return AssistantGenerationScopeObservation {
+            helper_only_context_pack_ids: helper_only_context_pack_ids.clone(),
+            helper_only_non_model_visible_context_pack_ids:
+                helper_only_non_model_visible_context_pack_ids.clone(),
+            ..AssistantGenerationScopeObservation::default()
+        };
     }
 
     let mut matched_context_pack_ids = BTreeSet::new();
@@ -8966,7 +9132,7 @@ fn derive_rollout_assistant_generation_scope_from_sources(
     for turn in direct_turns {
         let matched_ids = turn
             .context_pack_ids
-            .intersection(target_context_pack_ids)
+            .intersection(&target_context_pack_ids)
             .cloned()
             .collect::<BTreeSet<_>>();
         if matched_ids.is_empty() {
@@ -8983,7 +9149,7 @@ fn derive_rollout_assistant_generation_scope_from_sources(
     }
 
     let mut by_thread = BTreeMap::<String, Vec<(String, WorkingStateContextPackMeta)>>::new();
-    for context_pack_id in target_context_pack_ids {
+    for context_pack_id in &target_context_pack_ids {
         if matched_context_pack_ids.contains(context_pack_id) {
             continue;
         }
@@ -9063,7 +9229,10 @@ fn derive_rollout_assistant_generation_scope_from_sources(
         target_group_count: target_group_keys.len() as u64,
         observed_group_count,
         observed_tokens,
-        target_context_pack_ids: target_context_pack_ids.clone(),
+        helper_only_context_pack_ids: helper_only_context_pack_ids.clone(),
+        helper_only_non_model_visible_context_pack_ids:
+            helper_only_non_model_visible_context_pack_ids.clone(),
+        target_context_pack_ids,
         matched_context_pack_ids,
         unmatched_context_pack_ids,
         matched_turn_ids,
@@ -9073,6 +9242,60 @@ fn derive_rollout_assistant_generation_scope_from_sources(
         matched_direct_turn_ids,
         matched_rollout_turn_ids,
     }
+}
+
+fn helper_only_context_pack_ids_for_scope(
+    metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
+    helper_only_context_pack_ids_by_thread: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeSet<String> {
+    metadata
+        .iter()
+        .filter_map(|(context_pack_id, meta)| {
+            let helper_ids = helper_only_context_pack_ids_by_thread.get(meta.thread_id.as_str())?;
+            helper_ids
+                .contains(context_pack_id)
+                .then(|| context_pack_id.clone())
+        })
+        .collect()
+}
+
+fn event_has_model_visible_with_amai_tokens(event: &TokenBudgetEvent) -> bool {
+    event.context_tokens > 0
+        || event.recovery_tokens > 0
+        || event.client_prompt_tokens.unwrap_or(0) > 0
+        || event.assistant_generation_tokens.unwrap_or(0) > 0
+        || event.tool_overhead_tokens.unwrap_or(0) > 0
+        || event.continuity_restore_tokens.unwrap_or(0) > 0
+}
+
+fn is_legacy_continuity_bootstrap_context_pack(event: &TokenBudgetEvent) -> bool {
+    event.namespace == "continuity"
+        && event.source_kind == "live_context_pack"
+        && event.query_type == "code_lookup"
+        && event.target_kind == "file"
+        && event.query == CONTINUITY_SNAPSHOT_QUERY_LABEL
+}
+
+fn helper_only_non_model_visible_context_pack_ids(
+    events: &[TokenBudgetEvent],
+    metadata: &BTreeMap<String, WorkingStateContextPackMeta>,
+    helper_only_context_pack_ids_by_thread: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeSet<String> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let context_pack_id = event_context_pack_id(event)?;
+            let thread_id = metadata.get(context_pack_id.as_str())?.thread_id.as_str();
+            let helper_ids = helper_only_context_pack_ids_by_thread.get(thread_id)?;
+            if helper_ids.contains(&context_pack_id)
+                && !event_has_model_visible_with_amai_tokens(event)
+            {
+                Some(context_pack_id)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 pub async fn record_continuity_restore_observed_event(
@@ -9233,14 +9456,12 @@ async fn collect_report(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let sync_scope_events = active_same_meter_scope_events(&session_events, &rolling_window_events);
     let tool_overhead_changed =
-        sync_context_pack_tool_overhead_for_events(db, repo_root, &sync_scope_events).await?;
+        sync_context_pack_tool_overhead_for_events(db, repo_root, &events).await?;
     let assistant_generation_changed =
-        sync_rollout_assistant_generation_for_events(db, &sync_scope_events, &rollout_observations)
-            .await?;
+        sync_rollout_assistant_generation_for_events(db, &events, &rollout_observations).await?;
     let continuity_baseline_changed =
-        sync_continuity_pre_amai_baseline_for_events(db, repo_root, &sync_scope_events).await?;
+        sync_continuity_pre_amai_baseline_for_events(db, repo_root, &events).await?;
     if tool_overhead_changed || assistant_generation_changed || continuity_baseline_changed {
         let mut refreshed = load_events(db, include_verify_events, limit).await?;
         refreshed.sort_by_key(|event| event.created_at_epoch_ms);
@@ -10008,16 +10229,7 @@ async fn load_dashboard_token_events(
             dashboard_token_events_delta_limit(&previous_summary, &summary, 32)
         {
             let delta_events = load_raw_events(db, Some(delta_limit)).await?;
-            let mut merged = previous_raw_events;
-            let existing_event_ids = merged
-                .iter()
-                .map(|event| event.event_id.clone())
-                .collect::<BTreeSet<_>>();
-            merged.extend(
-                delta_events
-                    .into_iter()
-                    .filter(|event| !existing_event_ids.contains(&event.event_id)),
-            );
+            let merged = merge_dashboard_token_events(previous_raw_events, delta_events);
             store_dashboard_token_events(repo_root, &signature, &summary, &merged);
             return Ok(filter_dashboard_token_events(merged, include_verify_events));
         }
@@ -10197,6 +10409,61 @@ fn dashboard_token_events_delta_limit(
     }
 }
 
+fn event_shadow_version_key(event: &TokenBudgetEvent) -> (i64, i64, String) {
+    (
+        event.created_at_epoch_ms,
+        event.ingested_at_epoch_ms,
+        event
+            .snapshot_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| event.event_id.clone()),
+    )
+}
+
+fn live_usage_identity_shadow_key(event: &TokenBudgetEvent) -> Option<String> {
+    if event.traffic_class != "live" {
+        return None;
+    }
+    let correlation_id = event_context_pack_id(event)?;
+    Some(format!(
+        "{}:{}:{}:{}:{}",
+        event.project, event.namespace, event.measurement_scope, event.source_kind, correlation_id
+    ))
+}
+
+fn dashboard_token_event_merge_key(event: &TokenBudgetEvent) -> String {
+    live_usage_identity_shadow_key(event).unwrap_or_else(|| {
+        format!(
+            "{}:{}:{}:{}:{}:{}",
+            event.project,
+            event.namespace,
+            event.measurement_scope,
+            event.traffic_class,
+            event.source_kind,
+            event.event_id
+        )
+    })
+}
+
+fn merge_dashboard_token_events(
+    previous_events: Vec<TokenBudgetEvent>,
+    delta_events: Vec<TokenBudgetEvent>,
+) -> Vec<TokenBudgetEvent> {
+    let mut merged = BTreeMap::<String, TokenBudgetEvent>::new();
+    for event in previous_events.into_iter().chain(delta_events) {
+        let key = dashboard_token_event_merge_key(&event);
+        let version = event_shadow_version_key(&event);
+        match merged.get(&key) {
+            Some(existing) if event_shadow_version_key(existing) >= version => {}
+            _ => {
+                merged.insert(key, event);
+            }
+        }
+    }
+    merged.into_values().collect()
+}
+
 fn can_shadow_live_report_event(event: &TokenBudgetEvent) -> bool {
     if event.traffic_class == "live" {
         return false;
@@ -10219,32 +10486,58 @@ fn shadowed_live_event_key(event: &TokenBudgetEvent) -> Option<String> {
 }
 
 fn suppress_shadowed_live_events(events: Vec<TokenBudgetEvent>) -> Vec<TokenBudgetEvent> {
-    let mut newest_shadow_by_key = BTreeMap::<String, i64>::new();
+    let mut newest_shadow_by_key = BTreeMap::<String, (i64, i64, String)>::new();
+    let mut newest_live_by_usage_identity = BTreeMap::<String, (i64, i64, String)>::new();
     for event in &events {
+        if let Some(key) = live_usage_identity_shadow_key(event) {
+            let version = event_shadow_version_key(event);
+            newest_live_by_usage_identity
+                .entry(key)
+                .and_modify(|current| {
+                    if *current < version {
+                        *current = version.clone();
+                    }
+                })
+                .or_insert(version);
+        }
         if !can_shadow_live_report_event(event) {
             continue;
         }
         let Some(key) = shadowed_live_event_key(event) else {
             continue;
         };
+        let version = event_shadow_version_key(event);
         newest_shadow_by_key
             .entry(key)
-            .and_modify(|current| *current = (*current).max(event.created_at_epoch_ms))
-            .or_insert(event.created_at_epoch_ms);
+            .and_modify(|current| {
+                if *current < version {
+                    *current = version.clone();
+                }
+            })
+            .or_insert(version);
     }
     events
         .into_iter()
         .filter(|event| {
+            if let Some(key) = live_usage_identity_shadow_key(event) {
+                let current_version = event_shadow_version_key(event);
+                if newest_live_by_usage_identity
+                    .get(&key)
+                    .is_some_and(|latest_version| *latest_version > current_version)
+                {
+                    return false;
+                }
+            }
             if event.traffic_class != "live" {
                 return true;
             }
             let Some(key) = shadowed_live_event_key(event) else {
                 return true;
             };
-            let Some(shadow_created_at_epoch_ms) = newest_shadow_by_key.get(&key) else {
+            let Some(shadow_version) = newest_shadow_by_key.get(&key) else {
                 return true;
             };
-            *shadow_created_at_epoch_ms < event.created_at_epoch_ms
+            *shadow_version < event_shadow_version_key(event)
         })
         .collect()
 }
@@ -10318,6 +10611,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .map(ToOwned::to_owned)
         .or_else(|| node["context_pack_id"].as_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| event_id.clone());
+    let context_pack_id = node["context_pack_id"].as_str().map(ToOwned::to_owned);
     let payload_origin = node["payload_origin"]
         .as_str()
         .unwrap_or("unknown")
@@ -10556,6 +10850,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         created_at_epoch_ms: row.created_at_epoch_ms,
         event_id,
         correlation_id,
+        context_pack_id,
         payload_origin,
         session_id,
         rolling_window_profile,
@@ -12169,10 +12464,151 @@ fn client_limit_component_target_live_events(
         .map(|items| {
             items
                 .iter()
-                .filter(|event| is_client_limit_component_target_event(code, event))
+                .filter(|event| {
+                    if !is_client_limit_component_target_event(code, event) {
+                        return false;
+                    }
+                    if code != "tool_overhead_outside_retrieval" {
+                        return true;
+                    }
+                    if is_legacy_continuity_bootstrap_context_pack(event) {
+                        return false;
+                    }
+                    let Some(scope) = assistant_scope else {
+                        return true;
+                    };
+                    let Some(context_pack_id) = event_context_pack_id(event) else {
+                        return true;
+                    };
+                    !(scope
+                        .helper_only_non_model_visible_context_pack_ids
+                        .contains(&context_pack_id)
+                        && !event_has_model_visible_with_amai_tokens(event))
+                })
                 .count() as u64
         })
         .unwrap_or(live_events_count)
+}
+
+fn tool_overhead_target_events<'a>(
+    events: &'a [TokenBudgetEvent],
+    assistant_scope: Option<&AssistantGenerationScopeObservation>,
+) -> Vec<&'a TokenBudgetEvent> {
+    events
+        .iter()
+        .filter(|event| {
+            if !is_client_limit_component_target_event("tool_overhead_outside_retrieval", event) {
+                return false;
+            }
+            if is_legacy_continuity_bootstrap_context_pack(event) {
+                return false;
+            }
+            let Some(scope) = assistant_scope else {
+                return true;
+            };
+            let Some(context_pack_id) = event_context_pack_id(event) else {
+                return true;
+            };
+            !(scope
+                .helper_only_non_model_visible_context_pack_ids
+                .contains(&context_pack_id)
+                && !event_has_model_visible_with_amai_tokens(event))
+        })
+        .collect()
+}
+
+fn tool_overhead_observation_source_status(
+    events: Option<&[TokenBudgetEvent]>,
+    assistant_scope: Option<&AssistantGenerationScopeObservation>,
+) -> Value {
+    let Some(events) = events else {
+        return json!({
+            "source_kind": "context_pack_payload_attach_v1",
+            "state": "tool_overhead_scope_unavailable",
+            "target_live_events": 0,
+            "observed_live_events": 0,
+            "missing_live_events": 0,
+            "missing_class_sample": [],
+            "missing_context_pack_id_sample": [],
+            "note": "Без live events этот слой не может показать, какие retrieval context packs ещё не получили tool_overhead whole-cycle attach."
+        });
+    };
+    let target_events = tool_overhead_target_events(events, assistant_scope);
+    let observed_live_events = target_events
+        .iter()
+        .filter(|event| event.tool_overhead_tokens.is_some())
+        .count() as u64;
+    let missing_events = target_events
+        .iter()
+        .filter(|event| event.tool_overhead_tokens.is_none())
+        .copied()
+        .collect::<Vec<_>>();
+    let mut missing_classes = BTreeMap::<(String, String, String, String), u64>::new();
+    for event in &missing_events {
+        let key = (
+            event.source_kind.clone(),
+            event.namespace.clone(),
+            event.query_type.clone(),
+            event.target_kind.clone(),
+        );
+        *missing_classes.entry(key).or_default() += 1;
+    }
+    let mut missing_class_sample = missing_classes
+        .into_iter()
+        .map(
+            |((source_kind, namespace, query_type, target_kind), count)| {
+                json!({
+                    "source_kind": source_kind,
+                    "namespace": namespace,
+                    "query_type": query_type,
+                    "target_kind": target_kind,
+                    "count": count,
+                })
+            },
+        )
+        .collect::<Vec<_>>();
+    missing_class_sample.sort_by(|left, right| {
+        right["count"]
+            .as_u64()
+            .cmp(&left["count"].as_u64())
+            .then_with(|| {
+                left["source_kind"]
+                    .as_str()
+                    .cmp(&right["source_kind"].as_str())
+            })
+            .then_with(|| left["namespace"].as_str().cmp(&right["namespace"].as_str()))
+            .then_with(|| {
+                left["query_type"]
+                    .as_str()
+                    .cmp(&right["query_type"].as_str())
+            })
+            .then_with(|| {
+                left["target_kind"]
+                    .as_str()
+                    .cmp(&right["target_kind"].as_str())
+            })
+    });
+
+    json!({
+        "source_kind": "context_pack_payload_attach_v1",
+        "state": if target_events.is_empty() {
+            "no_tool_overhead_target_scope"
+        } else if missing_events.is_empty() {
+            "tool_overhead_source_covers_missing_scope"
+        } else {
+            "tool_overhead_source_partial_scope_overlap"
+        },
+        "target_live_events": target_events.len(),
+        "observed_live_events": observed_live_events,
+        "missing_live_events": missing_events.len(),
+        "missing_class_sample": missing_class_sample.into_iter().take(8).collect::<Vec<_>>(),
+        "missing_context_pack_id_sample": missing_events
+            .iter()
+            .filter_map(|event| event_context_pack_id(event))
+            .take(8)
+            .collect::<Vec<_>>(),
+        "note": "Этот слой показывает, какие retrieval live events ещё не получили whole-cycle tool_overhead attach после payload-based sync, и какими классами они сгруппированы."
+    })
 }
 
 fn client_limit_component_event_coverage(
@@ -12316,10 +12752,11 @@ fn assistant_generation_missing_scope_context_pack_ids(
         .filter(|event| {
             event.traffic_class == "live"
                 && event.measurement_scope == "retrieval_lower_bound"
+                && event_has_model_visible_with_amai_tokens(event)
+                && !is_legacy_continuity_bootstrap_context_pack(event)
                 && event.assistant_generation_tokens.is_none()
         })
-        .map(|event| event.correlation_id.clone())
-        .filter(|value| !value.is_empty())
+        .filter_map(event_context_pack_id)
         .collect()
 }
 
@@ -12809,7 +13246,8 @@ fn continuity_pre_amai_baseline_source_from_events(
         if !is_client_limit_component_target_event("continuity_restore_outside_retrieval", event) {
             continue;
         }
-        if event.baseline_strategy != CONTINUITY_PRE_AMAI_BASELINE_STRATEGY || event.naive_tokens == 0
+        if event.baseline_strategy != CONTINUITY_PRE_AMAI_BASELINE_STRATEGY
+            || event.naive_tokens == 0
         {
             return None;
         }
@@ -12939,6 +13377,8 @@ fn build_client_limit_meter_alignment(
         rollout_observations,
         assistant_scope,
     );
+    let tool_overhead_observation_source =
+        tool_overhead_observation_source_status(events, assistant_scope);
     let baseline_equivalence =
         build_client_limit_baseline_equivalence(contract, summary, events, assistant_scope);
     let strict_client_meter_slice =
@@ -12950,13 +13390,12 @@ fn build_client_limit_meter_alignment(
         &baseline_equivalence,
         &explicit_boundary_surface,
     );
-    let pre_amai_baseline_source_status =
-        build_client_limit_pre_amai_baseline_source_status(
-            contract,
-            events,
-            &baseline_equivalence,
-            &explicit_boundary_surface,
-        );
+    let pre_amai_baseline_source_status = build_client_limit_pre_amai_baseline_source_status(
+        contract,
+        events,
+        &baseline_equivalence,
+        &explicit_boundary_surface,
+    );
     let mut blocking_reasons =
         client_limit_meter_alignment_blocking_reasons(summary, events, assistant_scope);
     match assistant_generation_observation_source["state"]
@@ -13010,6 +13449,7 @@ fn build_client_limit_meter_alignment(
         "component_event_coverage": component_coverage,
         "blocking_reasons": blocking_reasons,
         "assistant_generation_observation_source": assistant_generation_observation_source,
+        "tool_overhead_observation_source": tool_overhead_observation_source,
         "baseline_equivalence": baseline_equivalence,
         "strict_client_meter_slice": strict_client_meter_slice,
         "explicit_boundary_surface": explicit_boundary_surface,
@@ -13215,8 +13655,7 @@ fn build_agent_cycle_scope(
         observed_whole_cycle_with_assistant_scope_tokens(&summary, assistant_scope)
             .unwrap_or(with_amai_measured_tokens);
     let verified_observed_whole_cycle_with_amai_tokens =
-        summary["verified_observed_whole_cycle_with_amai_tokens"]
-            .as_u64()
+        verified_observed_whole_cycle_with_assistant_scope_tokens(&summary, assistant_scope)
             .unwrap_or(verified_with_amai_measured_tokens);
     let verified_share_pct = percent_share(
         summary["counted_events"].as_u64().unwrap_or(0),
@@ -13616,6 +14055,14 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
     object.insert(
         "correlation_id".to_string(),
         Value::String(event.correlation_id.clone()),
+    );
+    object.insert(
+        "context_pack_id".to_string(),
+        event
+            .context_pack_id
+            .as_ref()
+            .map(|value| Value::String(value.clone()))
+            .unwrap_or(Value::Null),
     );
     object.insert(
         "payload_origin".to_string(),
@@ -14112,9 +14559,15 @@ async fn latest_token_budget_snapshots_for_context_packs(
     if context_pack_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let rows =
-        postgres::list_observability_snapshots_by_kinds(db, &["token_budget_event"], Some(4096))
-            .await?;
+    let target_ids = context_pack_ids.iter().cloned().collect::<Vec<_>>();
+    let rows = postgres::list_latest_observability_snapshots_by_payload_string_field(
+        db,
+        "token_budget_event",
+        "token_budget_event",
+        "context_pack_id",
+        &target_ids,
+    )
+    .await?;
     let mut latest = BTreeMap::<String, ObservabilitySnapshotRecord>::new();
     for row in rows {
         let Some(context_pack_id) = row.payload["token_budget_event"]["context_pack_id"]
@@ -14420,14 +14873,8 @@ fn build_continuity_restore_observed_event(
 fn continuity_snapshot_semantic_epoch_ms(snapshot: &ObservabilitySnapshotRecord) -> i64 {
     snapshot.payload["_observability"]["captured_at_epoch_ms"]
         .as_i64()
-        .or_else(|| {
-            snapshot.payload["continuity_import"]["imported_at_epoch_ms"]
-                .as_i64()
-        })
-        .or_else(|| {
-            snapshot.payload["continuity_handoff"]["captured_at_epoch_ms"]
-                .as_i64()
-        })
+        .or_else(|| snapshot.payload["continuity_import"]["imported_at_epoch_ms"].as_i64())
+        .or_else(|| snapshot.payload["continuity_handoff"]["captured_at_epoch_ms"].as_i64())
         .unwrap_or(snapshot.created_at_epoch_ms)
 }
 
@@ -14540,7 +14987,10 @@ fn render_continuity_pre_amai_baseline_text(
         if let Some(value) = node["next_step"].as_str().filter(|value| !value.is_empty()) {
             lines.push(format!("- next_step: {value}"));
         }
-        if let Some(value) = node["details"].as_str().filter(|value| !value.trim().is_empty()) {
+        if let Some(value) = node["details"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+        {
             lines.push(String::new());
             lines.push("### Handoff Details".to_string());
             lines.push(value.trim().to_string());
@@ -14619,8 +15069,7 @@ fn apply_continuity_pre_amai_baseline(
         return Ok(false);
     }
 
-    let effective_saved_tokens =
-        materialization.baseline_tokens as i64 - continuity_tokens as i64;
+    let effective_saved_tokens = materialization.baseline_tokens as i64 - continuity_tokens as i64;
     let saved_tokens = materialization
         .baseline_tokens
         .saturating_sub(continuity_tokens);
@@ -14646,7 +15095,10 @@ fn apply_continuity_pre_amai_baseline(
     }
 
     node.insert("baseline_hit_target".to_string(), Value::Bool(true));
-    node.insert("cold_warm_state".to_string(), json!("pre_amai_baseline_materialized"));
+    node.insert(
+        "cold_warm_state".to_string(),
+        json!("pre_amai_baseline_materialized"),
+    );
     node.insert(
         "baseline_strategy".to_string(),
         json!(CONTINUITY_PRE_AMAI_BASELINE_STRATEGY),
@@ -14708,7 +15160,10 @@ fn apply_continuity_pre_amai_baseline(
     );
     node.insert("savings_factor".to_string(), Value::from(savings_factor));
     node.insert("savings_percent".to_string(), Value::from(savings_percent));
-    node.insert("gross_savings_pct".to_string(), Value::from(savings_percent));
+    node.insert(
+        "gross_savings_pct".to_string(),
+        Value::from(savings_percent),
+    );
     node.insert(
         "effective_savings_percent".to_string(),
         Value::from(effective_savings_percent),
@@ -15780,6 +16235,7 @@ mod tests {
                     created_at_epoch_ms: 0,
                     event_id: "event-default".to_string(),
                     correlation_id: "event-default".to_string(),
+                    context_pack_id: None,
                     payload_origin: "context_pack_token_budget".to_string(),
                     session_id: "session-default".to_string(),
                     rolling_window_profile: "codex_5h".to_string(),
@@ -15924,6 +16380,75 @@ mod tests {
         let filtered = suppress_shadowed_live_events(vec![live.clone(), proof_other_scope]);
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().any(|event| event.event_id == live.event_id));
+    }
+
+    #[test]
+    fn suppress_shadowed_live_events_drops_stale_live_usage_sibling() {
+        let stale = token_event! {
+            created_at_epoch_ms: 100,
+            ingested_at_epoch_ms: 100,
+            event_id: "live-event-stale".to_string(),
+            correlation_id: "".to_string(),
+            context_pack_id: Some("cp-1".to_string()),
+            source_kind: "live_context_pack".to_string(),
+            traffic_class: "live".to_string(),
+            payload_origin: "context_pack_token_budget".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+            tool_overhead_tokens: None,
+        };
+        let refreshed = token_event! {
+            created_at_epoch_ms: 200,
+            ingested_at_epoch_ms: 200,
+            event_id: "live-event-refreshed".to_string(),
+            correlation_id: "".to_string(),
+            context_pack_id: Some("cp-1".to_string()),
+            source_kind: "live_context_pack".to_string(),
+            traffic_class: "live".to_string(),
+            payload_origin: "context_pack_token_budget".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+            tool_overhead_tokens: Some(33),
+        };
+
+        let filtered = suppress_shadowed_live_events(vec![stale, refreshed.clone()]);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(
+            filtered[0].created_at_epoch_ms,
+            refreshed.created_at_epoch_ms
+        );
+        assert_eq!(filtered[0].tool_overhead_tokens, Some(33));
+    }
+
+    #[test]
+    fn merge_dashboard_token_events_replaces_stale_live_sibling() {
+        let stale = token_event! {
+            created_at_epoch_ms: 100,
+            ingested_at_epoch_ms: 100,
+            event_id: "live-event-stale".to_string(),
+            correlation_id: "".to_string(),
+            context_pack_id: Some("cp-1".to_string()),
+            source_kind: "live_context_pack".to_string(),
+            traffic_class: "live".to_string(),
+            payload_origin: "context_pack_token_budget".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+            tool_overhead_tokens: None,
+        };
+        let refreshed = token_event! {
+            created_at_epoch_ms: 200,
+            ingested_at_epoch_ms: 200,
+            event_id: "live-event-refreshed".to_string(),
+            correlation_id: "".to_string(),
+            context_pack_id: Some("cp-1".to_string()),
+            source_kind: "live_context_pack".to_string(),
+            traffic_class: "live".to_string(),
+            payload_origin: "context_pack_token_budget".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+            tool_overhead_tokens: Some(33),
+        };
+
+        let merged = super::merge_dashboard_token_events(vec![stale], vec![refreshed.clone()]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].created_at_epoch_ms, refreshed.created_at_epoch_ms);
+        assert_eq!(merged[0].tool_overhead_tokens, Some(33));
     }
 
     #[test]
@@ -17052,6 +17577,8 @@ effective_to_epoch_ms = 2000
                 target_group_count: 1,
                 observed_group_count: 1,
                 observed_tokens: 45,
+                helper_only_context_pack_ids: std::collections::BTreeSet::new(),
+                helper_only_non_model_visible_context_pack_ids: std::collections::BTreeSet::new(),
                 target_context_pack_ids: ["cp-1".to_string()].into_iter().collect(),
                 matched_context_pack_ids: ["cp-1".to_string()].into_iter().collect(),
                 unmatched_context_pack_ids: std::collections::BTreeSet::new(),
@@ -17070,7 +17597,7 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             preview["verified_internal_observed_whole_cycle_lower_bound_tokens"],
-            230
+            275
         );
         assert_eq!(preview["internal_provider_billed_tokens"], 305);
     }
@@ -19902,6 +20429,8 @@ effective_to_epoch_ms = 2000
                 target_group_count: 2,
                 observed_group_count: 1,
                 observed_tokens: 123,
+                helper_only_context_pack_ids: std::collections::BTreeSet::new(),
+                helper_only_non_model_visible_context_pack_ids: std::collections::BTreeSet::new(),
                 target_context_pack_ids: ["cp-1".to_string(), "cp-2".to_string()]
                     .into_iter()
                     .collect(),
@@ -19923,6 +20452,286 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(status["usable_direct_turns"], 1);
         assert_eq!(status["usable_rollout_turns"], 0);
+    }
+
+    #[test]
+    fn helper_only_context_packs_do_not_expand_assistant_generation_target_scope() {
+        let target_context_pack_ids = ["cp-real".to_string(), "cp-helper".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let metadata = [
+            (
+                "cp-real".to_string(),
+                super::WorkingStateContextPackMeta {
+                    thread_id: "thread-1".to_string(),
+                    captured_at_epoch_ms: 100,
+                },
+            ),
+            (
+                "cp-helper".to_string(),
+                super::WorkingStateContextPackMeta {
+                    thread_id: "thread-1".to_string(),
+                    captured_at_epoch_ms: 101,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+        let scope = super::derive_rollout_assistant_generation_scope_from_sources(
+            &target_context_pack_ids,
+            &[],
+            &metadata,
+            &std::collections::BTreeMap::new(),
+            &["cp-helper".to_string()].into_iter().collect(),
+            &std::collections::BTreeSet::new(),
+        );
+
+        assert_eq!(scope.target_group_count, 1);
+        assert_eq!(
+            scope.target_context_pack_ids,
+            ["cp-real".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            scope.helper_only_context_pack_ids,
+            ["cp-helper".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            scope.unmatched_context_pack_ids,
+            ["cp-real".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn assistant_generation_scope_skips_non_model_visible_retrieval_events() {
+        let helper_like_event = token_event! {
+            context_pack_id: Some("cp-helper".to_string()),
+            correlation_id: "cp-helper".to_string(),
+            context_tokens: 0,
+            recovery_tokens: 0,
+            client_prompt_tokens: None,
+            assistant_generation_tokens: None,
+            tool_overhead_tokens: None,
+            continuity_restore_tokens: None,
+        };
+        let model_visible_event = token_event! {
+            context_pack_id: Some("cp-real".to_string()),
+            correlation_id: "cp-real".to_string(),
+            context_tokens: 10,
+            recovery_tokens: 0,
+            client_prompt_tokens: Some(5),
+            assistant_generation_tokens: None,
+            tool_overhead_tokens: None,
+            continuity_restore_tokens: None,
+        };
+
+        let target_ids = super::assistant_generation_missing_scope_context_pack_ids(Some(&[
+            helper_like_event,
+            model_visible_event,
+        ]));
+
+        assert_eq!(target_ids, ["cp-real".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn assistant_generation_scope_skips_legacy_continuity_bootstrap_events() {
+        let continuity_event = token_event! {
+            context_pack_id: Some("cp-cont".to_string()),
+            correlation_id: "cp-cont".to_string(),
+            namespace: "continuity".to_string(),
+            source_kind: "live_context_pack".to_string(),
+            query: super::CONTINUITY_SNAPSHOT_QUERY_LABEL.to_string(),
+            query_type: "code_lookup".to_string(),
+            target_kind: "file".to_string(),
+            context_tokens: 675,
+            recovery_tokens: 0,
+            client_prompt_tokens: None,
+            assistant_generation_tokens: None,
+            tool_overhead_tokens: Some(2077),
+            continuity_restore_tokens: None,
+        };
+
+        let target_ids =
+            super::assistant_generation_missing_scope_context_pack_ids(Some(&[continuity_event]));
+
+        assert!(target_ids.is_empty());
+    }
+
+    #[test]
+    fn assistant_generation_scope_skips_context_packs_without_turn_lineage() {
+        let target_context_pack_ids = ["cp-real".to_string(), "cp-detached".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let metadata = [(
+            "cp-real".to_string(),
+            super::WorkingStateContextPackMeta {
+                thread_id: "thread-1".to_string(),
+                captured_at_epoch_ms: 100,
+            },
+        )]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+        let scope = super::derive_rollout_assistant_generation_scope_from_sources(
+            &target_context_pack_ids,
+            &[],
+            &metadata,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
+            &std::collections::BTreeSet::new(),
+        );
+
+        assert_eq!(scope.target_group_count, 1);
+        assert_eq!(
+            scope.target_context_pack_ids,
+            ["cp-real".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            scope.unmatched_context_pack_ids,
+            ["cp-real".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn assistant_generation_scope_skips_metadata_without_capture_time() {
+        let target_context_pack_ids = ["cp-real".to_string(), "cp-stale".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let metadata = [
+            (
+                "cp-real".to_string(),
+                super::WorkingStateContextPackMeta {
+                    thread_id: "thread-1".to_string(),
+                    captured_at_epoch_ms: 100,
+                },
+            ),
+            (
+                "cp-stale".to_string(),
+                super::WorkingStateContextPackMeta {
+                    thread_id: "thread-1".to_string(),
+                    captured_at_epoch_ms: 0,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+        let scope = super::derive_rollout_assistant_generation_scope_from_sources(
+            &target_context_pack_ids,
+            &[],
+            &metadata,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
+            &std::collections::BTreeSet::new(),
+        );
+
+        assert_eq!(scope.target_group_count, 1);
+        assert_eq!(
+            scope.target_context_pack_ids,
+            ["cp-real".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn tool_overhead_target_count_skips_helper_only_non_model_visible_events() {
+        let helper_event = token_event! {
+            context_pack_id: Some("cp-helper".to_string()),
+            correlation_id: "cp-helper".to_string(),
+            context_tokens: 0,
+            recovery_tokens: 0,
+            client_prompt_tokens: None,
+            assistant_generation_tokens: None,
+            tool_overhead_tokens: None,
+            continuity_restore_tokens: None,
+        };
+        let real_event = token_event! {
+            context_pack_id: Some("cp-real".to_string()),
+            correlation_id: "cp-real".to_string(),
+            tool_overhead_tokens: Some(33),
+        };
+        let scope = super::AssistantGenerationScopeObservation {
+            helper_only_context_pack_ids: ["cp-helper".to_string()].into_iter().collect(),
+            helper_only_non_model_visible_context_pack_ids: ["cp-helper".to_string()]
+                .into_iter()
+                .collect(),
+            ..super::AssistantGenerationScopeObservation::default()
+        };
+
+        let count = super::client_limit_component_target_live_events(
+            "tool_overhead_outside_retrieval",
+            Some(&[helper_event, real_event]),
+            0,
+            Some(&scope),
+        );
+
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn tool_overhead_target_count_skips_legacy_continuity_bootstrap_events() {
+        let continuity_event = token_event! {
+            context_pack_id: Some("cp-cont".to_string()),
+            correlation_id: "cp-cont".to_string(),
+            namespace: "continuity".to_string(),
+            source_kind: "live_context_pack".to_string(),
+            query: super::CONTINUITY_SNAPSHOT_QUERY_LABEL.to_string(),
+            query_type: "code_lookup".to_string(),
+            target_kind: "file".to_string(),
+            tool_overhead_tokens: Some(2077),
+        };
+        let real_event = token_event! {
+            context_pack_id: Some("cp-real".to_string()),
+            correlation_id: "cp-real".to_string(),
+            tool_overhead_tokens: Some(33),
+        };
+
+        let count = super::client_limit_component_target_live_events(
+            "tool_overhead_outside_retrieval",
+            Some(&[continuity_event, real_event]),
+            0,
+            Some(&super::AssistantGenerationScopeObservation::default()),
+        );
+
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn tool_overhead_observation_source_groups_missing_events() {
+        let missing_event = token_event! {
+            context_pack_id: Some("cp-missing".to_string()),
+            correlation_id: "cp-missing".to_string(),
+            namespace: "art".to_string(),
+            source_kind: "live_context_pack".to_string(),
+            query_type: "code_lookup".to_string(),
+            target_kind: "file".to_string(),
+            tool_overhead_tokens: None,
+        };
+        let observed_event = token_event! {
+            context_pack_id: Some("cp-observed".to_string()),
+            correlation_id: "cp-observed".to_string(),
+            namespace: "art".to_string(),
+            source_kind: "live_context_pack".to_string(),
+            query_type: "code_lookup".to_string(),
+            target_kind: "file".to_string(),
+            tool_overhead_tokens: Some(33),
+        };
+
+        let status = super::tool_overhead_observation_source_status(
+            Some(&[missing_event, observed_event]),
+            Some(&super::AssistantGenerationScopeObservation::default()),
+        );
+
+        assert_eq!(
+            status["state"],
+            "tool_overhead_source_partial_scope_overlap"
+        );
+        assert_eq!(status["target_live_events"], 2);
+        assert_eq!(status["observed_live_events"], 1);
+        assert_eq!(status["missing_live_events"], 1);
+        assert_eq!(
+            status["missing_class_sample"][0]["source_kind"],
+            "live_context_pack"
+        );
     }
 
     #[test]
@@ -20154,6 +20963,7 @@ effective_to_epoch_ms = 2000
             created_at_epoch_ms: 0,
             event_id: "event-1".to_string(),
             correlation_id: "corr-1".to_string(),
+            context_pack_id: None,
             payload_origin: "context_pack_token_budget".to_string(),
             session_id: "session-1".to_string(),
             rolling_window_profile: "codex_5h".to_string(),
@@ -21113,6 +21923,36 @@ effective_to_epoch_ms = 2000
         assert_ne!(signature, resolved_signature);
         let changed_rollout_signature = dashboard_same_meter_sync_signature(&events, "rollout-b");
         assert_ne!(signature, changed_rollout_signature);
+    }
+
+    #[test]
+    fn event_context_pack_id_ignores_synthetic_event_id_fallback() {
+        let synthetic = token_event! {
+            event_id: "legacy-event-id".to_string(),
+            correlation_id: "legacy-event-id".to_string(),
+            context_pack_id: None,
+        };
+        assert_eq!(super::event_context_pack_id(&synthetic), None);
+
+        let real_correlation = token_event! {
+            event_id: "legacy-event-id".to_string(),
+            correlation_id: "ctx-real".to_string(),
+            context_pack_id: None,
+        };
+        assert_eq!(
+            super::event_context_pack_id(&real_correlation).as_deref(),
+            Some("ctx-real")
+        );
+
+        let explicit_context_pack = token_event! {
+            event_id: "legacy-event-id".to_string(),
+            correlation_id: "legacy-event-id".to_string(),
+            context_pack_id: Some("ctx-explicit".to_string()),
+        };
+        assert_eq!(
+            super::event_context_pack_id(&explicit_context_pack).as_deref(),
+            Some("ctx-explicit")
+        );
     }
 
     #[test]

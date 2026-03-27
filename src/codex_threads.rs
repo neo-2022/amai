@@ -97,6 +97,7 @@ struct RolloutTurnParseState {
     finalized_turns: Vec<RolloutTurnObservation>,
     current_turn: Option<RolloutTurnObservation>,
     approved_context_pack_calls: HashMap<String, bool>,
+    helper_only_context_pack_ids: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1037,6 +1038,22 @@ pub fn rollout_assistant_generation_turn_observations_for_thread(
     parse_rollout_assistant_generation_turn_observations(thread_id, &rollout_path)
 }
 
+pub fn rollout_helper_only_context_pack_ids_for_thread(
+    thread_id: &str,
+) -> Result<BTreeSet<String>> {
+    let Some(record) = thread_record_by_id(thread_id)? else {
+        return Ok(BTreeSet::new());
+    };
+    if record.rollout_path.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let rollout_path = PathBuf::from(record.rollout_path);
+    if !rollout_path.exists() {
+        return Ok(BTreeSet::new());
+    }
+    Ok(load_rollout_turn_parse_state(&rollout_path)?.helper_only_context_pack_ids)
+}
+
 pub fn rollout_assistant_generation_turn_source_signature_for_thread(
     thread_id: &str,
 ) -> Result<Option<String>> {
@@ -1685,49 +1702,61 @@ fn parse_rollout_assistant_generation_turn_observations(
     thread_id: &str,
     rollout_path: &Path,
 ) -> Result<Vec<RolloutAssistantGenerationTurnObservation>> {
-    Ok(load_rollout_turn_observations(rollout_path)?
-        .into_iter()
-        .filter(|turn| turn.assistant_generation_tokens > 0 && turn.approved_context_pack_calls > 0)
-        .map(|turn| RolloutAssistantGenerationTurnObservation {
-            thread_id: thread_id.to_string(),
-            rollout_path: rollout_path.display().to_string(),
-            turn_id: turn.turn_id,
-            started_at_epoch_ms: turn.started_at_epoch_ms,
-            ended_at_epoch_ms: turn.ended_at_epoch_ms,
-            assistant_generation_tokens: turn.assistant_generation_tokens,
-            token_count_events: turn.token_count_events,
-            approved_context_pack_calls: turn.approved_context_pack_calls,
-            observation_source: "codex_rollout_turn_timeline_v1".to_string(),
-        })
-        .collect())
+    Ok(
+        snapshot_rollout_turn_observations(&load_rollout_turn_parse_state(rollout_path)?)
+            .into_iter()
+            .filter(|turn| {
+                turn.assistant_generation_tokens > 0 && turn.approved_context_pack_calls > 0
+            })
+            .map(|turn| RolloutAssistantGenerationTurnObservation {
+                thread_id: thread_id.to_string(),
+                rollout_path: rollout_path.display().to_string(),
+                turn_id: turn.turn_id,
+                started_at_epoch_ms: turn.started_at_epoch_ms,
+                ended_at_epoch_ms: turn.ended_at_epoch_ms,
+                assistant_generation_tokens: turn.assistant_generation_tokens,
+                token_count_events: turn.token_count_events,
+                approved_context_pack_calls: turn.approved_context_pack_calls,
+                observation_source: "codex_rollout_turn_timeline_v1".to_string(),
+            })
+            .collect(),
+    )
 }
 
 fn load_rollout_turn_observations(rollout_path: &Path) -> Result<Vec<RolloutTurnObservation>> {
+    Ok(snapshot_rollout_turn_observations(
+        &load_rollout_turn_parse_state(rollout_path)?,
+    ))
+}
+
+fn load_rollout_turn_parse_state(rollout_path: &Path) -> Result<RolloutTurnParseState> {
     let file_signature = rollout_file_signature(rollout_path);
-    if let Some(turns) = cached_rollout_turn_observations(rollout_path, &file_signature) {
-        return Ok(turns);
+    if let Some(parse_state) = cached_rollout_turn_observation_state(rollout_path, &file_signature)
+    {
+        return Ok(parse_state);
     }
-    if let Some(turns) = extend_cached_rollout_turn_observations(rollout_path, &file_signature)? {
-        return Ok(turns);
+    if let Some(parse_state) =
+        extend_cached_rollout_turn_observations(rollout_path, &file_signature)?
+    {
+        return Ok(parse_state);
     }
     let text = fs::read_to_string(rollout_path)
         .with_context(|| format!("failed to read {}", rollout_path.display()))?;
     let parse_state = collect_rollout_turn_observations_state(&text)?;
-    let turns = snapshot_rollout_turn_observations(&parse_state);
     store_cached_rollout_turn_observations(rollout_path, &file_signature, &parse_state);
-    Ok(turns)
+    Ok(parse_state)
 }
 
-fn cached_rollout_turn_observations(
+fn cached_rollout_turn_observation_state(
     rollout_path: &Path,
     file_signature: &str,
-) -> Option<Vec<RolloutTurnObservation>> {
+) -> Option<RolloutTurnParseState> {
     let cache = ROLLOUT_TURN_OBSERVATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let guard = cache.lock().ok()?;
     let key = canonical_rollout_path(rollout_path);
     let entry = guard.get(&key)?;
     if entry.file_signature == file_signature {
-        Some(snapshot_rollout_turn_observations(&entry.parse_state))
+        Some(entry.parse_state.clone())
     } else {
         None
     }
@@ -1766,7 +1795,7 @@ fn store_cached_rollout_turn_observations(
 fn extend_cached_rollout_turn_observations(
     rollout_path: &Path,
     file_signature: &str,
-) -> Result<Option<Vec<RolloutTurnObservation>>> {
+) -> Result<Option<RolloutTurnParseState>> {
     let Some(entry) = cached_rollout_turn_observation_entry(rollout_path) else {
         return Ok(None);
     };
@@ -1783,9 +1812,8 @@ fn extend_cached_rollout_turn_observations(
     }
     let mut parse_state = entry.parse_state.clone();
     extend_rollout_turn_observations_state(&mut parse_state, &tail_text)?;
-    let turns = snapshot_rollout_turn_observations(&parse_state);
     store_cached_rollout_turn_observations(rollout_path, file_signature, &parse_state);
-    Ok(Some(turns))
+    Ok(Some(parse_state))
 }
 
 fn collect_rollout_turn_observations_state(text: &str) -> Result<RolloutTurnParseState> {
@@ -1886,13 +1914,21 @@ fn process_rollout_turn_observation_line(
             if let Some(turn) = state.current_turn.as_mut() {
                 turn.ended_at_epoch_ms = timestamp_epoch_ms;
                 let call_id = payload["call_id"].as_str().unwrap_or_default();
-                if call_id.is_empty()
-                    || !state
+                let is_approved_context_pack_call = !call_id.is_empty()
+                    && state
                         .approved_context_pack_calls
                         .get(call_id)
                         .copied()
-                        .unwrap_or(false)
-                {
+                        .unwrap_or(false);
+                if !is_approved_context_pack_call {
+                    let mut helper_context_pack_ids = BTreeSet::new();
+                    collect_context_pack_ids_from_rollout_output(
+                        &payload["output"],
+                        &mut helper_context_pack_ids,
+                    );
+                    state
+                        .helper_only_context_pack_ids
+                        .extend(helper_context_pack_ids);
                     return Ok(());
                 }
                 collect_context_pack_ids_from_rollout_output(
@@ -2075,6 +2111,9 @@ fn collect_context_pack_ids_from_rollout_output(value: &Value, target: &mut BTre
         Value::String(text) => {
             let trimmed = text.trim();
             if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+                if let Some(context_pack_id) = extract_context_pack_id_from_output_text(trimmed) {
+                    target.insert(context_pack_id);
+                }
                 return;
             }
             if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
@@ -2082,6 +2121,21 @@ fn collect_context_pack_ids_from_rollout_output(value: &Value, target: &mut BTre
             }
         }
         _ => {}
+    }
+}
+
+fn extract_context_pack_id_from_output_text(text: &str) -> Option<String> {
+    let (_, tail) = text.rsplit_once("::")?;
+    let candidate = tail
+        .lines()
+        .next()
+        .map(str::trim)
+        .unwrap_or_default()
+        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | ')' | '(' | ',' | '.'));
+    if candidate.is_empty() || candidate.contains(char::is_whitespace) {
+        None
+    } else {
+        Some(candidate.to_string())
     }
 }
 
@@ -3295,6 +3349,41 @@ mod tests {
         assert_eq!(direct[0].turn_id, "turn-real");
         assert_eq!(direct[0].approved_context_pack_calls, 1);
         assert_eq!(direct[0].assistant_generation_tokens, 23);
+    }
+
+    #[test]
+    fn rollout_helper_only_context_pack_ids_collect_nested_nonapproved_outputs() {
+        let rollout_path =
+            std::env::temp_dir().join(format!("amai-rollout-helper-only-{}.jsonl", Uuid::new_v4()));
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-proof"}}
+{"timestamp":"2026-03-25T10:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-proof","arguments":"{\"cmd\":\"bash /home/art/agent-memory-index/scripts/proof_art_continuity_answer.sh\"}"}}
+{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-proof","output":"context pack stored: s3://ami-context-packs/context-packs/art/local_strict/helper-pack-1.json :: helper-pack-1"}}
+{"timestamp":"2026-03-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":19}}}}
+{"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-proof"}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-real"}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-real","arguments":"{\"cmd\":\"cargo run --quiet -- context pack --project amai --namespace default --query 'real'\"}"}}
+{"timestamp":"2026-03-25T10:00:05Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-real","output":"{\"context_pack_id\":\"ctx-pack-real\"}"}}
+{"timestamp":"2026-03-25T10:00:06Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":23}}}}
+{"timestamp":"2026-03-25T10:00:07Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-real"}}
+"#,
+        )
+        .expect("write rollout");
+
+        let parse_state = super::load_rollout_turn_parse_state(&rollout_path).expect("parse state");
+        let _ = fs::remove_file(&rollout_path);
+
+        assert!(
+            parse_state
+                .helper_only_context_pack_ids
+                .contains("helper-pack-1")
+        );
+        assert!(
+            !parse_state
+                .helper_only_context_pack_ids
+                .contains("ctx-pack-real")
+        );
     }
 
     #[test]
