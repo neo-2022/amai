@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 15:11 MSK
-Ручная сверка guide/docs: 2026-03-27 15:11 MSK
+modified_at: 2026-03-27 15:27 MSK
+Ручная сверка guide/docs: 2026-03-27 15:27 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1708,14 +1708,20 @@ preview, а не только raw count.
     - `Последний запрос клиента` = `rollout token_count.last_token_usage.total_tokens`
       против `model_context_window`;
     - `Лимит клиента сейчас` = live `rate_limits.primary / secondary`;
-    - `Amai в полном live-turn` = точная same-meter delta Amai как доля полного observed
+  - `Amai в полном live-turn` = точная same-meter delta Amai как доля полного observed
       client turn, а не только внутреннего retrieval slice;
   - этот слой нужен затем, чтобы оператор видел не только exact savings внутри Amai,
     но и почему внешний 5h лимит клиента может гореть быстрее из-за самого размера
     последнего client turn;
+  - если этот live contour уже показывает большой последний thread/request, низкий остаток
+    5h лимита и слабый `Amai в полном live-turn`, текущая session-card обязана fail-closed
+    перейти в `новый чат рекомендован` или `новый чат нужен сейчас` и явно советовать
+    сохранить handoff и продолжать через continuity startup, а не делать вид, что exact
+    internal savings уже достаточно;
   - human dashboard service теперь тоже обязан уметь materialize-ить этот live client meter:
-    если service запущен вне `CODEX_THREAD_ID`, он не должен притворяться `missing`,
-    пока в Codex SQLite уже есть более свежий live thread;
+    если service запущен вне `CODEX_THREAD_ID`, он не должен брать просто самый свежий
+    repo-thread из SQLite; сначала он обязан попытаться привязаться к `thread_id` из
+    latest repo `working_state_restore`, и только потом уже использовать fallback;
   - для этого слоя `assistant_generation` теперь тоже может стать exact same-meter
     компонентом, но только когда он поднят не как per-context-pack число, а как
     deduplicated turn-group passthrough из rollout/direct-turn scope;

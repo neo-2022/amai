@@ -7222,7 +7222,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     let (rollout_observation_signature, rollout_observations) =
         dashboard_rollout_assistant_generation_observations_for_repo(&repo_root)?;
     let client_live_meter_observation =
-        codex_threads::latest_rollout_client_meter_observation(repo_root_str, None)?;
+        preferred_rollout_client_meter_observation(db, &repo_root, repo_root_str).await?;
     record_dashboard_precache_stage_ms(
         &mut pre_cache_timings,
         "rollout_observations",
@@ -9780,6 +9780,45 @@ pub async fn record_verify_benchmark_event(db: &Client, benchmark_payload: &Valu
     Ok(())
 }
 
+async fn preferred_rollout_client_meter_observation(
+    db: &Client,
+    repo_root: &Path,
+    repo_root_str: &str,
+) -> Result<Option<codex_threads::RolloutClientMeterObservation>> {
+    if codex_threads::current_thread_id().is_some() {
+        return codex_threads::latest_rollout_client_meter_observation(repo_root_str, None);
+    }
+
+    let repo_root_display = repo_root.display().to_string();
+    let preferred_thread_id = match postgres::get_project_by_repo_root(db, &repo_root_display).await
+    {
+        Ok(project) => postgres::latest_observability_snapshot_for_project(
+            db,
+            "working_state_restore",
+            "working_state_restore",
+            &project.code,
+        )
+        .await?
+        .and_then(|snapshot| {
+            snapshot["working_state_restore"]["thread_id"]
+                .as_str()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        }),
+        Err(_) => None,
+    };
+
+    if let Some(thread_id) = preferred_thread_id {
+        if let Some(observation) =
+            codex_threads::latest_rollout_client_meter_observation_for_thread(&thread_id)?
+        {
+            return Ok(Some(observation));
+        }
+    }
+
+    codex_threads::latest_rollout_client_meter_observation(repo_root_str, None)
+}
+
 async fn collect_report(
     repo_root: &Path,
     db: &Client,
@@ -9794,7 +9833,7 @@ async fn collect_report(
         .ok_or_else(|| anyhow!("repo_root must be valid UTF-8"))?;
     let rollout_observations = rollout_assistant_generation_observations_for_repo(repo_root)?;
     let client_live_meter_observation =
-        codex_threads::latest_rollout_client_meter_observation(repo_root_str, None)?;
+        preferred_rollout_client_meter_observation(db, repo_root, repo_root_str).await?;
     let mut events = load_events(db, include_verify_events, limit).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
     let mut events =

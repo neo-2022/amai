@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 15:11 MSK
-Ручная сверка guide/docs: 2026-03-27 15:11 MSK
+modified_at: 2026-03-27 15:27 MSK
+Ручная сверка guide/docs: 2026-03-27 15:27 MSK
 
 # Token Ledger
 
@@ -801,9 +801,12 @@ whole-cycle компонент на одинаковое число всех liv
 - это обязательный truth guardrail: exact savings внутри Amai не имеют права маскировать
   тот факт, что внешний клиентский лимит может быстрее сгорать из-за большого размера
   самого последнего запроса;
+- если live client-turn pressure уже высокий и Amai даёт только слабую долю полного
+  observed turn, dashboard обязан не просто показать цифры, а fail-closed рекомендовать
+  новый чат через continuity startup;
 - если human dashboard service запущен вне `CODEX_THREAD_ID`, live client-turn contour
-  всё равно должен materialize-иться из самого свежего live Codex thread, а не
-  притворяться `missing`;
+  всё равно должен materialize-иться не из случайного самого свежего repo-thread, а
+  сначала из `thread_id`, который уже surfaced в latest repo `working_state_restore`;
 - если full same-meter equivalence ещё не materialized, строка `Экономия токенов модели`
   обязана fail-closed не показывать процент вовсе и прямо говорить, что `exact pair`
   ещё не materialized;

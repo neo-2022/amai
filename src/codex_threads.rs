@@ -1104,6 +1104,30 @@ pub fn rollout_client_meter_observations(
     parse_rollout_client_meter_observations(&thread_id, &rollout_path)
 }
 
+pub fn latest_rollout_client_meter_observation_for_thread(
+    thread_id: &str,
+) -> Result<Option<RolloutClientMeterObservation>> {
+    Ok(rollout_client_meter_observations_for_thread(thread_id)?
+        .into_iter()
+        .last())
+}
+
+pub fn rollout_client_meter_observations_for_thread(
+    thread_id: &str,
+) -> Result<Vec<RolloutClientMeterObservation>> {
+    let Some(record) = thread_record_by_id(thread_id)? else {
+        return Ok(Vec::new());
+    };
+    if record.rollout_path.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rollout_path = PathBuf::from(record.rollout_path);
+    if !rollout_path.exists() {
+        return Ok(Vec::new());
+    }
+    parse_rollout_client_meter_observations(thread_id, &rollout_path)
+}
+
 pub fn current_rollout_source_signature(repo_root: &str) -> Result<Option<String>> {
     let Some(record) = current_thread_record(repo_root, current_thread_id().as_deref())? else {
         return Ok(None);
