@@ -591,6 +591,7 @@ struct DashboardReportSignatureComponents {
     current_session_assistant_scope: String,
     rolling_window_assistant_scope: String,
     lifetime_assistant_scope: String,
+    client_live_meter: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -7205,6 +7206,9 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
 
     let stage_started_at = Instant::now();
     let repo_root = config::discover_repo_root(None)?;
+    let repo_root_str = repo_root
+        .to_str()
+        .ok_or_else(|| anyhow!("repo_root must be valid UTF-8"))?;
     let config = load_config(&repo_root)?;
     let profile = resolve_profile(&config, None, &repo_root)?;
     let include_verify_events = config.measurement.include_verify_events_by_default;
@@ -7217,6 +7221,8 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     let stage_started_at = Instant::now();
     let (rollout_observation_signature, rollout_observations) =
         dashboard_rollout_assistant_generation_observations_for_repo(&repo_root)?;
+    let client_live_meter_observation =
+        codex_threads::latest_rollout_client_meter_observation(repo_root_str, None)?;
     record_dashboard_precache_stage_ms(
         &mut pre_cache_timings,
         "rollout_observations",
@@ -7332,6 +7338,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         &current_session_assistant_scope,
         rolling_window_assistant_scope.as_ref(),
         &lifetime_assistant_scope,
+        client_live_meter_observation.as_ref(),
     );
     let report_signature = dashboard_report_signature(&report_components);
     record_dashboard_precache_stage_ms(
@@ -7476,8 +7483,11 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                 },
                 "lifetime": lifetime_statement_export_preview,
             },
+            "client_live_meter": build_client_live_meter_json(
+                client_live_meter_observation.as_ref(),
+            ),
             "cache_debug": cache_debug,
-            "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups и client-limit alignment, не разворачивает полный contractual/export contour, но поднимает compact statement_export_previews для reviewed frozen-debt surfaces. Quiet same-meter sync/write-back всё так же ограничен active live scope текущей сессии и рабочего окна. Sync write-back может materialize-иться в этом тике, а обновлённые token events подхватываются следующим refresh, чтобы текущий pass не делал лишний full reload.",
+            "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups, client-limit alignment и live client meter, не разворачивает полный contractual/export contour, но поднимает compact statement_export_previews для reviewed frozen-debt surfaces. Quiet same-meter sync/write-back всё так же ограничен active live scope текущей сессии и рабочего окна. Sync write-back может materialize-иться в этом тике, а обновлённые token events подхватываются следующим refresh, чтобы текущий pass не делал лишний full reload.",
         }
     });
     if let Some(node) = report["token_budget_report"]["cache_debug"].as_object_mut() {
@@ -7755,6 +7765,68 @@ fn dashboard_rollout_observation_signature(
         .collect::<Vec<_>>();
     let payload = Value::Array(payload);
     hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
+}
+
+fn dashboard_client_live_meter_signature(
+    observation: Option<&codex_threads::RolloutClientMeterObservation>,
+) -> String {
+    let payload = observation.map(|item| {
+        json!({
+            "thread_id": item.thread_id,
+            "turn_id": item.turn_id,
+            "client_turn_total_tokens": item.client_turn_total_tokens,
+            "latest_cumulative_total_tokens": item.latest_cumulative_total_tokens,
+            "latest_model_context_window": item.latest_model_context_window,
+            "latest_primary_limit_used_percent": item.latest_primary_limit_used_percent,
+            "latest_secondary_limit_used_percent": item.latest_secondary_limit_used_percent,
+        })
+    }).unwrap_or(Value::Null);
+    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
+}
+
+fn build_client_live_meter_json(
+    observation: Option<&codex_threads::RolloutClientMeterObservation>,
+) -> Value {
+    let Some(observation) = observation else {
+        return json!({
+            "status": "missing",
+            "note": "Текущий client-side live meter ещё не materialized из rollout token_count/rate_limits, поэтому карточки пока не могут честно показать полный turn/context pressure клиента."
+        });
+    };
+    let context_used_percent = if observation.latest_model_context_window == 0 {
+        None
+    } else {
+        Some(
+            observation.client_turn_total_tokens as f64
+                * 100.0
+                / observation.latest_model_context_window as f64,
+        )
+    };
+    let context_remaining_tokens = observation
+        .latest_model_context_window
+        .saturating_sub(observation.client_turn_total_tokens);
+    json!({
+        "status": "observed",
+        "observation_source": observation.observation_source,
+        "thread_id": observation.thread_id,
+        "turn_id": observation.turn_id,
+        "started_at_epoch_ms": observation.started_at_epoch_ms,
+        "ended_at_epoch_ms": observation.ended_at_epoch_ms,
+        "client_turn_total_tokens": observation.client_turn_total_tokens,
+        "client_turn_input_tokens": observation.client_turn_input_tokens,
+        "client_turn_cached_input_tokens": observation.client_turn_cached_input_tokens,
+        "client_turn_output_tokens": observation.client_turn_output_tokens,
+        "client_turn_reasoning_output_tokens": observation.client_turn_reasoning_output_tokens,
+        "latest_cumulative_total_tokens": observation.latest_cumulative_total_tokens,
+        "latest_model_context_window": observation.latest_model_context_window,
+        "context_used_percent": context_used_percent,
+        "context_remaining_tokens": context_remaining_tokens,
+        "primary_limit_used_percent": observation.latest_primary_limit_used_percent,
+        "primary_limit_remaining_percent": 100_u64.saturating_sub(observation.latest_primary_limit_used_percent),
+        "secondary_limit_used_percent": observation.latest_secondary_limit_used_percent,
+        "secondary_limit_remaining_percent": 100_u64.saturating_sub(observation.latest_secondary_limit_used_percent),
+        "note": "Этот surface поднимает именно live meter клиента из rollout token_count/rate_limits: он нужен, чтобы отделять Amai-side same-meter delta от полного расхода turn/context в самом клиенте."
+    })
 }
 
 fn store_dashboard_rollout_observations(
@@ -9042,6 +9114,7 @@ fn dashboard_report_signature_components(
     current_session_assistant_scope: &AssistantGenerationScopeObservation,
     rolling_window_assistant_scope: Option<&AssistantGenerationScopeObservation>,
     lifetime_assistant_scope: &AssistantGenerationScopeObservation,
+    client_live_meter_observation: Option<&codex_threads::RolloutClientMeterObservation>,
 ) -> DashboardReportSignatureComponents {
     DashboardReportSignatureComponents {
         current_session_events: dashboard_report_events_signature(current_session_events),
@@ -9056,6 +9129,7 @@ fn dashboard_report_signature_components(
         lifetime_assistant_scope: dashboard_report_assistant_scope_signature(
             lifetime_assistant_scope,
         ),
+        client_live_meter: dashboard_client_live_meter_signature(client_live_meter_observation),
     }
 }
 
@@ -9067,6 +9141,7 @@ fn dashboard_report_signature(components: &DashboardReportSignatureComponents) -
         "current_session_assistant_scope": components.current_session_assistant_scope,
         "rolling_window_assistant_scope": components.rolling_window_assistant_scope,
         "lifetime_assistant_scope": components.lifetime_assistant_scope,
+        "client_live_meter": components.client_live_meter,
     });
     hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
 }
@@ -9714,7 +9789,12 @@ async fn collect_report(
 ) -> Result<Value> {
     let config = load_config(repo_root)?;
     let profile = resolve_profile(&config, requested_profile, repo_root)?;
+    let repo_root_str = repo_root
+        .to_str()
+        .ok_or_else(|| anyhow!("repo_root must be valid UTF-8"))?;
     let rollout_observations = rollout_assistant_generation_observations_for_repo(repo_root)?;
+    let client_live_meter_observation =
+        codex_threads::latest_rollout_client_meter_observation(repo_root_str, None)?;
     let mut events = load_events(db, include_verify_events, limit).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
     let mut events =
@@ -10203,6 +10283,9 @@ async fn collect_report(
                 "rolling_window": rolling_window_settlement_report_preview,
                 "lifetime": lifetime_settlement_report_preview,
             },
+            "client_live_meter": build_client_live_meter_json(
+                client_live_meter_observation.as_ref(),
+            ),
             "source_breakdown": source_breakdown,
             "query_slices": query_slices,
             "baseline_strategy_slices": baseline_strategy_slices,
@@ -17833,7 +17916,7 @@ mod tests {
         );
         assert_eq!(
             token_event["contract"]["client_limit_meter_alignment_version"],
-            "client-limit-meter-alignment-v11"
+            "client-limit-meter-alignment-v12"
         );
         assert_eq!(
             token_event["contract"]["client_limit_baseline_equivalence_version"],
@@ -23701,6 +23784,7 @@ effective_to_epoch_ms = 2000
             &scope,
             Some(&scope),
             &scope,
+            None,
         ));
         let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
@@ -23709,6 +23793,7 @@ effective_to_epoch_ms = 2000
             &scope,
             Some(&scope),
             &scope,
+            None,
         ));
 
         assert_eq!(left, right);
@@ -23776,6 +23861,7 @@ effective_to_epoch_ms = 2000
             &base_scope,
             Some(&base_scope),
             &base_scope,
+            None,
         ));
         let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
@@ -23784,6 +23870,7 @@ effective_to_epoch_ms = 2000
             &changed_scope,
             Some(&base_scope),
             &base_scope,
+            None,
         ));
 
         assert_ne!(left, right);

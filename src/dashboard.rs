@@ -3220,10 +3220,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let rolling_window_statement = &report["statement_previews"]["rolling_window"];
     let lifetime_statement = &report["statement_previews"]["lifetime"];
     let lifetime_statement_export = &report["statement_export_previews"]["lifetime"];
-    let current_session_alignment =
-        &current_session_statement["client_limit_meter_alignment"];
-    let rolling_window_alignment =
-        &rolling_window_statement["client_limit_meter_alignment"];
+    let client_live_meter = &report["client_live_meter"];
+    let current_session_alignment = &current_session_statement["client_limit_meter_alignment"];
+    let rolling_window_alignment = &rolling_window_statement["client_limit_meter_alignment"];
     let lifetime_alignment = &lifetime_statement["client_limit_meter_alignment"];
     let current_session_exact_pair =
         exact_model_token_pair(current_session_statement, current_session_alignment);
@@ -3341,6 +3340,12 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_note.push(' ');
         session_note.push_str(&sentence);
     }
+    if let Some(sentence) =
+        client_live_meter_note_sentence(client_live_meter, current_session_exact_pair)
+    {
+        session_note.push(' ');
+        session_note.push_str(&sentence);
+    }
     let session_boundary_pressure =
         continuity_boundary_pressure(current_session, current_session_alignment);
     if let Some((boundary_tokens, strict_tokens)) = session_boundary_pressure {
@@ -3363,6 +3368,18 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_rows.push(row);
     }
     if let Some(row) = exact_model_component_delta_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
+    if let Some(row) = client_live_context_metric_row(client_live_meter) {
+        session_rows.push(row);
+    }
+    if let Some(row) = client_live_limit_metric_row(client_live_meter) {
+        session_rows.push(row);
+    }
+    if let Some(row) = client_full_turn_savings_metric_row(
+        client_live_meter,
+        current_session_exact_pair,
+    ) {
         session_rows.push(row);
     }
     if let Some(row) = client_limit_alignment_metric_row(current_session_alignment) {
@@ -3613,7 +3630,8 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         lifetime_note.push(' ');
         lifetime_note.push_str(&sentence);
     }
-    if let Some(sentence) = model_token_savings_note_sentence(lifetime_statement, lifetime_alignment)
+    if let Some(sentence) =
+        model_token_savings_note_sentence(lifetime_statement, lifetime_alignment)
     {
         lifetime_note.push(' ');
         lifetime_note.push_str(&sentence);
@@ -6390,7 +6408,10 @@ fn client_budget_disclaimer() -> &'static str {
     "Это не процент от лимита этого чата. Здесь считается только размер контекста, который Amai приносит в ответ, а не все токены разговора целиком."
 }
 
-fn exact_model_token_pair(scope_summary: &Value, alignment: &Value) -> Option<(u64, u64, i64, f64)> {
+fn exact_model_token_pair(
+    scope_summary: &Value,
+    alignment: &Value,
+) -> Option<(u64, u64, i64, f64)> {
     if alignment["same_meter_as_client_limit"].as_bool() != Some(true) {
         return None;
     }
@@ -6399,12 +6420,16 @@ fn exact_model_token_pair(scope_summary: &Value, alignment: &Value) -> Option<(u
         .or_else(|| {
             alignment["baseline_equivalence"]["measured_baseline_tokens_lower_bound"].as_u64()
         })
-        .or_else(|| scope_summary["verified_without_amai_measured_tokens"]
-        .as_u64()
-        .or_else(|| scope_summary["verified_baseline_tokens"].as_u64()))
+        .or_else(|| {
+            scope_summary["verified_without_amai_measured_tokens"]
+                .as_u64()
+                .or_else(|| scope_summary["verified_baseline_tokens"].as_u64())
+        })
         .unwrap_or(0);
-    let with_amai = scope_summary["verified_observed_whole_cycle_with_amai_tokens"]
+    let with_amai = scope_summary["observed_whole_cycle_with_amai_tokens"]
         .as_u64()
+        .or_else(|| scope_summary["verified_observed_whole_cycle_with_amai_tokens"].as_u64())
+        .or_else(|| scope_summary["with_amai_measured_tokens"].as_u64())
         .or_else(|| scope_summary["verified_with_amai_measured_tokens"].as_u64())
         .unwrap_or(0);
     if without_amai == 0 {
@@ -6448,7 +6473,8 @@ fn historical_startup_drag(
     let rolling_continuity_tokens = rolling_summary["observed_continuity_restore_tokens"]
         .as_u64()
         .unwrap_or(0);
-    let older_continuity_tokens = rolling_continuity_tokens.saturating_sub(current_continuity_tokens);
+    let older_continuity_tokens =
+        rolling_continuity_tokens.saturating_sub(current_continuity_tokens);
     Some(HistoricalStartupDrag {
         older_without_amai_tokens,
         older_with_amai_tokens,
@@ -6559,7 +6585,8 @@ fn exact_model_component_delta_metric_row(alignment: &Value) -> Option<Value> {
     let mut tooltip = String::from(
         "Этот ряд показывает, в каком same-meter компоненте сейчас сидит главная exact-разница между baseline «без Amai» и observed расходом «с Amai». Формат: baseline -> observed.",
     );
-    for (component_label, component_baseline, component_observed, component_delta) in all_components {
+    for (component_label, component_baseline, component_observed, component_delta) in all_components
+    {
         tooltip.push('\n');
         tooltip.push_str("- ");
         tooltip.push_str(&format_exact_model_component_delta_value(
@@ -6595,6 +6622,155 @@ fn exact_model_component_delta_note_sentence(alignment: &Value) -> Option<String
             format_u64(Some(delta.unsigned_abs()))
         )
     })
+}
+
+fn client_live_meter_note_sentence(
+    client_live_meter: &Value,
+    exact_pair: Option<(u64, u64, i64, f64)>,
+) -> Option<String> {
+    if client_live_meter["status"].as_str() != Some("observed") {
+        return None;
+    }
+    let turn_total_tokens = client_live_meter["client_turn_total_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    let model_context_window = client_live_meter["latest_model_context_window"]
+        .as_u64()
+        .unwrap_or(0);
+    let context_remaining_percent = client_live_meter["context_used_percent"]
+        .as_f64()
+        .map(|value| 100.0 - value)
+        .unwrap_or_default();
+    let Some((_, _, saved_tokens, _)) = exact_pair else {
+        return Some(format!(
+            "Текущий client live meter уже виден напрямую из rollout: последний observed запрос клиента занимает {} из {}, остаётся {}. Live pressure по 5ч и 7д лимитам вынесен в отдельную строку. Exact full-turn delta по Amai здесь ещё нельзя честно посчитать, пока same-meter pair не materialized.",
+            format_u64(Some(turn_total_tokens)),
+            format_u64(Some(model_context_window)),
+            format_percent(Some(context_remaining_percent)),
+        ));
+    };
+    let without_amai_total_tokens = if saved_tokens >= 0 {
+        turn_total_tokens.saturating_add(saved_tokens as u64)
+    } else {
+        turn_total_tokens.saturating_sub(saved_tokens.unsigned_abs())
+    };
+    let full_turn_savings_pct = if without_amai_total_tokens == 0 {
+        0.0
+    } else {
+        (saved_tokens as f64 * 100.0) / without_amai_total_tokens as f64
+    };
+    Some(format!(
+        "В полном live-turn клиента Amai сейчас даёт {}: без Amai было {}, с Amai стало {}. Последний observed запрос клиента сейчас занимает {} из {} окна, остаётся {}. Live pressure по 5ч и 7д лимитам вынесен в отдельную строку. Значит внешний burn сейчас определяется не только Amai-delta, а и общим размером текущего запроса внутри клиентского окна.",
+        format_percent(Some(full_turn_savings_pct)),
+        format_u64(Some(without_amai_total_tokens)),
+        format_u64(Some(turn_total_tokens)),
+        format_u64(Some(turn_total_tokens)),
+        format_u64(Some(model_context_window)),
+        format_percent(Some(context_remaining_percent)),
+    ))
+}
+
+fn client_live_context_metric_row(client_live_meter: &Value) -> Option<Value> {
+    if client_live_meter["status"].as_str() != Some("observed") {
+        return None;
+    }
+    let turn_total_tokens = client_live_meter["client_turn_total_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    let model_context_window = client_live_meter["latest_model_context_window"]
+        .as_u64()
+        .unwrap_or(0);
+    let context_remaining_percent = client_live_meter["context_used_percent"]
+        .as_f64()
+        .map(|value| 100.0 - value)
+        .unwrap_or_default();
+    let tooltip = format!(
+        "Этот ряд показывает последний observed запрос клиента из rollout token_count.\n- Последний запрос: {} из {}\n- Остаётся в окне: {}\n- Источник: rollout token_count.last_token_usage.total_tokens / model_context_window",
+        format_u64(Some(turn_total_tokens)),
+        format_u64(Some(model_context_window)),
+        format_percent(Some(context_remaining_percent)),
+    );
+    Some(metric_row(
+        "Последний запрос клиента",
+        format!(
+            "{} из {}, остаётся {}",
+            format_u64(Some(turn_total_tokens)),
+            format_u64(Some(model_context_window)),
+            format_percent(Some(context_remaining_percent))
+        ),
+        Some(tooltip.as_str()),
+    ))
+}
+
+fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
+    if client_live_meter["status"].as_str() != Some("observed") {
+        return None;
+    }
+    let primary_remaining_percent = client_live_meter["primary_limit_remaining_percent"]
+        .as_u64()
+        .unwrap_or(0);
+    let secondary_remaining_percent = client_live_meter["secondary_limit_remaining_percent"]
+        .as_u64()
+        .unwrap_or(0);
+    let tooltip = format!(
+        "Этот ряд показывает live rate-limit contour клиента из rollout token_count/rate_limits.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})",
+        format_percent(Some(primary_remaining_percent as f64)),
+        format_percent(client_live_meter["primary_limit_used_percent"].as_f64()),
+        format_percent(Some(secondary_remaining_percent as f64)),
+        format_percent(client_live_meter["secondary_limit_used_percent"].as_f64()),
+    );
+    Some(metric_row(
+        "Лимит клиента сейчас",
+        format!(
+            "5ч остаётся {}, 7д остаётся {}",
+            format_percent(Some(primary_remaining_percent as f64)),
+            format_percent(Some(secondary_remaining_percent as f64))
+        ),
+        Some(tooltip.as_str()),
+    ))
+}
+
+fn client_full_turn_savings_metric_row(
+    client_live_meter: &Value,
+    exact_pair: Option<(u64, u64, i64, f64)>,
+) -> Option<Value> {
+    if client_live_meter["status"].as_str() != Some("observed") {
+        return None;
+    }
+    let (_, _, saved_tokens, _) = exact_pair?;
+    let turn_total_tokens = client_live_meter["client_turn_total_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    if turn_total_tokens == 0 {
+        return None;
+    }
+    let without_amai_total_tokens = if saved_tokens >= 0 {
+        turn_total_tokens.saturating_add(saved_tokens as u64)
+    } else {
+        turn_total_tokens.saturating_sub(saved_tokens.unsigned_abs())
+    };
+    if without_amai_total_tokens == 0 {
+        return None;
+    }
+    let full_turn_savings_pct = (saved_tokens as f64 * 100.0) / without_amai_total_tokens as f64;
+    let tooltip = format!(
+        "Этот ряд показывает реальный вклад Amai в полный live-turn клиента, а не только во внутренний Amai-side slice.\n- Без Amai: {}\n- С Amai: {}\n- Delta Amai: {}\n- Процент от полного turn: {}\n- Источник observed full turn: rollout token_count.last_token_usage.total_tokens",
+        format_u64(Some(without_amai_total_tokens)),
+        format_u64(Some(turn_total_tokens)),
+        format_signed_count(Some(saved_tokens)),
+        format_percent(Some(full_turn_savings_pct)),
+    );
+    Some(metric_row(
+        "Amai в полном live-turn",
+        format!(
+            "{}: без Amai {}, с Amai {}, delta {}",
+            format_percent(Some(full_turn_savings_pct)),
+            format_u64(Some(without_amai_total_tokens)),
+            format_u64(Some(turn_total_tokens)),
+            format_signed_count(Some(saved_tokens))
+        ),
+        Some(tooltip.as_str()),
+    ))
 }
 
 fn exact_pair_primary_blocker_note_sentence(alignment: &Value) -> Option<String> {
@@ -6717,23 +6893,25 @@ fn exact_pair_status_metric_row(alignment: &Value) -> Option<Value> {
 }
 
 fn exact_pair_frozen_debt_metric_row(alignment: &Value) -> Option<Value> {
-    let exact_pair_status = &alignment["exact_pair_status"];
-    if exact_pair_status["state"].as_str() != Some("exact_pair_blocked") {
+    let frozen_gap_review_surface = &alignment["frozen_gap_review_surface"];
+    if frozen_gap_review_surface["state"].as_str() != Some("review_required") {
         return None;
     }
-    let blocker = exact_pair_status["blockers"].as_array()?.first()?;
-    if blocker["frozen_gap_candidate"].as_bool() != Some(true) {
-        return None;
-    }
-    let blocker_code = blocker["code"].as_str().unwrap_or("unknown_blocker");
-    let missing_live_events = blocker["missing_live_events"].as_u64().unwrap_or(0);
-    let irrecoverable_missing_live_events = blocker["irrecoverable_missing_live_events"]
+    let blocker_code = frozen_gap_review_surface["blocking_component"]
+        .as_str()
+        .unwrap_or("unknown_blocker");
+    let missing_live_events = frozen_gap_review_surface["missing_live_events"]
         .as_u64()
         .unwrap_or(0);
-    let recoverable_missing_live_events = blocker["recoverable_missing_live_events"]
+    let irrecoverable_missing_live_events = frozen_gap_review_surface
+        ["irrecoverable_missing_live_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let recoverable_missing_live_events = frozen_gap_review_surface
+        ["recoverable_missing_live_events"]
         .as_u64()
         .unwrap_or_else(|| missing_live_events.saturating_sub(irrecoverable_missing_live_events));
-    let resolution_condition = blocker["resolution_condition"]
+    let resolution_condition = frozen_gap_review_surface["resolution_condition"]
         .as_str()
         .unwrap_or("freeze_irrecoverable_gap_or_keep_exact_pair_unavailable");
     let tooltip = format!(
@@ -9406,8 +9584,8 @@ mod tests {
                 .contains("тот же meter, которым клиент считает лимит")
         );
 
-        let note = super::model_token_savings_note_sentence(&statement_preview, &alignment)
-            .expect("note");
+        let note =
+            super::model_token_savings_note_sentence(&statement_preview, &alignment).expect("note");
         assert!(note.contains("25.00%"));
         assert!(note.contains("точный процент"));
     }
@@ -9417,6 +9595,7 @@ mod tests {
         let statement_preview = json!({
             "verified_without_amai_measured_tokens": 605,
             "verified_with_amai_measured_tokens": 0,
+            "observed_whole_cycle_with_amai_tokens": 605,
             "verified_observed_whole_cycle_with_amai_tokens": 589
         });
         let alignment = json!({
@@ -9432,7 +9611,7 @@ mod tests {
         let row = super::model_token_savings_metric_row(&statement_preview, &alignment);
         assert_eq!(
             row["value"].as_str(),
-            Some("3.28%: без Amai 609, с Amai 589, экономия 20")
+            Some("0.66%: без Amai 609, с Amai 605, экономия 4")
         );
     }
 
@@ -9640,12 +9819,7 @@ mod tests {
             row["value"].as_str(),
             Some("вне текущей сессии: без Amai 9154, с Amai 9600, +446 к расходу")
         );
-        assert!(
-            row["tooltip"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("9544")
-        );
+        assert!(row["tooltip"].as_str().unwrap_or_default().contains("9544"));
     }
 
     #[test]
@@ -9866,6 +10040,69 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("Current session: exact pair materialized")
+        );
+    }
+
+    #[test]
+    fn client_full_turn_savings_metric_row_surfaces_full_turn_share() {
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 35534
+        });
+        let row = super::client_full_turn_savings_metric_row(
+            &meter,
+            Some((550, 127, 423, 76.91)),
+        )
+        .expect("full turn row");
+        assert_eq!(row["label"], "Amai в полном live-turn");
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("без Amai 35957")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("rollout token_count.last_token_usage.total_tokens")
+        );
+    }
+
+    #[test]
+    fn client_live_limit_metric_row_surfaces_remaining_budget() {
+        let meter = json!({
+            "status": "observed",
+            "primary_limit_remaining_percent": 31,
+            "primary_limit_used_percent": 69,
+            "secondary_limit_remaining_percent": 79,
+            "secondary_limit_used_percent": 21
+        });
+        let row = super::client_live_limit_metric_row(&meter).expect("limit row");
+        assert_eq!(row["label"], "Лимит клиента сейчас");
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("5ч остаётся 31.00%")
+        );
+    }
+
+    #[test]
+    fn client_live_context_metric_row_uses_last_request_window_pressure() {
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 133419,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 51.633359133126934
+        });
+        let row = super::client_live_context_metric_row(&meter).expect("context row");
+        assert_eq!(row["label"].as_str(), Some("Последний запрос клиента"));
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("133419 из 258400")
         );
     }
 

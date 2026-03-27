@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 14:36 MSK
-Ручная сверка guide/docs: 2026-03-27 14:36 MSK
+modified_at: 2026-03-27 15:11 MSK
+Ручная сверка guide/docs: 2026-03-27 15:11 MSK
 
 # Token Ledger
 
@@ -793,6 +793,17 @@ whole-cycle компонент на одинаковое число всех liv
   `без Amai / с Amai`;
 - dashboard обязан читать этот exact percent из same-meter pair, а не из retrieval-only
   verified slice;
+- для `current_session` dashboard теперь обязан отдельно показывать и полный observed
+  client-turn contour:
+  - `Последний запрос клиента` = live `last_token_usage.total_tokens / model_context_window`;
+  - `Лимит клиента сейчас` = live `rate_limits.primary/secondary`;
+  - `Amai в полном live-turn` = same-meter delta Amai как доля полного observed client turn;
+- это обязательный truth guardrail: exact savings внутри Amai не имеют права маскировать
+  тот факт, что внешний клиентский лимит может быстрее сгорать из-за большого размера
+  самого последнего запроса;
+- если human dashboard service запущен вне `CODEX_THREAD_ID`, live client-turn contour
+  всё равно должен materialize-иться из самого свежего live Codex thread, а не
+  притворяться `missing`;
 - если full same-meter equivalence ещё не materialized, строка `Экономия токенов модели`
   обязана fail-closed не показывать процент вовсе и прямо говорить, что `exact pair`
   ещё не materialized;

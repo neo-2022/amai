@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 14:36 MSK
-Ручная сверка guide/docs: 2026-03-27 14:36 MSK
+modified_at: 2026-03-27 15:11 MSK
+Ручная сверка guide/docs: 2026-03-27 15:11 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1704,6 +1704,18 @@ preview, а не только raw count.
     exact pair `без Amai / с Amai / экономия / процент` в том же meter клиента; если нет,
     карточка fail-closed не показывает процент вовсе и честно пишет, что exact pair ещё
     не materialized;
+  - для `current_session` dashboard теперь ещё обязан поднимать separate client-turn pressure:
+    - `Последний запрос клиента` = `rollout token_count.last_token_usage.total_tokens`
+      против `model_context_window`;
+    - `Лимит клиента сейчас` = live `rate_limits.primary / secondary`;
+    - `Amai в полном live-turn` = точная same-meter delta Amai как доля полного observed
+      client turn, а не только внутреннего retrieval slice;
+  - этот слой нужен затем, чтобы оператор видел не только exact savings внутри Amai,
+    но и почему внешний 5h лимит клиента может гореть быстрее из-за самого размера
+    последнего client turn;
+  - human dashboard service теперь тоже обязан уметь materialize-ить этот live client meter:
+    если service запущен вне `CODEX_THREAD_ID`, он не должен притворяться `missing`,
+    пока в Codex SQLite уже есть более свежий live thread;
   - для этого слоя `assistant_generation` теперь тоже может стать exact same-meter
     компонентом, но только когда он поднят не как per-context-pack число, а как
     deduplicated turn-group passthrough из rollout/direct-turn scope;
