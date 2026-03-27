@@ -2657,7 +2657,7 @@ fn render_direct_answer(
         && intent != "chat_at_time"
         && let Some(restore_node) = restore.map(|value| &value["working_state_restore"])
     {
-        if let Some(summary) = summarize_materialized_notes(&restore_node["materialized_notes"]) {
+        if let Some(summary) = summarize_startup_materialized_notes(restore_node) {
             lines.push(format!("Что уже materialized: {summary}"));
         }
         if let Some(summary) = summarize_recent_actions(&restore_node["recent_actions"]) {
@@ -3270,7 +3270,7 @@ fn build_chat_start_restore(
         .unwrap_or("preliminary")
         .to_string();
     let materialized_summary =
-        restore_node.and_then(|value| summarize_materialized_notes(&value["materialized_notes"]));
+        restore_node.and_then(summarize_startup_materialized_notes);
     let recent_actions_summary =
         restore_node.and_then(|value| summarize_recent_actions(&value["recent_actions"]));
     let active_files_summary =
@@ -3613,7 +3613,7 @@ fn render_chat_start_prompt(
         .unwrap_or(headline);
     let compact_current_goal = compact_prompt_fragment(current_goal, 80);
     let materialized_summary =
-        restore_node.and_then(|value| summarize_materialized_notes(&value["materialized_notes"]));
+        restore_node.and_then(summarize_startup_materialized_notes);
     let compact_materialized_summary = materialized_summary
         .as_deref()
         .map(|value| compact_prompt_fragment(value, 88));
@@ -3883,8 +3883,51 @@ fn extract_next_step_from_text(text: &str) -> Option<String> {
     None
 }
 
-fn summarize_materialized_notes(value: &Value) -> Option<String> {
-    summarize_string_list(value, 2)
+fn startup_materialized_notes(restore_node: &Value) -> Vec<String> {
+    let mut notes = Vec::new();
+    if let Some(guard) = restore_node.get("client_budget_guard") {
+        if let Some(status_label) = guard["status_label"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            notes.push(format!("Client-budget guard: {status_label}."));
+        }
+        if let Some(last_request) = guard["last_request"].as_str().filter(|value| !value.is_empty())
+        {
+            notes.push(format!("Последний запрос в модель: {last_request}."));
+        }
+        if let Some(client_limits) = guard["client_limits"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            notes.push(format!("Лимит клиента сейчас: {client_limits}."));
+        }
+    }
+    if let Some(items) = restore_node["materialized_notes"].as_array() {
+        for item in items.iter().filter_map(Value::as_str) {
+            let trimmed = item.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("Client-budget guard:")
+                || trimmed.starts_with("Последний запрос в модель:")
+                || trimmed.starts_with("Лимит клиента сейчас:")
+            {
+                continue;
+            }
+            notes.push(trimmed.to_string());
+        }
+    }
+    notes
+}
+
+fn summarize_startup_materialized_notes(restore_node: &Value) -> Option<String> {
+    let notes = startup_materialized_notes(restore_node);
+    if notes.is_empty() {
+        None
+    } else {
+        Some(notes.into_iter().take(2).collect::<Vec<_>>().join("; "))
+    }
 }
 
 fn summarize_recent_actions(value: &Value) -> Option<String> {
@@ -5449,6 +5492,66 @@ mod tests {
             node["execctl_active_lease"]["storage_lane"],
             json!("ami.execctl_task_leases")
         );
+    }
+
+    #[test]
+    fn build_chat_start_restore_prefers_live_client_budget_summary_over_stale_notes() {
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "amai".to_string(),
+            display_name: "Amai".to_string(),
+            repo_root: "/home/art/agent-memory-index".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let continuity = json!({
+            "bootstrap_summary": {
+                "details": {
+                    "thread_count": 3,
+                    "latest_rendered_transcript": "/tmp/rendered.md"
+                }
+            }
+        });
+        let handoff = json!({
+            "headline": "Продолжить активную рабочую линию",
+            "next_step": "продолжить работу в свежем чате через continuity startup"
+        });
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Продолжить активную рабочую линию",
+                "restore_confidence": "high",
+                "client_budget_guard": {
+                    "status_label": "новый чат нужен сейчас",
+                    "last_request": "162594 из 258400, остаётся 37.08% · raw 23:27:06 MSK",
+                    "client_limits": "5ч остаётся 8.00%, 7д остаётся 72.00% · raw 23:27:06 MSK"
+                },
+                "materialized_notes": [
+                    "Client-budget guard: новый чат рекомендован.",
+                    "Последний запрос в модель: 190690 из 258400, остаётся 26.20% · raw 23:15:46 MSK.",
+                    "Лимит клиента сейчас: 5ч остаётся 8.00%, 7д остаётся 72.00% · raw 23:15:46 MSK.",
+                    "Продолжить ту же рабочую линию: Продолжить активную рабочую линию."
+                ]
+            }
+        });
+
+        let pack =
+            build_chat_start_restore(&project, &namespace, &continuity, &handoff, Some(&restore));
+        let node = &pack["chat_start_restore"];
+        let prompt = node["prompt_text"].as_str().expect("prompt text");
+        let materialized = node["materialized_summary"]
+            .as_str()
+            .expect("materialized summary");
+
+        assert!(prompt.contains("Client-budget guard: новый чат нужен сейчас."));
+        assert!(!prompt.contains("190690 из 258400"));
+        assert!(materialized.contains("162594 из 258400"));
+        assert!(materialized.contains("23:27:06 MSK"));
+        assert!(!materialized.contains("23:15:46 MSK"));
     }
 
     #[test]
