@@ -3296,7 +3296,11 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             format_count_with_word(session_answer_count, "случай", "случая", "случаев"),
             format_percent(session_answer_rate),
             format_percent(session_answer_percent)
-        ) + " Подробные цифры по главному итогу, всему живому потоку и тому, что пока вне главного итога, вынесены в нижние строки."
+        ) + if current_session_exact_pair.is_some() {
+            " Нижние строки ниже разделяют внутренний retrieval-KPI Amai и exact model-meter breakdown."
+        } else {
+            " Подробные цифры по главному итогу, всему живому потоку и тому, что пока вне главного итога, вынесены в нижние строки."
+        }
     } else if session_events_total > 0 {
         format!(
             "В этой сессии уже есть Amai-запросы: {}. Но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому главный итог по сессии ещё не накоплен.",
@@ -3323,6 +3327,10 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_note.push(' ');
         session_note.push_str(&sentence);
     }
+    if let Some(sentence) = exact_model_component_delta_note_sentence(current_session_alignment) {
+        session_note.push(' ');
+        session_note.push_str(&sentence);
+    }
     let session_boundary_pressure =
         continuity_boundary_pressure(current_session, current_session_alignment);
     if let Some((boundary_tokens, strict_tokens)) = session_boundary_pressure {
@@ -3332,11 +3340,15 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             strict_tokens,
         ));
     }
-    let mut session_rows = current_session_lane_rows(current_session);
+    let mut session_rows =
+        current_session_lane_rows(current_session, current_session_exact_pair.is_some());
     session_rows.push(model_token_savings_metric_row(
         current_session_statement,
         current_session_alignment,
     ));
+    if let Some(row) = exact_model_component_delta_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
     if let Some(row) = client_limit_alignment_metric_row(current_session_alignment) {
         session_rows.push(row);
     }
@@ -3428,6 +3440,10 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         rolling_note.push(' ');
         rolling_note.push_str(&sentence);
     }
+    if let Some(sentence) = exact_model_component_delta_note_sentence(rolling_window_alignment) {
+        rolling_note.push(' ');
+        rolling_note.push_str(&sentence);
+    }
     let rolling_boundary_pressure =
         continuity_boundary_pressure(rolling_window, rolling_window_alignment);
     if let Some((boundary_tokens, strict_tokens)) = rolling_boundary_pressure {
@@ -3442,6 +3458,9 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         rolling_window_statement,
         rolling_window_alignment,
     ));
+    if let Some(row) = exact_model_component_delta_metric_row(rolling_window_alignment) {
+        rolling_rows.push(row);
+    }
     if let Some(row) = client_limit_alignment_metric_row(rolling_window_alignment) {
         rolling_rows.push(row);
     }
@@ -3534,11 +3553,18 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         lifetime_note.push(' ');
         lifetime_note.push_str(&sentence);
     }
+    if let Some(sentence) = exact_model_component_delta_note_sentence(lifetime_alignment) {
+        lifetime_note.push(' ');
+        lifetime_note.push_str(&sentence);
+    }
     let mut lifetime_rows = Vec::new();
     lifetime_rows.push(model_token_savings_metric_row(
         lifetime_statement,
         lifetime_alignment,
     ));
+    if let Some(row) = exact_model_component_delta_metric_row(lifetime_alignment) {
+        lifetime_rows.push(row);
+    }
     if let Some(row) = client_limit_alignment_metric_row(lifetime_alignment) {
         lifetime_rows.push(row);
     }
@@ -6181,7 +6207,17 @@ fn recovery_sentence(median_recovery_tokens: Option<f64>) -> String {
     }
 }
 
-fn current_session_lane_rows(summary: &Value) -> Vec<Value> {
+fn current_session_lane_rows(summary: &Value, exact_pair_materialized: bool) -> Vec<Value> {
+    let verified_tooltip = if exact_pair_materialized {
+        "Здесь считаются только те живые запросы, где польза Amai уже подтвердилась без потери качества. Это внутренний retrieval/recovery KPI Amai: он не тождествен exact model-token pair ниже, где дополнительно учитываются same-meter whole-cycle компоненты."
+    } else {
+        "Здесь считаются только те живые запросы, где польза Amai уже подтвердилась без потери качества."
+    };
+    let total_tooltip = if exact_pair_materialized {
+        "Здесь показаны все живые запросы подряд, даже если они ещё не вошли в главный итог. Это внутренний retrieval/recovery KPI Amai: он не тождествен exact model-token pair ниже, где дополнительно учитываются same-meter whole-cycle компоненты."
+    } else {
+        "Здесь показаны все живые запросы подряд, даже если они ещё не вошли в главный итог."
+    };
     vec![
         metric_row(
             "Главный итог",
@@ -6191,9 +6227,7 @@ fn current_session_lane_rows(summary: &Value) -> Vec<Value> {
                 summary["verified_recovery_tokens"].as_u64(),
                 summary["verified_effective_saved_tokens"].as_i64(),
             ),
-            Some(
-                "Здесь считаются только те живые запросы, где польза Amai уже подтвердилась без потери качества.",
-            ),
+            Some(verified_tooltip),
         ),
         metric_row(
             "Весь живой поток",
@@ -6203,9 +6237,7 @@ fn current_session_lane_rows(summary: &Value) -> Vec<Value> {
                 summary["total_recovery_tokens"].as_u64(),
                 summary["total_effective_saved_tokens"].as_i64(),
             ),
-            Some(
-                "Здесь показаны все живые запросы подряд, даже если они ещё не вошли в главный итог.",
-            ),
+            Some(total_tooltip),
         ),
         metric_row(
             "Пока вне главного итога",
@@ -6254,9 +6286,14 @@ fn exact_model_token_pair(scope_summary: &Value, alignment: &Value) -> Option<(u
     if alignment["same_meter_as_client_limit"].as_bool() != Some(true) {
         return None;
     }
-    let without_amai = scope_summary["verified_without_amai_measured_tokens"]
+    let without_amai = alignment["strict_client_meter_slice"]["lower_bound_tokens"]
         .as_u64()
-        .or_else(|| scope_summary["verified_baseline_tokens"].as_u64())
+        .or_else(|| {
+            alignment["baseline_equivalence"]["measured_baseline_tokens_lower_bound"].as_u64()
+        })
+        .or_else(|| scope_summary["verified_without_amai_measured_tokens"]
+        .as_u64()
+        .or_else(|| scope_summary["verified_baseline_tokens"].as_u64()))
         .unwrap_or(0);
     let with_amai = scope_summary["verified_observed_whole_cycle_with_amai_tokens"]
         .as_u64()
@@ -6272,6 +6309,112 @@ fn exact_model_token_pair(scope_summary: &Value, alignment: &Value) -> Option<(u
         saved_tokens as f64 * 100.0 / without_amai as f64
     };
     Some((without_amai, with_amai, saved_tokens, saved_pct))
+}
+
+fn exact_model_component_deltas(alignment: &Value) -> Vec<(String, u64, u64, i64)> {
+    let mut deltas = alignment["baseline_equivalence"]["component_semantics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["whole_cycle_observed_complete"].as_bool() == Some(true))
+        .filter_map(|item| {
+            let code = item["code"].as_str()?;
+            let label = human_client_limit_component(code)?;
+            let baseline = item["baseline_measured_tokens"].as_u64()?;
+            let observed = item["observed_tokens"].as_u64()?;
+            Some((
+                label.to_string(),
+                baseline,
+                observed,
+                observed as i64 - baseline as i64,
+            ))
+        })
+        .collect::<Vec<_>>();
+    deltas.sort_by(|left, right| {
+        right
+            .3
+            .abs()
+            .cmp(&left.3.abs())
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    deltas
+}
+
+fn format_exact_model_component_delta_value(
+    label: &str,
+    baseline: u64,
+    observed: u64,
+    delta: i64,
+) -> String {
+    if delta > 0 {
+        format!(
+            "{label}: {} -> {} (+{} к расходу)",
+            format_u64(Some(baseline)),
+            format_u64(Some(observed)),
+            format_u64(Some(delta as u64))
+        )
+    } else if delta < 0 {
+        format!(
+            "{label}: {} -> {} (экономия {})",
+            format_u64(Some(baseline)),
+            format_u64(Some(observed)),
+            format_u64(Some(delta.unsigned_abs()))
+        )
+    } else {
+        format!(
+            "{label}: {} -> {} (без разницы)",
+            format_u64(Some(baseline)),
+            format_u64(Some(observed))
+        )
+    }
+}
+
+fn exact_model_component_delta_metric_row(alignment: &Value) -> Option<Value> {
+    let all_components = exact_model_component_deltas(alignment);
+    let (label, baseline, observed, delta) = all_components
+        .iter()
+        .find(|item| item.3 != 0)
+        .or_else(|| all_components.first())
+        .cloned()?;
+    let mut tooltip = String::from(
+        "Этот ряд показывает, в каком same-meter компоненте сейчас сидит главная exact-разница между baseline «без Amai» и observed расходом «с Amai». Формат: baseline -> observed.",
+    );
+    for (component_label, component_baseline, component_observed, component_delta) in all_components {
+        tooltip.push('\n');
+        tooltip.push_str("- ");
+        tooltip.push_str(&format_exact_model_component_delta_value(
+            &component_label,
+            component_baseline,
+            component_observed,
+            component_delta,
+        ));
+    }
+    Some(metric_row(
+        "Главный драйвер exact-пары",
+        format_exact_model_component_delta_value(&label, baseline, observed, delta),
+        Some(tooltip.as_str()),
+    ))
+}
+
+fn exact_model_component_delta_note_sentence(alignment: &Value) -> Option<String> {
+    let (label, baseline, observed, delta) = exact_model_component_deltas(alignment)
+        .into_iter()
+        .find(|item| item.3 != 0)?;
+    Some(if delta > 0 {
+        format!(
+            "Главную exact-разницу сейчас даёт {label}: без Amai было {}, с Amai стало {}, это +{} токенов к расходу в том же meter.",
+            format_u64(Some(baseline)),
+            format_u64(Some(observed)),
+            format_u64(Some(delta as u64))
+        )
+    } else {
+        format!(
+            "Главную exact-разницу сейчас даёт {label}: без Amai было {}, с Amai стало {}, это уже экономия {} токенов в том же meter.",
+            format_u64(Some(baseline)),
+            format_u64(Some(observed)),
+            format_u64(Some(delta.unsigned_abs()))
+        )
+    })
 }
 
 fn model_token_savings_metric_row(scope_summary: &Value, alignment: &Value) -> Value {
@@ -8789,6 +8932,65 @@ mod tests {
             .expect("note");
         assert!(note.contains("25.00%"));
         assert!(note.contains("точный процент"));
+    }
+
+    #[test]
+    fn model_token_savings_row_prefers_strict_same_meter_lower_bound() {
+        let statement_preview = json!({
+            "verified_without_amai_measured_tokens": 605,
+            "verified_with_amai_measured_tokens": 0,
+            "verified_observed_whole_cycle_with_amai_tokens": 589
+        });
+        let alignment = json!({
+            "same_meter_as_client_limit": true,
+            "strict_client_meter_slice": {
+                "lower_bound_tokens": 609
+            },
+            "baseline_equivalence": {
+                "measured_baseline_tokens_lower_bound": 609
+            }
+        });
+
+        let row = super::model_token_savings_metric_row(&statement_preview, &alignment);
+        assert_eq!(
+            row["value"].as_str(),
+            Some("3.28%: без Amai 609, с Amai 589, экономия 20")
+        );
+    }
+
+    #[test]
+    fn exact_model_component_delta_row_surfaces_top_same_meter_driver() {
+        let alignment = json!({
+            "baseline_equivalence": {
+                "component_semantics": [
+                    {
+                        "code": "client_prompt",
+                        "baseline_measured_tokens": 48,
+                        "observed_tokens": 48,
+                        "whole_cycle_observed_complete": true
+                    },
+                    {
+                        "code": "continuity_restore_outside_retrieval",
+                        "baseline_measured_tokens": 8228,
+                        "observed_tokens": 8456,
+                        "whole_cycle_observed_complete": true
+                    }
+                ]
+            }
+        });
+
+        let row = super::exact_model_component_delta_metric_row(&alignment).expect("row");
+        assert_eq!(row["label"].as_str(), Some("Главный драйвер exact-пары"));
+        assert_eq!(
+            row["value"].as_str(),
+            Some("continuity-restore overhead вне retrieval: 8228 -> 8456 (+228 к расходу)")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("исходный запрос клиента: 48 -> 48 (без разницы)")
+        );
     }
 
     #[test]
