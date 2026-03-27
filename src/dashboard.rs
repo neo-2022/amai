@@ -3400,6 +3400,11 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     }
     let mut session_rows =
         current_session_lane_rows(current_session, current_session_exact_pair.is_some());
+    if let Some(row) =
+        client_full_turn_savings_metric_row(client_live_meter, current_session_exact_pair)
+    {
+        session_rows.push(row);
+    }
     session_rows.push(model_token_savings_metric_row(
         current_session_statement,
         current_session_alignment,
@@ -3417,11 +3422,6 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_rows.push(row);
     }
     if let Some(row) = client_live_limit_metric_row(client_live_meter) {
-        session_rows.push(row);
-    }
-    if let Some(row) =
-        client_full_turn_savings_metric_row(client_live_meter, current_session_exact_pair)
-    {
         session_rows.push(row);
     }
     if let Some(row) = client_turn_pressure_metric_row(session_client_turn_pressure) {
@@ -3788,11 +3788,13 @@ fn compact_token_hero_card(mut card: Value) -> Value {
         });
         for row in rows {
             if let Some(label) = row["label"].as_str() {
-                row["label"] = Value::String(humanize_token_card_row_label(label).to_string());
+                row["label"] =
+                    Value::String(humanize_token_card_row_label(&title, label).to_string());
             }
             if let (Some(label), Some(value)) = (row["label"].as_str(), row["value"].as_str()) {
-                row["value"] =
-                    Value::String(humanize_token_card_row_value(label, value).to_string());
+                row["value"] = Value::String(
+                    humanize_token_card_row_value(&title, label, value).to_string(),
+                );
             }
         }
     }
@@ -3809,6 +3811,7 @@ fn compact_token_hero_card(mut card: Value) -> Value {
 fn truth_only_token_card_labels(title: &str) -> &'static [&'static str] {
     match title {
         "Экономия токенов за текущую сессию" => &[
+            "Amai в полном live-turn",
             "Экономия токенов модели",
             "Совпадение с реальным лимитом",
             "Последний запрос клиента",
@@ -3831,19 +3834,37 @@ fn truth_only_token_card_labels(title: &str) -> &'static [&'static str] {
     }
 }
 
-fn humanize_token_card_row_label(label: &str) -> &str {
-    match label {
-        "Последний запрос клиента" => "Последний запрос в модель",
-        "Исторический startup-хвост" => "Хвост от прошлых стартов",
-        "Исторический frozen debt" => "Исторический долг точности",
-        "Review-only export" => "Отчёт для ручной сверки",
+fn humanize_token_card_row_label<'a>(title: &str, label: &'a str) -> &'a str {
+    match (title, label) {
+        ("Экономия токенов за текущую сессию", "Amai в полном live-turn") => {
+            "Экономия на реальной шкале"
+        }
+        ("Экономия токенов за текущую сессию", "Экономия токенов модели")
+        | ("Экономия токенов за рабочее окно", "Экономия токенов модели")
+        | ("Экономия токенов за всё время записи", "Экономия токенов модели") => {
+            "Экономия на учтённой части"
+        }
+        (_, "Совпадение с реальным лимитом") => "Точность учтённой части",
+        (_, "Последний запрос клиента") => "Последний запрос в модель",
+        (_, "Исторический startup-хвост") => "Хвост от прошлых стартов",
+        (_, "Исторический frozen debt") => "Исторический долг точности",
+        (_, "Review-only export") => "Отчёт для ручной сверки",
         _ => label,
     }
 }
 
-fn humanize_token_card_row_value(label: &str, value: &str) -> String {
-    match label {
-        "Исторический долг точности" => {
+fn humanize_token_card_row_value(title: &str, label: &str, value: &str) -> String {
+    match (title, label) {
+        ("Экономия токенов за текущую сессию", "Экономия на реальной шкале") => {
+            humanize_full_turn_savings_value(value)
+        }
+        ("Экономия токенов за текущую сессию", "Экономия на учтённой части")
+        | ("Экономия токенов за рабочее окно", "Экономия на учтённой части")
+        | ("Экономия токенов за всё время записи", "Экономия на учтённой части") => {
+            humanize_tracked_slice_savings_value(value)
+        }
+        (_, "Точность учтённой части") => humanize_tracked_slice_exactness_value(value),
+        (_, "Исторический долг точности") => {
             if let Some((_, rows)) = value.rsplit_once(", ") {
                 return format!(
                     "старый исторический хвост: {}",
@@ -3858,7 +3879,7 @@ fn humanize_token_card_row_value(label: &str, value: &str) -> String {
             }
             "старый исторический хвост".to_string()
         }
-        "Отчёт для ручной сверки" => {
+        (_, "Отчёт для ручной сверки") => {
             if let Some((_, rows)) = value.rsplit_once(": ") {
                 return format!(
                     "есть отдельный отчёт для ручной сверки: {}",
@@ -3869,6 +3890,44 @@ fn humanize_token_card_row_value(label: &str, value: &str) -> String {
         }
         _ => value.to_string(),
     }
+}
+
+fn humanize_full_turn_savings_value(value: &str) -> String {
+    let normalized = value.replace("delta ", "экономия ");
+    if let Some((pct, rest)) = normalized.split_once(": ") {
+        if pct.trim_start().starts_with('-') {
+            return format!(
+                "На полной шкале Amai пока добавил расход {}: {}",
+                pct,
+                rest.replace("экономия -", "перерасход ")
+            );
+        }
+        return format!("На полной шкале Amai сэкономил {}: {rest}", pct);
+    }
+    normalized
+}
+
+fn humanize_tracked_slice_savings_value(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix("Amai сэкономил ") {
+        return format!("На учтённой части Amai сэкономил {rest}");
+    }
+    if let Some(rest) = value.strip_prefix("Точного процента пока нет; ") {
+        return format!("По полной шкале точного процента пока нет; на учтённой части {rest}");
+    }
+    value.to_string()
+}
+
+fn humanize_tracked_slice_exactness_value(value: &str) -> String {
+    if value == "цифра точная: полностью совпадает со шкалой лимита модели" {
+        return "учтённая часть посчитана точно по той же шкале клиента".to_string();
+    }
+    if let Some(rest) = value.strip_prefix("цифра пока не полностью точная: ") {
+        return format!("учтённая часть пока не сведена полностью: {rest}");
+    }
+    if let Some(rest) = value.strip_prefix("цифра пока предварительная: ") {
+        return format!("учтённая часть пока предварительная: {rest}");
+    }
+    value.to_string()
 }
 
 fn humanize_history_row_count(value: &str) -> String {
@@ -3884,13 +3943,13 @@ fn humanize_review_row_count(value: &str) -> String {
 fn truth_only_token_card_title_tooltip(title: &str) -> Option<String> {
     let text = match title {
         "Экономия токенов за текущую сессию" => {
-            "Показывает только проверяемые цифры по текущей сессии: расход модели, остаток лимита и следующее действие."
+            "Показывает только проверяемые цифры по текущей сессии: реальную долю Amai на полной живой шкале turn, текущий лимит клиента и точность учтённой части."
         }
         "Экономия токенов за рабочее окно" => {
-            "Показывает только проверяемые цифры по рабочему окну и подтверждённые причины перерасхода."
+            "Показывает только проверяемые цифры по рабочему окну. Процент здесь относится к подтверждённой учтённой части, а не ко всему полному расходу модели за окно."
         }
         "Экономия токенов за всё время записи" => {
-            "Показывает только подтверждённые цифры за всё время и отдельно помечает старый неполный исторический хвост."
+            "Показывает только подтверждённые цифры за всё время записи. Процент здесь относится к подтверждённой учтённой части, а старый исторический хвост вынесен отдельно."
         }
         _ => return None,
     };
@@ -3901,13 +3960,13 @@ fn truth_only_token_card_source_label(card: &Value) -> Option<String> {
     let title = card["title"].as_str()?;
     let source = match title {
         "Экономия токенов за текущую сессию" => {
-            "Источник: точная пара токенов модели и живой лимит клиента из текущего чата."
+            "Источник: живая шкала клиента из rollout token_count и отдельно сведённая учтённая часть Amai."
         }
         "Экономия токенов за рабочее окно" => {
-            "Источник: точная пара токенов модели и подтверждённый хвост прошлых стартов в этом окне."
+            "Источник: подтверждённая учтённая часть окна и подтверждённый хвост прошлых стартов. Это не весь полный расход клиента за окно."
         }
         "Экономия токенов за всё время записи" => {
-            "Источник: подтверждённая история плюс отдельно отмеченный старый долг точности."
+            "Источник: подтверждённая учтённая история плюс отдельно отмеченный старый долг точности. Это не полный raw spend всей истории."
         }
         _ => return None,
     };
@@ -3921,13 +3980,13 @@ fn truth_only_token_card_note(card: &Value) -> String {
         .unwrap_or(card["status"].as_str().unwrap_or("неизвестно"));
     match title {
         "Экономия токенов за текущую сессию" => {
-            format!("Короткая карточка только с проверяемыми цифрами по текущей сессии. Статус: {status_label}.")
+            format!("Короткая карточка только с проверяемыми цифрами по текущей сессии: сверху реальная доля Amai на полной шкале текущего turn, ниже точность учтённой части. Статус: {status_label}.")
         }
         "Экономия токенов за рабочее окно" => {
-            format!("Короткая карточка только с проверяемыми цифрами по рабочему окну. Статус: {status_label}.")
+            format!("Короткая карточка только с проверяемыми цифрами по рабочему окну. Процент здесь относится к подтверждённой учтённой части, а не ко всему полному расходу модели за окно. Статус: {status_label}.")
         }
         "Экономия токенов за всё время записи" => {
-            format!("Короткая карточка только с подтверждёнными цифрами за всё время записи. Статус: {status_label}.")
+            format!("Короткая карточка только с подтверждёнными цифрами за всё время записи. Процент здесь относится к подтверждённой учтённой части, а старый долг точности вынесен отдельно. Статус: {status_label}.")
         }
         _ => return card["note"].as_str().unwrap_or_default().to_string(),
     }
@@ -9451,10 +9510,11 @@ mod tests {
 
         let cards = build_hero_cards(&snapshot);
         let note = cards[0]["note"].as_str().unwrap_or_default();
-        assert!(note.contains("Короткая карточка только с проверяемыми цифрами по текущей сессии."));
+        assert!(note.contains("Короткая карточка только с проверяемыми цифрами по текущей сессии"));
+        assert!(note.contains("реальная доля Amai"));
         let rows = cards[0]["rows"].as_array().expect("rows");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["label"].as_str(), Some("Экономия токенов модели"));
+        assert_eq!(rows[0]["label"].as_str(), Some("Экономия на учтённой части"));
     }
 
     #[test]
@@ -9523,7 +9583,7 @@ mod tests {
         assert_eq!(
             cards[0]["title_tooltip"].as_str(),
             Some(
-                "Показывает только проверяемые цифры по текущей сессии: расход модели, остаток лимита и следующее действие."
+                "Показывает только проверяемые цифры по текущей сессии: реальную долю Amai на полной живой шкале turn, текущий лимит клиента и точность учтённой части."
             )
         );
         assert!(cards[1]["title_tooltip"].as_str().is_some_and(|value| {
@@ -9597,7 +9657,7 @@ mod tests {
         assert!(cards[0]["note"]
             .as_str()
             .unwrap_or_default()
-            .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии."));
+            .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии"));
     }
 
     #[test]
@@ -9693,7 +9753,7 @@ mod tests {
         assert!(cards[0]["source_label"]
             .as_str()
             .unwrap_or_default()
-            .contains("точная пара токенов модели"));
+            .contains("живая шкала клиента"));
     }
 
     #[test]
@@ -9841,12 +9901,12 @@ mod tests {
         assert!(cards[0]["note"]
             .as_str()
             .unwrap_or_default()
-            .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии."));
+            .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии"));
         let model_row = cards[0]["rows"]
             .as_array()
             .expect("session rows")
             .iter()
-            .find(|row| row["label"].as_str() == Some("Экономия токенов модели"))
+            .find(|row| row["label"].as_str() == Some("Экономия на учтённой части"))
             .expect("model-token row");
         assert!(model_row["value"]
             .as_str()
@@ -10518,6 +10578,7 @@ mod tests {
             "note": "long note",
             "rows": [
                 {"label": "Главный итог", "value": "x"},
+                {"label": "Amai в полном live-turn", "value": "0.30%: без Amai 1000, с Amai 997, delta 3"},
                 {"label": "Экономия токенов модели", "value": "y"},
                 {"label": "Совпадение с реальным лимитом", "value": "z"},
                 {"label": "Лимит клиента сейчас", "value": "l"},
@@ -10535,20 +10596,21 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                "Экономия токенов модели",
-                "Совпадение с реальным лимитом",
+                "Экономия на реальной шкале",
+                "Экономия на учтённой части",
+                "Точность учтённой части",
                 "Лимит клиента сейчас",
                 "Следующее действие"
             ]
         );
         assert_eq!(
             compact["source_label"].as_str(),
-            Some("Источник: точная пара токенов модели и живой лимит клиента из текущего чата.")
+            Some("Источник: живая шкала клиента из rollout token_count и отдельно сведённая учтённая часть Amai.")
         );
         assert!(compact["note"]
             .as_str()
             .unwrap_or_default()
-            .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии."));
+            .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии"));
     }
 
     #[test]
@@ -10576,15 +10638,15 @@ mod tests {
         assert_eq!(
             labels,
             vec![
-                "Экономия токенов модели",
-                "Совпадение с реальным лимитом",
+                "Экономия на учтённой части",
+                "Точность учтённой части",
                 "Отчёт для ручной сверки",
                 "Исторический долг точности"
             ]
         );
         assert_eq!(
             compact["source_label"].as_str(),
-            Some("Источник: подтверждённая история плюс отдельно отмеченный старый долг точности.")
+            Some("Источник: подтверждённая учтённая история плюс отдельно отмеченный старый долг точности. Это не полный raw spend всей истории.")
         );
     }
 
