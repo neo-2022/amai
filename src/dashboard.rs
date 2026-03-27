@@ -8517,6 +8517,9 @@ fn client_turn_pressure_tooltip(
         "\n- При таком соотношении продолжение в том же thread жжёт внешний клиентский лимит в основном размером самого thread/context, а не Amai-delta\n- Следующее действие: сохранить continuity handoff и продолжить в свежем чате через continuity startup",
     );
     if let Some(bundle) = action_bundle {
+        if let Some(command) = bundle["operator_flow"]["rotate_helper_command"].as_str() {
+            tooltip.push_str(&format!("\n- One-shot rotate helper: {command}"));
+        }
         if let Some(command) = bundle["operator_flow"]["handoff_command"].as_str() {
             tooltip.push_str(&format!("\n- Готовая команда handoff: {command}"));
         }

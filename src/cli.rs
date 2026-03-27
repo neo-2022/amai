@@ -101,6 +101,7 @@ pub enum ContinuityCommand {
     Restore(ContinuityStartupArgs),
     Answer(ContinuityAnswerArgs),
     Handoff(ContinuityHandoffArgs),
+    RotateChat(ContinuityRotateChatArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -328,6 +329,26 @@ pub struct ContinuityHandoffArgs {
     pub next_step: String,
     #[arg(long)]
     pub details_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ContinuityRotateChatArgs {
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub repo_root: Option<PathBuf>,
+    #[arg(long, default_value = "continuity")]
+    pub namespace: String,
+    #[arg(long)]
+    pub headline: Option<String>,
+    #[arg(long = "next-step")]
+    pub next_step: Option<String>,
+    #[arg(long)]
+    pub details_file: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -999,6 +1020,27 @@ mod tests {
             args.startup.token_source_kind,
             DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND
         );
+    }
+
+    #[test]
+    fn continuity_rotate_chat_cli_parses() {
+        let cli = Cli::parse_from([
+            "amai",
+            "continuity",
+            "rotate-chat",
+            "--project",
+            "art",
+            "--json",
+        ]);
+        let Command::Continuity { command } = cli.command else {
+            panic!("expected continuity command");
+        };
+        let ContinuityCommand::RotateChat(args) = command else {
+            panic!("expected continuity rotate-chat command");
+        };
+        assert_eq!(args.project.as_deref(), Some("art"));
+        assert!(args.json);
+        assert!(!args.force);
     }
 
     #[test]

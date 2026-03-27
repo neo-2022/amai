@@ -2274,6 +2274,20 @@ pub(crate) fn build_rotate_chat_action_bundle(
         ])),
         _ => None,
     };
+    let rotate_helper_command = match (project_code, namespace_code, repo_root) {
+        (Some(project), Some(namespace), Some(root)) => Some(shell_join_command(&[
+            "amai",
+            "continuity",
+            "rotate-chat",
+            "--project",
+            project,
+            "--namespace",
+            namespace,
+            "--repo-root",
+            root,
+        ])),
+        _ => None,
+    };
     json!({
         "bundle_version": "rotate-chat-action-bundle-v1",
         "ready_for_automation": missing_inputs.is_empty(),
@@ -2286,6 +2300,7 @@ pub(crate) fn build_rotate_chat_action_bundle(
         },
         "operator_flow": {
             "copy_paste_ready": handoff_command.is_some() && startup_command.is_some(),
+            "rotate_helper_command": rotate_helper_command,
             "handoff_command": handoff_command,
             "open_fresh_chat_summary": "открой свежий чат клиента вручную",
             "startup_command": startup_command,
@@ -3619,6 +3634,12 @@ mod tests {
         assert_eq!(
             bundle["operator_flow"]["copy_paste_ready"],
             json!(true)
+        );
+        assert!(
+            bundle["operator_flow"]["rotate_helper_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("rotate-chat")
         );
         assert!(
             bundle["operator_flow"]["handoff_command"]

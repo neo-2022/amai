@@ -1,10 +1,12 @@
 use crate::chat_question;
 use crate::cli::{
-    ContinuityAnswerArgs, ContinuityHandoffArgs, ContinuityImportArgs, ContinuityStartupArgs,
-    ContinuityStartupStateArgs, ContinuityThreadIndexEnrichArgs, VerifyContinuityArgs,
+    ContinuityAnswerArgs, ContinuityHandoffArgs, ContinuityImportArgs, ContinuityRotateChatArgs,
+    ContinuityStartupArgs, ContinuityStartupStateArgs, ContinuityThreadIndexEnrichArgs,
+    VerifyContinuityArgs,
 };
 use crate::codex_threads;
 use crate::config::AppConfig;
+use crate::dashboard;
 use crate::eval_verdict::{self, EvalPattern, EvalSignals};
 use crate::mcp;
 use crate::postgres::{self, ChunkRecord, DocumentRecord, NamespaceRecord, ProjectRecord};
@@ -1732,14 +1734,445 @@ pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> R
     let namespace = postgres::find_namespace_by_code(&db, project.project_id, &args.namespace)
         .await?
         .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.namespace))?;
-    let details = if let Some(details_file) = &args.details_file {
-        fs::read_to_string(details_file)
-            .with_context(|| format!("failed to read {}", details_file.display()))?
-    } else {
-        String::new()
+    let details = read_optional_details_file(args.details_file.as_ref())?;
+    let payload = capture_handoff_payload(
+        cfg,
+        &mut db,
+        &project,
+        &namespace,
+        &args.headline,
+        &args.next_step,
+        &details,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Result<()> {
+    let mut db = connect_bootstrapped_admin(cfg).await?;
+    let startup_args = ContinuityStartupArgs {
+        project: args.project.clone(),
+        repo_root: args.repo_root.clone(),
+        namespace: args.namespace.clone(),
+        json: false,
+        token_source_kind: "operator_continuity_rotate_chat".to_string(),
     };
+    let (context, continuity_import_missing) = match load_startup_context(&db, &startup_args).await {
+        Ok(context) => (context, false),
+        Err(error)
+            if error
+                .to_string()
+                .contains("no continuity import found for") =>
+        {
+            let project = resolve_project(&db, &startup_args).await?;
+            let namespace = postgres::ensure_namespace(
+                &db,
+                project.project_id,
+                &args.namespace,
+                Some("Continuity"),
+                "local_strict",
+            )
+            .await?;
+            let handoff_summary = latest_handoff_summary(&db, &project, &namespace)
+                .await?
+                .unwrap_or_else(|| {
+                    json!({
+                        "headline": "ещё нет данных",
+                        "next_step": "ещё нет данных",
+                    })
+                });
+            let restore = working_state::build_restore_bundle(&db, &project, &namespace).await?;
+            (
+                ContinuityStartupContext {
+                    project,
+                    namespace,
+                    continuity: json!({
+                        "imported_at_epoch_ms": 0,
+                        "documents_imported": 0,
+                        "rendered_transcript_files": 0,
+                    }),
+                    handoff_summary,
+                    restore,
+                },
+                true,
+            )
+        }
+        Err(error) => return Err(error),
+    };
+    let restore_node = context
+        .restore
+        .as_ref()
+        .and_then(|value| value.get("working_state_restore"));
+    let dashboard_report = token_budget::collect_dashboard_report(&db).await?;
+    let client_budget_guard = dashboard::current_session_budget_guard(&json!({
+        "token_budget_report": {
+            "token_budget_report": dashboard_report["token_budget_report"].clone(),
+        },
+        "latest_repo_working_state_restore": context.restore.clone().unwrap_or_else(|| {
+            json!({
+                "working_state_restore": {}
+            })
+        }),
+    }));
+    let should_rotate_chat = client_budget_guard["should_rotate_chat_now"].as_bool() == Some(true)
+        || client_budget_guard["should_rotate_chat_soon"].as_bool() == Some(true);
+    if !should_rotate_chat && !args.force {
+        let status_label = client_budget_guard["status_label"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("guard не требует rotate");
+        bail!(
+            "client-budget rotate helper refused because guard is not active: {status_label}; pass --force only if you intentionally want to rotate despite clear guard"
+        );
+    }
+
+    let recommended_headline = restore_node
+        .and_then(|value| value["current_goal"].as_str())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            context.handoff_summary["headline"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or("Продолжить активную рабочую линию");
+    let recommended_next_step = restore_node
+        .and_then(|value| value["next_step"].as_str())
+        .and_then(normalize_next_step_value)
+        .or_else(|| {
+            context.handoff_summary["next_step"]
+                .as_str()
+                .and_then(normalize_next_step_value)
+        })
+        .unwrap_or_else(|| "продолжить работу в свежем чате через continuity startup".to_string());
+    let headline = args
+        .headline
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(recommended_headline);
+    let next_step = args
+        .next_step
+        .as_deref()
+        .and_then(normalize_next_step_value)
+        .unwrap_or(recommended_next_step);
+    let preserves_return_obligation = restore_node
+        .and_then(|value| value["execctl_resume_state"].as_str())
+        .unwrap_or("clear")
+        != "clear";
+    let action_bundle = working_state::build_rotate_chat_action_bundle(
+        Some(context.project.code.as_str()),
+        Some(context.namespace.code.as_str()),
+        Some(context.project.repo_root.as_str()),
+        preserves_return_obligation,
+        Some(headline),
+        Some(&next_step),
+    );
+    let details = if let Some(details_file) = args.details_file.as_ref() {
+        read_optional_details_file(Some(details_file))?
+    } else {
+        build_rotate_chat_details(&client_budget_guard, headline, &next_step)
+    };
+    let handoff_payload = capture_handoff_payload(
+        cfg,
+        &mut db,
+        &context.project,
+        &context.namespace,
+        headline,
+        &next_step,
+        &details,
+    )
+    .await?;
+    let blocking_reply_contract = client_budget_guard["reply_execution_gate"]["blocking_reply_contract"]
+        .clone();
+    let blocked_reply_text = blocking_reply_contract["template"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE)
+        .to_string();
+    let rotate_helper_command = action_bundle["operator_flow"]["rotate_helper_command"]
+        .as_str()
+        .map(ToOwned::to_owned);
+    let startup_command = action_bundle["operator_flow"]["startup_command"]
+        .as_str()
+        .map(ToOwned::to_owned);
+    let handoff_command = action_bundle["operator_flow"]["handoff_command"]
+        .as_str()
+        .map(ToOwned::to_owned);
+    let continuity_import = if continuity_import_missing {
+        build_rotate_chat_import_step(
+            &context.project.code,
+            &context.project.display_name,
+            &context.project.repo_root,
+            &context.namespace.code,
+        )?
+    } else {
+        None
+    };
+    let payload = json!({
+        "continuity_rotate_chat": {
+            "status": if should_rotate_chat { "ready" } else { "forced" },
+            "forced": args.force,
+            "project": {
+                "code": context.project.code,
+                "display_name": context.project.display_name,
+                "repo_root": context.project.repo_root,
+            },
+            "namespace": {
+                "code": context.namespace.code,
+                "display_name": context.namespace.display_name,
+            },
+            "client_budget_guard": client_budget_guard,
+            "blocking_reply_contract": blocking_reply_contract,
+            "blocked_reply_text": blocked_reply_text,
+            "action_bundle": action_bundle,
+            "handoff": handoff_payload["continuity_handoff"].clone(),
+            "startup_requires_continuity_import": continuity_import_missing,
+            "continuity_import": continuity_import,
+            "operator_flow": {
+                "rotate_helper_command": rotate_helper_command,
+                "handoff_command": handoff_command,
+                "startup_command": startup_command,
+            }
+        }
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+    let status_label = payload["continuity_rotate_chat"]["client_budget_guard"]["status_label"]
+        .as_str()
+        .unwrap_or("новый чат рекомендован");
+    let last_request = payload["continuity_rotate_chat"]["client_budget_guard"]["last_request"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    let client_limits = payload["continuity_rotate_chat"]["client_budget_guard"]["client_limits"]
+        .as_str()
+        .unwrap_or("ещё нет данных");
+    println!("Amai continuity rotate-chat");
+    println!();
+    println!(
+        "Проект: {} ({})",
+        context.project.display_name, context.project.code
+    );
+    println!("Namespace continuity: {}", context.namespace.code);
+    println!("Статус client-budget guard: {status_label}");
+    println!("Последний запрос в модель: {last_request}");
+    println!("Лимит клиента сейчас: {client_limits}");
+    println!("Разрешённый короткий ответ в старом чате: {blocked_reply_text}");
+    println!();
+    println!("Handoff записан:");
+    println!("- headline: {headline}");
+    println!("- next_step: {next_step}");
+    println!(
+        "- local_path: {}",
+        payload["continuity_rotate_chat"]["handoff"]["local_path"]
+            .as_str()
+            .unwrap_or("ещё нет данных")
+    );
+    println!();
+    println!("Готовые действия:");
+    if let Some(command) = payload["continuity_rotate_chat"]["continuity_import"]["import_command"]
+        .as_str()
+    {
+        println!("- Сначала materialize continuity import: {command}");
+    }
+    if let Some(command) = payload["continuity_rotate_chat"]["operator_flow"]["startup_command"]
+        .as_str()
+    {
+        println!("- После открытия свежего чата запусти: {command}");
+    }
+    if let Some(command) = payload["continuity_rotate_chat"]["operator_flow"]["rotate_helper_command"]
+        .as_str()
+    {
+        println!("- One-shot helper: {command}");
+    }
+    Ok(())
+}
+
+fn read_optional_details_file(details_file: Option<&PathBuf>) -> Result<String> {
+    if let Some(details_file) = details_file {
+        return fs::read_to_string(details_file)
+            .with_context(|| format!("failed to read {}", details_file.display()));
+    }
+    Ok(String::new())
+}
+
+fn build_rotate_chat_details(client_budget_guard: &Value, headline: &str, next_step: &str) -> String {
+    let mut lines = Vec::new();
+    if let Some(status_label) = client_budget_guard["status_label"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("Client-budget guard: {status_label}."));
+    }
+    if let Some(last_request) = client_budget_guard["last_request"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("Последний запрос в модель: {last_request}."));
+    }
+    if let Some(client_limits) = client_budget_guard["client_limits"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("Лимит клиента сейчас: {client_limits}."));
+    }
+    if let Some(note) = client_budget_guard["note"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("Почему rotate обязателен: {note}."));
+    }
+    lines.push(format!(
+        "Продолжить ту же рабочую линию: {headline}."
+    ));
+    lines.push(format!(
+        "Ближайший обязательный следующий шаг в свежем чате: {next_step}."
+    ));
+    lines.join("\n")
+}
+
+fn build_rotate_chat_import_step(
+    project_code: &str,
+    display_name: &str,
+    repo_root: &str,
+    namespace_code: &str,
+) -> Result<Option<Value>> {
+    let bootstrap_file = write_project_bootstrap_snapshot(project_code, repo_root)?;
+    let Some(bootstrap_file) = bootstrap_file else {
+        return Ok(None);
+    };
+    let import_command = format!(
+        "./scripts/import_continuity.sh --project {} --display-name {} --repo-root {} --namespace {} --bootstrap-file {} --transcript-limit 3",
+        shell_quote(project_code),
+        shell_quote(display_name),
+        shell_quote(repo_root),
+        shell_quote(namespace_code),
+        shell_quote(&bootstrap_file.display().to_string()),
+    );
+    Ok(Some(json!({
+        "required": true,
+        "bootstrap_file": bootstrap_file.display().to_string(),
+        "import_command": import_command,
+    })))
+}
+
+fn write_project_bootstrap_snapshot(project_code: &str, repo_root: &str) -> Result<Option<PathBuf>> {
+    let memory_home = std::env::var("MEMORY_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/"))
+                .join(".memory")
+        });
+    let thread_index_path = memory_home
+        .join("transcripts")
+        .join("codex")
+        .join("thread_index.json");
+    if !thread_index_path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&thread_index_path)
+        .with_context(|| format!("failed to read {}", thread_index_path.display()))?;
+    let mut index: ContinuityThreadIndexFile = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", thread_index_path.display()))?;
+    index.threads.retain(|entry| entry.cwd.starts_with(repo_root));
+    if index.threads.is_empty() {
+        return Ok(None);
+    }
+    index.threads.sort_by(|left, right| right.source_rollout.cmp(&left.source_rollout));
+    let amai_repo_root = crate::config::discover_repo_root(None)?;
+    let output_path = amai_repo_root
+        .join("state")
+        .join("continuity-imports")
+        .join(project_code)
+        .join(format!(
+            "continuity-snapshot-{}.md",
+            slugify_repo_root(repo_root)
+        ));
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let handoff_path = amai_repo_root
+        .join("state")
+        .join("continuity-imports")
+        .join(project_code)
+        .join("live-handoff.md");
+    let mut lines = vec![
+        "# Amai Project Continuity Snapshot".to_string(),
+        String::new(),
+        format!("- `cwd_prefix`: `{repo_root}`"),
+        format!("- `thread_count`: `{}`", index.threads.len()),
+        "- `purpose`: локальный transcript-based continuity snapshot для проекта. Он импортируется в `Amai` и служит refresh-evidence, а не отдельной системой памяти.".to_string(),
+        "- `important`: канонический current handoff теперь живёт в `Amai`; полная история остаётся в `raw_mirror` и `rendered_transcript`.".to_string(),
+        format!(
+            "- `current_handoff_snapshot`: `{}`",
+            handoff_path.display()
+        ),
+        String::new(),
+        "## Индекс потоков проекта".to_string(),
+        String::new(),
+    ];
+    for entry in &index.threads {
+        lines.push(format!("### {}", entry.thread_id));
+        lines.push(String::new());
+        lines.push(format!("- `title`: `{}`", entry.title));
+        lines.push(format!("- `cwd`: `{}`", entry.cwd));
+        if !entry.first_user_message.is_empty() {
+            lines.push(format!(
+                "- `first_user_message`: `{}`",
+                entry.first_user_message
+            ));
+        }
+        lines.push(format!("- `source_rollout`: `{}`", entry.source_rollout));
+        if !entry.raw_mirror.is_empty() {
+            lines.push(format!("- `raw_mirror`: `{}`", entry.raw_mirror));
+        }
+        lines.push(format!(
+            "- `rendered_transcript`: `{}`",
+            entry.rendered_transcript
+        ));
+        lines.push(String::new());
+    }
+    fs::write(&output_path, lines.join("\n") + "\n")
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    Ok(Some(output_path))
+}
+
+fn slugify_repo_root(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_was_dash = false;
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        let keep = ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-');
+        if keep {
+            slug.push(ch);
+            previous_was_dash = false;
+        } else if !previous_was_dash {
+            slug.push('-');
+            previous_was_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "project".to_string()
+    } else {
+        slug
+    }
+}
+
+async fn capture_handoff_payload(
+    cfg: &AppConfig,
+    db: &mut Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    headline: &str,
+    next_step: &str,
+    details: &str,
+) -> Result<Value> {
     let captured_at_epoch_ms = now_epoch_ms()?;
-    let body = render_handoff_markdown(&args.headline, &args.next_step, &details);
+    let body = render_handoff_markdown(headline, next_step, details);
     let amai_repo_root = crate::config::discover_repo_root(None)?;
     let local_handoff_path = amai_repo_root
         .join("state")
@@ -1770,7 +2203,7 @@ pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> R
         }),
     )?;
     let chunks = build_chunks(cfg, &body);
-    postgres::replace_document_index(&mut db, &document, &[], &chunks).await?;
+    postgres::replace_document_index(db, &document, &[], &chunks).await?;
     let payload = json!({
         "continuity_handoff": {
             "project": {
@@ -1783,8 +2216,8 @@ pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> R
                 "display_name": namespace.display_name,
             },
             "captured_at_epoch_ms": captured_at_epoch_ms,
-            "headline": args.headline,
-            "next_step": args.next_step,
+            "headline": headline,
+            "next_step": next_step,
             "details": details,
             "relative_path": ".amai-continuity/live-handoff/HANDOFF.md",
             "local_path": local_handoff_path.display().to_string(),
@@ -1795,14 +2228,13 @@ pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> R
         &db,
         &project,
         &namespace,
-        &args.headline,
-        &args.next_step,
+        headline,
+        next_step,
         &details,
         &local_handoff_path.display().to_string(),
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&payload)?);
-    Ok(())
+    Ok(payload)
 }
 
 fn build_continuity_answer_payload(

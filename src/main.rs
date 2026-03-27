@@ -143,6 +143,11 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 continuity::capture_handoff(&cfg, &args).await?;
             }
+            ContinuityCommand::RotateChat(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                continuity::rotate_chat(&cfg, &args).await?;
+            }
         },
         Command::Deployment { command } => {
             let repo_root = config::discover_repo_root(None)?;
