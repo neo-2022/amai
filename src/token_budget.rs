@@ -456,6 +456,7 @@ struct TokenBudgetEvent {
     assistant_generation_tokens: Option<u64>,
     tool_overhead_tokens: Option<u64>,
     continuity_restore_tokens: Option<u64>,
+    tool_overhead_source: Option<Value>,
     pre_amai_baseline_source: Option<Value>,
 }
 
@@ -7796,6 +7797,25 @@ async fn sync_context_pack_tool_overhead_for_events(
             .unwrap_or(0);
         let Some(output_json) = stored_context_pack_payload_json(db, &context_pack_id).await?
         else {
+            let attached = attach_tool_overhead_source_status_to_snapshot(
+                db,
+                row,
+                Some(json!({ "context_pack_id": context_pack_id })),
+                json!({
+                    "state": "context_pack_payload_missing_irrecoverable",
+                    "source_kind": "ami.context_packs",
+                    "resolution_condition": "recover_historical_tool_overhead_source_or_freeze_irrecoverable_gap",
+                    "note": "Stored context pack payload for this context_pack_id is missing, so payload-based tool_overhead reconstruction cannot proceed from ami.context_packs."
+                }),
+            )
+            .await?;
+            if attached
+                .as_ref()
+                .and_then(|value| value["tool_overhead_source_attach"]["attached"].as_bool())
+                .unwrap_or(false)
+            {
+                changed = true;
+            }
             continue;
         };
         let tool_overhead_tokens = count_cli_context_pack_output_overhead_tokens(
@@ -10843,6 +10863,9 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
     let tool_overhead_tokens = node["whole_cycle_observed"]["tool_overhead_tokens"].as_u64();
     let continuity_restore_tokens =
         node["whole_cycle_observed"]["continuity_restore_tokens"].as_u64();
+    let tool_overhead_source = node["whole_cycle_observed_source"]["tool_overhead"]
+        .as_object()
+        .map(|_| node["whole_cycle_observed_source"]["tool_overhead"].clone());
     let pre_amai_baseline_source = node["pre_amai_baseline_source"]
         .as_object()
         .map(|_| node["pre_amai_baseline_source"].clone());
@@ -10939,6 +10962,7 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         assistant_generation_tokens,
         tool_overhead_tokens,
         continuity_restore_tokens,
+        tool_overhead_source,
         pre_amai_baseline_source,
     }))
 }
@@ -12545,6 +12569,7 @@ fn tool_overhead_observation_source_status(
         .filter(|event| event.tool_overhead_tokens.is_none())
         .copied()
         .collect::<Vec<_>>();
+    let mut missing_source_states = BTreeMap::<String, u64>::new();
     let mut missing_classes = BTreeMap::<(String, String, String, String), u64>::new();
     for event in &missing_events {
         let key = (
@@ -12554,6 +12579,13 @@ fn tool_overhead_observation_source_status(
             event.target_kind.clone(),
         );
         *missing_classes.entry(key).or_default() += 1;
+        let state = event
+            .tool_overhead_source
+            .as_ref()
+            .and_then(|value| value["state"].as_str())
+            .unwrap_or("source_state_unknown")
+            .to_string();
+        *missing_source_states.entry(state).or_default() += 1;
     }
     let mut missing_class_sample = missing_classes
         .into_iter()
@@ -12590,6 +12622,39 @@ fn tool_overhead_observation_source_status(
                     .cmp(&right["target_kind"].as_str())
             })
     });
+    let mut missing_source_state_sample = missing_source_states
+        .into_iter()
+        .map(|(state, count)| {
+            json!({
+                "state": state,
+                "count": count,
+            })
+        })
+        .collect::<Vec<_>>();
+    missing_source_state_sample.sort_by(|left, right| {
+        right["count"]
+            .as_u64()
+            .cmp(&left["count"].as_u64())
+            .then_with(|| left["state"].as_str().cmp(&right["state"].as_str()))
+    });
+    let irrecoverable_missing_live_events = missing_events
+        .iter()
+        .filter(|event| {
+            event.tool_overhead_source
+                .as_ref()
+                .and_then(|value| value["state"].as_str())
+                == Some("context_pack_payload_missing_irrecoverable")
+        })
+        .count() as u64;
+    let recoverability_state = if missing_events.is_empty() {
+        "not_applicable"
+    } else if irrecoverable_missing_live_events == 0 {
+        "missing_scope_recoverability_unknown"
+    } else if irrecoverable_missing_live_events == missing_events.len() as u64 {
+        "source_loss_irrecoverable"
+    } else {
+        "mixed_recoverable_and_irrecoverable"
+    };
 
     json!({
         "source_kind": "context_pack_payload_attach_v1",
@@ -12603,13 +12668,17 @@ fn tool_overhead_observation_source_status(
         "target_live_events": target_events.len(),
         "observed_live_events": observed_live_events,
         "missing_live_events": missing_events.len(),
+        "recoverability_state": recoverability_state,
+        "irrecoverable_missing_live_events": irrecoverable_missing_live_events,
+        "recoverable_missing_live_events": (missing_events.len() as u64).saturating_sub(irrecoverable_missing_live_events),
+        "missing_source_state_sample": missing_source_state_sample.into_iter().take(8).collect::<Vec<_>>(),
         "missing_class_sample": missing_class_sample.into_iter().take(8).collect::<Vec<_>>(),
         "missing_context_pack_id_sample": missing_events
             .iter()
             .filter_map(|event| event_context_pack_id(event))
             .take(8)
             .collect::<Vec<_>>(),
-        "note": "Этот слой показывает, какие retrieval live events ещё не получили whole-cycle tool_overhead attach после payload-based sync, и какими классами они сгруппированы."
+        "note": "Этот слой показывает, какие retrieval live events ещё не получили whole-cycle tool_overhead attach после payload-based sync, как они сгруппированы по классам, и есть ли среди них irrecoverable source-loss без stored context pack payload."
     })
 }
 
@@ -13387,8 +13456,18 @@ fn build_client_limit_exact_pair_status(
             "observed_live_events": observed_live_events,
             "target_live_events": target_live_events,
             "missing_live_events": tool_overhead_observation_source["missing_live_events"].clone(),
-            "resolution_condition": "tool_overhead_source_covers_missing_scope",
-            "note": "Whole-cycle exact pair по этому компоненту ещё не materialized: retrieval live scope имеет missing tool_overhead attach и пока даёт только partial same-meter coverage."
+            "recoverability_state": tool_overhead_observation_source["recoverability_state"].clone(),
+            "irrecoverable_missing_live_events": tool_overhead_observation_source["irrecoverable_missing_live_events"].clone(),
+            "resolution_condition": if tool_overhead_observation_source["irrecoverable_missing_live_events"].as_u64().unwrap_or(0) > 0 {
+                json!("recover_historical_tool_overhead_source_or_freeze_irrecoverable_gap")
+            } else {
+                json!("tool_overhead_source_covers_missing_scope")
+            },
+            "note": if tool_overhead_observation_source["irrecoverable_missing_live_events"].as_u64().unwrap_or(0) > 0 {
+                Value::String("Whole-cycle exact pair по этому компоненту ещё не materialized: часть retrieval live scope уже упирается в irrecoverable source-loss без stored context pack payload, поэтому дальше нужен либо recovery source, либо explicit frozen gap.".to_string())
+            } else {
+                Value::String("Whole-cycle exact pair по этому компоненту ещё не materialized: retrieval live scope имеет missing tool_overhead attach и пока даёт только partial same-meter coverage.".to_string())
+            }
         }));
     }
 
@@ -14499,6 +14578,14 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
             "continuity_restore_tokens": event.continuity_restore_tokens,
         }),
     );
+    if let Some(source) = &event.tool_overhead_source {
+        object.insert(
+            "whole_cycle_observed_source".to_string(),
+            json!({
+                "tool_overhead": source.clone(),
+            }),
+        );
+    }
     if let Some(source) = &event.pre_amai_baseline_source {
         object.insert("pre_amai_baseline_source".to_string(), source.clone());
     }
@@ -14893,6 +14980,49 @@ async fn attach_whole_cycle_observed_to_snapshot(
             "whole_cycle_observed": whole_cycle_observed,
             "attached": attached,
             "note": "Conflicting overwrite is fail-closed; reattaching the same observed value is allowed."
+        }
+    })))
+}
+
+async fn attach_tool_overhead_source_status_to_snapshot(
+    db: &Client,
+    row: &ObservabilitySnapshotRecord,
+    selector: Option<Value>,
+    source_status: Value,
+) -> Result<Option<Value>> {
+    let mut payload = row.payload.clone();
+    let (event_id, correlation_id, updated, tool_overhead_source) = {
+        let node = payload["token_budget_event"]
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("token budget payload missing token_budget_event"))?;
+        let event_id = node.get("event_id").cloned().unwrap_or(Value::Null);
+        let correlation_id = node.get("correlation_id").cloned().unwrap_or(Value::Null);
+        let whole_cycle_source = ensure_nested_object(node, "whole_cycle_observed_source")?;
+        let existing = whole_cycle_source.get("tool_overhead");
+        let updated = existing != Some(&source_status);
+        if updated {
+            whole_cycle_source.insert("tool_overhead".to_string(), source_status.clone());
+        }
+        (
+            event_id,
+            correlation_id,
+            updated,
+            whole_cycle_source
+                .get("tool_overhead")
+                .cloned()
+                .unwrap_or(Value::Null),
+        )
+    };
+    postgres::update_observability_snapshot_payload(db, &row.snapshot_id, &payload).await?;
+    Ok(Some(json!({
+        "tool_overhead_source_attach": {
+            "selector": selector.unwrap_or(Value::Null),
+            "snapshot_id": row.snapshot_id,
+            "event_id": event_id,
+            "correlation_id": correlation_id,
+            "tool_overhead_source": tool_overhead_source,
+            "attached": updated,
+            "note": "Tool-overhead source status is mutable provenance metadata: it may advance from missing-source to materialized-source if historical context-pack payloads are later recovered."
         }
     })))
 }
@@ -16481,6 +16611,7 @@ mod tests {
                     assistant_generation_tokens: None,
                     tool_overhead_tokens: None,
                     continuity_restore_tokens: None,
+                    tool_overhead_source: None,
                     pre_amai_baseline_source: None,
                 };
                 $(event.$field = $value;)+
@@ -20632,6 +20763,10 @@ effective_to_epoch_ms = 2000
                 traffic_class: "live".to_string(),
                 client_prompt_tokens: Some(20),
                 tool_overhead_tokens: None,
+                tool_overhead_source: Some(json!({
+                    "state": "context_pack_payload_missing_irrecoverable",
+                    "source_kind": "ami.context_packs",
+                })),
             },
         ];
         let assistant_scope = super::AssistantGenerationScopeObservation {
@@ -20674,6 +20809,14 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             alignment["exact_pair_status"]["blockers"][0]["blocker_kind"],
             "whole_cycle_observation_gap"
+        );
+        assert_eq!(
+            alignment["exact_pair_status"]["blockers"][0]["recoverability_state"],
+            "source_loss_irrecoverable"
+        );
+        assert_eq!(
+            alignment["exact_pair_status"]["blockers"][0]["resolution_condition"],
+            "recover_historical_tool_overhead_source_or_freeze_irrecoverable_gap"
         );
         assert_eq!(
             alignment["exact_pair_status"]["blockers"][1]["code"],
@@ -21004,6 +21147,35 @@ effective_to_epoch_ms = 2000
     }
 
     #[test]
+    fn tool_overhead_observation_source_reports_irrecoverable_source_loss() {
+        let missing_event = token_event! {
+            context_pack_id: Some("cp-missing".to_string()),
+            correlation_id: "cp-missing".to_string(),
+            namespace: "art".to_string(),
+            source_kind: "live_context_pack".to_string(),
+            query_type: "code_lookup".to_string(),
+            target_kind: "file".to_string(),
+            tool_overhead_tokens: None,
+            tool_overhead_source: Some(json!({
+                "state": "context_pack_payload_missing_irrecoverable",
+                "source_kind": "ami.context_packs",
+            })),
+        };
+
+        let status = super::tool_overhead_observation_source_status(
+            Some(&[missing_event]),
+            Some(&super::AssistantGenerationScopeObservation::default()),
+        );
+
+        assert_eq!(status["recoverability_state"], "source_loss_irrecoverable");
+        assert_eq!(status["irrecoverable_missing_live_events"], 1);
+        assert_eq!(
+            status["missing_source_state_sample"][0]["state"],
+            "context_pack_payload_missing_irrecoverable"
+        );
+    }
+
+    #[test]
     fn summarize_events_derives_client_prompt_tokens_from_query_when_field_missing() {
         let measurement = measurement_fixture();
         let contract = contract_fixture();
@@ -21319,6 +21491,7 @@ effective_to_epoch_ms = 2000
             assistant_generation_tokens: None,
             tool_overhead_tokens: None,
             continuity_restore_tokens: None,
+            tool_overhead_source: None,
             pre_amai_baseline_source: None,
         };
 
