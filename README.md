@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 17:20 MSK
-Ручная сверка guide/docs: 2026-03-27 17:20 MSK
+modified_at: 2026-03-27 17:40 MSK
+Ручная сверка guide/docs: 2026-03-27 17:40 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1726,6 +1726,11 @@ preview, а не только raw count.
     ещё не materialized, а live-turn уже раздут настолько, что честный full-scale effect
     теряется в размере самого thread/context, operator должен увидеть ранний переход в свежий чат
     ещё до того, как 5h лимит почти выгорел;
+  - managed startup instructions теперь тоже обязаны повторять этот закон в plain language:
+    если dashboard/current-session contour уже говорит `новый чат рекомендован` или
+    `новый чат нужен сейчас`, либо полный live-turn помечен как `не доказано` на раздутом
+    turn, агент не должен дожигать текущий thread и обязан продолжать через fresh chat +
+    continuity startup;
   - human dashboard service теперь тоже обязан уметь materialize-ить этот live client meter:
     если service запущен вне `CODEX_THREAD_ID`, он не должен брать просто самый свежий
     repo-thread из SQLite; сначала он обязан попытаться привязаться к `thread_id` из
