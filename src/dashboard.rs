@@ -1,5 +1,6 @@
 use crate::config::{self, AppConfig};
 use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary, collect_machine_summary};
+use crate::working_state;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -2780,12 +2781,20 @@ pub fn build_payload(
 }
 
 pub fn current_session_budget_guard(snapshot: &Value) -> Value {
-    current_session_budget_guard_from_report(
+    current_session_budget_guard_with_restore_context(
         &snapshot["token_budget_report"]["token_budget_report"],
+        &snapshot["latest_repo_working_state_restore"]["working_state_restore"],
     )
 }
 
 pub fn current_session_budget_guard_from_report(report: &Value) -> Value {
+    current_session_budget_guard_with_restore_context(report, &Value::Null)
+}
+
+fn current_session_budget_guard_with_restore_context(
+    report: &Value,
+    restore_context: &Value,
+) -> Value {
     let client_live_meter = &report["client_live_meter"];
     let current_session_summary = &report["current_session"];
     let current_session_statement = &report["statement_previews"]["current_session"];
@@ -2823,7 +2832,13 @@ pub fn current_session_budget_guard_from_report(report: &Value) -> Value {
                 "max_guard_age_seconds": 10,
                 "guard_fresh_until_epoch_ms": null,
                 "rotate_now": false,
-                "rotate_soon": false
+                "rotate_soon": false,
+                "action_bundle": working_state::build_rotate_chat_action_bundle(
+                    None,
+                    None,
+                    None,
+                    false,
+                )
             },
             "reason": "current_session hero card is unavailable",
             "note": "current_session hero card is unavailable"
@@ -2855,6 +2870,9 @@ pub fn current_session_budget_guard_from_report(report: &Value) -> Value {
     let should_rotate_chat_now = status_label == "новый чат нужен сейчас";
     let should_rotate_chat_soon =
         status_label == "новый чат рекомендован" || should_rotate_chat_now;
+    let preserves_return_obligation = restore_context["execctl_resume_state"]
+        .as_str()
+        .is_some_and(|value| value != "clear");
     let reply_execution_gate = build_client_budget_reply_execution_gate(
         status,
         status_label,
@@ -2862,6 +2880,10 @@ pub fn current_session_budget_guard_from_report(report: &Value) -> Value {
         max_guard_age_seconds,
         should_rotate_chat_now,
         should_rotate_chat_soon,
+        preserves_return_obligation,
+        restore_context["project"]["code"].as_str(),
+        restore_context["namespace"]["code"].as_str(),
+        restore_context["project"]["repo_root"].as_str(),
     );
     let tracked_slice =
         row_value("Экономия на учтённой части").or_else(|| {
@@ -2909,6 +2931,10 @@ fn build_client_budget_reply_execution_gate(
     max_guard_age_seconds: u64,
     should_rotate_chat_now: bool,
     should_rotate_chat_soon: bool,
+    preserves_return_obligation: bool,
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
+    repo_root: Option<&str>,
 ) -> Value {
     let blocking = should_rotate_chat_now || should_rotate_chat_soon;
     let action_kind = if blocking {
@@ -2940,6 +2966,12 @@ fn build_client_budget_reply_execution_gate(
         "guard_fresh_until_epoch_ms": gate_fresh_until_epoch_ms,
         "rotate_now": should_rotate_chat_now,
         "rotate_soon": should_rotate_chat_soon,
+        "action_bundle": working_state::build_rotate_chat_action_bundle(
+            project_code,
+            namespace_code,
+            repo_root,
+            preserves_return_obligation,
+        ),
     })
 }
 
@@ -12498,20 +12530,34 @@ mod tests {
                         "lifetime": {}
                     },
                     "statement_export_previews": {"lifetime": {}},
-                    "client_live_meter": {
-                        "status": "observed",
-                        "client_turn_total_tokens": 140921,
-                        "latest_model_context_window": 258400,
-                        "context_used_percent": 54.54,
+	                "client_live_meter": {
+	                    "status": "observed",
+	                    "client_turn_total_tokens": 140921,
+	                    "latest_model_context_window": 258400,
+	                    "context_used_percent": 54.54,
                         "primary_limit_remaining_percent": 61.0,
                         "secondary_limit_remaining_percent": 88.0,
                         "started_at_epoch_ms": 1774622174000u64,
                         "ended_at_epoch_ms": 1774622949000u64
                     },
-                    "profile": {"display_name": "Обычная рабочая машина"}
-                }
-            }
-        });
+	                    "profile": {"display_name": "Обычная рабочая машина"}
+	                }
+	            },
+	            "latest_repo_working_state_restore": {
+	                "working_state_restore": {
+	                    "project": {
+	                        "code": "amai",
+	                        "display_name": "Amai",
+	                        "repo_root": "/home/art/agent-memory-index"
+	                    },
+	                    "namespace": {
+	                        "code": "continuity",
+	                        "display_name": "Continuity"
+	                    },
+	                    "execctl_resume_state": "pending_return_queue_present"
+	                }
+	            }
+	        });
 
         let guard = super::current_session_budget_guard(&snapshot);
         assert_eq!(
@@ -12535,6 +12581,14 @@ mod tests {
             guard["reply_execution_gate"]["action_kind"],
             json!("rotate_chat_for_client_budget")
         );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_bundle"]["bundle_version"],
+            json!("rotate-chat-action-bundle-v1")
+        );
+	        assert_eq!(
+	            guard["reply_execution_gate"]["action_bundle"]["run_continuity_startup"]["project"],
+	            json!("amai")
+	        );
         assert_eq!(guard["max_guard_age_seconds"], json!(10));
         assert_eq!(guard["observed_at_epoch_ms"], json!(1774622949000u64));
         assert!(

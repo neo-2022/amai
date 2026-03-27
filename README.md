@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 21:24 MSK
-Ручная сверка guide/docs: 2026-03-27 21:24 MSK
+modified_at: 2026-03-27 21:38 MSK
+Ручная сверка guide/docs: 2026-03-27 21:38 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1284,6 +1284,8 @@ preview, а не только raw count.
   - если `startup_next_action.action_kind = rotate_chat_for_client_budget`, клиент обязан
     сохранить return obligation через handoff и продолжать только в свежем чате через
     continuity startup; продолжать в раздутом live-thread нельзя;
+  - эта rotate-ветка теперь несёт и machine-readable `action_bundle` с каноническими шагами
+    `capture_continuity_handoff`, `open_fresh_chat`, `run_continuity_startup`;
   - если `execctl_active_lease.lease_owner_state = previous_session_owner`, клиент не имеет права
     тихо захватывать линию и обязан follow `startup_next_action` first;
   - `no_silent_drop = true` запрещает тихо переключаться на unrelated work.
@@ -1844,7 +1846,7 @@ Fail-closed правило для расхождений:
   - после такого recheck клиент больше не должен разбирать только prose/status-label:
     `client_budget_guard.reply_execution_gate` теперь даёт pinned object для следующего ответа
     с полями вроде `blocking`, `must_rotate_before_reply`, `action_kind`,
-    `guard_observed_at_epoch_ms` и `guard_fresh_until_epoch_ms`.
+    `guard_observed_at_epoch_ms`, `guard_fresh_until_epoch_ms` и `action_bundle`.
   - для automation теперь есть и hard gate path:
     `cargo run -- observe client-budget-guard --enforce-reply-gate` обязан печатать тот же JSON,
     но выходить с non-zero exit code, если текущий reply уже должен быть остановлен и переведён

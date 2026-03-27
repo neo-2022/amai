@@ -656,6 +656,9 @@ fn compose_restore_bundle(
         &next_step,
         &execctl_resume_contract,
         &client_budget_guard,
+        project["code"].as_str(),
+        namespace["code"].as_str(),
+        project["repo_root"].as_str(),
     );
     let startup_next_action_summary = summarize_startup_next_action(&startup_next_action);
 
@@ -1980,6 +1983,9 @@ fn overlay_client_budget_guard(bundle: &mut Value, client_budget_guard: &Value) 
         &next_step,
         &contract,
         client_budget_guard,
+        restore["project"]["code"].as_str(),
+        restore["namespace"]["code"].as_str(),
+        restore["project"]["repo_root"].as_str(),
     );
     let startup_next_action_summary = summarize_startup_next_action(&startup_next_action);
     restore.insert("startup_next_action".to_string(), startup_next_action);
@@ -2165,11 +2171,94 @@ fn summarize_execctl_resume_contract(value: &Value) -> Option<String> {
     ))
 }
 
+pub(crate) fn build_rotate_chat_action_bundle(
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
+    repo_root: Option<&str>,
+    preserves_return_obligation: bool,
+) -> Value {
+    let project_code = project_code.filter(|value| !value.is_empty());
+    let namespace_code = namespace_code.filter(|value| !value.is_empty());
+    let repo_root = repo_root.filter(|value| !value.is_empty());
+    let mut missing_inputs = Vec::new();
+    if project_code.is_none() {
+        missing_inputs.push("project_code");
+    }
+    if namespace_code.is_none() {
+        missing_inputs.push("namespace_code");
+    }
+    if repo_root.is_none() {
+        missing_inputs.push("repo_root");
+    }
+    let project_arg = project_code.unwrap_or("<project_code_required>");
+    let namespace_arg = namespace_code.unwrap_or("<namespace_code_required>");
+    let repo_root_arg = repo_root.unwrap_or("<repo_root_required>");
+    json!({
+        "bundle_version": "rotate-chat-action-bundle-v1",
+        "ready_for_automation": missing_inputs.is_empty(),
+        "missing_inputs": missing_inputs,
+        "preserves_return_obligation": preserves_return_obligation,
+        "order": [
+            "capture_continuity_handoff",
+            "open_fresh_chat",
+            "run_continuity_startup"
+        ],
+        "capture_continuity_handoff": {
+            "subcommand": "continuity handoff",
+            "argv_template": [
+                "amai",
+                "continuity",
+                "handoff",
+                "--project",
+                project_arg,
+                "--namespace",
+                namespace_arg,
+                "--headline",
+                "<headline_required>",
+                "--next-step",
+                "<next_step_required>"
+            ],
+            "project": project_code,
+            "namespace": namespace_code,
+            "requires_caller_supplied": ["headline", "next_step"],
+            "details_file_optional": true
+        },
+        "open_fresh_chat": {
+            "action_kind": "open_fresh_client_chat",
+            "required": true
+        },
+        "run_continuity_startup": {
+            "subcommand": "continuity startup",
+            "argv_template": [
+                "amai",
+                "continuity",
+                "startup",
+                "--project",
+                project_arg,
+                "--namespace",
+                namespace_arg,
+                "--repo-root",
+                repo_root_arg,
+                "--token-source-kind",
+                "live_continuity_startup",
+                "--json"
+            ],
+            "project": project_code,
+            "namespace": namespace_code,
+            "repo_root": repo_root,
+            "token_source_kind": "live_continuity_startup"
+        }
+    })
+}
+
 fn build_startup_next_action(
     current_goal: &str,
     next_step: &str,
     contract: &Value,
     client_budget_guard: &Value,
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
+    repo_root: Option<&str>,
 ) -> Value {
     let resume_state = contract["resume_state"].as_str().unwrap_or("clear");
     let no_silent_drop = contract["no_silent_drop"].as_bool().unwrap_or(true);
@@ -2199,6 +2288,7 @@ fn build_startup_next_action(
         .as_str()
         .filter(|value| !value.is_empty());
     if should_rotate_chat {
+        let preserves_return_obligation = resume_state != "clear";
         json!({
             "action_version": "startup-next-action-v1",
             "action_kind": "rotate_chat_for_client_budget",
@@ -2210,7 +2300,13 @@ fn build_startup_next_action(
             "next_step": "сохрани handoff и продолжай только в свежем чате через continuity startup",
             "client_budget_status_label": client_budget_status,
             "client_budget_note": client_budget_note,
-            "preserves_return_obligation": resume_state != "clear",
+            "preserves_return_obligation": preserves_return_obligation,
+            "action_bundle": build_rotate_chat_action_bundle(
+                project_code,
+                namespace_code,
+                repo_root,
+                preserves_return_obligation,
+            ),
         })
     } else if resume_state != "clear" && required_headline.is_some() {
         json!({
@@ -3384,6 +3480,38 @@ mod tests {
             scenario["class_key"].as_str() == Some("stale_handoff")
                 && scenario["details"]["restore_freshness_state"] == json!("stale")
         }));
+    }
+
+    #[test]
+    fn rotate_chat_action_bundle_exposes_canonical_handoff_and_startup_commands() {
+        let bundle = super::build_rotate_chat_action_bundle(
+            Some("amai"),
+            Some("continuity"),
+            Some("/tmp/amai"),
+            true,
+        );
+        assert_eq!(
+            bundle["bundle_version"],
+            json!("rotate-chat-action-bundle-v1")
+        );
+        assert_eq!(bundle["ready_for_automation"], json!(true));
+        assert_eq!(bundle["preserves_return_obligation"], json!(true));
+        assert_eq!(
+            bundle["capture_continuity_handoff"]["argv_template"][0],
+            json!("amai")
+        );
+        assert_eq!(
+            bundle["capture_continuity_handoff"]["argv_template"][2],
+            json!("handoff")
+        );
+        assert_eq!(
+            bundle["run_continuity_startup"]["argv_template"][2],
+            json!("startup")
+        );
+        assert_eq!(
+            bundle["run_continuity_startup"]["token_source_kind"],
+            json!("live_continuity_startup")
+        );
     }
 
     proptest! {

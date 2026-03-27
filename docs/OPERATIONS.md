@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 21:24 MSK
-Ручная сверка guide/docs: 2026-03-27 21:24 MSK
+modified_at: 2026-03-27 21:38 MSK
+Ручная сверка guide/docs: 2026-03-27 21:38 MSK
 
 # Operations
 
@@ -936,6 +936,9 @@ cargo run -- mcp serve
   считается таким же blocking first action, как и `resume_required_return_task`:
   клиент обязан сохранить handoff и немедленно перейти в свежий чат через continuity startup,
   а не продолжать жечь раздутый live-thread.
+- Та же rotate-ветка теперь несёт `action_bundle.bundle_version = rotate-chat-action-bundle-v1`
+  с каноническими шагами `capture_continuity_handoff`, `open_fresh_chat`,
+  `run_continuity_startup`, чтобы automation не склеивала этот путь вручную.
 - `working_state_restore.client_budget_guard` теперь должен совпадать с truth-law живой
   current-session card: источник истины для startup rotate decision — полный observed client turn
   и live raw limits, а не только internal tracked slice Amai.
@@ -956,7 +959,7 @@ cargo run -- mcp serve
 - После такого recheck automation больше не должна читать только human rows или `status_label`:
   source-of-truth для решения о следующем ответе теперь `client_budget_guard.reply_execution_gate`
   с explicit `blocking`, `must_rotate_before_reply`, `action_kind`,
-  `guard_observed_at_epoch_ms` и `guard_fresh_until_epoch_ms`.
+  `guard_observed_at_epoch_ms`, `guard_fresh_until_epoch_ms` и `action_bundle`.
 - Если automation нужен hard stop без разбора JSON вручную, используйте
   `cargo run -- observe client-budget-guard --enforce-reply-gate`:
   он печатает тот же guard, но завершает команду non-zero exit code, когда reply уже должен

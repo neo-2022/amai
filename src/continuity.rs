@@ -2875,6 +2875,8 @@ fn build_chat_start_restore(
             default_startup_next_action(
                 &current_goal,
                 &next_step,
+                project,
+                namespace,
                 &execctl_resume_obligation,
                 restore_node.and_then(|value| value.get("client_budget_guard")),
             )
@@ -3048,6 +3050,8 @@ fn summarize_execctl_resume_obligation(contract: &Value) -> Value {
 fn default_startup_next_action(
     current_goal: &str,
     next_step: &str,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
     execctl_resume_obligation: &Value,
     client_budget_guard: Option<&Value>,
 ) -> Value {
@@ -3081,6 +3085,7 @@ fn default_startup_next_action(
         .and_then(|guard| guard["note"].as_str())
         .filter(|value| !value.is_empty());
     if should_rotate_chat {
+        let preserves_return_obligation = resume_state != "clear";
         json!({
             "action_version": "startup-next-action-v1",
             "action_kind": "rotate_chat_for_client_budget",
@@ -3092,7 +3097,13 @@ fn default_startup_next_action(
             "next_step": "сохрани handoff и продолжай только в свежем чате через continuity startup",
             "client_budget_status_label": client_budget_status,
             "client_budget_note": client_budget_note,
-            "preserves_return_obligation": resume_state != "clear",
+            "preserves_return_obligation": preserves_return_obligation,
+            "action_bundle": working_state::build_rotate_chat_action_bundle(
+                Some(project.code.as_str()),
+                Some(namespace.code.as_str()),
+                Some(project.repo_root.as_str()),
+                preserves_return_obligation,
+            ),
         })
     } else if resume_state != "clear" && required_headline.is_some() {
         json!({
@@ -3192,6 +3203,8 @@ fn render_chat_start_prompt(
             default_startup_next_action(
                 current_goal,
                 &next_step,
+                project,
+                namespace,
                 &execctl_resume_obligation,
                 restore_node.and_then(|value| value.get("client_budget_guard")),
             )
