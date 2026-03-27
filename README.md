@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 14:29 MSK
-Ручная сверка guide/docs: 2026-03-27 14:29 MSK
+modified_at: 2026-03-27 14:36 MSK
+Ручная сверка guide/docs: 2026-03-27 14:36 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1875,6 +1875,10 @@ preview, а не только raw count.
       прямые команды `observe token-statement-export --scope ...` и
       `observe token-evidence-pack --scope ...` surface-ятся в tooltip,
       чтобы review-only export можно было собрать без ручного поиска runbook;
+    - если `current_session` и `rolling_window` уже exact, а frozen debt остаётся
+      только в lifetime, карточка теперь отдельно показывает
+      `Исторический frozen debt`, чтобы было видно: долг старый и live drift
+      сейчас не растёт;
   - тот же decision point теперь materialized и machine-readable:
     `frozen_gap_review_surface` фиксирует neutral `review_required` state,
     allowed paths и запрет `claim_raw_exact_history` без отдельного решения;

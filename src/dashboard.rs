@@ -3626,6 +3626,14 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         lifetime_note.push(' ');
         lifetime_note.push_str(&sentence);
     }
+    if let Some(sentence) = historical_frozen_debt_note_sentence(
+        current_session_alignment,
+        rolling_window_alignment,
+        lifetime_alignment,
+    ) {
+        lifetime_note.push(' ');
+        lifetime_note.push_str(&sentence);
+    }
     let mut lifetime_rows = Vec::new();
     lifetime_rows.push(model_token_savings_metric_row(
         lifetime_statement,
@@ -3635,6 +3643,13 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         lifetime_rows.push(row);
     }
     if let Some(row) = exact_pair_frozen_debt_metric_row(lifetime_alignment) {
+        lifetime_rows.push(row);
+    }
+    if let Some(row) = historical_frozen_debt_metric_row(
+        current_session_alignment,
+        rolling_window_alignment,
+        lifetime_alignment,
+    ) {
         lifetime_rows.push(row);
     }
     if let Some(row) = reviewed_frozen_debt_export_metric_row(lifetime_statement_export) {
@@ -6750,6 +6765,60 @@ fn reviewed_frozen_debt_export_note_sentence(alignment: &Value) -> Option<&'stat
     )
 }
 
+fn historical_frozen_debt_note_sentence(
+    current_session_alignment: &Value,
+    rolling_window_alignment: &Value,
+    lifetime_alignment: &Value,
+) -> Option<&'static str> {
+    historical_frozen_debt_metric_row(
+        current_session_alignment,
+        rolling_window_alignment,
+        lifetime_alignment,
+    )?;
+    Some(
+        "Текущая сессия и рабочее окно уже exact: frozen debt сейчас остался только в историческом lifetime-хвосте и не выглядит как новый live drift.",
+    )
+}
+
+fn historical_frozen_debt_metric_row(
+    current_session_alignment: &Value,
+    rolling_window_alignment: &Value,
+    lifetime_alignment: &Value,
+) -> Option<Value> {
+    let current_exact =
+        current_session_alignment["exact_pair_status"]["exact_pair_available"].as_bool() == Some(true);
+    let rolling_exact =
+        rolling_window_alignment["exact_pair_status"]["exact_pair_available"].as_bool() == Some(true);
+    let frozen_gap_review_surface = &lifetime_alignment["frozen_gap_review_surface"];
+    if !(current_exact
+        && rolling_exact
+        && frozen_gap_review_surface["state"].as_str() == Some("review_required"))
+    {
+        return None;
+    }
+    let blocker_code = frozen_gap_review_surface["blocking_component"]
+        .as_str()
+        .unwrap_or("unknown_blocker");
+    let irrecoverable_missing_live_events = frozen_gap_review_surface
+        ["irrecoverable_missing_live_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let tooltip = format!(
+        "Этот ряд показывает, что frozen debt сейчас уже не растёт в активных live scopes.\n- Current session: exact pair materialized\n- Working window: exact pair materialized\n- Lifetime blocker: {}\n- Lifetime irrecoverable rows: {}\n- Значит irrecoverable debt сейчас выглядит как исторический хвост, а не как новый live drift.",
+        blocker_code,
+        format_u64(Some(irrecoverable_missing_live_events)),
+    );
+    Some(metric_row(
+        "Исторический frozen debt",
+        format!(
+            "{}: historical-only, {} rows",
+            blocker_code,
+            format_u64(Some(irrecoverable_missing_live_events))
+        ),
+        Some(tooltip.as_str()),
+    ))
+}
+
 fn reviewed_frozen_debt_export_metric_row(alignment: &Value) -> Option<Value> {
     let surface = &alignment["reviewed_frozen_debt_export_surface"];
     if surface["export_ready_report_only"].as_bool() != Some(true) {
@@ -9758,6 +9827,45 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("freeze_irrecoverable_gap_or_keep_exact_pair_unavailable")
+        );
+    }
+
+    #[test]
+    fn historical_frozen_debt_metric_row_surfaces_historical_only_tail() {
+        let current_session_alignment = json!({
+            "exact_pair_status": {
+                "exact_pair_available": true
+            }
+        });
+        let rolling_window_alignment = json!({
+            "exact_pair_status": {
+                "exact_pair_available": true
+            }
+        });
+        let lifetime_alignment = json!({
+            "frozen_gap_review_surface": {
+                "state": "review_required",
+                "blocking_component": "tool_overhead_outside_retrieval",
+                "irrecoverable_missing_live_events": 13
+            }
+        });
+
+        let row = super::historical_frozen_debt_metric_row(
+            &current_session_alignment,
+            &rolling_window_alignment,
+            &lifetime_alignment,
+        )
+        .expect("historical tail row");
+        assert_eq!(row["label"], "Исторический frozen debt");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("tool_overhead_outside_retrieval: historical-only, 13 rows")
+        );
+        assert!(
+            row["tooltip"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Current session: exact pair materialized")
         );
     }
 
