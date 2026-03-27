@@ -8403,20 +8403,20 @@ fn client_turn_pressure_guard(
     let negligible_amai_share = full_turn_savings_pct
         .map(|value| value <= 0.5)
         .unwrap_or(false);
-    let early_context_pressure = context_used_percent >= 35.0;
-    let moderate_context_pressure = context_used_percent >= 45.0;
-    let extreme_context_pressure = context_used_percent >= 80.0;
-    let high_context_pressure = context_used_percent >= 65.0;
-    let early_large_live_thread = turn_total_tokens >= 80_000 || early_context_pressure;
-    let inflation_locking_in_burn = turn_total_tokens >= 100_000 || moderate_context_pressure;
-    let large_live_thread = turn_total_tokens >= 120_000 || context_used_percent >= 50.0;
-    let huge_live_thread = turn_total_tokens >= 150_000 || context_used_percent >= 60.0;
+    let early_context_pressure = context_used_percent >= 25.0;
+    let moderate_context_pressure = context_used_percent >= 35.0;
+    let extreme_context_pressure = context_used_percent >= 70.0;
+    let high_context_pressure = context_used_percent >= 50.0;
+    let early_large_live_thread = turn_total_tokens >= 60_000 || early_context_pressure;
+    let inflation_locking_in_burn = turn_total_tokens >= 90_000 || moderate_context_pressure;
+    let large_live_thread = turn_total_tokens >= 110_000 || context_used_percent >= 45.0;
+    let huge_live_thread = turn_total_tokens >= 140_000 || context_used_percent >= 55.0;
     let emergency_primary_limit = primary_remaining_percent <= 10.0;
     let critical_primary_limit = primary_remaining_percent <= 20.0;
     let low_primary_limit = primary_remaining_percent <= 35.0;
-    let softened_primary_limit = primary_remaining_percent <= 65.0;
-    let early_primary_limit = primary_remaining_percent <= 75.0;
-    let generous_primary_limit = primary_remaining_percent <= 85.0;
+    let softened_primary_limit = primary_remaining_percent <= 75.0;
+    let early_primary_limit = primary_remaining_percent <= 90.0;
+    let generous_primary_limit = primary_remaining_percent <= 95.0;
 
     let (severity, status_label) = if (exact_pair_missing
         && inflation_locking_in_burn
@@ -12427,7 +12427,7 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_recommends_early_rotate_for_negligible_exact_savings() {
+    fn client_turn_pressure_guard_blocks_earlier_for_negligible_exact_savings() {
         let meter = json!({
             "status": "observed",
             "client_turn_total_tokens": 90000,
@@ -12437,6 +12437,22 @@ mod tests {
             "secondary_limit_remaining_percent": 95.0
         });
         let guard = super::client_turn_pressure_guard(&meter, Some((90452, 90000, 452, 0.50)))
+            .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_even_earlier_for_small_negligible_gain() {
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 65000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 25.15,
+            "primary_limit_remaining_percent": 94.0,
+            "secondary_limit_remaining_percent": 97.0
+        });
+        let guard = super::client_turn_pressure_guard(&meter, Some((65320, 65000, 320, 0.49)))
             .expect("pressure guard");
         assert_eq!(guard.severity, "alert");
         assert_eq!(guard.status_label, "новый чат рекомендован");
