@@ -316,8 +316,6 @@ fn compact_client_budget_gate_payload(guard: &Value) -> Value {
         "max_guard_age_seconds": guard["max_guard_age_seconds"].clone(),
         "should_rotate_chat_now": guard["should_rotate_chat_now"].clone(),
         "should_rotate_chat_soon": guard["should_rotate_chat_soon"].clone(),
-        "requires_global_budget_recovery_before_reply":
-            guard["requires_global_budget_recovery_before_reply"].clone(),
         "reply_execution_gate": compact_reply_execution_gate(reply_execution_gate),
     })
 }
@@ -331,24 +329,11 @@ fn compact_reply_execution_gate(reply_execution_gate: &Value) -> Value {
         "must_wait_for_budget_recovery_before_reply":
             reply_execution_gate["must_wait_for_budget_recovery_before_reply"].clone(),
         "reply_budget_mode": reply_execution_gate["reply_budget_mode"].clone(),
-        "reply_budget_contract": reply_execution_gate["reply_budget_contract"].clone(),
-        "save_handoff_before_rotate": reply_execution_gate["save_handoff_before_rotate"].clone(),
-        "fresh_chat_requires_continuity_startup":
-            reply_execution_gate["fresh_chat_requires_continuity_startup"].clone(),
         "rotate_now": reply_execution_gate["rotate_now"].clone(),
         "rotate_soon": reply_execution_gate["rotate_soon"].clone(),
-        "blocking_reply_contract": reply_execution_gate["blocking_reply_contract"].clone(),
-        "action_bundle": compact_reply_gate_action_bundle(
-            &reply_execution_gate["action_bundle"],
-        ),
-    })
-}
-
-fn compact_reply_gate_action_bundle(action_bundle: &Value) -> Value {
-    json!({
-        "operator_flow": action_bundle["operator_flow"].clone(),
-        "preserves_return_obligation": action_bundle["preserves_return_obligation"].clone(),
-        "recommended_handoff": action_bundle["recommended_handoff"].clone(),
+        "preserves_return_obligation": reply_execution_gate["action_bundle"]
+            ["preserves_return_obligation"]
+            .clone(),
     })
 }
 
@@ -4888,7 +4873,6 @@ mod tests {
             "max_guard_age_seconds": 10,
             "should_rotate_chat_now": true,
             "should_rotate_chat_soon": true,
-            "requires_global_budget_recovery_before_reply": false,
             "reply_execution_gate": {
                 "gate_version": "client-reply-budget-gate-v1",
                 "reason": "client_budget_guard_pressure",
@@ -4897,31 +4881,10 @@ mod tests {
                 "must_rotate_before_reply": true,
                 "must_wait_for_budget_recovery_before_reply": false,
                 "reply_budget_mode": "compact_high_signal",
-                "reply_budget_contract": {
-                    "contract_version": "client-reply-budget-v1"
-                },
-                "save_handoff_before_rotate": true,
-                "fresh_chat_requires_continuity_startup": true,
                 "rotate_now": true,
                 "rotate_soon": true,
-                "blocking_reply_contract": {
-                    "contract_version": "client-budget-blocked-reply-v1"
-                },
                 "action_bundle": {
-                    "bundle_version": "rotate-chat-action-bundle-v1",
-                    "operator_flow": {
-                        "handoff_command": "handoff",
-                        "rotate_helper_command": "rotate",
-                        "startup_command": "startup"
-                    },
                     "preserves_return_obligation": false,
-                    "recommended_handoff": {
-                        "headline": "headline",
-                        "next_step": "next"
-                    },
-                    "capture_continuity_handoff": {
-                        "argv_template": ["heavy"]
-                    }
                 }
             },
             "last_request": "heavy row",
@@ -4939,6 +4902,10 @@ mod tests {
             Some("compact_high_signal")
         );
         assert_eq!(
+            payload["reply_execution_gate"]["preserves_return_obligation"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
             payload["reason_code"].as_str(),
             Some("client_budget_guard_pressure")
         );
@@ -4946,12 +4913,9 @@ mod tests {
         assert!(payload.get("tracked_slice").is_none());
         assert!(payload.get("client_limits").is_none());
         assert!(payload.get("reason").is_none());
-        assert!(
-            payload["reply_execution_gate"]["action_bundle"]["capture_continuity_handoff"]
-                .is_null()
-        );
-        assert!(
-            payload["reply_execution_gate"]["action_bundle"]["bundle_version"].is_null()
-        );
+        assert!(payload.get("requires_global_budget_recovery_before_reply").is_none());
+        assert!(payload["reply_execution_gate"]["reply_budget_contract"].is_null());
+        assert!(payload["reply_execution_gate"]["blocking_reply_contract"].is_null());
+        assert!(payload["reply_execution_gate"]["action_bundle"].is_null());
     }
 }
