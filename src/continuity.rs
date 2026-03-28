@@ -3825,9 +3825,6 @@ fn default_startup_next_action(
         .and_then(|guard| guard["status_label"].as_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("новый чат рекомендован");
-    let client_budget_note = client_budget_guard
-        .and_then(|guard| guard["note"].as_str())
-        .filter(|value| !value.is_empty());
     if wait_for_global_budget_recovery {
         let preserves_return_obligation = resume_state != "clear";
         json!({
@@ -3840,7 +3837,6 @@ fn default_startup_next_action(
             "headline": format!("Клиентский лимит: {client_budget_status}"),
             "next_step": "не продолжай содержательный reply, дождись восстановления внешнего клиентского лимита и только потом снова проверь continuity startup",
             "client_budget_status_label": client_budget_status,
-            "client_budget_note": client_budget_note,
             "preserves_return_obligation": preserves_return_obligation,
             "action_bundle": working_state::build_wait_for_global_client_budget_action_bundle(
                 Some(project.code.as_str()),
@@ -3863,7 +3859,6 @@ fn default_startup_next_action(
             "headline": format!("Клиентский лимит: {client_budget_status}"),
             "next_step": "сохрани handoff и продолжай только в свежем чате через continuity startup",
             "client_budget_status_label": client_budget_status,
-            "client_budget_note": client_budget_note,
             "preserves_return_obligation": preserves_return_obligation,
             "action_bundle": working_state::build_rotate_chat_action_bundle(
                 Some(project.code.as_str()),
