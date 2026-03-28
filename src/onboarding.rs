@@ -617,6 +617,9 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             .expect("startup instruction path must exist when marked present");
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
+        let instruction_references_required_summary_fields =
+            content.contains("required_summary_fields");
+        let instruction_references_restored_obligations = content.contains("restored_obligations");
         (
             Some(content.contains(&format!(
                 "startup_contract_sha256 = \"{expected_contract_sha}\""
@@ -625,11 +628,25 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             Some(content.contains("missing_or_unreadable_fail_closed = true")),
             Some(content.contains("sha256_mismatch_fail_closed = true")),
             Some(content.contains("startup_next_action")),
-            Some(content.contains("required_return_task")),
+            Some(
+                content.contains("required_return_task")
+                    || instruction_references_required_summary_fields
+                    || instruction_references_restored_obligations,
+            ),
             Some(content.contains("resume_required_return_task")),
-            Some(content.contains("execctl_resume_contract_summary")),
-            Some(content.contains("execctl_resume_obligation")),
-            Some(content.contains("execctl_active_lease_summary")),
+            Some(
+                content.contains("execctl_resume_contract_summary")
+                    || instruction_references_required_summary_fields,
+            ),
+            Some(
+                content.contains("execctl_resume_obligation")
+                    || instruction_references_restored_obligations,
+            ),
+            Some(
+                content.contains("execctl_active_lease_summary")
+                    || instruction_references_required_summary_fields
+                    || instruction_references_restored_obligations,
+            ),
             Some(content.contains("lease_owner_state")),
             Some(content.contains("previous_session_owner")),
             Some(content.contains("previous_session_owner_must_follow_startup_next_action = true")),
@@ -647,10 +664,26 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
                 content.contains("он должен нести `continuity_startup_summary`")
                     || content.contains("он обязан нести `continuity_startup_summary`"),
             ),
-            Some(content.contains("project_task_tree")),
-            Some(content.contains("project_task_tree_summary")),
-            Some(content.contains("project_task_ledger")),
-            Some(content.contains("project_task_ledger_summary")),
+            Some(
+                content.contains("project_task_tree")
+                    || instruction_references_required_summary_fields
+                    || instruction_references_restored_obligations,
+            ),
+            Some(
+                content.contains("project_task_tree_summary")
+                    || instruction_references_required_summary_fields
+                    || instruction_references_restored_obligations,
+            ),
+            Some(
+                content.contains("project_task_ledger")
+                    || instruction_references_required_summary_fields
+                    || instruction_references_restored_obligations,
+            ),
+            Some(
+                content.contains("project_task_ledger_summary")
+                    || instruction_references_required_summary_fields
+                    || instruction_references_restored_obligations,
+            ),
             Some(content.contains("startup_execution_gate")),
             Some(content.contains("continuity startup-state --repo-root")),
             Some(
@@ -2289,20 +2322,14 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>()
         .join(", ");
-    let required_summary_fields = contract["required_summary_fields"]
+    contract["required_summary_fields"]
         .as_array()
-        .ok_or_else(|| anyhow!("project_chat_startup contract is missing required_summary_fields"))?
-        .iter()
-        .filter_map(Value::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let restored_obligations = contract["restored_obligations"]
+        .ok_or_else(|| {
+            anyhow!("project_chat_startup contract is missing required_summary_fields")
+        })?;
+    contract["restored_obligations"]
         .as_array()
-        .ok_or_else(|| anyhow!("project_chat_startup contract is missing restored_obligations"))?
-        .iter()
-        .filter_map(Value::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing restored_obligations"))?;
     let resume_enforcement = &contract["resume_enforcement"];
     let resume_contract_field = resume_enforcement["contract_field"]
         .as_str()
@@ -2556,7 +2583,7 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     let contract_path_display = contract_path.display().to_string();
 
     Ok(format!(
-        "Перед первым содержательным ответом в новом или resumed чате, а затем перед каждым следующим содержательным ответом, пока этот чат жив:\n1. Считай текущий workspace проектом с repo root `{repo_root_display}`.\n2. Сначала прочитай machine-readable startup contract `{contract_path_display}` (relative path `{startup_contract_relative_path}`) и используй JSON как единственный source-of-truth; этот markdown только thin wrapper.\n3. До MCP tool call обязательно проверь literal `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call_text}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed_text}` и `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed_text}`.\n4. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"`; `project` передавай только при exact binding по repo_root.\n5. Не переходи к `amai_context_pack` и другим новым действиям, пока не получен `continuity_startup_summary`.\n6. После startup прочитай runtime artifact `{runtime_state_relative_path}`; его пишет `{runtime_state_written_by_tool}`, он обязан нести `{runtime_state_source_summary_field}`, а `workspace_runtime_state_artifact_version` должен быть `{runtime_state_artifact_version}`. Если direct file-read неудобен, используй `cargo run -- {startup_state_fallback_cli} --repo-root \"{repo_root_display}\" --json`.\n7. В runtime artifact используй как pinned pointers: `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. Подними все поля из `required_summary_fields` ({required_summary_fields}) и верни все obligations из `restored_obligations` ({restored_obligations}).\n8. Если `{gate_semantics_consistent_field} != true` (`gate_semantics_consistent_true_required = {gate_semantics_consistent_true_required_text}`), `{startup_execution_gate_field}.{gate_must_follow_field} != true`, `{startup_execution_gate_field}.{gate_unrelated_work_allowed_field} != false`, `{startup_execution_gate_field}.{gate_prompt_read_field} != true` или `{startup_execution_gate_field}.{gate_no_silent_drop_field} != true`, fail-closed и не делай unrelated work.\n9. Если `{startup_execution_gate_field}.{gate_required_action_kind_field} == \"{required_action_kind}\"`, `{startup_next_action_field}.action_kind == \"{required_action_kind}\"` (`must_resume_required_return_task_before_unrelated_work = {must_resume_before_unrelated_text}`) или `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"` (`previous_session_owner_must_follow_startup_next_action = {previous_session_owner_must_follow_startup_next_action_text}`), follow startup_next_action first. Silent drop запрещён: `no_silent_drop = {no_silent_drop_text}`.\n10. Перед каждым содержательным ответом обновляй guard `cargo run -- {client_budget_guard_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`, stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`), для hard gate automation используй `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`).\n11. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, substantive reply разрешён только по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts when possible, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing.\n12. Если `{client_budget_reply_execution_gate_field}.must_rotate_before_reply = true`, `{client_budget_rotate_now_field} = true` или `{client_budget_status_label_field}` равен одному из [{client_budget_rotate_status_labels}], сначала сохрани handoff (`save_handoff_before_rotate = {client_budget_save_handoff_before_rotate_text}`) и продолжай только в свежем чате через continuity startup (`fresh_chat_requires_continuity_startup = {client_budget_fresh_chat_requires_startup_text}`). В blocked path разрешён только `{client_budget_blocking_reply_contract_field}`: `contract_version = \"{client_budget_blocking_reply_contract_version}\"`, `response_kind = \"{client_budget_blocking_reply_response_kind}\"`, `max_sentences = {client_budget_blocking_reply_max_sentences}`, `must_avoid_substantive_work = {client_budget_blocking_reply_must_avoid_substantive_work_text}`, `must_use_action_bundle_operator_flow = {client_budget_blocking_reply_must_use_action_bundle_operator_flow_text}`. Pinned template: `{client_budget_blocking_reply_template}`.\n13. Не подменяй полную клиентскую шкалу внутренним Amai-slice: `full_scale_client_truth_required = {client_budget_full_scale_truth_required_text}`.\n14. Если startup вернул любой fail-closed scenario ({fail_closed}), прямо сообщай о блокере и не угадывай continuity."
+        "Перед первым содержательным ответом в новом или resumed чате, а затем перед каждым следующим содержательным ответом, пока этот чат жив:\n1. Считай текущий workspace проектом с repo root `{repo_root_display}`.\n2. Сначала прочитай machine-readable startup contract `{contract_path_display}` (relative path `{startup_contract_relative_path}`) и используй JSON как единственный source-of-truth; этот markdown только thin wrapper.\n3. До MCP tool call обязательно проверь literal `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call_text}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed_text}` и `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed_text}`.\n4. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"`; `project` передавай только при exact binding по repo_root.\n5. Не переходи к `amai_context_pack` и другим новым действиям, пока не получен `continuity_startup_summary`.\n6. После startup прочитай runtime artifact `{runtime_state_relative_path}`; его пишет `{runtime_state_written_by_tool}`, он обязан нести `{runtime_state_source_summary_field}`, а `workspace_runtime_state_artifact_version` должен быть `{runtime_state_artifact_version}`. Если direct file-read неудобен, используй `cargo run -- {startup_state_fallback_cli} --repo-root \"{repo_root_display}\" --json`.\n7. В runtime artifact используй как pinned pointers: `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. Все обязательные restore fields бери из массива `required_summary_fields`, а все обязательные workline obligations бери из массива `restored_obligations` внутри startup contract; не пересказывай и не подменяй эти списки вручную.\n8. Если `{gate_semantics_consistent_field} != true` (`gate_semantics_consistent_true_required = {gate_semantics_consistent_true_required_text}`), `{startup_execution_gate_field}.{gate_must_follow_field} != true`, `{startup_execution_gate_field}.{gate_unrelated_work_allowed_field} != false`, `{startup_execution_gate_field}.{gate_prompt_read_field} != true` или `{startup_execution_gate_field}.{gate_no_silent_drop_field} != true`, fail-closed и не делай unrelated work.\n9. Если `{startup_execution_gate_field}.{gate_required_action_kind_field} == \"{required_action_kind}\"`, `{startup_next_action_field}.action_kind == \"{required_action_kind}\"` (`must_resume_required_return_task_before_unrelated_work = {must_resume_before_unrelated_text}`) или `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"` (`previous_session_owner_must_follow_startup_next_action = {previous_session_owner_must_follow_startup_next_action_text}`), follow startup_next_action first. Silent drop запрещён: `no_silent_drop = {no_silent_drop_text}`.\n10. Перед каждым содержательным ответом обновляй guard `cargo run -- {client_budget_guard_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`, stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`), для hard gate automation используй `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`).\n11. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, substantive reply разрешён только по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts when possible, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing.\n12. Если `{client_budget_reply_execution_gate_field}.must_rotate_before_reply = true`, `{client_budget_rotate_now_field} = true` или `{client_budget_status_label_field}` равен одному из [{client_budget_rotate_status_labels}], сначала сохрани handoff (`save_handoff_before_rotate = {client_budget_save_handoff_before_rotate_text}`) и продолжай только в свежем чате через continuity startup (`fresh_chat_requires_continuity_startup = {client_budget_fresh_chat_requires_startup_text}`). В blocked path разрешён только `{client_budget_blocking_reply_contract_field}`: `contract_version = \"{client_budget_blocking_reply_contract_version}\"`, `response_kind = \"{client_budget_blocking_reply_response_kind}\"`, `max_sentences = {client_budget_blocking_reply_max_sentences}`, `must_avoid_substantive_work = {client_budget_blocking_reply_must_avoid_substantive_work_text}`, `must_use_action_bundle_operator_flow = {client_budget_blocking_reply_must_use_action_bundle_operator_flow_text}`. Pinned template: `{client_budget_blocking_reply_template}`.\n13. Не подменяй полную клиентскую шкалу внутренним Amai-slice: `full_scale_client_truth_required = {client_budget_full_scale_truth_required_text}`.\n14. Если startup вернул любой fail-closed scenario ({fail_closed}), прямо сообщай о блокере и не угадывай continuity."
     ))
 }
 
@@ -2830,18 +2857,13 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("/tmp/amai"));
         assert!(text.contains("thin wrapper"));
         assert!(text.contains("continuity_startup_summary"));
-        assert!(text.contains("execctl_resume_contract_summary"));
-        assert!(text.contains("execctl_resume_obligation"));
+        assert!(text.contains("required_summary_fields"));
+        assert!(text.contains("restored_obligations"));
         assert!(text.contains("startup_next_action"));
         assert!(text.contains("execctl_active_lease"));
         assert!(text.contains("lease_owner_state"));
         assert!(text.contains("previous_session_owner"));
         assert!(text.contains("resume_required_return_task"));
-        assert!(text.contains("required_return_task"));
-        assert!(text.contains("project_task_tree"));
-        assert!(text.contains("project_task_tree_summary"));
-        assert!(text.contains("project_task_ledger"));
-        assert!(text.contains("project_task_ledger_summary"));
         assert!(
             text.contains(
                 startup_contract_artifact_path(repo)
