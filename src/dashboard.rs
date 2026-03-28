@@ -3135,7 +3135,7 @@ fn build_client_budget_reply_execution_gate(
     let rotate_blocking = should_rotate_chat_now;
     let blocking = rotate_blocking || requires_global_budget_recovery_before_reply;
     let reply_budget_mode = if blocking {
-        working_state::ClientReplyBudgetMode::Normal
+        working_state::ClientReplyBudgetMode::CompactHighSignal
     } else if compact_reply_required {
         working_state::ClientReplyBudgetMode::CompactHighSignal
     } else {
@@ -14284,7 +14284,7 @@ mod tests {
         );
         assert_eq!(
             guard["reply_execution_gate"]["reply_budget_mode"],
-            json!(working_state::CLIENT_REPLY_BUDGET_MODE_NORMAL)
+            json!(working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL)
         );
         assert_eq!(
             guard["reply_execution_gate"]["blocking_reply_contract"]["contract_version"],
