@@ -7443,7 +7443,9 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         &rolling_window_events,
         &events,
         &current_session_assistant_scope,
-        rolling_window_assistant_scope.as_ref(),
+        rolling_window_assistant_scope
+            .as_ref()
+            .and_then(|scope| materialized_assistant_scope(scope)),
         &lifetime_assistant_scope,
         client_live_meter_observation.as_ref(),
         client_live_meter_binding_hint.as_deref(),
@@ -7498,7 +7500,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         &session_events,
         &config.contract,
         &rollout_observations,
-        Some(&current_session_assistant_scope),
+        materialized_assistant_scope(&current_session_assistant_scope),
     );
     let rolling_window_statement_preview = if profile.rolling_window_hours.is_some() {
         build_dashboard_statement_preview(
@@ -7508,7 +7510,9 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
             &rolling_window_events,
             &config.contract,
             &rollout_observations,
-            rolling_window_assistant_scope.as_ref(),
+            rolling_window_assistant_scope
+                .as_ref()
+                .and_then(|scope| materialized_assistant_scope(scope)),
         )
     } else {
         Value::Null
@@ -7520,7 +7524,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         &events,
         &config.contract,
         &rollout_observations,
-        Some(&lifetime_assistant_scope),
+        materialized_assistant_scope(&lifetime_assistant_scope),
     );
     let current_session_statement_export_preview = build_dashboard_statement_export_preview(
         &current_session_statement_preview,
@@ -10246,6 +10250,95 @@ fn helper_only_non_model_visible_context_pack_ids(
         .collect()
 }
 
+fn current_live_turn_assistant_scope_from_client_meter(
+    events: &[TokenBudgetEvent],
+    matched_context_pack_ids: &BTreeSet<String>,
+    observation: &codex_threads::RolloutClientMeterObservation,
+) -> Option<AssistantGenerationScopeObservation> {
+    let target_context_pack_ids = assistant_generation_missing_scope_context_pack_ids(Some(events))
+        .into_iter()
+        .filter(|context_pack_id| matched_context_pack_ids.contains(context_pack_id))
+        .collect::<BTreeSet<_>>();
+    if target_context_pack_ids.is_empty() {
+        return None;
+    }
+
+    let thread_id = observation.thread_id.trim();
+    let turn_id = observation.turn_id.trim();
+    let turn_key = if !thread_id.is_empty()
+        && !turn_id.is_empty()
+        && observation.started_at_epoch_ms > 0
+        && observation.ended_at_epoch_ms > 0
+    {
+        Some(format!("{thread_id}:{turn_id}"))
+    } else {
+        None
+    };
+    let observed = turn_key.is_some() && observation.client_turn_output_tokens > 0;
+    let matched_turn_ids = turn_key
+        .clone()
+        .into_iter()
+        .filter(|_| observed)
+        .collect::<BTreeSet<_>>();
+    let matched_context_pack_ids = if observed {
+        target_context_pack_ids.clone()
+    } else {
+        BTreeSet::new()
+    };
+    let unmatched_context_pack_ids = target_context_pack_ids
+        .difference(&matched_context_pack_ids)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    Some(AssistantGenerationScopeObservation {
+        target_group_count: 1,
+        observed_group_count: if observed { 1 } else { 0 },
+        observed_tokens: if observed {
+            observation.client_turn_output_tokens
+        } else {
+            0
+        },
+        helper_only_context_pack_ids: BTreeSet::new(),
+        helper_only_non_model_visible_context_pack_ids: BTreeSet::new(),
+        target_context_pack_ids,
+        matched_context_pack_ids,
+        unmatched_context_pack_ids,
+        matched_turn_ids: matched_turn_ids.clone(),
+        available_turns: turn_key.iter().count() as u64,
+        available_direct_turns: 0,
+        available_rollout_turns: turn_key.iter().count() as u64,
+        matched_direct_turn_ids: BTreeSet::new(),
+        matched_rollout_turn_ids: matched_turn_ids,
+    })
+}
+
+fn current_live_turn_meter_summary(summary: &Value) -> Value {
+    let mut adjusted = summary.clone();
+    let live_events_count = adjusted["live_events_count"].as_u64().unwrap_or(0);
+    if live_events_count > 0 {
+        adjusted["meter_counted_events"] = Value::from(live_events_count);
+    }
+    adjusted
+}
+
+fn assistant_scope_is_materialized(scope: &AssistantGenerationScopeObservation) -> bool {
+    scope.target_group_count > 0
+        || scope.observed_group_count > 0
+        || scope.observed_tokens > 0
+        || scope.available_turns > 0
+        || !scope.target_context_pack_ids.is_empty()
+        || !scope.matched_context_pack_ids.is_empty()
+        || !scope.unmatched_context_pack_ids.is_empty()
+        || !scope.helper_only_context_pack_ids.is_empty()
+        || !scope.helper_only_non_model_visible_context_pack_ids.is_empty()
+}
+
+fn materialized_assistant_scope<'a>(
+    scope: &'a AssistantGenerationScopeObservation,
+) -> Option<&'a AssistantGenerationScopeObservation> {
+    assistant_scope_is_materialized(scope).then_some(scope)
+}
+
 pub async fn record_continuity_restore_observed_event(
     db: &Client,
     project_code: &str,
@@ -10572,24 +10665,31 @@ async fn build_current_live_turn_surface(
         return Ok(surface);
     }
 
-    let assistant_scope = derive_rollout_assistant_generation_scope(db, &matched_events).await?;
+    let assistant_scope =
+        current_live_turn_assistant_scope_from_client_meter(
+            &matched_events,
+            &matched_context_pack_ids,
+            observation,
+        );
     let summary = summarize_events(
         &matched_events,
         observation.ended_at_epoch_ms,
         measurement,
         contract,
     );
+    let meter_summary = current_live_turn_meter_summary(&summary);
     let statement_preview = build_dashboard_statement_preview(
         "current_live_turn",
         "текущий live-turn",
-        &summary,
+        &meter_summary,
         &matched_events,
         contract,
         rollout_observations,
-        Some(&assistant_scope),
+        assistant_scope.as_ref(),
     );
-    surface["events_total"] = summary["events_total"].clone();
-    surface["counted_events"] = summary["counted_events"].clone();
+    surface["events_total"] = meter_summary["events_total"].clone();
+    surface["counted_events"] = meter_summary["counted_events"].clone();
+    surface["meter_counted_events"] = meter_summary["meter_counted_events"].clone();
     if let Some((without_amai_tokens, with_amai_tokens, saved_tokens, saved_pct)) =
         scope_same_meter_exact_pair(&statement_preview)
     {
@@ -10742,8 +10842,10 @@ async fn collect_report(
         &profile.display_name,
         &rollout_observations,
         &current_session_assistant_scope,
-        rolling_window_assistant_scope.as_ref(),
-        Some(&lifetime_assistant_scope),
+        rolling_window_assistant_scope
+            .as_ref()
+            .and_then(|scope| materialized_assistant_scope(scope)),
+        materialized_assistant_scope(&lifetime_assistant_scope),
     );
     let current_session_metering_freshness = build_metering_freshness_summary(
         &config.contract,
@@ -10798,7 +10900,7 @@ async fn collect_report(
         &reconciliation_contract,
         &current_session_metering_freshness,
         &rollout_observations,
-        Some(&current_session_assistant_scope),
+        materialized_assistant_scope(&current_session_assistant_scope),
     );
     let rolling_window_statement_preview = if profile.rolling_window_hours.is_some() {
         build_statement_preview(
@@ -10814,7 +10916,9 @@ async fn collect_report(
             &reconciliation_contract,
             &rolling_window_metering_freshness,
             &rollout_observations,
-            rolling_window_assistant_scope.as_ref(),
+            rolling_window_assistant_scope
+                .as_ref()
+                .and_then(|scope| materialized_assistant_scope(scope)),
         )
     } else {
         Value::Null
@@ -10832,7 +10936,7 @@ async fn collect_report(
         &reconciliation_contract,
         &lifetime_metering_freshness,
         &rollout_observations,
-        Some(&lifetime_assistant_scope),
+        materialized_assistant_scope(&lifetime_assistant_scope),
     );
     let current_session_reconciliation_preview = build_reconciliation_preview(
         "current_session",
@@ -13676,8 +13780,9 @@ fn client_limit_meter_alignment_counts(
         .as_u64()
         .or_else(|| events_total.checked_sub(live_events_count))
         .unwrap_or(0);
-    let counted_events = summary["counted_events"]
+    let counted_events = summary["meter_counted_events"]
         .as_u64()
+        .or_else(|| summary["counted_events"].as_u64())
         .or_else(|| {
             events.map(|items| {
                 items
@@ -14290,6 +14395,12 @@ fn client_limit_baseline_component_semantics(
                                 )
                             }
                         }
+                        "tool_overhead_outside_retrieval" => (
+                            "amai_only_zero_baseline",
+                            Some(0),
+                            "Для tool_overhead_outside_retrieval truthful pre-Amai baseline равен 0: этот model-visible orchestration spend появляется только из-за Amai вне retrieval payload и отсутствует в no-Amai path."
+                                .to_string(),
+                        ),
                         "continuity_restore_outside_retrieval" => {
                             if let Some((baseline_tokens, source_ref)) =
                                 continuity_baseline_source.as_ref()
@@ -15383,7 +15494,7 @@ fn build_agent_cycle_economics(
             current_session_events,
             AGENT_CYCLE_TIMELINE_MAX_POINTS / 2,
             rollout_observations,
-            Some(current_session_assistant_scope),
+            materialized_assistant_scope(current_session_assistant_scope),
         ),
         "rolling_window": rolling_window_events
             .map(|events| {
@@ -22494,7 +22605,7 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["strict_client_meter_slice"]
                 ["components"],
-            json!(["client_prompt"])
+            json!(["client_prompt", "tool_overhead_outside_retrieval"])
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["surface_kind"],
@@ -22514,11 +22625,11 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["baseline_equivalence"]["measured_baseline_components"],
-            json!(["client_prompt"])
+            json!(["client_prompt", "tool_overhead_outside_retrieval"])
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["baseline_equivalence"]["missing_baseline_components"],
-            json!(["tool_overhead_outside_retrieval"])
+            json!(["assistant_generation"])
         );
         assert_eq!(
             economics["current_session"]["client_limit_meter_alignment"]["explicit_boundary_surface"]
@@ -23050,6 +23161,142 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(status["usable_direct_turns"], 1);
         assert_eq!(status["usable_rollout_turns"], 0);
+    }
+
+    #[test]
+    fn current_live_turn_assistant_scope_from_client_meter_matches_current_turn_window() {
+        let events = vec![token_event! {
+            event_id: "event-live-turn".to_string(),
+            context_pack_id: Some("cp-live".to_string()),
+            correlation_id: "cp-live".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+            traffic_class: "live".to_string(),
+            context_tokens: 40,
+            client_prompt_tokens: Some(12),
+            assistant_generation_tokens: None,
+            tool_overhead_tokens: Some(9),
+        }];
+        let matched_context_pack_ids =
+            ["cp-live".to_string()].into_iter().collect::<std::collections::BTreeSet<_>>();
+        let observation = crate::codex_threads::RolloutClientMeterObservation {
+            thread_id: "thread-1".to_string(),
+            rollout_path: "/tmp/current-live-turn.jsonl".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_epoch_ms: 100,
+            ended_at_epoch_ms: 200,
+            client_turn_total_tokens: 94,
+            client_turn_input_tokens: 12,
+            client_turn_cached_input_tokens: 0,
+            client_turn_output_tokens: 33,
+            client_turn_reasoning_output_tokens: 0,
+            latest_cumulative_total_tokens: 94,
+            latest_model_context_window: 258400,
+            latest_primary_limit_used_percent: 10,
+            latest_secondary_limit_used_percent: 20,
+            observation_source: "codex_rollout_client_meter_v2".to_string(),
+        };
+
+        let scope = super::current_live_turn_assistant_scope_from_client_meter(
+            &events,
+            &matched_context_pack_ids,
+            &observation,
+        )
+        .expect("scope");
+
+        assert_eq!(scope.target_group_count, 1);
+        assert_eq!(scope.observed_group_count, 1);
+        assert_eq!(scope.observed_tokens, 33);
+        assert_eq!(
+            scope.target_context_pack_ids,
+            ["cp-live".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            scope.matched_context_pack_ids,
+            ["cp-live".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            scope.matched_rollout_turn_ids,
+            ["thread-1:turn-1".to_string()].into_iter().collect()
+        );
+        assert_eq!(scope.available_rollout_turns, 1);
+    }
+
+    #[test]
+    fn current_live_turn_meter_summary_enables_same_meter_pair_without_quality_gate() {
+        let measurement = measurement_fixture();
+        let contract = contract_fixture();
+        let events = vec![token_event! {
+            event_id: "event-live-turn".to_string(),
+            context_pack_id: Some("cp-live".to_string()),
+            correlation_id: "cp-live".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+            traffic_class: "live".to_string(),
+            quality_ok: false,
+            context_tokens: 40,
+            naive_tokens: 200,
+            effective_saved_tokens: 160,
+            client_prompt_tokens: Some(12),
+            assistant_generation_tokens: None,
+            tool_overhead_tokens: Some(9),
+        }];
+        let matched_context_pack_ids =
+            ["cp-live".to_string()].into_iter().collect::<std::collections::BTreeSet<_>>();
+        let observation = crate::codex_threads::RolloutClientMeterObservation {
+            thread_id: "thread-1".to_string(),
+            rollout_path: "/tmp/current-live-turn.jsonl".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_epoch_ms: 100,
+            ended_at_epoch_ms: 200,
+            client_turn_total_tokens: 94,
+            client_turn_input_tokens: 12,
+            client_turn_cached_input_tokens: 0,
+            client_turn_output_tokens: 33,
+            client_turn_reasoning_output_tokens: 0,
+            latest_cumulative_total_tokens: 94,
+            latest_model_context_window: 258400,
+            latest_primary_limit_used_percent: 10,
+            latest_secondary_limit_used_percent: 20,
+            observation_source: "codex_rollout_client_meter_v2".to_string(),
+        };
+        let assistant_scope = super::current_live_turn_assistant_scope_from_client_meter(
+            &events,
+            &matched_context_pack_ids,
+            &observation,
+        )
+        .expect("scope");
+        let summary = super::summarize_events(&events, 250, &measurement, &contract);
+        let raw_preview = super::build_dashboard_statement_preview(
+            "current_live_turn",
+            "текущий live-turn",
+            &summary,
+            &events,
+            &contract,
+            &[],
+            Some(&assistant_scope),
+        );
+        assert!(super::scope_same_meter_exact_pair(&raw_preview).is_none());
+
+        let adjusted_summary = super::current_live_turn_meter_summary(&summary);
+        let preview = super::build_dashboard_statement_preview(
+            "current_live_turn",
+            "текущий live-turn",
+            &adjusted_summary,
+            &events,
+            &contract,
+            &[],
+            Some(&assistant_scope),
+        );
+        let (without_amai, with_amai, saved_tokens, saved_pct) =
+            super::scope_same_meter_exact_pair(&preview).expect("exact pair");
+
+        assert_eq!(
+            preview["client_limit_meter_alignment"]["same_meter_as_client_limit"],
+            json!(true)
+        );
+        assert_eq!(without_amai, 45);
+        assert_eq!(with_amai, 94);
+        assert_eq!(saved_tokens, -49);
+        assert!((saved_pct - (-108.888_888_888_888_89)).abs() < 1e-9);
     }
 
     #[test]
