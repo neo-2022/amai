@@ -1460,6 +1460,7 @@ pub fn render_html(refresh_ms: u64) -> String {
     const REFRESH_MS = __REFRESH_MS__;
     const CLIENT_BUDGET_LIVE_REFRESH_MS = Math.min(Math.max(Math.floor(REFRESH_MS / 2), 3000), 10000);
     const CLIENT_BUDGET_ROW_ALIASES = {
+      client_live_full_turn_savings: ["client_live_full_turn_savings", "Amai в полном live-turn"],
       client_live_context: ["client_live_context", "Последний запрос клиента"],
       client_live_limit: ["client_live_limit", "Лимит клиента сейчас", "Последний observed лимит клиента"],
     };
@@ -4995,6 +4996,8 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         client_live_meter,
         current_session_exact_pair,
     );
+    let session_live_turn_exact_pair = current_live_turn_exact_pair(&report["current_live_turn"])
+        .or(session_live_turn_exact_pair);
     let restore_context = &snapshot["latest_repo_working_state_restore"]["working_state_restore"];
     let session_rotate_bundle = restore_context.is_object().then(|| {
         working_state::build_rotate_chat_action_bundle(
@@ -7779,6 +7782,7 @@ fn metric_row_with_key(key: &str, label: &str, value: String, tooltip: Option<&s
 }
 
 const CLIENT_LIVE_CONTEXT_ROW_KEY: &str = "client_live_context";
+const CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY: &str = "client_live_full_turn_savings";
 const CLIENT_LIVE_LIMIT_ROW_KEY: &str = "client_live_limit";
 
 fn prefixed_metric_label(prefix: &str, metric: &str) -> String {
@@ -9157,7 +9161,20 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
     } else {
         &snapshot["token_budget_report"]["client_live_meter"]
     };
+    let nested_current_live_turn =
+        &snapshot["token_budget_report"]["token_budget_report"]["current_live_turn"];
+    let current_live_turn = if nested_current_live_turn.is_object() {
+        nested_current_live_turn
+    } else {
+        &snapshot["token_budget_report"]["current_live_turn"]
+    };
     let mut rows = Vec::new();
+    if let Some(row) = client_full_turn_savings_metric_row(
+        client_live_meter,
+        current_live_turn_exact_pair(current_live_turn),
+    ) {
+        rows.push(row);
+    }
     if let Some(row) = client_live_context_metric_row(client_live_meter) {
         rows.push(row);
     }
@@ -9180,6 +9197,19 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
             .unwrap_or_else(|| client_live_meter["ended_at_epoch_ms"].clone()),
         "rows": rows,
     })
+}
+
+fn current_live_turn_exact_pair(current_live_turn: &Value) -> Option<(u64, u64, i64, f64)> {
+    if current_live_turn["exact_pair_available"].as_bool() != Some(true) {
+        return None;
+    }
+    let exact_pair = &current_live_turn["exact_pair"];
+    Some((
+        exact_pair["without_amai_tokens"].as_u64().unwrap_or(0),
+        exact_pair["with_amai_tokens"].as_u64().unwrap_or(0),
+        exact_pair["saved_tokens"].as_i64().unwrap_or(0),
+        exact_pair["saved_pct"].as_f64().unwrap_or(0.0),
+    ))
 }
 
 fn live_turn_exact_pair(
@@ -9245,7 +9275,8 @@ fn client_full_turn_savings_metric_row(
         return None;
     }
     if !current_session_client_live_meter_available(client_live_meter) {
-        return Some(metric_row(
+        return Some(metric_row_with_key(
+            CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY,
             "Amai в полном live-turn",
             "точный процент по шкале VS Code пока не доказан".to_string(),
             Some(
@@ -9260,7 +9291,8 @@ fn client_full_turn_savings_metric_row(
         return None;
     }
     let Some((_, _, saved_tokens, _)) = exact_pair else {
-        return Some(metric_row(
+        return Some(metric_row_with_key(
+            CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY,
             "Amai в полном live-turn",
             "точный процент по шкале VS Code пока не доказан".to_string(),
             Some(
@@ -9285,7 +9317,8 @@ fn client_full_turn_savings_metric_row(
         format_signed_count(Some(saved_tokens)),
         format_percent(Some(full_turn_savings_pct)),
     );
-    Some(metric_row(
+    Some(metric_row_with_key(
+        CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY,
         "Amai в полном live-turn",
         format!(
             "{}: без Amai {}, с Amai {}, delta {}",
@@ -12790,6 +12823,10 @@ mod tests {
         });
         let row = super::client_full_turn_savings_metric_row(&meter, Some((550, 127, 423, 76.91)))
             .expect("full turn row");
+        assert_eq!(
+            row["key"].as_str(),
+            Some(super::CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY)
+        );
         assert_eq!(row["label"], "Amai в полном live-turn");
         assert!(row["value"]
             .as_str()
@@ -12814,6 +12851,10 @@ mod tests {
             "client_turn_total_tokens": 35534
         });
         let row = super::client_full_turn_savings_metric_row(&meter, None).expect("full turn row");
+        assert_eq!(
+            row["key"].as_str(),
+            Some(super::CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY)
+        );
         assert_eq!(row["label"], "Amai в полном live-turn");
         assert_eq!(
             row["value"].as_str(),
@@ -12834,6 +12875,10 @@ mod tests {
             "client_turn_total_tokens": 35534
         });
         let row = super::client_full_turn_savings_metric_row(&meter, None).expect("full turn row");
+        assert_eq!(
+            row["key"].as_str(),
+            Some(super::CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY)
+        );
         assert_eq!(row["label"], "Amai в полном live-turn");
         assert_eq!(
             row["value"].as_str(),
@@ -12904,6 +12949,44 @@ mod tests {
     }
 
     #[test]
+    fn current_live_turn_exact_pair_surfaces_zero_pair() {
+        let current_live_turn = json!({
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 0,
+                "with_amai_tokens": 0,
+                "saved_tokens": 0,
+                "saved_pct": 0.0
+            }
+        });
+        assert_eq!(
+            super::current_live_turn_exact_pair(&current_live_turn),
+            Some((0, 0, 0, 0.0))
+        );
+    }
+
+    #[test]
+    fn client_full_turn_savings_metric_row_surfaces_zero_percent_when_no_amai_activity() {
+        let meter = json!({
+            "status": "observed",
+            "thread_binding_state": "current_thread_bound",
+            "current_thread_bound": true,
+            "client_turn_total_tokens": 35534
+        });
+        let row =
+            super::client_full_turn_savings_metric_row(&meter, Some((0, 0, 0, 0.0)))
+                .expect("full turn row");
+        assert!(row["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("0.00%"));
+        assert!(row["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("delta 0"));
+    }
+
+    #[test]
     fn client_live_context_metric_row_uses_last_request_window_pressure() {
         let meter = json!({
             "status": "observed",
@@ -12969,10 +13052,11 @@ mod tests {
         });
         let payload = super::client_budget_live_payload(&snapshot);
         let rows = payload["rows"].as_array().expect("rows array");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["key"].as_str(), Some("client_live_limit"));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["key"].as_str(), Some("client_live_full_turn_savings"));
+        assert_eq!(rows[1]["key"].as_str(), Some("client_live_limit"));
         assert_eq!(
-            rows[0]["label"].as_str(),
+            rows[1]["label"].as_str(),
             Some("Последний observed лимит клиента")
         );
     }
@@ -13006,6 +13090,36 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("5ч остаётся 61.00%, 7д остаётся 58.00%"));
+    }
+
+    #[test]
+    fn client_budget_live_payload_surfaces_current_live_turn_numeric_row() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "client_live_meter": {
+                    "status": "observed",
+                    "thread_binding_state": "current_thread_bound",
+                    "current_thread_bound": true,
+                    "client_turn_total_tokens": 35534,
+                    "primary_limit_remaining_percent": 61,
+                    "secondary_limit_remaining_percent": 58,
+                    "ended_at_epoch_ms": 1774682249000u64
+                },
+                "current_live_turn": {
+                    "exact_pair_available": true,
+                    "exact_pair": {
+                        "without_amai_tokens": 0,
+                        "with_amai_tokens": 0,
+                        "saved_tokens": 0,
+                        "saved_pct": 0.0
+                    }
+                }
+            }
+        });
+        let payload = super::client_budget_live_payload(&snapshot);
+        let rows = payload["rows"].as_array().expect("rows array");
+        assert_eq!(rows[0]["key"].as_str(), Some("client_live_full_turn_savings"));
+        assert!(rows[0]["value"].as_str().unwrap_or_default().contains("0.00%"));
     }
 
     #[test]

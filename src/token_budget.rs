@@ -388,6 +388,8 @@ struct TokenBudgetEvent {
     event_id: String,
     correlation_id: String,
     context_pack_id: Option<String>,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
     payload_origin: String,
     session_id: String,
     rolling_window_profile: String,
@@ -7396,8 +7398,15 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     };
     let lifetime_assistant_scope = scope_iter.next().unwrap_or_default();
     let stage_started_at = Instant::now();
-    let client_live_meter_observation =
-        preferred_rollout_client_meter_observation(db, &repo_root, repo_root_str).await?;
+    let client_live_meter_binding_hint =
+        preferred_dashboard_thread_binding_hint(db, &repo_root).await?;
+    let client_live_meter_observation = preferred_rollout_client_meter_observation(
+        db,
+        &repo_root,
+        repo_root_str,
+        client_live_meter_binding_hint.as_deref(),
+    )
+    .await?;
     record_dashboard_precache_stage_ms(
         &mut pre_cache_timings,
         "client_live_meter_observation",
@@ -7411,6 +7420,22 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         "exact_client_limits_observation",
         stage_started_at,
     );
+    let stage_started_at = Instant::now();
+    let current_live_turn = build_current_live_turn_surface(
+        db,
+        &events,
+        client_live_meter_observation.as_ref(),
+        client_live_meter_binding_hint.as_deref(),
+        &config.measurement,
+        &config.contract,
+        &rollout_observations,
+    )
+    .await?;
+    record_dashboard_precache_stage_ms(
+        &mut pre_cache_timings,
+        "current_live_turn",
+        stage_started_at,
+    );
 
     let stage_started_at = Instant::now();
     let report_components = dashboard_report_signature_components(
@@ -7421,6 +7446,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         rolling_window_assistant_scope.as_ref(),
         &lifetime_assistant_scope,
         client_live_meter_observation.as_ref(),
+        client_live_meter_binding_hint.as_deref(),
         exact_client_limits_observation.as_ref(),
     );
     let report_signature = dashboard_report_signature(&report_components);
@@ -7567,8 +7593,10 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
             },
             "client_live_meter": build_client_live_meter_json(
                 client_live_meter_observation.as_ref(),
+                client_live_meter_binding_hint.as_deref(),
                 exact_client_limits_observation.as_ref(),
             ),
+            "current_live_turn": current_live_turn,
             "cache_debug": cache_debug,
             "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups, client-limit alignment и live client meter, не разворачивает полный contractual/export contour, но поднимает compact statement_export_previews для reviewed frozen-debt surfaces. Quiet same-meter sync/write-back всё так же ограничен active live scope текущей сессии и рабочего окна. Sync write-back может materialize-иться в этом тике, а обновлённые token events подхватываются следующим refresh, чтобы текущий pass не делал лишний full reload.",
         }
@@ -7868,13 +7896,13 @@ fn dashboard_rollout_observation_signature(
 
 fn dashboard_client_live_meter_signature(
     observation: Option<&codex_threads::RolloutClientMeterObservation>,
+    binding_thread_id_hint: Option<&str>,
 ) -> String {
-    let current_thread_id = codex_threads::current_thread_id();
     let payload = observation
         .map(|item| {
             let (thread_binding_state, current_thread_bound) =
                 client_live_meter_thread_binding_state(
-                    current_thread_id.as_deref(),
+                    binding_thread_id_hint,
                     &item.thread_id,
                 );
             json!({
@@ -7969,6 +7997,77 @@ fn client_live_meter_thread_binding_state(
         Some(_) => ("current_thread_mismatch", false),
         None => ("no_current_thread_binding", false),
     }
+}
+
+fn dashboard_thread_binding_hint_from_working_state_restore(restore: &Value) -> Option<String> {
+    if restore["restore_freshness_state"].as_str() != Some("fresh") {
+        return None;
+    }
+    let thread_id = restore["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let session_id = restore["session_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let lease = &restore["execctl_active_lease"];
+    let lease_state = lease["lease_state"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let owner_thread_id = lease["owner_thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let owner_session_id = lease["owner_session_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if lease_state.is_some() || owner_thread_id.is_some() || owner_session_id.is_some() {
+        if lease_state != Some("active") {
+            return None;
+        }
+        if owner_thread_id != Some(thread_id) {
+            return None;
+        }
+        match (session_id, owner_session_id) {
+            (Some(session_id), Some(owner_session_id)) if session_id == owner_session_id => {}
+            (None, None) => {}
+            (Some(_), None) => {}
+            _ => return None,
+        }
+    }
+
+    Some(thread_id.to_string())
+}
+
+async fn preferred_dashboard_thread_binding_hint(
+    db: &Client,
+    repo_root: &Path,
+) -> Result<Option<String>> {
+    if let Some(current_thread_id) = codex_threads::current_thread_id()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(Some(current_thread_id));
+    }
+
+    let repo_root_display = repo_root.display().to_string();
+    let Ok(project) = postgres::get_project_by_repo_root(db, &repo_root_display).await else {
+        return Ok(None);
+    };
+    let snapshot = postgres::latest_observability_snapshot_for_project(
+        db,
+        "working_state_restore",
+        "working_state_restore",
+        &project.code,
+    )
+    .await?;
+    Ok(snapshot.and_then(|value| {
+        dashboard_thread_binding_hint_from_working_state_restore(&value["working_state_restore"])
+    }))
 }
 
 fn codex_extension_relative_codex_path() -> &'static str {
@@ -8252,6 +8351,7 @@ fn build_status_bar_rate_limits_json(
 
 fn build_client_live_meter_json(
     observation: Option<&codex_threads::RolloutClientMeterObservation>,
+    binding_thread_id_hint: Option<&str>,
     exact_client_limits: Option<&CodexAppServerRateLimitsObservation>,
 ) -> Value {
     let Some(observation) = observation else {
@@ -8261,9 +8361,8 @@ fn build_client_live_meter_json(
             "note": "Текущий client-side live meter ещё не materialized из rollout token_count/rate_limits, поэтому карточки пока не могут честно показать полный turn/context pressure клиента."
         });
     };
-    let current_thread_id = codex_threads::current_thread_id();
     let (thread_binding_state, current_thread_bound) = client_live_meter_thread_binding_state(
-        current_thread_id.as_deref(),
+        binding_thread_id_hint,
         &observation.thread_id,
     );
     let context_used_percent = if observation.latest_model_context_window == 0 {
@@ -9594,6 +9693,7 @@ fn dashboard_report_signature_components(
     rolling_window_assistant_scope: Option<&AssistantGenerationScopeObservation>,
     lifetime_assistant_scope: &AssistantGenerationScopeObservation,
     client_live_meter_observation: Option<&codex_threads::RolloutClientMeterObservation>,
+    client_live_meter_binding_hint: Option<&str>,
     exact_client_limits_observation: Option<&CodexAppServerRateLimitsObservation>,
 ) -> DashboardReportSignatureComponents {
     DashboardReportSignatureComponents {
@@ -9609,7 +9709,10 @@ fn dashboard_report_signature_components(
         lifetime_assistant_scope: dashboard_report_assistant_scope_signature(
             lifetime_assistant_scope,
         ),
-        client_live_meter: dashboard_client_live_meter_signature(client_live_meter_observation),
+        client_live_meter: dashboard_client_live_meter_signature(
+            client_live_meter_observation,
+            client_live_meter_binding_hint,
+        ),
         exact_client_limits: dashboard_exact_client_limits_signature(
             exact_client_limits_observation,
         ),
@@ -10271,42 +10374,243 @@ pub async fn record_verify_benchmark_event(db: &Client, benchmark_payload: &Valu
 }
 
 async fn preferred_rollout_client_meter_observation(
-    db: &Client,
-    repo_root: &Path,
+    _db: &Client,
+    _repo_root: &Path,
     repo_root_str: &str,
+    preferred_thread_id_hint: Option<&str>,
 ) -> Result<Option<codex_threads::RolloutClientMeterObservation>> {
-    if codex_threads::current_thread_id().is_some() {
-        return codex_threads::latest_rollout_client_meter_observation(repo_root_str, None);
-    }
-
-    let repo_root_display = repo_root.display().to_string();
-    let preferred_thread_id = match postgres::get_project_by_repo_root(db, &repo_root_display).await
+    if let Some(thread_id) = preferred_thread_id_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     {
-        Ok(project) => postgres::latest_observability_snapshot_for_project(
-            db,
-            "working_state_restore",
-            "working_state_restore",
-            &project.code,
-        )
-        .await?
-        .and_then(|snapshot| {
-            snapshot["working_state_restore"]["thread_id"]
-                .as_str()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        }),
-        Err(_) => None,
-    };
-
-    if let Some(thread_id) = preferred_thread_id {
         if let Some(observation) =
-            codex_threads::latest_rollout_client_meter_observation_for_thread(&thread_id)?
+            codex_threads::latest_rollout_client_meter_observation_for_thread(thread_id)?
         {
             return Ok(Some(observation));
         }
     }
 
     codex_threads::latest_rollout_client_meter_observation(repo_root_str, None)
+}
+
+async fn live_turn_retrieval_context_pack_ids(
+    db: &Client,
+    thread_id: &str,
+    started_at_epoch_ms: i64,
+    ended_at_epoch_ms: i64,
+    grace_ms: i64,
+) -> Result<(BTreeSet<String>, u64)> {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Ok((BTreeSet::new(), 0));
+    }
+    let upper_bound = ended_at_epoch_ms.max(started_at_epoch_ms);
+    if started_at_epoch_ms <= 0 || upper_bound <= 0 {
+        return Ok((BTreeSet::new(), 0));
+    }
+    let lower_bound = started_at_epoch_ms.saturating_sub(grace_ms.max(0));
+    let upper_bound = upper_bound.saturating_add(grace_ms.max(0));
+    let rows = db
+        .query(
+            "
+            SELECT payload->'working_state_event'->>'context_pack_id' AS context_pack_id
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_event'
+              AND payload->'working_state_event'->>'event_kind' = 'retrieval_context_pack'
+              AND payload->'working_state_event'->>'thread_id' = $1
+              AND COALESCE(
+                    NULLIF(payload->'working_state_event'->>'recorded_at_epoch_ms', '')::bigint,
+                    (EXTRACT(EPOCH FROM created_at) * 1000)::bigint
+                  ) BETWEEN $2 AND $3
+            ORDER BY created_at DESC
+            ",
+            &[&thread_id, &lower_bound, &upper_bound],
+        )
+        .await?;
+    let retrieval_count = rows.len() as u64;
+    let context_pack_ids = rows
+        .into_iter()
+        .filter_map(|row| row.get::<_, Option<String>>("context_pack_id"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>();
+    Ok((context_pack_ids, retrieval_count))
+}
+
+fn live_turn_token_budget_events(
+    events: &[TokenBudgetEvent],
+    thread_id: &str,
+    turn_id: &str,
+    context_pack_ids: &BTreeSet<String>,
+) -> Vec<TokenBudgetEvent> {
+    let thread_id = thread_id.trim();
+    let turn_id = turn_id.trim();
+    let mut seen_event_ids = HashSet::new();
+    let mut matched = Vec::new();
+    for event in events {
+        if event.traffic_class != "live" {
+            continue;
+        }
+        let thread_turn_match = !thread_id.is_empty()
+            && !turn_id.is_empty()
+            && event.thread_id.as_deref().map(str::trim) == Some(thread_id)
+            && event.turn_id.as_deref().map(str::trim) == Some(turn_id);
+        let context_pack_match = event
+            .context_pack_id
+            .as_deref()
+            .is_some_and(|value| context_pack_ids.contains(value));
+        if !(thread_turn_match || context_pack_match) {
+            continue;
+        }
+        if seen_event_ids.insert(event.event_id.clone()) {
+            matched.push(event.clone());
+        }
+    }
+    matched.sort_by_key(|event| event.created_at_epoch_ms);
+    matched
+}
+
+async fn build_current_live_turn_surface(
+    db: &Client,
+    events: &[TokenBudgetEvent],
+    client_live_meter_observation: Option<&codex_threads::RolloutClientMeterObservation>,
+    client_live_meter_binding_hint: Option<&str>,
+    measurement: &MeasurementConfig,
+    contract: &TokenBudgetContractConfig,
+    rollout_observations: &[codex_threads::RolloutAssistantGenerationObservation],
+) -> Result<Value> {
+    let Some(observation) = client_live_meter_observation else {
+        return Ok(json!({
+            "status": "missing",
+            "scope_code": "current_live_turn",
+            "scope_label": "текущий live-turn",
+            "thread_binding_state": "missing_rollout_client_meter",
+            "current_thread_bound": false,
+            "exact_pair_available": false,
+            "exact_pair": Value::Null,
+            "note": "Live rollout client meter для текущего turn ещё не materialized."
+        }));
+    };
+    let (thread_binding_state, current_thread_bound) = client_live_meter_thread_binding_state(
+        client_live_meter_binding_hint,
+        &observation.thread_id,
+    );
+    let mut surface = json!({
+        "status": "observed",
+        "scope_code": "current_live_turn",
+        "scope_label": "текущий live-turn",
+        "thread_id": observation.thread_id,
+        "turn_id": observation.turn_id,
+        "started_at_epoch_ms": observation.started_at_epoch_ms,
+        "ended_at_epoch_ms": observation.ended_at_epoch_ms,
+        "thread_binding_state": thread_binding_state,
+        "current_thread_bound": current_thread_bound,
+        "exact_pair_available": false,
+        "exact_pair": Value::Null,
+        "matched_events_count": 0,
+        "matched_context_pack_ids_count": 0,
+        "retrieval_context_pack_count": 0,
+        "note": "Current live turn surface is built only for the thread-bound rollout meter of the active chat."
+    });
+    if !current_thread_bound {
+        surface["status"] = Value::from("current_thread_unbound");
+        surface["note"] = Value::from(
+            "Current-thread binding для live meter ещё не materialized, поэтому exact full-turn pair по текущему чату честно не доказывается.",
+        );
+        return Ok(surface);
+    }
+    if observation.started_at_epoch_ms <= 0 || observation.ended_at_epoch_ms <= 0 {
+        surface["status"] = Value::from("invalid_live_turn_window");
+        surface["note"] = Value::from(
+            "У live meter отсутствует валидное окно текущего turn, поэтому точный full-turn процент пока не доказывается.",
+        );
+        return Ok(surface);
+    }
+
+    let grace_ms = measurement
+        .late_arrival_grace_minutes
+        .saturating_mul(60_000)
+        .max(ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS as u64) as i64;
+    let (matched_context_pack_ids, retrieval_context_pack_count) = live_turn_retrieval_context_pack_ids(
+        db,
+        &observation.thread_id,
+        observation.started_at_epoch_ms,
+        observation.ended_at_epoch_ms,
+        grace_ms,
+    )
+    .await?;
+    let matched_events = live_turn_token_budget_events(
+        events,
+        &observation.thread_id,
+        &observation.turn_id,
+        &matched_context_pack_ids,
+    );
+    surface["matched_events_count"] = Value::from(matched_events.len() as u64);
+    surface["matched_context_pack_ids_count"] = Value::from(matched_context_pack_ids.len() as u64);
+    surface["retrieval_context_pack_count"] = Value::from(retrieval_context_pack_count);
+
+    if matched_events.is_empty() && retrieval_context_pack_count == 0 {
+        surface["status"] = Value::from("no_amai_activity_in_current_live_turn");
+        surface["exact_pair_available"] = Value::from(true);
+        surface["exact_pair"] = json!({
+            "without_amai_tokens": 0,
+            "with_amai_tokens": 0,
+            "saved_tokens": 0,
+            "saved_pct": 0.0
+        });
+        surface["note"] = Value::from(
+            "В текущем live-turn не наблюдалось ни одного retrieval_context_pack от Amai, поэтому честный вклад Amai в шкалу VS Code сейчас равен 0.00%.",
+        );
+        return Ok(surface);
+    }
+
+    if matched_events.is_empty() {
+        surface["status"] = Value::from("activity_observed_exact_pair_unavailable");
+        surface["note"] = Value::from(
+            "Amai-активность в текущем live-turn уже observed по working_state, но соответствующие token_budget_event exact-pair для этого turn ещё не materialized.",
+        );
+        return Ok(surface);
+    }
+
+    let assistant_scope = derive_rollout_assistant_generation_scope(db, &matched_events).await?;
+    let summary = summarize_events(
+        &matched_events,
+        observation.ended_at_epoch_ms,
+        measurement,
+        contract,
+    );
+    let statement_preview = build_dashboard_statement_preview(
+        "current_live_turn",
+        "текущий live-turn",
+        &summary,
+        &matched_events,
+        contract,
+        rollout_observations,
+        Some(&assistant_scope),
+    );
+    surface["events_total"] = summary["events_total"].clone();
+    surface["counted_events"] = summary["counted_events"].clone();
+    if let Some((without_amai_tokens, with_amai_tokens, saved_tokens, saved_pct)) =
+        scope_same_meter_exact_pair(&statement_preview)
+    {
+        surface["status"] = Value::from("exact_pair_materialized");
+        surface["exact_pair_available"] = Value::from(true);
+        surface["exact_pair"] = json!({
+            "without_amai_tokens": without_amai_tokens,
+            "with_amai_tokens": with_amai_tokens,
+            "saved_tokens": saved_tokens,
+            "saved_pct": saved_pct
+        });
+        surface["note"] = Value::from(
+            "Exact full-turn pair materialized from live token_budget events, matched to the current thread-bound turn and same-meter aligned with the VS Code status bar.",
+        );
+    } else {
+        surface["status"] = Value::from("activity_observed_exact_pair_unavailable");
+        surface["note"] = Value::from(
+            "Amai-активность в текущем live-turn уже observed, но same-meter exact pair для этой live turn выборки ещё не materialized.",
+        );
+    }
+    Ok(surface)
 }
 
 async fn collect_report(
@@ -10377,9 +10681,26 @@ async fn collect_report(
         None
     };
     let lifetime_assistant_scope = derive_rollout_assistant_generation_scope(db, &events).await?;
-    let client_live_meter_observation =
-        preferred_rollout_client_meter_observation(db, repo_root, repo_root_str).await?;
+    let client_live_meter_binding_hint =
+        preferred_dashboard_thread_binding_hint(db, repo_root).await?;
+    let client_live_meter_observation = preferred_rollout_client_meter_observation(
+        db,
+        repo_root,
+        repo_root_str,
+        client_live_meter_binding_hint.as_deref(),
+    )
+    .await?;
     let exact_client_limits_observation = dashboard_exact_client_rate_limits_observation().await?;
+    let current_live_turn = build_current_live_turn_surface(
+        db,
+        &events,
+        client_live_meter_observation.as_ref(),
+        client_live_meter_binding_hint.as_deref(),
+        &config.measurement,
+        &config.contract,
+        &rollout_observations,
+    )
+    .await?;
 
     let latest_event = events
         .last()
@@ -10815,8 +11136,10 @@ async fn collect_report(
             },
             "client_live_meter": build_client_live_meter_json(
                 client_live_meter_observation.as_ref(),
+                client_live_meter_binding_hint.as_deref(),
                 exact_client_limits_observation.as_ref(),
             ),
+            "current_live_turn": current_live_turn,
             "source_breakdown": source_breakdown,
             "query_slices": query_slices,
             "baseline_strategy_slices": baseline_strategy_slices,
@@ -10883,6 +11206,19 @@ async fn enrich_live_event_payload(
     let session_id =
         resolve_session_id(&events, timestamp_utc, session_gap_ms, &current_source_kind);
     node.insert("session_id".to_string(), Value::String(session_id));
+    if let Some(thread_id) = codex_threads::current_thread_id()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        node.insert("thread_id".to_string(), Value::String(thread_id.clone()));
+        if let Ok(Some(observation)) =
+            codex_threads::latest_rollout_client_meter_observation_for_thread(&thread_id)
+        {
+            if !observation.turn_id.trim().is_empty() {
+                node.insert("turn_id".to_string(), Value::String(observation.turn_id));
+            }
+        }
+    }
     node.insert(
         "rolling_window_profile".to_string(),
         Value::String(profile.code.clone()),
@@ -11511,6 +11847,16 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         .or_else(|| node["context_pack_id"].as_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| event_id.clone());
     let context_pack_id = node["context_pack_id"].as_str().map(ToOwned::to_owned);
+    let thread_id = node["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let turn_id = node["turn_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let payload_origin = node["payload_origin"]
         .as_str()
         .unwrap_or("unknown")
@@ -11753,6 +12099,8 @@ fn parse_snapshot_event(row: &ObservabilitySnapshotRecord) -> Result<Option<Toke
         event_id,
         correlation_id,
         context_pack_id,
+        thread_id,
+        turn_id,
         payload_origin,
         session_id,
         rolling_window_profile,
@@ -13278,6 +13626,31 @@ fn product_headline_same_meter_exact_pair(summary: &Value) -> Option<(i64, f64)>
     let saved_tokens = without_amai as i64 - with_amai as i64;
     let value_percent = saved_tokens as f64 * 100.0 / without_amai as f64;
     Some((saved_tokens, value_percent))
+}
+
+fn scope_same_meter_exact_pair(scope_summary: &Value) -> Option<(u64, u64, i64, f64)> {
+    let alignment = &scope_summary["client_limit_meter_alignment"];
+    if alignment["same_meter_as_client_limit"].as_bool() != Some(true) {
+        return None;
+    }
+    let without_amai = alignment["strict_client_meter_slice"]["lower_bound_tokens"]
+        .as_u64()
+        .or_else(|| {
+            alignment["baseline_equivalence"]["measured_baseline_tokens_lower_bound"].as_u64()
+        })
+        .or_else(|| scope_summary["verified_without_amai_measured_tokens"].as_u64())
+        .or_else(|| scope_summary["verified_baseline_tokens"].as_u64())?;
+    let with_amai = scope_summary["observed_whole_cycle_with_amai_tokens"]
+        .as_u64()
+        .or_else(|| scope_summary["verified_observed_whole_cycle_with_amai_tokens"].as_u64())
+        .or_else(|| scope_summary["verified_with_amai_measured_tokens"].as_u64())
+        .or_else(|| scope_summary["with_amai_measured_tokens"].as_u64())?;
+    if without_amai == 0 {
+        return None;
+    }
+    let saved_tokens = without_amai as i64 - with_amai as i64;
+    let saved_pct = saved_tokens as f64 * 100.0 / without_amai as f64;
+    Some((without_amai, with_amai, saved_tokens, saved_pct))
 }
 
 fn client_limit_meter_alignment_counts(
@@ -15475,6 +15848,22 @@ fn event_to_json(event: &TokenBudgetEvent) -> Value {
         "context_pack_id".to_string(),
         event
             .context_pack_id
+            .as_ref()
+            .map(|value| Value::String(value.clone()))
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "thread_id".to_string(),
+        event
+            .thread_id
+            .as_ref()
+            .map(|value| Value::String(value.clone()))
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "turn_id".to_string(),
+        event
+            .turn_id
             .as_ref()
             .map(|value| Value::String(value.clone()))
             .unwrap_or(Value::Null),
@@ -17954,6 +18343,8 @@ mod tests {
                     event_id: "event-default".to_string(),
                     correlation_id: "event-default".to_string(),
                     context_pack_id: None,
+                    thread_id: None,
+                    turn_id: None,
                     payload_origin: "context_pack_token_budget".to_string(),
                     session_id: "session-default".to_string(),
                     rolling_window_profile: "codex_5h".to_string(),
@@ -23355,6 +23746,8 @@ effective_to_epoch_ms = 2000
             event_id: "event-1".to_string(),
             correlation_id: "corr-1".to_string(),
             context_pack_id: None,
+            thread_id: None,
+            turn_id: None,
             payload_origin: "context_pack_token_budget".to_string(),
             session_id: "session-1".to_string(),
             rolling_window_profile: "codex_5h".to_string(),
@@ -24406,6 +24799,7 @@ effective_to_epoch_ms = 2000
             &scope,
             None,
             None,
+            None,
         ));
         let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
@@ -24414,6 +24808,7 @@ effective_to_epoch_ms = 2000
             &scope,
             Some(&scope),
             &scope,
+            None,
             None,
             None,
         ));
@@ -24485,6 +24880,7 @@ effective_to_epoch_ms = 2000
             &base_scope,
             None,
             None,
+            None,
         ));
         let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
@@ -24493,6 +24889,7 @@ effective_to_epoch_ms = 2000
             &changed_scope,
             Some(&base_scope),
             &base_scope,
+            None,
             None,
             None,
         ));
@@ -24588,6 +24985,7 @@ effective_to_epoch_ms = 2000
             Some(&scope),
             &scope,
             None,
+            None,
             Some(&baseline_limits),
         ));
         let right = dashboard_report_signature(&dashboard_report_signature_components(
@@ -24597,6 +24995,7 @@ effective_to_epoch_ms = 2000
             &scope,
             Some(&scope),
             &scope,
+            None,
             None,
             Some(&changed_limits),
         ));
@@ -25016,5 +25415,210 @@ effective_to_epoch_ms = 2000
         );
         assert_eq!(state, "current_thread_mismatch");
         assert!(!bound);
+    }
+
+    #[test]
+    fn dashboard_thread_binding_hint_accepts_fresh_matching_restore_and_lease() {
+        let restore = json!({
+            "restore_freshness_state": "fresh",
+            "thread_id": "thread-live",
+            "session_id": "session-live",
+            "execctl_active_lease": {
+                "lease_state": "active",
+                "owner_thread_id": "thread-live",
+                "owner_session_id": "session-live"
+            }
+        });
+        assert_eq!(
+            super::dashboard_thread_binding_hint_from_working_state_restore(&restore),
+            Some("thread-live".to_string())
+        );
+    }
+
+    #[test]
+    fn dashboard_thread_binding_hint_rejects_mismatched_active_lease_owner() {
+        let restore = json!({
+            "restore_freshness_state": "fresh",
+            "thread_id": "thread-live",
+            "session_id": "session-live",
+            "execctl_active_lease": {
+                "lease_state": "active",
+                "owner_thread_id": "thread-other",
+                "owner_session_id": "session-live"
+            }
+        });
+        assert_eq!(
+            super::dashboard_thread_binding_hint_from_working_state_restore(&restore),
+            None
+        );
+    }
+
+    #[test]
+    fn dashboard_thread_binding_hint_rejects_stale_restore() {
+        let restore = json!({
+            "restore_freshness_state": "stale",
+            "thread_id": "thread-live",
+            "session_id": "session-live",
+            "execctl_active_lease": {
+                "lease_state": "active",
+                "owner_thread_id": "thread-live",
+                "owner_session_id": "session-live"
+            }
+        });
+        assert_eq!(
+            super::dashboard_thread_binding_hint_from_working_state_restore(&restore),
+            None
+        );
+    }
+
+    #[test]
+    fn dashboard_report_signature_changes_when_client_live_meter_binding_hint_changes() {
+        let events = vec![token_event! {
+            created_at_epoch_ms: 10,
+            event_id: "event-a".to_string(),
+            correlation_id: "ctx-a".to_string(),
+            session_id: "session-1".to_string(),
+            rolling_window_profile: "codex_5h".to_string(),
+            timestamp_utc: 10,
+            occurred_at_epoch_ms: 10,
+            ingested_at_epoch_ms: 10,
+            query: "q-a".to_string(),
+            query_hash: "hash-a".to_string(),
+            query_type: "code_lookup".to_string(),
+            target_kind: "file".to_string(),
+            baseline_hit_target: true,
+            amai_hit_target: true,
+            cold_warm_state: "warm".to_string(),
+            baseline_strategy: "naive_top_files".to_string(),
+            retrieval_mode: Some("local_strict".to_string()),
+            tokenizer: "o200k_base".to_string(),
+            latency_ms: 1.0,
+            saved_tokens: 10,
+            naive_tokens: 20,
+            context_tokens: 10,
+            recovery_tokens: 0,
+            effective_saved_tokens: 10,
+            savings_factor: 2.0,
+            savings_percent: 50.0,
+            effective_savings_percent: 50.0,
+            quality_ok: true,
+            quality_score: 1.0,
+            quality_method: "retrieval_parity".to_string(),
+            quality_tier: "retrieval".to_string(),
+            head_hit_target: true,
+            needed_followup: false,
+            followup_count: 0,
+            followup_of_event_id: None,
+            resolved_by_event_id: None,
+            fallback_triggered: false,
+            fallback_count: 0,
+            document_hits: 1,
+            symbol_hits_count: 0,
+            file_hits: 1,
+            sources_count: 1,
+            chunks_count: 1,
+            pack_token_count: 10,
+            deduped_token_count: 10,
+        }];
+        let scope = AssistantGenerationScopeObservation::default();
+        let meter = crate::codex_threads::RolloutClientMeterObservation {
+            thread_id: "thread-live".to_string(),
+            rollout_path: "/tmp/thread-live.jsonl".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_epoch_ms: 10,
+            ended_at_epoch_ms: 11,
+            client_turn_total_tokens: 100,
+            client_turn_input_tokens: 80,
+            client_turn_cached_input_tokens: 0,
+            client_turn_output_tokens: 20,
+            client_turn_reasoning_output_tokens: 0,
+            latest_cumulative_total_tokens: 1000,
+            latest_model_context_window: 258400,
+            latest_primary_limit_used_percent: 10,
+            latest_secondary_limit_used_percent: 20,
+            observation_source: "codex_rollout_client_meter_v2".to_string(),
+        };
+        let left = dashboard_report_signature(&dashboard_report_signature_components(
+            &events,
+            &events,
+            &events,
+            &scope,
+            Some(&scope),
+            &scope,
+            Some(&meter),
+            Some("thread-live"),
+            None,
+        ));
+        let right = dashboard_report_signature(&dashboard_report_signature_components(
+            &events,
+            &events,
+            &events,
+            &scope,
+            Some(&scope),
+            &scope,
+            Some(&meter),
+            None,
+            None,
+        ));
+        assert_ne!(left, right);
+    }
+
+    #[test]
+    fn scope_same_meter_exact_pair_surfaces_exact_tuple() {
+        let scope_summary = json!({
+            "client_limit_meter_alignment": {
+                "same_meter_as_client_limit": true,
+                "strict_client_meter_slice": {
+                    "lower_bound_tokens": 640
+                }
+            },
+            "observed_whole_cycle_with_amai_tokens": 99
+        });
+        assert_eq!(
+            super::scope_same_meter_exact_pair(&scope_summary),
+            Some((640, 99, 541, 84.53125))
+        );
+    }
+
+    #[test]
+    fn live_turn_token_budget_events_matches_thread_turn_and_context_pack_without_duplicates() {
+        let events = vec![
+            token_event! {
+                event_id: "event-thread-turn".to_string(),
+                thread_id: Some("thread-live".to_string()),
+                turn_id: Some("turn-live".to_string()),
+                context_pack_id: Some("ctx-1".to_string()),
+                traffic_class: "live".to_string(),
+            },
+            token_event! {
+                event_id: "event-context-pack".to_string(),
+                thread_id: None,
+                turn_id: None,
+                context_pack_id: Some("ctx-2".to_string()),
+                traffic_class: "live".to_string(),
+            },
+            token_event! {
+                event_id: "event-non-live".to_string(),
+                thread_id: Some("thread-live".to_string()),
+                turn_id: Some("turn-live".to_string()),
+                context_pack_id: Some("ctx-3".to_string()),
+                traffic_class: "proof".to_string(),
+            },
+        ];
+        let context_pack_ids = BTreeSet::from([
+            "ctx-1".to_string(),
+            "ctx-2".to_string(),
+        ]);
+        let matched = super::live_turn_token_budget_events(
+            &events,
+            "thread-live",
+            "turn-live",
+            &context_pack_ids,
+        );
+        let matched_ids = matched
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(matched_ids, vec!["event-thread-turn", "event-context-pack"]);
     }
 }
