@@ -300,6 +300,7 @@ fn with_whole_cycle_observed_overrides(payload: &Value, args: &ContextPackArgs) 
 
 pub(crate) fn model_visible_context_pack_payload(payload: &Value) -> Value {
     let (lexical_chunks, semantic_chunks) = compact_retrieval_chunks(&payload["retrieval"]);
+    let chunk_contents_by_path = compact_chunk_contents_by_path(&lexical_chunks, &semantic_chunks);
     json!({
         "context_pack_id": payload["context_pack_id"].clone(),
         "project": {
@@ -313,7 +314,10 @@ pub(crate) fn model_visible_context_pack_payload(payload: &Value) -> Value {
         "visible_projects": compact_visible_projects(&payload["visible_projects"]),
         "decision_trace": compact_decision_trace(&payload["decision_trace"]),
         "retrieval": {
-            "exact_documents": compact_exact_documents(&payload["retrieval"]["exact_documents"]),
+            "exact_documents": compact_exact_documents(
+                &payload["retrieval"]["exact_documents"],
+                &chunk_contents_by_path,
+            ),
             "symbol_hits": compact_symbol_hits(&payload["retrieval"]["symbol_hits"]),
             "lexical_chunks": lexical_chunks,
             "semantic_chunks": semantic_chunks,
@@ -377,18 +381,26 @@ fn compact_semantic_guard(value: &Value) -> Value {
     })
 }
 
-fn compact_exact_documents(value: &Value) -> Vec<Value> {
+fn compact_exact_documents(
+    value: &Value,
+    chunk_contents_by_path: &HashMap<String, Vec<String>>,
+) -> Vec<Value> {
     value
         .as_array()
         .into_iter()
         .flatten()
         .map(|item| {
-            json!({
+            let mut compact = json!({
                 "project_code": item["project_code"].clone(),
                 "relative_path": item["relative_path"].clone(),
-                "snippet": item["snippet"].clone(),
                 "source_kind": item["source_kind"].clone(),
-            })
+            });
+            let duplicate_snippet =
+                exact_document_snippet_covered_by_chunks(item, chunk_contents_by_path);
+            if !duplicate_snippet {
+                compact["snippet"] = item["snippet"].clone();
+            }
+            compact
         })
         .collect()
 }
@@ -398,6 +410,35 @@ fn compact_retrieval_chunks(retrieval: &Value) -> (Vec<Value>, Vec<Value>) {
     let lexical_chunks = compact_chunks(&retrieval["lexical_chunks"], &mut seen_signatures);
     let semantic_chunks = compact_chunks(&retrieval["semantic_chunks"], &mut seen_signatures);
     (lexical_chunks, semantic_chunks)
+}
+
+fn compact_chunk_contents_by_path(
+    lexical_chunks: &[Value],
+    semantic_chunks: &[Value],
+) -> HashMap<String, Vec<String>> {
+    let mut contents_by_path = HashMap::new();
+    for item in lexical_chunks
+        .iter()
+        .chain(semantic_chunks.iter())
+    {
+        let Some(path_signature) = compact_text_path_signature(
+            item["project_code"]
+                .as_str()
+                .or_else(|| item["provenance"]["source_project"].as_str())
+                .unwrap_or_default(),
+            item["relative_path"].as_str().unwrap_or_default(),
+        ) else {
+            continue;
+        };
+        let Some(content) = item["content"].as_str() else {
+            continue;
+        };
+        let entry = contents_by_path.entry(path_signature).or_insert_with(Vec::new);
+        if !entry.iter().any(|existing| existing == content) {
+            entry.push(content.to_string());
+        }
+    }
+    contents_by_path
 }
 
 fn compact_symbol_hits(value: &Value) -> Vec<Value> {
@@ -454,10 +495,45 @@ fn compact_chunk_signature(item: &Value) -> Option<String> {
         .unwrap_or_default();
     let relative_path = item["relative_path"].as_str().unwrap_or_default();
     let content = item["content"].as_str().unwrap_or_default();
-    if project_code.is_empty() && relative_path.is_empty() && content.is_empty() {
+    compact_text_signature(project_code, relative_path, content)
+}
+
+fn exact_document_snippet_covered_by_chunks(
+    item: &Value,
+    chunk_contents_by_path: &HashMap<String, Vec<String>>,
+) -> bool {
+    let Some(path_signature) = compact_text_path_signature(
+        item["project_code"]
+            .as_str()
+            .or_else(|| item["provenance"]["source_project"].as_str())
+            .unwrap_or_default(),
+        item["relative_path"].as_str().unwrap_or_default(),
+    ) else {
+        return false;
+    };
+    let Some(snippet) = item["snippet"].as_str() else {
+        return false;
+    };
+    if snippet.is_empty() {
+        return false;
+    }
+    chunk_contents_by_path
+        .get(&path_signature)
+        .is_some_and(|contents| contents.iter().any(|content| content.contains(snippet)))
+}
+
+fn compact_text_path_signature(project_code: &str, relative_path: &str) -> Option<String> {
+    if project_code.is_empty() && relative_path.is_empty() {
         return None;
     }
-    Some(format!("{project_code}\u{1f}{relative_path}\u{1f}{content}"))
+    Some(format!("{project_code}\u{1f}{relative_path}"))
+}
+
+fn compact_text_signature(project_code: &str, relative_path: &str, text: &str) -> Option<String> {
+    if project_code.is_empty() && relative_path.is_empty() && text.is_empty() {
+        return None;
+    }
+    Some(format!("{project_code}\u{1f}{relative_path}\u{1f}{text}"))
 }
 
 pub fn try_execute_context_pack_fast_cached(
@@ -2626,6 +2702,10 @@ mod tests {
             Some(".amai-continuity/live-handoff.md")
         );
         assert_eq!(
+            compact["retrieval"]["exact_documents"][0]["snippet"].as_str(),
+            Some("handoff snippet")
+        );
+        assert_eq!(
             compact["retrieval"]["lexical_chunks"][0]["content"].as_str(),
             Some("lexical excerpt")
         );
@@ -2735,8 +2815,172 @@ mod tests {
         assert_eq!(compact["retrieval"]["exact_documents"].as_array().unwrap().len(), 1);
         assert_eq!(compact["retrieval"]["lexical_chunks"].as_array().unwrap().len(), 1);
         assert_eq!(compact["retrieval"]["semantic_chunks"].as_array().unwrap().len(), 0);
+        assert!(compact["retrieval"]["exact_documents"][0]
+            .get("snippet")
+            .is_none());
         assert!(compact["decision_trace"]["included"][0].get("reason").is_none());
         assert!(compact["decision_trace"]["not_included"][0].get("reason").is_none());
+        assert!(compact["decision_trace"]["semantic_guard"].get("detail").is_none());
+    }
+
+    #[test]
+    fn model_visible_context_pack_payload_symbol_only_shape_stays_metadata_only() {
+        let payload = json!({
+            "context_pack_id": "ctx-symbol-only",
+            "project": {
+                "code": "art",
+                "display_name": "Art",
+            },
+            "namespace": {
+                "code": "continuity",
+                "display_name": "Continuity"
+            },
+            "query": "symbol_only_navigation_runtime_checkpoint",
+            "effective_retrieval_mode": "local_strict",
+            "visible_projects": [{
+                "project_code": "art",
+                "repo_root": "/home/art/Art"
+            }],
+            "decision_trace": {
+                "scope": {"effective_retrieval_mode": "local_strict"},
+                "included": [{
+                    "strategy": "symbol_hits",
+                    "count": 1,
+                    "reason": "verbose symbol reason"
+                }],
+                "not_included": [],
+                "semantic_guard": {
+                    "abstained": true,
+                    "detail": "verbose semantic abstain detail"
+                }
+            },
+            "retrieval": {
+                "exact_documents": [],
+                "symbol_hits": [{
+                    "project_code": "art",
+                    "relative_path": "src/lib.rs",
+                    "name": "symbol_only_navigation_runtime_checkpoint",
+                    "kind": "function_item",
+                    "metadata": {
+                        "language": "rust",
+                        "visibility": "pub"
+                    },
+                    "provenance": {
+                        "source_project": "art",
+                        "repo_root": "/home/art/Art"
+                    }
+                }],
+                "lexical_chunks": [],
+                "semantic_chunks": []
+            }
+        });
+
+        let compact = model_visible_context_pack_payload(&payload);
+
+        assert_eq!(compact["retrieval"]["exact_documents"].as_array().unwrap().len(), 0);
+        assert_eq!(compact["retrieval"]["lexical_chunks"].as_array().unwrap().len(), 0);
+        assert_eq!(compact["retrieval"]["semantic_chunks"].as_array().unwrap().len(), 0);
+        assert_eq!(compact["retrieval"]["symbol_hits"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            compact["retrieval"]["symbol_hits"][0]["name"].as_str(),
+            Some("symbol_only_navigation_runtime_checkpoint")
+        );
+        assert!(
+            compact["retrieval"]["symbol_hits"][0]
+                .get("metadata")
+                .is_none()
+        );
+        assert!(
+            compact["retrieval"]["symbol_hits"][0]["provenance"]
+                .get("repo_root")
+                .is_none()
+        );
+        assert!(compact["decision_trace"]["included"][0].get("reason").is_none());
+        assert!(compact["decision_trace"]["semantic_guard"].get("detail").is_none());
+    }
+
+    #[test]
+    fn model_visible_context_pack_payload_preserves_unique_exact_snippet_in_hybrid_shape() {
+        let payload = json!({
+            "context_pack_id": "ctx-hybrid-unique-exact",
+            "project": {
+                "code": "art",
+                "display_name": "Art",
+            },
+            "namespace": {
+                "code": "continuity",
+                "display_name": "Continuity"
+            },
+            "query": "Continuity snapshot",
+            "effective_retrieval_mode": "local_plus_related",
+            "visible_projects": [{
+                "project_code": "art",
+                "repo_root": "/home/art/Art"
+            }],
+            "decision_trace": {
+                "scope": {"effective_retrieval_mode": "local_plus_related"},
+                "included": [{
+                    "strategy": "exact_documents",
+                    "count": 1,
+                    "reason": "verbose exact reason"
+                }, {
+                    "strategy": "lexical_chunks",
+                    "count": 1,
+                    "reason": "verbose lexical reason"
+                }],
+                "not_included": [],
+                "semantic_guard": {
+                    "abstained": false,
+                    "detail": "verbose semantic detail"
+                }
+            },
+            "retrieval": {
+                "exact_documents": [{
+                    "project_code": "art",
+                    "relative_path": "docs/continuity.md",
+                    "snippet": "unique exact note only",
+                    "source_kind": "docs"
+                }],
+                "symbol_hits": [],
+                "lexical_chunks": [{
+                    "project_code": "art",
+                    "relative_path": "docs/continuity.md",
+                    "content": "covered chunk text without the exact-only note",
+                    "provenance": {
+                        "source_project": "art",
+                        "repo_root": "/home/art/Art"
+                    }
+                }],
+                "semantic_chunks": [{
+                    "project_code": "art",
+                    "relative_path": "docs/related.md",
+                    "content": "related semantic evidence",
+                    "provenance": {
+                        "source_project": "art",
+                        "repo_root": "/home/art/Art"
+                    }
+                }]
+            }
+        });
+
+        let compact = model_visible_context_pack_payload(&payload);
+
+        assert_eq!(compact["retrieval"]["exact_documents"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            compact["retrieval"]["exact_documents"][0]["snippet"].as_str(),
+            Some("unique exact note only")
+        );
+        assert_eq!(compact["retrieval"]["lexical_chunks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            compact["retrieval"]["lexical_chunks"][0]["content"].as_str(),
+            Some("covered chunk text without the exact-only note")
+        );
+        assert_eq!(compact["retrieval"]["semantic_chunks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            compact["retrieval"]["semantic_chunks"][0]["relative_path"].as_str(),
+            Some("docs/related.md")
+        );
+        assert!(compact["decision_trace"]["included"][0].get("reason").is_none());
         assert!(compact["decision_trace"]["semantic_guard"].get("detail").is_none());
     }
 

@@ -903,6 +903,8 @@ pub struct ObserveRepairTokenLedgerArgs {
     #[arg(long)]
     pub source_kind: Option<String>,
     #[arg(long)]
+    pub correlation_id: Option<String>,
+    #[arg(long)]
     pub rewrite_source_kind: Option<String>,
     #[arg(long)]
     pub repair_reason: Option<String>,

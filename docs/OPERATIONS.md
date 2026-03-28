@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 21:39 MSK
-Ручная сверка guide/docs: 2026-03-27 21:39 MSK
+modified_at: 2026-03-28 15:43 MSK
+Ручная сверка guide/docs: 2026-03-28 15:43 MSK
 
 # Operations
 
@@ -2322,6 +2322,58 @@ report path теперь умеет auto-sync их из stored `ami.context_pack
   `scripts/proof_token_mcp_assistant_generation.sh`
 - conflicting overwrite запрещён:
   если observed value уже materialized, другой attach с новым числом должен fail-closed.
+
+### Proof: `current_live_turn >= 90%`
+
+Для headline `Amai в полном live-turn` acceptance теперь считается не по внутреннему slice,
+а только по `current_live_turn.exact_pair.saved_pct` на том же thread-bound meter, который
+двигает шкалу VS Code.
+
+Операционное определение `all live turns` для этого proof-контура фиксировано через
+representative shapes:
+- `exact-only`
+- `symbol-only`
+- `lexical-only`
+- `semantic-only`
+- `hybrid local_plus_related`
+
+Канонический synthetic proof:
+
+```bash
+./scripts/proof_token_live_turn_savings_matrix.sh
+```
+
+Этот script обязан:
+- materialize-ить временные proof projects и relation;
+- для каждого shape отдельно поднять временный `thread_id` в `~/.codex/state_5.sqlite`;
+- записать временный rollout JSONL с `task_started / token_count / task_complete`;
+- запустить обычный `context pack` под `CODEX_THREAD_ID=<proof-thread>`;
+- проверить именно `observe snapshot -> token_budget_report.current_live_turn`;
+- считать PASS только если для каждого shape отдельно:
+  - `exact_pair_available = true`;
+  - `saved_pct >= 90.0`.
+
+Отдельный real-runtime proof для `Art continuity`:
+
+```bash
+./scripts/proof_token_art_live_turn_savings.sh
+```
+
+Этот script использует тот же runtime contour, но на реальном запросе:
+- `project = art`
+- `namespace = continuity`
+- `query = Continuity snapshot`
+
+Cleanup в обоих scripts обязателен и fail-safe:
+- временная запись thread удаляется из `~/.codex/state_5.sqlite`;
+- временный rollout JSONL удаляется;
+- live token-ledger события после proof не остаются в operator lane:
+  script переписывает их `source_kind` из `live_proof_*` в `proof_*`
+  через `observe repair-token-ledger --source-kind ... --correlation-id ... --rewrite-source-kind ...`.
+
+Именно `correlation_id` здесь является точечным cleanup selector для proof tail:
+без него нельзя честно repair-ить cache-hit context packs, у которых `context_pack_id`
+может совпасть с уже существующим payload.
 
 Если runtime уже сохранил raw Codex rollout JSONL, можно materialize-ить
 `assistant_generation_tokens` и через rollout-backed path:

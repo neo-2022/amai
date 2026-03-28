@@ -7124,6 +7124,7 @@ pub struct TokenLedgerRepairRequest {
     pub project_prefix: Option<String>,
     pub namespace: Option<String>,
     pub source_kind: Option<String>,
+    pub correlation_id: Option<String>,
     pub rewrite_source_kind: Option<String>,
     pub repair_reason: Option<String>,
 }
@@ -7134,6 +7135,7 @@ impl TokenLedgerRepairRequest {
             || self.project_prefix.is_some()
             || self.namespace.is_some()
             || self.source_kind.is_some()
+            || self.correlation_id.is_some()
     }
 }
 
@@ -12404,6 +12406,13 @@ fn matches_token_ledger_repair_selector(
         .source_kind
         .as_deref()
         .is_some_and(|expected| event.source_kind != expected)
+    {
+        return false;
+    }
+    if request
+        .correlation_id
+        .as_deref()
+        .is_some_and(|expected| event.correlation_id != expected)
     {
         return false;
     }
@@ -24476,6 +24485,7 @@ effective_to_epoch_ms = 2000
                 project_prefix: Some("memory_eval".to_string()),
                 namespace: Some("continuity".to_string()),
                 source_kind: Some("live_context_pack".to_string()),
+                correlation_id: Some("corr-1".to_string()),
                 rewrite_source_kind: Some("verify_memory_matrix_context_pack".to_string()),
                 repair_reason: None,
             },
@@ -24489,11 +24499,27 @@ effective_to_epoch_ms = 2000
                 project_prefix: Some("project_alpha".to_string()),
                 namespace: Some("continuity".to_string()),
                 source_kind: Some("live_context_pack".to_string()),
+                correlation_id: Some("corr-1".to_string()),
                 rewrite_source_kind: Some("verify_memory_matrix_context_pack".to_string()),
                 repair_reason: None,
             },
         );
         assert!(!mismatched);
+
+        let mismatched_correlation = matches_token_ledger_repair_selector(
+            &event,
+            &TokenLedgerRepairRequest {
+                limit: None,
+                project: None,
+                project_prefix: Some("memory_eval".to_string()),
+                namespace: Some("continuity".to_string()),
+                source_kind: Some("live_context_pack".to_string()),
+                correlation_id: Some("corr-2".to_string()),
+                rewrite_source_kind: Some("verify_memory_matrix_context_pack".to_string()),
+                repair_reason: None,
+            },
+        );
+        assert!(!mismatched_correlation);
     }
 
     #[test]

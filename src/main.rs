@@ -477,6 +477,7 @@ async fn main() -> Result<()> {
                         project_prefix: args.project_prefix,
                         namespace: args.namespace,
                         source_kind: args.source_kind,
+                        correlation_id: args.correlation_id,
                         rewrite_source_kind: args.rewrite_source_kind,
                         repair_reason: args.repair_reason,
                     },
