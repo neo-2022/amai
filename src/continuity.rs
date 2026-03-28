@@ -80,11 +80,6 @@ struct ContinuityThreadIndexEntry {
 
 const MAX_SEARCHABLE_CONTINUITY_BYTES: usize = 12_000;
 const STARTUP_RUNTIME_STATE_ARTIFACT_VERSION: &str = "workspace-startup-runtime-state-v4";
-const STARTUP_TASK_TREE_PREVIEW_LIMIT: usize = 2;
-const STARTUP_LEDGER_ENTRY_PREVIEW_LIMIT: usize = 2;
-const STARTUP_LEDGER_QUEUE_PREVIEW_LIMIT: usize = 2;
-const STARTUP_LEDGER_ACTIVE_FILE_PREVIEW_LIMIT: usize = 2;
-const STARTUP_LEDGER_NOTES_PREVIEW_LIMIT: usize = 2;
 
 struct ContinuityStartupContext {
     project: ProjectRecord,
@@ -279,32 +274,6 @@ fn compact_project_task_tree_for_startup(tree: &Value) -> Value {
     };
     let nodes = tree["nodes"].as_array().cloned().unwrap_or_default();
     let edges = tree["edges"].as_array().cloned().unwrap_or_default();
-    let nodes_preview = nodes
-        .iter()
-        .take(STARTUP_TASK_TREE_PREVIEW_LIMIT)
-        .map(|node| {
-            json!({
-                "task_id": node["task_id"].clone(),
-                "task_role": node["task_role"].clone(),
-                "task_state": node["task_state"].clone(),
-                "resume_state": node["resume_state"].clone(),
-                "headline": node["headline"].clone(),
-                "next_step": node["next_step"].clone(),
-            })
-        })
-        .collect::<Vec<_>>();
-    let edges_preview = edges
-        .iter()
-        .take(STARTUP_TASK_TREE_PREVIEW_LIMIT)
-        .map(|edge| {
-            json!({
-                "from_task_id": edge["from_task_id"].clone(),
-                "to_task_id": edge["to_task_id"].clone(),
-                "relation": edge["relation"].clone(),
-                "priority_rank": edge["priority_rank"].clone(),
-            })
-        })
-        .collect::<Vec<_>>();
     json!({
         "tree_version": tree["tree_version"].clone(),
         "project_code": tree["project_code"].clone(),
@@ -314,33 +283,10 @@ fn compact_project_task_tree_for_startup(tree: &Value) -> Value {
         "pending_return_count": tree["pending_return_count"].clone(),
         "nodes_total": nodes.len(),
         "edges_total": edges.len(),
-        "nodes_preview": nodes_preview,
-        "edges_preview": edges_preview,
-        "preview_truncated": nodes.len() > STARTUP_TASK_TREE_PREVIEW_LIMIT
-            || edges.len() > STARTUP_TASK_TREE_PREVIEW_LIMIT,
         "summary_only": true,
         "full_shape_preserved_in_working_state_restore": tree_object.contains_key("nodes")
             && tree_object.contains_key("edges"),
     })
-}
-
-fn compact_pending_return_queue_for_startup(queue: &Value) -> Value {
-    Value::Array(
-        queue
-            .as_array()
-            .into_iter()
-            .flatten()
-            .take(STARTUP_LEDGER_QUEUE_PREVIEW_LIMIT)
-            .map(|item| {
-                json!({
-                    "headline": item["headline"].clone(),
-                    "next_step": item["next_step"].clone(),
-                    "resume_state": item["resume_state"].clone(),
-                    "queued_at_epoch_ms": item["queued_at_epoch_ms"].clone(),
-                })
-            })
-            .collect(),
-    )
 }
 
 fn compact_project_task_ledger_for_startup(ledger: &Value) -> Value {
@@ -348,40 +294,14 @@ fn compact_project_task_ledger_for_startup(ledger: &Value) -> Value {
         return Value::Null;
     };
     let entries = ledger["entries"].as_array().cloned().unwrap_or_default();
-    let entries_preview = entries
+    let active_entries = entries
         .iter()
-        .take(STARTUP_LEDGER_ENTRY_PREVIEW_LIMIT)
-        .map(|entry| {
-            let active_files = entry["active_files"].as_array().cloned().unwrap_or_default();
-            let notes = entry["materialized_notes"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            let queue = entry["pending_return_queue"].as_array().cloned().unwrap_or_default();
-            json!({
-                "headline": entry["headline"].clone(),
-                "next_step": entry["next_step"].clone(),
-                "resume_state": entry["resume_state"].clone(),
-                "task_role": entry["task_role"].clone(),
-                "task_state": entry["task_state"].clone(),
-                "recorded_at_epoch_ms": entry["recorded_at_epoch_ms"].clone(),
-                "task_id": entry["task_id"].clone(),
-                "agent_scope": entry["agent_scope"].clone(),
-                "active_files_count": active_files.len(),
-                "active_files_preview": active_files
-                    .into_iter()
-                    .take(STARTUP_LEDGER_ACTIVE_FILE_PREVIEW_LIMIT)
-                    .collect::<Vec<_>>(),
-                "materialized_notes_count": notes.len(),
-                "materialized_notes_preview": notes
-                    .into_iter()
-                    .take(STARTUP_LEDGER_NOTES_PREVIEW_LIMIT)
-                    .collect::<Vec<_>>(),
-                "pending_return_queue_count": queue.len(),
-                "pending_return_queue_preview": compact_pending_return_queue_for_startup(&Value::Array(queue)),
-            })
-        })
-        .collect::<Vec<_>>();
+        .filter(|entry| entry["task_role"].as_str() == Some("active"))
+        .count();
+    let pending_return_entries = entries
+        .iter()
+        .filter(|entry| entry["task_role"].as_str() == Some("pending_return"))
+        .count();
     json!({
         "ledger_version": ledger["ledger_version"].clone(),
         "project_code": ledger["project_code"].clone(),
@@ -391,8 +311,8 @@ fn compact_project_task_ledger_for_startup(ledger: &Value) -> Value {
         "persistence_state": ledger["persistence_state"].clone(),
         "storage_lane": ledger["storage_lane"].clone(),
         "entries_count": entries.len(),
-        "entries_preview": entries_preview,
-        "preview_truncated": entries.len() > STARTUP_LEDGER_ENTRY_PREVIEW_LIMIT,
+        "active_entries_count": active_entries,
+        "pending_return_entries_count": pending_return_entries,
         "summary_only": true,
         "full_shape_preserved_in_working_state_restore": ledger_object.contains_key("entries"),
     })
@@ -6423,13 +6343,14 @@ mod tests {
             json!(5)
         );
         assert_eq!(
-            artifact["continuity_startup_summary"]["project_task_tree"]["nodes_preview"]
-                .as_array()
-                .map(|items| items.len()),
-            Some(2)
+            artifact["continuity_startup_summary"]["project_task_tree"]["edges_total"],
+            json!(5)
         );
+        assert!(artifact["continuity_startup_summary"]["project_task_tree"]["nodes_preview"].is_null());
+        assert!(artifact["continuity_startup_summary"]["project_task_tree"]["edges_preview"].is_null());
         assert_eq!(
-            artifact["continuity_startup_summary"]["project_task_tree"]["preview_truncated"],
+            artifact["continuity_startup_summary"]["project_task_tree"]
+                ["full_shape_preserved_in_working_state_restore"],
             json!(true)
         );
         assert_eq!(
@@ -6449,20 +6370,17 @@ mod tests {
             json!(4)
         );
         assert_eq!(
-            artifact["continuity_startup_summary"]["project_task_ledger"]["entries_preview"]
-                .as_array()
-                .map(|items| items.len()),
-            Some(2)
+            artifact["continuity_startup_summary"]["project_task_ledger"]["active_entries_count"],
+            json!(1)
         );
         assert_eq!(
-            artifact["continuity_startup_summary"]["project_task_ledger"]["entries_preview"][0]
-                ["pending_return_queue_preview"]
-                .as_array()
-                .map(|items| items.len()),
-            Some(2)
+            artifact["continuity_startup_summary"]["project_task_ledger"]["pending_return_entries_count"],
+            json!(1)
         );
+        assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["entries_preview"].is_null());
         assert_eq!(
-            artifact["continuity_startup_summary"]["project_task_ledger"]["preview_truncated"],
+            artifact["continuity_startup_summary"]["project_task_ledger"]
+                ["full_shape_preserved_in_working_state_restore"],
             json!(true)
         );
         assert_eq!(

@@ -1742,24 +1742,24 @@ fn summarize_pending_return_queue(value: &Value) -> Option<String> {
     let items = value.as_array()?;
     let rendered = items
         .iter()
-        .take(3)
         .filter_map(|item| {
             let headline = item["headline"].as_str().unwrap_or_default();
-            let next_step = item["next_step"].as_str().unwrap_or_default();
             if !is_meaningful_pending_return_headline(headline) {
                 None
-            } else if next_step.is_empty() {
-                Some(headline.to_string())
             } else {
-                Some(format!("{headline} -> {next_step}"))
+                Some(collapse_human_text(headline, 72))
             }
         })
-        .collect::<Vec<_>>()
-        .join(" || ");
+        .collect::<Vec<_>>();
     if rendered.is_empty() {
         None
     } else {
-        Some(rendered)
+        let more = rendered.len().saturating_sub(1);
+        let mut summary = format!("pending_return({}): {}", rendered.len(), rendered[0]);
+        if more > 0 {
+            summary.push_str(&format!("; +{more} more"));
+        }
+        Some(summary)
     }
 }
 
@@ -1863,27 +1863,22 @@ fn summarize_project_task_tree(value: &Value) -> Option<String> {
         .filter(|item| item["task_role"].as_str() == Some("pending_return"))
         .collect::<Vec<_>>();
     if pending.is_empty() {
-        return Some(format!("active: {active_headline}"));
+        return Some(format!("active: {}", collapse_human_text(active_headline, 72)));
     }
-    let pending_summary = pending
+    let pending_headline = pending
         .iter()
-        .take(3)
-        .filter_map(|item| {
-            let headline = item["headline"].as_str().unwrap_or_default();
-            let next_step = item["next_step"].as_str().unwrap_or_default();
-            if headline.is_empty() {
-                None
-            } else if next_step.is_empty() {
-                Some(headline.to_string())
-            } else {
-                Some(format!("{headline} -> {next_step}"))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" || ");
+        .filter_map(|item| item["headline"].as_str())
+        .find(|headline| !headline.is_empty())
+        .map(|headline| collapse_human_text(headline, 72))
+        .unwrap_or_else(|| "ещё нет данных".to_string());
+    let more = pending.len().saturating_sub(1);
+    let mut pending_summary = format!("pending_return({}): {pending_headline}", pending.len());
+    if more > 0 {
+        pending_summary.push_str(&format!("; +{more} more"));
+    }
     Some(format!(
-        "active: {active_headline}; pending_return({}): {pending_summary}",
-        pending.len()
+        "active: {}; {pending_summary}",
+        collapse_human_text(active_headline, 72)
     ))
 }
 
@@ -2042,7 +2037,8 @@ fn summarize_project_task_ledger(value: &Value) -> Option<String> {
         .filter(|item| item["task_role"].as_str() == Some("historical_handoff"))
         .count();
     Some(format!(
-        "active: {active_headline}; pending_return({pending}); historical_handoffs({historical})"
+        "active: {}; pending_return({pending}); historical_handoffs({historical})",
+        collapse_human_text(active_headline, 72)
     ))
 }
 
@@ -2052,11 +2048,10 @@ fn summarize_execctl_active_lease(value: &Value) -> Option<String> {
         .filter(|item| !item.is_empty())
         .unwrap_or("unknown_owner");
     let headline = value["headline"].as_str().filter(|item| !item.is_empty())?;
-    let next_step = value["next_step"]
-        .as_str()
-        .filter(|item| !item.is_empty())
-        .unwrap_or("ещё нет данных");
-    Some(format!("{owner_state}: {headline} -> {next_step}"))
+    Some(format!(
+        "{owner_state}: {}",
+        collapse_human_text(headline, 72)
+    ))
 }
 
 fn overlay_durable_project_task_ledger(
@@ -2372,13 +2367,10 @@ fn summarize_execctl_resume_contract(value: &Value) -> Option<String> {
         .as_str()
         .filter(|item| !item.is_empty())
         .unwrap_or("ещё нет данных");
-    let next_step = required["next_step"]
-        .as_str()
-        .filter(|item| !item.is_empty())
-        .unwrap_or("ещё нет данных");
     let count = value["pending_return_count"].as_u64().unwrap_or(0);
     Some(format!(
-        "return_required({count}): {headline} -> {next_step}"
+        "return_required({count}): {}",
+        collapse_human_text(headline, 72)
     ))
 }
 
@@ -2797,11 +2789,10 @@ fn summarize_startup_next_action(value: &Value) -> Option<String> {
         .as_str()
         .filter(|item| !item.is_empty())
         .unwrap_or("ещё нет данных");
-    let next_step = value["next_step"]
-        .as_str()
-        .filter(|item| !item.is_empty())
-        .unwrap_or("ещё нет данных");
-    Some(format!("{action_kind}: {headline} -> {next_step}"))
+    Some(format!(
+        "{action_kind}: {}",
+        collapse_human_text(headline, 72)
+    ))
 }
 
 fn normalize_next_step_hint(value: &str) -> String {
