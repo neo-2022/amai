@@ -493,7 +493,7 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
     if args.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&build_startup_runtime_state_cli_json(
+            serde_json::to_string(&build_startup_runtime_state_cli_json(
                 &audit,
                 artifact_payload.as_ref(),
             ))?
@@ -1402,7 +1402,7 @@ fn persist_startup_runtime_state_artifact(repo_root: &Path, payload: &Value) -> 
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let artifact = build_startup_runtime_state_artifact(repo_root, payload, now_epoch_ms()?)?;
-    let content = serde_json::to_string_pretty(&artifact)
+    let content = serde_json::to_string(&artifact)
         .context("failed to serialize startup runtime state artifact")?;
     fs::write(&output_path, content)
         .with_context(|| format!("failed to write {}", output_path.display()))?;

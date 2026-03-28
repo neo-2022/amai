@@ -2640,7 +2640,7 @@ fn render_startup_contract_artifact(repo_root: &Path) -> Result<(String, String)
         },
         "startup_contract": contract
     });
-    let content = serde_json::to_string_pretty(&payload)
+    let content = serde_json::to_string(&payload)
         .context("failed to serialize startup contract artifact")?;
     Ok((content, startup_contract_sha256))
 }
@@ -2698,7 +2698,7 @@ fn render_startup_agent_contract_artifact(repo_root: &Path) -> Result<String> {
         },
         "fail_closed_conditions": contract["fail_closed_conditions"].clone()
     });
-    serde_json::to_string_pretty(&payload)
+    serde_json::to_string(&payload)
         .context("failed to serialize startup agent contract artifact")
 }
 

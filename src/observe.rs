@@ -249,7 +249,7 @@ pub async fn print_client_budget_guard(cfg: &AppConfig, enforce_reply_gate: bool
     maybe_cleanup_local_artifacts().await?;
     let snapshot = collect_snapshot_preview(cfg).await?;
     let guard = dashboard::current_session_budget_guard(&snapshot);
-    println!("{}", serde_json::to_string_pretty(&guard)?);
+    println!("{}", serde_json::to_string(&guard)?);
     if enforce_reply_gate && client_budget_guard_blocks_reply(&guard) {
         let action_kind = guard["reply_execution_gate"]["action_kind"]
             .as_str()
@@ -275,7 +275,7 @@ pub async fn print_client_budget_gate(cfg: &AppConfig, enforce_reply_gate: bool)
     let payload = json!({
         "client_budget_reply_gate": compact_client_budget_gate_payload(&guard)
     });
-    println!("{}", serde_json::to_string_pretty(&payload)?);
+    println!("{}", serde_json::to_string(&payload)?);
     if enforce_reply_gate && client_budget_guard_blocks_reply(&payload["client_budget_reply_gate"]) {
         let action_kind = payload["client_budget_reply_gate"]["reply_execution_gate"]["action_kind"]
             .as_str()
@@ -298,7 +298,7 @@ pub async fn print_client_budget_root_cause(cfg: &AppConfig) -> Result<()> {
     maybe_cleanup_local_artifacts().await?;
     let snapshot = collect_snapshot_preview(cfg).await?;
     let payload = dashboard::client_budget_root_cause_payload(&snapshot);
-    println!("{}", serde_json::to_string_pretty(&payload)?);
+    println!("{}", serde_json::to_string(&payload)?);
     Ok(())
 }
 
