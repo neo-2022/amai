@@ -18454,6 +18454,10 @@ fn render_naive_scope_prompt(payload: &Value, scope: &NaiveScope) -> String {
 }
 
 pub(crate) fn render_context_pack_prompt(payload: &Value) -> String {
+    if payload["cache_reuse_reference"]["state"].as_str() == Some("same_thread_context_pack_replay")
+    {
+        return render_same_thread_cache_reuse_prompt(payload);
+    }
     let mut excerpt_paths = HashSet::new();
     let mut exact_lines = Vec::new();
     let mut symbol_lines = Vec::new();
@@ -18559,6 +18563,57 @@ pub(crate) fn render_context_pack_prompt(payload: &Value) -> String {
     prompt
 }
 
+fn render_same_thread_cache_reuse_prompt(payload: &Value) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("Q:");
+    prompt.push_str(payload["query"].as_str().unwrap_or_default());
+    prompt.push('\n');
+    prompt.push_str("M:");
+    prompt.push_str(
+        payload["effective_retrieval_mode"]
+            .as_str()
+            .unwrap_or_default(),
+    );
+    prompt.push('\n');
+    prompt.push_str("P\n");
+    for project in payload["visible_projects"].as_array().into_iter().flatten() {
+        prompt.push('[');
+        prompt.push_str(project["project_code"].as_str().unwrap_or_default());
+        prompt.push_str("] ");
+        prompt.push_str(project["repo_root"].as_str().unwrap_or_default());
+        prompt.push('\n');
+    }
+    prompt.push('\n');
+
+    let mut reuse_lines = Vec::new();
+    if let Some(context_pack_id) = payload["cache_reuse_reference"]["source_context_pack_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        reuse_lines.push(format!("ctx={context_pack_id}"));
+    }
+    let counts = &payload["cache_reuse_reference"]["retrieval_counts"];
+    reuse_lines.push(format!(
+        "counts docs={} symbols={} lexical={} semantic={}",
+        counts["exact_documents"].as_u64().unwrap_or(0),
+        counts["symbol_hits"].as_u64().unwrap_or(0),
+        counts["lexical_chunks"].as_u64().unwrap_or(0),
+        counts["semantic_chunks"].as_u64().unwrap_or(0),
+    ));
+    for path in payload["cache_reuse_reference"]["active_files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .take(6)
+    {
+        reuse_lines.push(format!("file={path}"));
+    }
+    reuse_lines.push("reuse=prior_full_payload_same_thread".to_string());
+    push_compact_lines(&mut prompt, "R", &reuse_lines);
+    prompt
+}
+
 fn push_compact_lines(prompt: &mut String, title: &str, lines: &[String]) {
     prompt.push_str(title);
     prompt.push('\n');
@@ -18623,7 +18678,8 @@ mod tests {
         parse_infra_cost_profile_file, parse_rate_card_file, parse_snapshot_event,
         provider_rate_card_default_path, provider_usage_default_path, reconcile_followup_recovery,
         repair_legacy_token_event_payload, report_contract_json, resolve_session_id,
-        rewrite_token_ledger_source_kind_payload, summarize_events, suppress_shadowed_live_events,
+        render_context_pack_prompt, rewrite_token_ledger_source_kind_payload, summarize_events,
+        suppress_shadowed_live_events,
     };
     use crate::postgres::{ObservabilitySnapshotKindSummary, ObservabilitySnapshotRecord};
     use serde_json::json;
@@ -25992,6 +26048,40 @@ effective_to_epoch_ms = 2000
         let tokens = count_cli_context_pack_output_overhead_tokens(&measurement, output_json, 3)
             .expect("token count");
         assert!(tokens > 0);
+    }
+
+    #[test]
+    fn render_context_pack_prompt_compacts_same_thread_cache_reuse_payload() {
+        let prompt = render_context_pack_prompt(&json!({
+            "query": "Continuity snapshot",
+            "effective_retrieval_mode": "local_strict",
+            "visible_projects": [{
+                "project_code": "art",
+                "repo_root": "/home/art/Art"
+            }],
+            "retrieval": {
+                "exact_documents": [],
+                "symbol_hits": [],
+                "lexical_chunks": [],
+                "semantic_chunks": []
+            },
+            "cache_reuse_reference": {
+                "state": "same_thread_context_pack_replay",
+                "source_context_pack_id": "ctx-pack-1",
+                "active_files": ["docs/continuity.md", "src/lib.rs"],
+                "retrieval_counts": {
+                    "exact_documents": 1,
+                    "symbol_hits": 1,
+                    "lexical_chunks": 2,
+                    "semantic_chunks": 0
+                }
+            }
+        }));
+
+        assert!(prompt.contains("ctx=ctx-pack-1"));
+        assert!(prompt.contains("file=docs/continuity.md"));
+        assert!(prompt.contains("reuse=prior_full_payload_same_thread"));
+        assert!(!prompt.contains("lexical excerpt"));
     }
 
     fn unique_test_repo_root(name: &str) -> PathBuf {

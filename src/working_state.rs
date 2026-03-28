@@ -1501,6 +1501,20 @@ fn extract_active_files_from_context_pack(payload: &Value) -> Vec<String> {
             }
         }
     }
+    if active_files.is_empty() {
+        for path in payload["cache_reuse_reference"]["active_files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if let Some(path) = path.as_str().filter(|value| !value.is_empty()) {
+                push_unique(&mut active_files, path.to_string());
+            }
+            if active_files.len() >= MAX_ACTIVE_FILES {
+                return active_files;
+            }
+        }
+    }
     active_files
 }
 
@@ -3099,6 +3113,32 @@ mod tests {
             paths
                 .iter()
                 .any(|path| path.contains("/home/art/agent-memory-index/src/token_budget.rs"))
+        );
+    }
+
+    #[test]
+    fn extract_active_files_from_context_pack_falls_back_to_cache_reuse_reference() {
+        let payload = json!({
+            "retrieval": {
+                "exact_documents": [],
+                "symbol_hits": [],
+                "lexical_chunks": [],
+                "semantic_chunks": []
+            },
+            "cache_reuse_reference": {
+                "state": "same_thread_context_pack_replay",
+                "active_files": [
+                    "docs/continuity.md",
+                    "src/lib.rs"
+                ]
+            }
+        });
+
+        let active_files = extract_active_files_from_context_pack(&payload);
+
+        assert_eq!(
+            active_files,
+            vec!["docs/continuity.md".to_string(), "src/lib.rs".to_string()]
         );
     }
 

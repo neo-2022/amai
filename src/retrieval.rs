@@ -1,4 +1,5 @@
 use crate::cli::ContextPackArgs;
+use crate::codex_threads;
 use crate::config::AppConfig;
 use crate::edge_cache;
 use crate::postgres::{
@@ -139,6 +140,8 @@ static LOCAL_CONTEXT_PACK_CACHE: OnceLock<RwLock<HashMap<String, LocalContextPac
 static LOCAL_FAST_CONTEXT_PACK_CACHE: OnceLock<
     RwLock<HashMap<FastCacheKey, LocalContextPackEntry>>,
 > = OnceLock::new();
+static THREAD_CONTEXT_PACK_DELIVERY_CACHE: OnceLock<RwLock<HashMap<String, HashSet<String>>>> =
+    OnceLock::new();
 
 pub async fn build_context_pack(
     cfg: &AppConfig,
@@ -148,8 +151,11 @@ pub async fn build_context_pack(
     let mut prepared = prepare_context_pack(cfg, db, args).await?;
     ensure_context_pack_persisted(cfg, db, args, &mut prepared).await?;
     cache_context_pack_entry(cfg, args, &prepared, true)?;
-    record_context_pack_token_budget_event(db, prepared.payload.as_ref(), args).await?;
-    let compact_output = model_visible_context_pack_payload(prepared.payload.as_ref());
+    let caller_payload =
+        materialize_context_pack_caller_payload(db, args, prepared.payload.as_ref(), &prepared.stats)
+            .await?;
+    record_context_pack_token_budget_event(db, &caller_payload, args).await?;
+    let compact_output = model_visible_context_pack_payload(&caller_payload);
     let compact_output_json = serde_json::to_string(&compact_output)?;
     let _ = token_budget::observe_cli_context_pack_tool_overhead(
         db,
@@ -225,10 +231,16 @@ pub async fn execute_context_pack_capture_with_options(
     track_token_usage: bool,
 ) -> Result<ContextPackResult> {
     if let Some(cached) = try_execute_context_pack_fast_cached(cfg, args, persist)? {
+        let payload =
+            materialize_context_pack_caller_payload(db, args, &cached.payload, &cached.stats)
+                .await?;
         if track_token_usage {
-            record_context_pack_token_budget_event(db, &cached.payload, args).await?;
+            record_context_pack_token_budget_event(db, &payload, args).await?;
         }
-        return Ok(cached);
+        return Ok(ContextPackResult {
+            payload,
+            stats: cached.stats,
+        });
     }
     let mut prepared = prepare_context_pack(cfg, db, args).await?;
     if persist {
@@ -236,11 +248,14 @@ pub async fn execute_context_pack_capture_with_options(
     }
     let durably_persisted = persist || prepared.durably_persisted;
     cache_context_pack_entry(cfg, args, &prepared, durably_persisted)?;
+    let payload =
+        materialize_context_pack_caller_payload(db, args, prepared.payload.as_ref(), &prepared.stats)
+            .await?;
     if track_token_usage {
-        record_context_pack_token_budget_event(db, prepared.payload.as_ref(), args).await?;
+        record_context_pack_token_budget_event(db, &payload, args).await?;
     }
     Ok(ContextPackResult {
-        payload: prepared.payload.as_ref().clone(),
+        payload,
         stats: prepared.stats,
     })
 }
@@ -256,7 +271,230 @@ async fn record_context_pack_token_budget_event(
     let token_budget_payload = with_whole_cycle_observed_overrides(payload, args);
     token_budget::record_context_pack_event(db, &token_budget_payload, &args.token_source_kind)
         .await?;
-    working_state::record_context_pack_event(db, payload).await
+    working_state::record_context_pack_event(db, payload).await?;
+    remember_thread_context_pack_delivery(payload)?;
+    Ok(())
+}
+
+async fn materialize_context_pack_caller_payload(
+    db: &Client,
+    args: &ContextPackArgs,
+    payload: &Value,
+    stats: &ContextPackStats,
+) -> Result<Value> {
+    let payload = if let Some(compact) = same_thread_cache_reuse_payload_if_needed(db, payload, stats).await? {
+        compact
+    } else {
+        payload.clone()
+    };
+    Ok(with_whole_cycle_observed_overrides(&payload, args))
+}
+
+async fn same_thread_cache_reuse_payload_if_needed(
+    db: &Client,
+    payload: &Value,
+    stats: &ContextPackStats,
+) -> Result<Option<Value>> {
+    if !stats.cache_hit {
+        return Ok(None);
+    }
+    let Some(thread_id) = codex_threads::current_thread_id() else {
+        return Ok(None);
+    };
+    let Some(context_pack_id) = payload["context_pack_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if !same_thread_context_pack_previously_delivered(db, &thread_id, context_pack_id).await? {
+        return Ok(None);
+    }
+    Ok(Some(build_same_thread_cache_reuse_payload(payload, &thread_id)))
+}
+
+async fn same_thread_context_pack_previously_delivered(
+    db: &Client,
+    thread_id: &str,
+    context_pack_id: &str,
+) -> Result<bool> {
+    if thread_context_pack_delivery_seen(thread_id, context_pack_id)? {
+        return Ok(true);
+    }
+    let row = db
+        .query_opt(
+            r#"
+            SELECT 1
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = 'working_state_event'
+              AND payload #>> ARRAY['working_state_event', 'event_kind'] = 'retrieval_context_pack'
+              AND payload #>> ARRAY['working_state_event', 'thread_id'] = $1
+              AND payload #>> ARRAY['working_state_event', 'context_pack_id'] = $2
+            LIMIT 1
+            "#,
+            &[&thread_id, &context_pack_id],
+        )
+        .await
+        .context("failed to detect previous same-thread context-pack delivery")?;
+    let delivered = row.is_some();
+    if delivered {
+        remember_thread_context_pack_delivery_pair(thread_id, context_pack_id)?;
+    }
+    Ok(delivered)
+}
+
+fn build_same_thread_cache_reuse_payload(payload: &Value, thread_id: &str) -> Value {
+    let active_files = context_pack_active_files(payload, 6);
+    json!({
+        "context_pack_id": payload["context_pack_id"].clone(),
+        "project": payload["project"].clone(),
+        "namespace": payload["namespace"].clone(),
+        "query": payload["query"].clone(),
+        "effective_retrieval_mode": payload["effective_retrieval_mode"].clone(),
+        "visible_projects": payload["visible_projects"].clone(),
+        "decision_trace": payload["decision_trace"].clone(),
+        "workspace_graph": payload["workspace_graph"].clone(),
+        "retrieval_runtime": payload["retrieval_runtime"].clone(),
+        "whole_cycle_observed": payload["whole_cycle_observed"].clone(),
+        "retrieval": {
+            "exact_documents": metadata_only_exact_documents(&payload["retrieval"]["exact_documents"]),
+            "symbol_hits": compact_symbol_hits(&payload["retrieval"]["symbol_hits"]),
+            "lexical_chunks": metadata_only_chunk_refs(&payload["retrieval"]["lexical_chunks"]),
+            "semantic_chunks": metadata_only_chunk_refs(&payload["retrieval"]["semantic_chunks"]),
+        },
+        "cache_reuse_reference": {
+            "state": "same_thread_context_pack_replay",
+            "thread_id": thread_id,
+            "source_context_pack_id": payload["context_pack_id"].clone(),
+            "active_files": active_files,
+            "retrieval_counts": {
+                "exact_documents": payload["retrieval"]["exact_documents"].as_array().map_or(0, Vec::len),
+                "symbol_hits": payload["retrieval"]["symbol_hits"].as_array().map_or(0, Vec::len),
+                "lexical_chunks": payload["retrieval"]["lexical_chunks"].as_array().map_or(0, Vec::len),
+                "semantic_chunks": payload["retrieval"]["semantic_chunks"].as_array().map_or(0, Vec::len),
+            },
+            "note": "Полный текст этого context pack уже был доставлен раньше в этом thread; этот повторный cache-hit даёт только короткую карту файлов и символов вместо повторной пересылки того же текста."
+        }
+    })
+}
+
+fn metadata_only_exact_documents(value: &Value) -> Vec<Value> {
+    let mut seen_paths = HashSet::new();
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let signature = compact_text_path_signature(
+                item["project_code"]
+                    .as_str()
+                    .or_else(|| item["provenance"]["source_project"].as_str())
+                    .unwrap_or_default(),
+                item["relative_path"].as_str().unwrap_or_default(),
+            )?;
+            if !seen_paths.insert(signature) {
+                return None;
+            }
+            Some(json!({
+                "project_code": item["project_code"].clone(),
+                "relative_path": item["relative_path"].clone(),
+                "source_kind": item["source_kind"].clone(),
+            }))
+        })
+        .collect()
+}
+
+fn metadata_only_chunk_refs(value: &Value) -> Vec<Value> {
+    let mut seen_paths = HashSet::new();
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let signature = compact_text_path_signature(
+                item["project_code"]
+                    .as_str()
+                    .or_else(|| item["provenance"]["source_project"].as_str())
+                    .unwrap_or_default(),
+                item["relative_path"].as_str().unwrap_or_default(),
+            )?;
+            if !seen_paths.insert(signature) {
+                return None;
+            }
+            Some(json!({
+                "project_code": item["project_code"].clone(),
+                "relative_path": item["relative_path"].clone(),
+                "provenance": {
+                    "source_project": item["provenance"]["source_project"].clone(),
+                }
+            }))
+        })
+        .collect()
+}
+
+fn context_pack_active_files(payload: &Value, limit: usize) -> Vec<String> {
+    let mut active_files = Vec::new();
+    for key in [
+        "exact_documents",
+        "symbol_hits",
+        "lexical_chunks",
+        "semantic_chunks",
+    ] {
+        for item in payload["retrieval"][key].as_array().into_iter().flatten() {
+            let Some(path) = item["relative_path"]
+                .as_str()
+                .or_else(|| item["provenance"]["path"].as_str())
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if !active_files.iter().any(|existing| existing == path) {
+                active_files.push(path.to_string());
+            }
+            if active_files.len() >= limit {
+                return active_files;
+            }
+        }
+    }
+    active_files
+}
+
+fn thread_context_pack_delivery_seen(thread_id: &str, context_pack_id: &str) -> Result<bool> {
+    let cache = THREAD_CONTEXT_PACK_DELIVERY_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    let guard = cache
+        .read()
+        .map_err(|_| anyhow!("thread context-pack delivery cache lock poisoned"))?;
+    Ok(guard
+        .get(thread_id)
+        .is_some_and(|entries| entries.contains(context_pack_id)))
+}
+
+fn remember_thread_context_pack_delivery(payload: &Value) -> Result<()> {
+    let Some(thread_id) = codex_threads::current_thread_id() else {
+        return Ok(());
+    };
+    let Some(context_pack_id) = payload["context_pack_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    remember_thread_context_pack_delivery_pair(&thread_id, context_pack_id)
+}
+
+fn remember_thread_context_pack_delivery_pair(
+    thread_id: &str,
+    context_pack_id: &str,
+) -> Result<()> {
+    let cache = THREAD_CONTEXT_PACK_DELIVERY_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    let mut guard = cache
+        .write()
+        .map_err(|_| anyhow!("thread context-pack delivery cache lock poisoned"))?;
+    guard
+        .entry(thread_id.to_string())
+        .or_insert_with(HashSet::new)
+        .insert(context_pack_id.to_string());
+    Ok(())
 }
 
 fn with_whole_cycle_observed_overrides(payload: &Value, args: &ContextPackArgs) -> Value {
@@ -299,6 +537,9 @@ fn with_whole_cycle_observed_overrides(payload: &Value, args: &ContextPackArgs) 
 }
 
 pub(crate) fn model_visible_context_pack_payload(payload: &Value) -> Value {
+    if is_same_thread_cache_reuse_payload(payload) {
+        return model_visible_same_thread_cache_reuse_payload(payload);
+    }
     let (lexical_chunks, semantic_chunks) = compact_retrieval_chunks(&payload["retrieval"]);
     let chunk_contents_by_path = compact_chunk_contents_by_path(&lexical_chunks, &semantic_chunks);
     json!({
@@ -322,6 +563,46 @@ pub(crate) fn model_visible_context_pack_payload(payload: &Value) -> Value {
             "lexical_chunks": lexical_chunks,
             "semantic_chunks": semantic_chunks,
         }
+    })
+}
+
+fn is_same_thread_cache_reuse_payload(payload: &Value) -> bool {
+    payload["cache_reuse_reference"]["state"].as_str() == Some("same_thread_context_pack_replay")
+}
+
+fn model_visible_same_thread_cache_reuse_payload(payload: &Value) -> Value {
+    json!({
+        "context_pack_id": payload["context_pack_id"].clone(),
+        "project": {
+            "code": payload["project"]["code"].clone(),
+        },
+        "namespace": {
+            "code": payload["namespace"]["code"].clone(),
+        },
+        "query": payload["query"].clone(),
+        "effective_retrieval_mode": payload["effective_retrieval_mode"].clone(),
+        "visible_projects": compact_visible_projects(&payload["visible_projects"]),
+        "decision_trace": compact_decision_trace(&payload["decision_trace"]),
+        "retrieval": {
+            "exact_documents": metadata_only_exact_documents(&payload["retrieval"]["exact_documents"]),
+            "symbol_hits": compact_symbol_hits(&payload["retrieval"]["symbol_hits"]),
+            "lexical_chunks": metadata_only_chunk_refs(&payload["retrieval"]["lexical_chunks"]),
+            "semantic_chunks": metadata_only_chunk_refs(&payload["retrieval"]["semantic_chunks"]),
+        },
+        "cache_reuse_reference": compact_cache_reuse_reference(&payload["cache_reuse_reference"]),
+    })
+}
+
+fn compact_cache_reuse_reference(value: &Value) -> Value {
+    if !value.is_object() {
+        return Value::Null;
+    }
+    json!({
+        "state": value["state"].clone(),
+        "source_context_pack_id": value["source_context_pack_id"].clone(),
+        "active_files": value["active_files"].clone(),
+        "retrieval_counts": value["retrieval_counts"].clone(),
+        "note": value["note"].clone(),
     })
 }
 
@@ -2487,6 +2768,7 @@ fn synthetic_chunk_hit(relative_path: &str, content: &str) -> ChunkHit {
 mod tests {
     use super::{
         SemanticTimings, apply_semantic_relevance_guard, build_context_pack_decision_trace,
+        build_same_thread_cache_reuse_payload,
         degradation_probe_stale_fast_cache, degradation_proof_scenarios,
         model_visible_context_pack_payload, query_terms, semantic_fallback_result,
         semantic_hit_has_query_overlap, should_use_minimal_document_workspace_graph,
@@ -2982,6 +3264,171 @@ mod tests {
         );
         assert!(compact["decision_trace"]["included"][0].get("reason").is_none());
         assert!(compact["decision_trace"]["semantic_guard"].get("detail").is_none());
+    }
+
+    #[test]
+    fn same_thread_cache_reuse_payload_drops_text_and_keeps_reference_map() {
+        let payload = json!({
+            "context_pack_id": "ctx-reuse",
+            "project": {
+                "code": "art",
+                "display_name": "Art",
+                "repo_root": "/home/art/Art"
+            },
+            "namespace": {
+                "code": "continuity",
+                "display_name": "Continuity"
+            },
+            "query": "Continuity snapshot",
+            "effective_retrieval_mode": "local_strict",
+            "visible_projects": [{
+                "project_code": "art",
+                "repo_root": "/home/art/Art"
+            }],
+            "decision_trace": {
+                "scope": {"effective_retrieval_mode": "local_strict"},
+                "included": [{"strategy": "exact_documents", "count": 1}],
+                "not_included": []
+            },
+            "retrieval_runtime": {"cache_hit": true},
+            "retrieval": {
+                "exact_documents": [{
+                    "project_code": "art",
+                    "relative_path": "docs/continuity.md",
+                    "snippet": "handoff snippet",
+                    "source_kind": "docs",
+                    "provenance": {
+                        "source_project": "art"
+                    }
+                }],
+                "symbol_hits": [{
+                    "project_code": "art",
+                    "relative_path": "src/lib.rs",
+                    "name": "build_context_pack",
+                    "kind": "function_item",
+                    "provenance": {
+                        "source_project": "art"
+                    }
+                }],
+                "lexical_chunks": [{
+                    "project_code": "art",
+                    "relative_path": "docs/continuity.md",
+                    "content": "full lexical text",
+                    "provenance": {
+                        "source_project": "art"
+                    }
+                }],
+                "semantic_chunks": [{
+                    "project_code": "art",
+                    "relative_path": "docs/related.md",
+                    "content": "full semantic text",
+                    "provenance": {
+                        "source_project": "art"
+                    }
+                }]
+            }
+        });
+
+        let compact = build_same_thread_cache_reuse_payload(&payload, "thread-1");
+
+        assert_eq!(
+            compact["cache_reuse_reference"]["state"].as_str(),
+            Some("same_thread_context_pack_replay")
+        );
+        assert_eq!(
+            compact["cache_reuse_reference"]["source_context_pack_id"].as_str(),
+            Some("ctx-reuse")
+        );
+        assert_eq!(
+            compact["cache_reuse_reference"]["active_files"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(
+            compact["retrieval"]["exact_documents"][0]
+                .get("snippet")
+                .is_none()
+        );
+        assert!(
+            compact["retrieval"]["lexical_chunks"][0]
+                .get("content")
+                .is_none()
+        );
+        assert!(
+            compact["retrieval"]["semantic_chunks"][0]
+                .get("content")
+                .is_none()
+        );
+        assert_eq!(
+            compact["retrieval"]["symbol_hits"][0]["name"].as_str(),
+            Some("build_context_pack")
+        );
+    }
+
+    #[test]
+    fn model_visible_context_pack_payload_preserves_same_thread_cache_reuse_reference() {
+        let payload = build_same_thread_cache_reuse_payload(
+            &json!({
+                "context_pack_id": "ctx-reuse-visible",
+                "project": {
+                    "code": "art",
+                    "display_name": "Art",
+                    "repo_root": "/home/art/Art"
+                },
+                "namespace": {
+                    "code": "continuity",
+                    "display_name": "Continuity"
+                },
+                "query": "Continuity snapshot",
+                "effective_retrieval_mode": "local_strict",
+                "visible_projects": [{
+                    "project_code": "art",
+                    "repo_root": "/home/art/Art"
+                }],
+                "decision_trace": {
+                    "scope": {"effective_retrieval_mode": "local_strict"},
+                    "included": [{"strategy": "lexical_chunks", "count": 1, "reason": "verbose"}],
+                    "not_included": []
+                },
+                "retrieval": {
+                    "exact_documents": [],
+                    "symbol_hits": [],
+                    "lexical_chunks": [{
+                        "project_code": "art",
+                        "relative_path": "docs/continuity.md",
+                        "content": "full lexical text",
+                        "provenance": {
+                            "source_project": "art"
+                        }
+                    }],
+                    "semantic_chunks": []
+                }
+            }),
+            "thread-2",
+        );
+
+        let compact = model_visible_context_pack_payload(&payload);
+
+        assert_eq!(
+            compact["cache_reuse_reference"]["state"].as_str(),
+            Some("same_thread_context_pack_replay")
+        );
+        assert_eq!(
+            compact["cache_reuse_reference"]["source_context_pack_id"].as_str(),
+            Some("ctx-reuse-visible")
+        );
+        assert_eq!(
+            compact["retrieval"]["lexical_chunks"][0]["relative_path"].as_str(),
+            Some("docs/continuity.md")
+        );
+        assert!(
+            compact["retrieval"]["lexical_chunks"][0]
+                .get("content")
+                .is_none()
+        );
+        assert!(compact["decision_trace"]["included"][0].get("reason").is_none());
     }
 
     #[test]
