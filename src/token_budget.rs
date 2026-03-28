@@ -12698,6 +12698,13 @@ fn build_product_headline(
         .unwrap_or(0);
     let quality_ok_rate = summary["quality_ok_rate"].as_f64().unwrap_or(0.0);
     let fallback_rate = summary["fallback_rate"].as_f64().unwrap_or(0.0);
+    let same_meter_exact_pair = product_headline_same_meter_exact_pair(summary);
+    let status_bar_correlated = same_meter_exact_pair.is_some();
+    let target_percent = 90.0;
+    let same_meter_value_percent = same_meter_exact_pair.map(|(_, pct)| pct);
+    let same_meter_saved_tokens = same_meter_exact_pair.map(|(saved_tokens, _)| saved_tokens);
+    let below_status_bar_target =
+        same_meter_value_percent.is_some_and(|value| value < target_percent);
     let client_limit_boundary_semantics =
         client_limit_boundary_semantics.cloned().unwrap_or_else(|| {
             if summary["client_limit_meter_alignment"].is_object() {
@@ -12752,17 +12759,28 @@ fn build_product_headline(
             "metric_code": "verified_effective_savings_pct",
             "title": "Проверенная реальная экономия",
             "scope_label": scope_label,
-            "status": if preliminary { "alert" } else { "pass" },
+            "status": if preliminary || below_status_bar_target { "alert" } else { "pass" },
             "preliminary": preliminary,
-            "value_percent": verified_percent,
-            "saved_tokens": verified_saved_tokens,
+            "value_percent": same_meter_value_percent.unwrap_or(verified_percent),
+            "saved_tokens": same_meter_saved_tokens.unwrap_or(verified_saved_tokens),
             "events_count": events_total,
             "counted_events": counted_events,
             "quality_ok_rate": quality_ok_rate,
             "fallback_rate": fallback_rate,
+            "client_meter_status_bar_correlated": status_bar_correlated,
+            "client_meter_target_percent": target_percent,
+            "client_meter_target_met": status_bar_correlated && !below_status_bar_target,
             "client_limit_boundary_semantics": client_limit_boundary_semantics,
             "note": annotate_note(if preliminary {
-                "Это уже quality-gated метрика, но выборка пока ещё маленькая."
+                if status_bar_correlated {
+                    "Это уже quality-gated exact same-meter метрика, коррелирующая с VS Code status bar, но выборка пока ещё маленькая."
+                } else {
+                    "Это уже quality-gated метрика, но выборка пока ещё маленькая."
+                }
+            } else if below_status_bar_target {
+                "Это exact same-meter метрика, коррелирующая с VS Code status bar. Текущая экономия реальных токенов модели пользователя остаётся ниже целевой планки 90%."
+            } else if status_bar_correlated {
+                "Это главный честный KPI: exact same-meter, quality-gated, коррелирует с VS Code status bar и показывает реальную экономию токенов модели пользователя."
             } else {
                 "Это главный честный KPI: live-only, quality-gated и с учётом recovery."
             }),
@@ -12804,6 +12822,31 @@ fn build_product_headline(
             "note": annotate_note("Amai ещё не накопил live-события для этой метрики."),
         })
     }
+}
+
+fn product_headline_same_meter_exact_pair(summary: &Value) -> Option<(i64, f64)> {
+    let alignment = &summary["client_limit_meter_alignment"];
+    if alignment["same_meter_as_client_limit"].as_bool() != Some(true) {
+        return None;
+    }
+    let without_amai = alignment["strict_client_meter_slice"]["lower_bound_tokens"]
+        .as_u64()
+        .or_else(|| {
+            alignment["baseline_equivalence"]["measured_baseline_tokens_lower_bound"].as_u64()
+        })
+        .or_else(|| summary["verified_without_amai_measured_tokens"].as_u64())
+        .or_else(|| summary["verified_baseline_tokens"].as_u64())?;
+    let with_amai = summary["observed_whole_cycle_with_amai_tokens"]
+        .as_u64()
+        .or_else(|| summary["verified_observed_whole_cycle_with_amai_tokens"].as_u64())
+        .or_else(|| summary["verified_with_amai_measured_tokens"].as_u64())
+        .or_else(|| summary["with_amai_measured_tokens"].as_u64())?;
+    if without_amai == 0 {
+        return None;
+    }
+    let saved_tokens = without_amai as i64 - with_amai as i64;
+    let value_percent = saved_tokens as f64 * 100.0 / without_amai as f64;
+    Some((saved_tokens, value_percent))
 }
 
 fn client_limit_meter_alignment_counts(
@@ -21182,6 +21225,7 @@ effective_to_epoch_ms = 2000
                 .unwrap_or_default()
                 .contains("headline не равен клиентскому лимиту")
         );
+        assert_eq!(headline["client_meter_status_bar_correlated"], json!(false));
     }
 
     #[test]
@@ -21226,6 +21270,55 @@ effective_to_epoch_ms = 2000
                 .as_str()
                 .unwrap_or_default()
                 .contains("frozen-gap review")
+        );
+    }
+
+    #[test]
+    fn product_headline_prefers_same_meter_exact_pair_and_marks_below_target() {
+        let headline = build_product_headline(
+            &json!({
+                "events_total": 12,
+                "counted_events": 7,
+                "preliminary": false,
+                "verified_effective_savings_pct": 97.4,
+                "effective_savings_pct": 97.8,
+                "verified_effective_saved_tokens": 184220,
+                "total_effective_saved_tokens": 200000,
+                "quality_ok_rate": 96.1,
+                "fallback_rate": 3.8,
+                "verified_baseline_tokens": 1000,
+                "verified_observed_whole_cycle_with_amai_tokens": 250,
+                "client_limit_meter_alignment": {
+                    "same_meter_as_client_limit": true,
+                    "strict_client_meter_slice": {
+                        "lower_bound_tokens": 1000
+                    },
+                    "baseline_equivalence": {
+                        "measured_baseline_tokens_lower_bound": 1000
+                    }
+                }
+            }),
+            "окно Codex 5 часов",
+            None,
+        );
+        assert_eq!(headline["metric_code"], "verified_effective_savings_pct");
+        assert_eq!(headline["value_percent"], 75.0);
+        assert_eq!(headline["saved_tokens"], 750);
+        assert_eq!(headline["status"], "alert");
+        assert_eq!(headline["client_meter_status_bar_correlated"], json!(true));
+        assert_eq!(headline["client_meter_target_percent"], json!(90.0));
+        assert_eq!(headline["client_meter_target_met"], json!(false));
+        assert!(
+            headline["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("VS Code status bar")
+        );
+        assert!(
+            headline["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ниже целевой планки 90%")
         );
     }
 
