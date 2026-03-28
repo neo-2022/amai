@@ -13,7 +13,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -2004,12 +2004,13 @@ async fn dashboard_api_handler(
     Query(query): Query<ThreadBindingQuery>,
 ) -> impl IntoResponse {
     refresh_client_live_meter_on_request(&state).await;
-    let response =
-        if let Some(thread_id_hint) = normalized_thread_id_hint(query.thread_id.as_deref()) {
-            thread_bound_dashboard_payload(&state, thread_id_hint).await
-        } else {
-            cached_dashboard_payload(&state).await
-        };
+    let response = if let Some(thread_id_hint) =
+        resolved_request_thread_hint(&state, query.thread_id.as_deref()).await
+    {
+        thread_bound_dashboard_payload(&state, &thread_id_hint).await
+    } else {
+        cached_dashboard_payload(&state).await
+    };
     match response {
         Ok(payload) => (
             StatusCode::OK,
@@ -2030,12 +2031,13 @@ async fn client_budget_live_api_handler(
     Query(query): Query<ThreadBindingQuery>,
 ) -> impl IntoResponse {
     refresh_client_live_meter_on_request(&state).await;
-    let response =
-        if let Some(thread_id_hint) = normalized_thread_id_hint(query.thread_id.as_deref()) {
-            thread_bound_snapshot_with_meta(&state, thread_id_hint).await
-        } else {
-            cached_snapshot_with_meta(&state).await
-        };
+    let response = if let Some(thread_id_hint) =
+        resolved_request_thread_hint(&state, query.thread_id.as_deref()).await
+    {
+        thread_bound_snapshot_with_meta(&state, &thread_id_hint).await
+    } else {
+        cached_snapshot_with_meta(&state).await
+    };
     match response {
         Ok(snapshot) => (
             StatusCode::OK,
@@ -2057,12 +2059,13 @@ async fn snapshot_api_handler(
     Query(query): Query<ThreadBindingQuery>,
 ) -> impl IntoResponse {
     refresh_client_live_meter_on_request(&state).await;
-    let response =
-        if let Some(thread_id_hint) = normalized_thread_id_hint(query.thread_id.as_deref()) {
-            thread_bound_snapshot_with_meta(&state, thread_id_hint).await
-        } else {
-            cached_snapshot_with_meta(&state).await
-        };
+    let response = if let Some(thread_id_hint) =
+        resolved_request_thread_hint(&state, query.thread_id.as_deref()).await
+    {
+        thread_bound_snapshot_with_meta(&state, &thread_id_hint).await
+    } else {
+        cached_snapshot_with_meta(&state).await
+    };
     match response {
         Ok(snapshot) => (
             StatusCode::OK,
@@ -2187,6 +2190,64 @@ async fn cached_snapshot_with_meta(state: &ObserveState) -> Result<Value> {
 
 fn normalized_thread_id_hint(thread_id: Option<&str>) -> Option<&str> {
     thread_id.map(str::trim).filter(|value| !value.is_empty())
+}
+
+async fn resolved_request_thread_hint(
+    state: &ObserveState,
+    explicit_thread_id: Option<&str>,
+) -> Option<String> {
+    if let Some(thread_id) = normalized_thread_id_hint(explicit_thread_id) {
+        Some(thread_id.to_string())
+    } else {
+        auto_thread_binding_hint_from_cache(state).await
+    }
+}
+
+async fn auto_thread_binding_hint_from_cache(state: &ObserveState) -> Option<String> {
+    let cache = state.cache.read().await;
+    let snapshot = cache.snapshot.as_ref()?;
+    strict_auto_thread_binding_hint_from_snapshot(snapshot)
+}
+
+fn strict_auto_thread_binding_hint_from_snapshot(snapshot: &Value) -> Option<String> {
+    strict_auto_thread_binding_hint_from_agent_scope_activity(&snapshot["agent_scope_activity"])
+}
+
+fn strict_auto_thread_binding_hint_from_agent_scope_activity(activity: &Value) -> Option<String> {
+    let recent_thread_ids = activity["client_recent_threads"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            item["thread_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .collect::<BTreeSet<_>>();
+    if recent_thread_ids.is_empty() {
+        return None;
+    }
+
+    let active_thread_ids = activity["active_now_scopes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            item["owner_thread_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .collect::<BTreeSet<_>>();
+    if active_thread_ids.len() != 1 {
+        return None;
+    }
+
+    let thread_id = active_thread_ids.into_iter().next()?;
+    recent_thread_ids.contains(&thread_id).then_some(thread_id)
 }
 
 async fn thread_bound_dashboard_payload(state: &ObserveState, thread_id: &str) -> Result<Value> {
@@ -4049,6 +4110,67 @@ mod tests {
         assert_eq!(
             normalized_thread_id_hint(Some("  thread-123  ")),
             Some("thread-123")
+        );
+    }
+
+    #[test]
+    fn strict_auto_thread_binding_hint_uses_unique_active_thread() {
+        let snapshot = json!({
+            "agent_scope_activity": {
+                "client_recent_threads": [
+                    { "thread_id": "thread-live" },
+                    { "thread_id": "thread-other" }
+                ],
+                "active_now_scopes": [
+                    { "owner_thread_id": "thread-live" },
+                    { "owner_thread_id": "thread-live" }
+                ]
+            }
+        });
+
+        assert_eq!(
+            super::strict_auto_thread_binding_hint_from_snapshot(&snapshot).as_deref(),
+            Some("thread-live")
+        );
+    }
+
+    #[test]
+    fn strict_auto_thread_binding_hint_rejects_ambiguous_active_threads() {
+        let snapshot = json!({
+            "agent_scope_activity": {
+                "client_recent_threads": [
+                    { "thread_id": "thread-a" },
+                    { "thread_id": "thread-b" }
+                ],
+                "active_now_scopes": [
+                    { "owner_thread_id": "thread-a" },
+                    { "owner_thread_id": "thread-b" }
+                ]
+            }
+        });
+
+        assert_eq!(
+            super::strict_auto_thread_binding_hint_from_snapshot(&snapshot),
+            None
+        );
+    }
+
+    #[test]
+    fn strict_auto_thread_binding_hint_requires_matching_raw_client_thread() {
+        let snapshot = json!({
+            "agent_scope_activity": {
+                "client_recent_threads": [
+                    { "thread_id": "thread-other" }
+                ],
+                "active_now_scopes": [
+                    { "owner_thread_id": "thread-live" }
+                ]
+            }
+        });
+
+        assert_eq!(
+            super::strict_auto_thread_binding_hint_from_snapshot(&snapshot),
+            None
         );
     }
 
