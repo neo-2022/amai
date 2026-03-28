@@ -2906,7 +2906,7 @@ fn current_session_budget_guard_with_restore_context(
     restore_context: &Value,
 ) -> Value {
     let client_live_meter = &report["client_live_meter"];
-    let current_thread_bound = client_live_meter_current_thread_bound(client_live_meter);
+    let current_thread_bound = current_session_client_live_meter_available(client_live_meter);
     let current_session_summary = &report["current_session"];
     let current_session_statement = &report["statement_previews"]["current_session"];
     let current_session_alignment = &current_session_statement["client_limit_meter_alignment"];
@@ -2987,7 +2987,7 @@ fn current_session_budget_guard_with_restore_context(
     let observed_at_epoch_ms = if current_session_client_live_meter_available(client_live_meter)
         || global_limit_guard.is_some()
     {
-        client_live_meter["ended_at_epoch_ms"].as_u64()
+        preferred_client_limit_observed_at_epoch_ms(client_live_meter)
     } else {
         None
     };
@@ -3003,8 +3003,13 @@ fn current_session_budget_guard_with_restore_context(
     let status_label = global_limit_guard
         .map(|guard| guard.status_label)
         .unwrap_or(compact_status_label);
-    let global_limit_note = global_limit_guard
-        .map(|guard| global_client_limit_guard_note(guard, client_limits.as_deref()));
+    let global_limit_note = global_limit_guard.map(|guard| {
+        global_client_limit_guard_note(
+            guard,
+            client_limits.as_deref(),
+            preferred_client_limit_meter_is_exact(client_live_meter),
+        )
+    });
     let status_tooltip = global_limit_note
         .clone()
         .or_else(|| compact["status_tooltip"].as_str().map(str::to_string));
@@ -3069,7 +3074,11 @@ fn current_session_budget_guard_with_restore_context(
         "client_live_meter_current_thread_bound": current_thread_bound,
         "client_live_meter_thread_binding_state": client_live_meter["thread_binding_state"]
             .as_str()
-            .unwrap_or("current_thread_bound"),
+            .unwrap_or(if current_thread_bound {
+                "current_thread_bound"
+            } else {
+                "missing_rollout_client_meter"
+            }),
         "max_guard_age_seconds": max_guard_age_seconds,
         "reply_execution_gate": reply_execution_gate,
         "tracked_slice": tracked_slice,
@@ -8584,6 +8593,46 @@ fn client_live_meter_is_observed(client_live_meter: &Value) -> bool {
     client_live_meter["status"].as_str() == Some("observed")
 }
 
+fn exact_status_bar_rate_limits(client_live_meter: &Value) -> Option<&Value> {
+    let exact = &client_live_meter["status_bar_rate_limits"];
+    (exact["status"].as_str() == Some("observed")).then_some(exact)
+}
+
+fn preferred_client_limit_meter_surface(client_live_meter: &Value) -> Option<&Value> {
+    exact_status_bar_rate_limits(client_live_meter).or_else(|| {
+        client_live_meter_is_observed(client_live_meter).then_some(client_live_meter)
+    })
+}
+
+fn preferred_client_limit_meter_is_exact(client_live_meter: &Value) -> bool {
+    exact_status_bar_rate_limits(client_live_meter).is_some()
+}
+
+fn preferred_client_limit_observed_at_epoch_ms(client_live_meter: &Value) -> Option<u64> {
+    preferred_client_limit_meter_surface(client_live_meter).and_then(|surface| {
+        surface["observed_at_epoch_ms"]
+            .as_u64()
+            .or_else(|| surface["ended_at_epoch_ms"].as_u64())
+    })
+}
+
+fn client_limit_remaining_percent(surface: &Value, remaining_key: &str, used_key: &str) -> f64 {
+    surface[remaining_key]
+        .as_f64()
+        .or_else(|| {
+            surface[remaining_key]
+                .as_u64()
+                .map(|value| value as f64)
+        })
+        .or_else(|| surface[used_key].as_f64().map(|used| 100.0 - used))
+        .or_else(|| {
+            surface[used_key]
+                .as_u64()
+                .map(|used| 100.0 - used as f64)
+        })
+        .unwrap_or(100.0)
+}
+
 fn client_live_meter_current_thread_bound(client_live_meter: &Value) -> bool {
     client_live_meter["current_thread_bound"]
         .as_bool()
@@ -8601,6 +8650,27 @@ fn current_session_client_live_meter_available(client_live_meter: &Value) -> boo
 }
 
 fn global_client_limit_source(client_live_meter: &Value) -> Option<Value> {
+    if preferred_client_limit_meter_is_exact(client_live_meter)
+        && !current_session_client_live_meter_available(client_live_meter)
+    {
+        return Some(json!({
+            "source_kind": "codex_app_server_account_rate_limits_read_v1",
+            "derived_from_latest_observed_client_limits": false,
+            "truly_global_source_materialized": true,
+            "status_bar_correlated": true,
+            "authoritative_for": [
+                "live_client_limits_now",
+                "global_client_limit_hint",
+                "wait_for_global_client_budget_recovery_when_critical"
+            ],
+            "not_authoritative_for": [
+                "thread_local_rotate_pressure",
+                "live_turn_rows"
+            ],
+            "observed_at_epoch_ms": preferred_client_limit_observed_at_epoch_ms(client_live_meter),
+            "summary": "При отсутствии current-thread binding Amai читает exact global rate limits напрямую из codex app-server account/rateLimits/read. Этот source совпадает с VS Code status bar для 5ч/7д окна и годится для честного live client limit surface и hard wait при глобальном исчерпании, но не для thread-local rotate pressure.",
+        }));
+    }
     if !client_live_meter_is_observed(client_live_meter)
         || client_live_meter_current_thread_bound(client_live_meter)
     {
@@ -8610,27 +8680,27 @@ fn global_client_limit_source(client_live_meter: &Value) -> Option<Value> {
 }
 
 fn global_client_limit_guard(client_live_meter: &Value) -> Option<GlobalClientLimitGuard> {
-    if !client_live_meter_is_observed(client_live_meter)
-        || client_live_meter_current_thread_bound(client_live_meter)
+    let limit_surface = if preferred_client_limit_meter_is_exact(client_live_meter)
+        && !current_session_client_live_meter_available(client_live_meter)
     {
-        return None;
-    }
-    let primary_remaining_percent = client_live_meter["primary_limit_remaining_percent"]
-        .as_f64()
-        .or_else(|| {
-            client_live_meter["primary_limit_used_percent"]
-                .as_f64()
-                .map(|used| 100.0 - used)
-        })
-        .unwrap_or(100.0);
-    let secondary_remaining_percent = client_live_meter["secondary_limit_remaining_percent"]
-        .as_f64()
-        .or_else(|| {
-            client_live_meter["secondary_limit_used_percent"]
-                .as_f64()
-                .map(|used| 100.0 - used)
-        })
-        .unwrap_or(100.0);
+        preferred_client_limit_meter_surface(client_live_meter)
+    } else if client_live_meter_is_observed(client_live_meter)
+        && !client_live_meter_current_thread_bound(client_live_meter)
+    {
+        Some(client_live_meter)
+    } else {
+        None
+    }?;
+    let primary_remaining_percent = client_limit_remaining_percent(
+        limit_surface,
+        "primary_limit_remaining_percent",
+        "primary_limit_used_percent",
+    );
+    let secondary_remaining_percent = client_limit_remaining_percent(
+        limit_surface,
+        "secondary_limit_remaining_percent",
+        "secondary_limit_used_percent",
+    );
     if primary_remaining_percent <= 5.0 || secondary_remaining_percent <= 5.0 {
         Some(GlobalClientLimitGuard {
             severity: "critical",
@@ -8653,10 +8723,23 @@ fn global_client_limit_guard(client_live_meter: &Value) -> Option<GlobalClientLi
 fn global_client_limit_guard_note(
     guard: GlobalClientLimitGuard,
     client_limits_value: Option<&str>,
+    exact_live_source: bool,
 ) -> String {
     let rendered_limits =
         client_limits_value.unwrap_or("последнее observed значение лимита клиента");
-    if guard.severity == "critical" {
+    if exact_live_source && guard.severity == "critical" {
+        format!(
+            "Current thread binding ещё не materialized, но Amai уже читает live global rate-limit source клиента напрямую из codex app-server: 5ч {}, 7д {}. Этого уже достаточно для fail-closed wait path: новый чат не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее live значение: {rendered_limits}.",
+            format_percent(Some(guard.primary_remaining_percent)),
+            format_percent(Some(guard.secondary_remaining_percent)),
+        )
+    } else if exact_live_source {
+        format!(
+            "Current thread binding ещё не materialized, но Amai уже читает live global rate-limit source клиента напрямую из codex app-server: 5ч {}, 7д {}. Это пока только global warning hint: rotate gate не включается, но следующий substantive reply стоит делать только после повторной проверки budget. Текущее live значение: {rendered_limits}.",
+            format_percent(Some(guard.primary_remaining_percent)),
+            format_percent(Some(guard.secondary_remaining_percent)),
+        )
+    } else if guard.severity == "critical" {
         format!(
             "Current thread binding ещё не materialized, поэтому Amai видит только последнее observed значение client limits: 5ч {}, 7д {}. Этого уже достаточно для fail-closed wait path: новый чат не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее observed значение: {rendered_limits}.",
             format_percent(Some(guard.primary_remaining_percent)),
@@ -8678,6 +8761,8 @@ fn client_turn_pressure_guard(
     if !current_session_client_live_meter_available(client_live_meter) {
         return None;
     }
+    let limit_surface =
+        preferred_client_limit_meter_surface(client_live_meter).unwrap_or(client_live_meter);
     let turn_total_tokens = client_live_meter["client_turn_total_tokens"]
         .as_u64()
         .unwrap_or(0);
@@ -8690,22 +8775,16 @@ fn client_turn_pressure_guard(
     let context_used_percent = client_live_meter["context_used_percent"]
         .as_f64()
         .unwrap_or_else(|| (turn_total_tokens as f64 * 100.0) / model_context_window as f64);
-    let primary_remaining_percent = client_live_meter["primary_limit_remaining_percent"]
-        .as_f64()
-        .or_else(|| {
-            client_live_meter["primary_limit_used_percent"]
-                .as_f64()
-                .map(|used| 100.0 - used)
-        })
-        .unwrap_or(100.0);
-    let secondary_remaining_percent = client_live_meter["secondary_limit_remaining_percent"]
-        .as_f64()
-        .or_else(|| {
-            client_live_meter["secondary_limit_used_percent"]
-                .as_f64()
-                .map(|used| 100.0 - used)
-        })
-        .unwrap_or(100.0);
+    let primary_remaining_percent = client_limit_remaining_percent(
+        limit_surface,
+        "primary_limit_remaining_percent",
+        "primary_limit_used_percent",
+    );
+    let secondary_remaining_percent = client_limit_remaining_percent(
+        limit_surface,
+        "secondary_limit_remaining_percent",
+        "secondary_limit_used_percent",
+    );
     let exact_pair_missing = exact_pair.is_none();
     let full_turn_savings_pct = exact_pair.and_then(|(_, _, saved_tokens, _)| {
         let without_amai_total_tokens = if saved_tokens >= 0 {
@@ -8962,49 +9041,71 @@ fn client_live_context_metric_row(client_live_meter: &Value) -> Option<Value> {
 }
 
 fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
-    if !client_live_meter_is_observed(client_live_meter) {
-        return None;
-    }
-    let current_thread_bound = client_live_meter_current_thread_bound(client_live_meter);
-    let primary_remaining_percent = client_live_meter["primary_limit_remaining_percent"]
-        .as_u64()
-        .or_else(|| {
-            client_live_meter["primary_limit_remaining_percent"]
-                .as_f64()
-                .map(|value| value.round() as u64)
-        })
-        .unwrap_or(0);
-    let secondary_remaining_percent = client_live_meter["secondary_limit_remaining_percent"]
-        .as_u64()
-        .or_else(|| {
-            client_live_meter["secondary_limit_remaining_percent"]
-                .as_f64()
-                .map(|value| value.round() as u64)
-        })
-        .unwrap_or(0);
-    let observed_at = client_live_meter["ended_at_epoch_ms"]
-        .as_u64()
+    let limit_surface = preferred_client_limit_meter_surface(client_live_meter)?;
+    let exact_source = preferred_client_limit_meter_is_exact(client_live_meter);
+    let rollout_observed = client_live_meter_is_observed(client_live_meter);
+    let current_thread_bound =
+        rollout_observed && client_live_meter_current_thread_bound(client_live_meter);
+    let primary_remaining_percent = client_limit_remaining_percent(
+        limit_surface,
+        "primary_limit_remaining_percent",
+        "primary_limit_used_percent",
+    );
+    let secondary_remaining_percent = client_limit_remaining_percent(
+        limit_surface,
+        "secondary_limit_remaining_percent",
+        "secondary_limit_used_percent",
+    );
+    let observed_at = preferred_client_limit_observed_at_epoch_ms(client_live_meter)
         .filter(|value| *value > 0)
         .map(human_timestamp);
-    let observed_at_short = client_live_meter["ended_at_epoch_ms"]
-        .as_u64()
+    let observed_at_short = preferred_client_limit_observed_at_epoch_ms(client_live_meter)
         .filter(|value| *value > 0)
         .map(human_timestamp_clock);
-    let (label, tooltip, value) = if current_thread_bound {
+    let (label, tooltip, value) = if exact_source {
+        let thread_context_note = if current_thread_bound {
+            "Параллельно есть current-thread-bound rollout meter для строки `Последний запрос клиента`, поэтому 5ч/7д лимиты и размер текущего запроса читаются из двух независимых truth-source."
+        } else if rollout_observed {
+            "Current thread binding для rollout meter ещё не materialized, поэтому этот ряд остаётся live global client-limit source, а не pressure текущего thread."
+        } else {
+            "Rollout meter для текущего thread пока не materialized, поэтому этот ряд остаётся единственным честным live source для 5ч/7д лимита клиента."
+        };
+        (
+            "Лимит клиента сейчас",
+            format!(
+                "Этот ряд показывает live rate-limit contour клиента из codex app-server account/rateLimits/read, тем же upstream path, что использует VS Code status bar.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- Снято из upstream: {}\n- {}",
+                format_percent(Some(primary_remaining_percent)),
+                format_percent(limit_surface["primary_limit_used_percent"].as_f64().or_else(|| limit_surface["primary_limit_used_percent"].as_u64().map(|value| value as f64))),
+                format_percent(Some(secondary_remaining_percent)),
+                format_percent(limit_surface["secondary_limit_used_percent"].as_f64().or_else(|| limit_surface["secondary_limit_used_percent"].as_u64().map(|value| value as f64))),
+                observed_at.clone().unwrap_or_else(|| "ещё нет данных".to_string()),
+                thread_context_note,
+            ),
+            format!(
+                "5ч остаётся {}, 7д остаётся {}{}",
+                format_percent(Some(primary_remaining_percent)),
+                format_percent(Some(secondary_remaining_percent)),
+                observed_at_short
+                    .as_ref()
+                    .map(|stamp| format!(" · live {stamp}"))
+                    .unwrap_or_default()
+            ),
+        )
+    } else if current_thread_bound {
         (
             "Лимит клиента сейчас",
             format!(
                 "Этот ряд показывает live rate-limit contour клиента из rollout token_count/rate_limits.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- Снято из raw token_count: {}",
-                format_percent(Some(primary_remaining_percent as f64)),
+                format_percent(Some(primary_remaining_percent)),
                 format_percent(client_live_meter["primary_limit_used_percent"].as_f64()),
-                format_percent(Some(secondary_remaining_percent as f64)),
+                format_percent(Some(secondary_remaining_percent)),
                 format_percent(client_live_meter["secondary_limit_used_percent"].as_f64()),
                 observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
             ),
             format!(
                 "5ч остаётся {}, 7д остаётся {}{}",
-                format_percent(Some(primary_remaining_percent as f64)),
-                format_percent(Some(secondary_remaining_percent as f64)),
+                format_percent(Some(primary_remaining_percent)),
+                format_percent(Some(secondary_remaining_percent)),
                 observed_at_short
                     .as_ref()
                     .map(|stamp| format!(" · raw {stamp}"))
@@ -9016,16 +9117,16 @@ fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
             "Последний observed лимит клиента",
             format!(
                 "Этот ряд показывает последнее observed значение клиентского rate-limit contour из rollout token_count/rate_limits.\n- Current thread binding ещё не materialized, поэтому это global client limit hint, а не pressure текущего thread.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- Последнее observed значение снято из raw token_count: {}",
-                format_percent(Some(primary_remaining_percent as f64)),
+                format_percent(Some(primary_remaining_percent)),
                 format_percent(client_live_meter["primary_limit_used_percent"].as_f64()),
-                format_percent(Some(secondary_remaining_percent as f64)),
+                format_percent(Some(secondary_remaining_percent)),
                 format_percent(client_live_meter["secondary_limit_used_percent"].as_f64()),
                 observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
             ),
             format!(
                 "последнее observed: 5ч остаётся {}, 7д остаётся {}{}",
-                format_percent(Some(primary_remaining_percent as f64)),
-                format_percent(Some(secondary_remaining_percent as f64)),
+                format_percent(Some(primary_remaining_percent)),
+                format_percent(Some(secondary_remaining_percent)),
                 observed_at_short
                     .as_ref()
                     .map(|stamp| format!(" · latest observed {stamp}"))
@@ -9056,11 +9157,20 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
     if let Some(row) = client_live_limit_metric_row(client_live_meter) {
         rows.push(row);
     }
+    let live_status = if current_session_client_live_meter_available(client_live_meter)
+        || preferred_client_limit_meter_surface(client_live_meter).is_some()
+    {
+        "observed"
+    } else {
+        client_live_meter["status"].as_str().unwrap_or("missing")
+    };
     json!({
-        "status": client_live_meter["status"].clone(),
+        "status": live_status,
         "thread_binding_state": client_live_meter["thread_binding_state"].clone(),
         "current_thread_bound": client_live_meter["current_thread_bound"].clone(),
-        "ended_at_epoch_ms": client_live_meter["ended_at_epoch_ms"].clone(),
+        "ended_at_epoch_ms": preferred_client_limit_observed_at_epoch_ms(client_live_meter)
+            .map(Value::from)
+            .unwrap_or_else(|| client_live_meter["ended_at_epoch_ms"].clone()),
         "rows": rows,
     })
 }
@@ -12576,6 +12686,42 @@ mod tests {
     }
 
     #[test]
+    fn client_live_limit_metric_row_prefers_exact_status_bar_source() {
+        let meter = json!({
+            "status": "observed",
+            "thread_binding_state": "no_current_thread_binding",
+            "current_thread_bound": false,
+            "primary_limit_remaining_percent": 31,
+            "primary_limit_used_percent": 69,
+            "secondary_limit_remaining_percent": 79,
+            "secondary_limit_used_percent": 21,
+            "ended_at_epoch_ms": 1774625102000u64,
+            "status_bar_rate_limits": {
+                "status": "observed",
+                "source": "codex_app_server_account_rate_limits_read_v1",
+                "status_bar_correlated": true,
+                "observed_at_epoch_ms": 1774682249000u64,
+                "primary_limit_used_percent": 38.0,
+                "primary_limit_remaining_percent": 62.0,
+                "secondary_limit_used_percent": 41.0,
+                "secondary_limit_remaining_percent": 59.0
+            }
+        });
+        let row = super::client_live_limit_metric_row(&meter).expect("limit row");
+        assert_eq!(row["key"].as_str(), Some("client_live_limit"));
+        assert_eq!(row["label"], "Лимит клиента сейчас");
+        assert!(row["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("5ч остаётся 62.00%, 7д остаётся 59.00%"));
+        assert!(row["value"].as_str().unwrap_or_default().contains("live"));
+        assert!(row["tooltip"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("codex app-server account/rateLimits/read"));
+    }
+
+    #[test]
     fn client_live_context_metric_row_uses_last_request_window_pressure() {
         let meter = json!({
             "status": "observed",
@@ -12647,6 +12793,37 @@ mod tests {
             rows[0]["label"].as_str(),
             Some("Последний observed лимит клиента")
         );
+    }
+
+    #[test]
+    fn client_budget_live_payload_surfaces_exact_live_limit_without_rollout_meter() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "client_live_meter": {
+                    "status": "missing",
+                    "status_bar_rate_limits": {
+                        "status": "observed",
+                        "source": "codex_app_server_account_rate_limits_read_v1",
+                        "status_bar_correlated": true,
+                        "observed_at_epoch_ms": 1774682249000u64,
+                        "primary_limit_used_percent": 39.0,
+                        "primary_limit_remaining_percent": 61.0,
+                        "secondary_limit_used_percent": 42.0,
+                        "secondary_limit_remaining_percent": 58.0
+                    }
+                }
+            }
+        });
+        let payload = super::client_budget_live_payload(&snapshot);
+        let rows = payload["rows"].as_array().expect("rows array");
+        assert_eq!(payload["status"], json!("observed"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["key"].as_str(), Some("client_live_limit"));
+        assert_eq!(rows[0]["label"].as_str(), Some("Лимит клиента сейчас"));
+        assert!(rows[0]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("5ч остаётся 61.00%, 7д остаётся 58.00%"));
     }
 
     #[test]

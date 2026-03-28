@@ -19,9 +19,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiktoken_rs::{CoreBPE, cl100k_base, o200k_base};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command as ProcessCommand;
+use tokio::time::timeout;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
@@ -31,6 +35,7 @@ const ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS: i64 = 60_000;
 const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_generation_turn_observed";
 const CONTINUITY_SNAPSHOT_QUERY_LABEL: &str = "Continuity snapshot";
 const CONTINUITY_PRE_AMAI_BASELINE_STRATEGY: &str = "truthful_pre_amai_continuity_summaries_v1";
+const DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS: u64 = 3_000;
 const TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS: i64 = 5_000;
 static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<
     Mutex<Option<DashboardRolloutObservationCache>>,
@@ -47,6 +52,9 @@ static DASHBOARD_TOKEN_EVENTS_CACHE: OnceLock<Mutex<Option<DashboardTokenEventsC
     OnceLock::new();
 static DASHBOARD_WORKING_STATE_METADATA_CACHE: OnceLock<
     Mutex<Option<DashboardWorkingStateMetadataCache>>,
+> = OnceLock::new();
+static DASHBOARD_EXACT_CLIENT_LIMITS_CACHE: OnceLock<
+    Mutex<Option<DashboardExactClientLimitsCache>>,
 > = OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
@@ -571,6 +579,12 @@ struct DashboardWorkingStateMetadataCache {
 }
 
 #[derive(Debug, Clone)]
+struct DashboardExactClientLimitsCache {
+    fetched_at_epoch_ms: u64,
+    observation: Option<CodexAppServerRateLimitsObservation>,
+}
+
+#[derive(Debug, Clone)]
 struct WorkingStateContextPackMeta {
     thread_id: String,
     captured_at_epoch_ms: i64,
@@ -593,6 +607,52 @@ struct DashboardReportSignatureComponents {
     rolling_window_assistant_scope: String,
     lifetime_assistant_scope: String,
     client_live_meter: String,
+    exact_client_limits: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CodexAppServerRateLimitsResponse {
+    #[serde(rename = "rateLimits")]
+    rate_limits: CodexAppServerRateLimitSnapshot,
+    #[serde(rename = "rateLimitsByLimitId")]
+    rate_limits_by_limit_id: Option<BTreeMap<String, CodexAppServerRateLimitSnapshot>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CodexAppServerRateLimitSnapshot {
+    #[serde(rename = "limitId")]
+    limit_id: Option<String>,
+    #[serde(rename = "limitName")]
+    limit_name: Option<String>,
+    primary: Option<CodexAppServerRateLimitWindow>,
+    secondary: Option<CodexAppServerRateLimitWindow>,
+    credits: Option<CodexAppServerCreditsSnapshot>,
+    #[serde(rename = "planType")]
+    plan_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CodexAppServerRateLimitWindow {
+    #[serde(rename = "usedPercent")]
+    used_percent: f64,
+    #[serde(rename = "windowDurationMins")]
+    window_duration_mins: Option<u64>,
+    #[serde(rename = "resetsAt")]
+    resets_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CodexAppServerCreditsSnapshot {
+    #[serde(rename = "hasCredits")]
+    has_credits: bool,
+    unlimited: bool,
+    balance: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct CodexAppServerRateLimitsObservation {
+    observed_at_epoch_ms: u64,
+    rate_limits: CodexAppServerRateLimitSnapshot,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -7339,6 +7399,14 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     );
 
     let stage_started_at = Instant::now();
+    let exact_client_limits_observation = dashboard_exact_client_rate_limits_observation().await?;
+    record_dashboard_precache_stage_ms(
+        &mut pre_cache_timings,
+        "exact_client_limits_observation",
+        stage_started_at,
+    );
+
+    let stage_started_at = Instant::now();
     let report_components = dashboard_report_signature_components(
         &session_events,
         &rolling_window_events,
@@ -7347,6 +7415,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         rolling_window_assistant_scope.as_ref(),
         &lifetime_assistant_scope,
         client_live_meter_observation.as_ref(),
+        exact_client_limits_observation.as_ref(),
     );
     let report_signature = dashboard_report_signature(&report_components);
     record_dashboard_precache_stage_ms(&mut pre_cache_timings, "report_signature", stage_started_at);
@@ -7492,6 +7561,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
             },
             "client_live_meter": build_client_live_meter_json(
                 client_live_meter_observation.as_ref(),
+                exact_client_limits_observation.as_ref(),
             ),
             "cache_debug": cache_debug,
             "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups, client-limit alignment и live client meter, не разворачивает полный contractual/export contour, но поднимает compact statement_export_previews для reviewed frozen-debt surfaces. Quiet same-meter sync/write-back всё так же ограничен active live scope текущей сессии и рабочего окна. Sync write-back может materialize-иться в этом тике, а обновлённые token events подхватываются следующим refresh, чтобы текущий pass не делал лишний full reload.",
@@ -7817,6 +7887,63 @@ fn dashboard_client_live_meter_signature(
     hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
 }
 
+fn dashboard_exact_client_limits_signature(
+    observation: Option<&CodexAppServerRateLimitsObservation>,
+) -> String {
+    let payload = observation
+        .map(|item| {
+            json!({
+                "observed_at_epoch_ms": item.observed_at_epoch_ms,
+                "limit_id": item.rate_limits.limit_id,
+                "limit_name": item.rate_limits.limit_name,
+                "plan_type": item.rate_limits.plan_type,
+                "primary_used_percent": item.rate_limits.primary.as_ref().map(|window| window.used_percent),
+                "primary_window_duration_mins": item
+                    .rate_limits
+                    .primary
+                    .as_ref()
+                    .and_then(|window| window.window_duration_mins),
+                "primary_resets_at": item
+                    .rate_limits
+                    .primary
+                    .as_ref()
+                    .and_then(|window| window.resets_at),
+                "secondary_used_percent": item
+                    .rate_limits
+                    .secondary
+                    .as_ref()
+                    .map(|window| window.used_percent),
+                "secondary_window_duration_mins": item
+                    .rate_limits
+                    .secondary
+                    .as_ref()
+                    .and_then(|window| window.window_duration_mins),
+                "secondary_resets_at": item
+                    .rate_limits
+                    .secondary
+                    .as_ref()
+                    .and_then(|window| window.resets_at),
+                "credits_has_credits": item
+                    .rate_limits
+                    .credits
+                    .as_ref()
+                    .map(|credits| credits.has_credits),
+                "credits_unlimited": item
+                    .rate_limits
+                    .credits
+                    .as_ref()
+                    .map(|credits| credits.unlimited),
+                "credits_balance": item
+                    .rate_limits
+                    .credits
+                    .as_ref()
+                    .and_then(|credits| credits.balance),
+            })
+        })
+        .unwrap_or(Value::Null);
+    hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
+}
+
 fn client_live_meter_thread_binding_state(
     current_thread_id: Option<&str>,
     observation_thread_id: &str,
@@ -7838,12 +7965,293 @@ fn client_live_meter_thread_binding_state(
     }
 }
 
-fn build_client_live_meter_json(
-    observation: Option<&codex_threads::RolloutClientMeterObservation>,
+fn codex_extension_relative_codex_path() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "bin/windows-x86_64/codex.exe"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "bin/macos-aarch64/codex"
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        "bin/linux-x86_64/codex"
+    }
+}
+
+fn discover_local_codex_app_server_executable() -> Option<PathBuf> {
+    let override_path = std::env::var_os("AMI_CODEX_APP_SERVER_BIN")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file());
+    if override_path.is_some() {
+        return override_path;
+    }
+    let extensions_dir = dirs::home_dir()?.join(".vscode").join("extensions");
+    let relative_path = PathBuf::from(codex_extension_relative_codex_path());
+    let mut candidates = fs::read_dir(extensions_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.starts_with("openai.chatgpt-"))
+        })
+        .map(|path| path.join(&relative_path))
+        .filter(|path| path.is_file())
+        .filter_map(|path| {
+            let modified = path
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .unwrap_or(UNIX_EPOCH);
+            Some((modified, path))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(modified, _)| *modified);
+    candidates.pop().map(|(_, path)| path)
+}
+
+fn load_codex_chatgpt_auth_refresh_payload() -> Option<Value> {
+    let auth_path = dirs::home_dir()?.join(".codex").join("auth.json");
+    let raw = fs::read_to_string(auth_path).ok()?;
+    let payload: Value = serde_json::from_str(&raw).ok()?;
+    let access_token = payload["tokens"]["access_token"].as_str()?;
+    let account_id = payload["tokens"]["account_id"].as_str()?;
+    Some(json!({
+        "accessToken": access_token,
+        "chatgptAccountId": account_id,
+        "chatgptPlanType": Value::Null,
+    }))
+}
+
+async fn write_codex_app_server_json_line(
+    stdin: &mut tokio::process::ChildStdin,
+    value: &Value,
+) -> Result<()> {
+    stdin
+        .write_all(serde_json::to_string(value)?.as_bytes())
+        .await
+        .context("failed to write codex app-server request")?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .context("failed to terminate codex app-server request line")?;
+    stdin
+        .flush()
+        .await
+        .context("failed to flush codex app-server request")?;
+    Ok(())
+}
+
+async fn query_codex_app_server_rate_limits(
+    executable: &Path,
+) -> Result<Option<CodexAppServerRateLimitsObservation>> {
+    let mut child = ProcessCommand::new(executable)
+        .arg("app-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to spawn codex app-server from {}",
+                executable.display()
+            )
+        })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("codex app-server stdin is unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("codex app-server stdout is unavailable"))?;
+    let init_request = json!({
+        "id": "1",
+        "method": "initialize",
+        "params": {
+            "clientInfo": {
+                "name": "amai-dashboard",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+            "capabilities": Value::Null,
+        }
+    });
+    write_codex_app_server_json_line(&mut stdin, &init_request).await?;
+    let observed: Option<CodexAppServerRateLimitsObservation> =
+        timeout(Duration::from_secs(5), async {
+        let mut lines = BufReader::new(stdout).lines();
+        let mut rate_limit_request_sent = false;
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .context("failed to read codex app-server response")?
+        {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let message: Value =
+                serde_json::from_str(trimmed).context("failed to decode codex app-server JSON")?;
+            if message["id"] == Value::from("1")
+                && message.get("result").is_some()
+                && !rate_limit_request_sent
+            {
+                write_codex_app_server_json_line(
+                    &mut stdin,
+                    &json!({
+                        "id": "2",
+                        "method": "account/rateLimits/read",
+                    }),
+                )
+                .await?;
+                rate_limit_request_sent = true;
+                continue;
+            }
+            if message["method"].as_str() == Some("account/chatgptAuthTokens/refresh") {
+                if let Some(refresh_payload) = load_codex_chatgpt_auth_refresh_payload() {
+                    write_codex_app_server_json_line(
+                        &mut stdin,
+                        &json!({
+                            "id": message["id"].clone(),
+                            "result": refresh_payload,
+                        }),
+                    )
+                    .await?;
+                }
+                continue;
+            }
+            if message["id"] != Value::from("2") {
+                continue;
+            }
+            let Some(result) = message.get("result") else {
+                return Ok::<Option<CodexAppServerRateLimitsObservation>, anyhow::Error>(None);
+            };
+            let parsed: CodexAppServerRateLimitsResponse =
+                serde_json::from_value(result.clone())
+                    .context("failed to parse codex app-server rate limits response")?;
+            let preferred_snapshot = parsed
+                .rate_limits_by_limit_id
+                .as_ref()
+                .and_then(|buckets| buckets.get("codex").cloned())
+                .unwrap_or(parsed.rate_limits);
+            return Ok(Some(CodexAppServerRateLimitsObservation {
+                observed_at_epoch_ms: current_epoch_ms().unwrap_or_default() as u64,
+                rate_limits: preferred_snapshot,
+            }));
+        }
+        Ok::<Option<CodexAppServerRateLimitsObservation>, anyhow::Error>(None)
+    })
+        .await
+        .context("timed out while waiting for codex app-server rate limits")??;
+    let _ = child.start_kill();
+    let _ = timeout(Duration::from_secs(1), child.wait()).await;
+    Ok(observed)
+}
+
+async fn dashboard_exact_client_rate_limits_observation(
+) -> Result<Option<CodexAppServerRateLimitsObservation>> {
+    let now_epoch_ms = current_epoch_ms().unwrap_or_default() as u64;
+    let cache = DASHBOARD_EXACT_CLIENT_LIMITS_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some(entry) = guard.as_ref() {
+            if now_epoch_ms.saturating_sub(entry.fetched_at_epoch_ms)
+                <= DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS
+            {
+                return Ok(entry.observation.clone());
+            }
+        }
+    }
+    let observation = if let Some(executable) = discover_local_codex_app_server_executable() {
+        query_codex_app_server_rate_limits(&executable).await?
+    } else {
+        None
+    };
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(DashboardExactClientLimitsCache {
+            fetched_at_epoch_ms: now_epoch_ms,
+            observation: observation.clone(),
+        });
+    }
+    Ok(observation)
+}
+
+fn build_status_bar_rate_limits_json(
+    observation: Option<&CodexAppServerRateLimitsObservation>,
 ) -> Value {
     let Some(observation) = observation else {
         return json!({
             "status": "missing",
+            "source": "codex_app_server_account_rate_limits_read_v1",
+            "status_bar_correlated": true,
+            "note": "Exact upstream rate-limit source через codex app-server пока недоступен, поэтому dashboard должен честно деградировать к rollout fallback и не называть это точной копией VS Code status bar.",
+        });
+    };
+    let primary_used_percent = observation
+        .rate_limits
+        .primary
+        .as_ref()
+        .map(|window| window.used_percent);
+    let secondary_used_percent = observation
+        .rate_limits
+        .secondary
+        .as_ref()
+        .map(|window| window.used_percent);
+    json!({
+        "status": "observed",
+        "source": "codex_app_server_account_rate_limits_read_v1",
+        "status_bar_correlated": true,
+        "observed_at_epoch_ms": observation.observed_at_epoch_ms,
+        "ended_at_epoch_ms": observation.observed_at_epoch_ms,
+        "limit_id": observation.rate_limits.limit_id,
+        "limit_name": observation.rate_limits.limit_name,
+        "plan_type": observation.rate_limits.plan_type,
+        "primary_limit_used_percent": primary_used_percent,
+        "primary_limit_remaining_percent": primary_used_percent.map(|value| (100.0 - value).max(0.0)),
+        "primary_window_duration_mins": observation
+            .rate_limits
+            .primary
+            .as_ref()
+            .and_then(|window| window.window_duration_mins),
+        "primary_resets_at_epoch_seconds": observation
+            .rate_limits
+            .primary
+            .as_ref()
+            .and_then(|window| window.resets_at),
+        "secondary_limit_used_percent": secondary_used_percent,
+        "secondary_limit_remaining_percent": secondary_used_percent.map(|value| (100.0 - value).max(0.0)),
+        "secondary_window_duration_mins": observation
+            .rate_limits
+            .secondary
+            .as_ref()
+            .and_then(|window| window.window_duration_mins),
+        "secondary_resets_at_epoch_seconds": observation
+            .rate_limits
+            .secondary
+            .as_ref()
+            .and_then(|window| window.resets_at),
+        "credits": observation.rate_limits.credits.as_ref().map(|credits| {
+            json!({
+                "has_credits": credits.has_credits,
+                "unlimited": credits.unlimited,
+                "balance": credits.balance,
+            })
+        }).unwrap_or(Value::Null),
+        "note": "Этот source поднимается через codex app-server account/rateLimits/read и совпадает с тем же upstream rate-limit contour, который extension использует для VS Code status bar и /wham/usage.",
+    })
+}
+
+fn build_client_live_meter_json(
+    observation: Option<&codex_threads::RolloutClientMeterObservation>,
+    exact_client_limits: Option<&CodexAppServerRateLimitsObservation>,
+) -> Value {
+    let Some(observation) = observation else {
+        return json!({
+            "status": "missing",
+            "status_bar_rate_limits": build_status_bar_rate_limits_json(exact_client_limits),
             "note": "Текущий client-side live meter ещё не materialized из rollout token_count/rate_limits, поэтому карточки пока не могут честно показать полный turn/context pressure клиента."
         });
     };
@@ -7885,10 +8293,11 @@ fn build_client_live_meter_json(
         "primary_limit_remaining_percent": 100_u64.saturating_sub(observation.latest_primary_limit_used_percent),
         "secondary_limit_used_percent": observation.latest_secondary_limit_used_percent,
         "secondary_limit_remaining_percent": 100_u64.saturating_sub(observation.latest_secondary_limit_used_percent),
+        "status_bar_rate_limits": build_status_bar_rate_limits_json(exact_client_limits),
         "note": if current_thread_bound {
-            "Этот surface поднимает именно live meter клиента из rollout token_count/rate_limits: он нужен, чтобы отделять Amai-side same-meter delta от полного расхода turn/context в самом клиенте."
+            "Этот surface поднимает именно live meter клиента из rollout token_count/rate_limits: он нужен, чтобы отделять Amai-side same-meter delta от полного расхода turn/context в самом клиенте. Exact текущие 5ч/7д лимиты при этом отдельно приходят из codex app-server status-bar source."
         } else {
-            "Этот surface поднят из rollout token_count/rate_limits, но текущий thread ещё не привязан к observation. Пока не materialized current-thread meter, live-turn rows и rotate-pressure должны деградировать до unknown/stale, а не наследоваться от предыдущего thread."
+            "Этот surface поднят из rollout token_count/rate_limits, но текущий thread ещё не привязан к observation. Пока не materialized current-thread meter, live-turn rows и rotate-pressure должны деградировать до unknown/stale, а не наследоваться от предыдущего thread. Exact текущие 5ч/7д лимиты при этом отдельно приходят из codex app-server status-bar source."
         }
     })
 }
@@ -9179,6 +9588,7 @@ fn dashboard_report_signature_components(
     rolling_window_assistant_scope: Option<&AssistantGenerationScopeObservation>,
     lifetime_assistant_scope: &AssistantGenerationScopeObservation,
     client_live_meter_observation: Option<&codex_threads::RolloutClientMeterObservation>,
+    exact_client_limits_observation: Option<&CodexAppServerRateLimitsObservation>,
 ) -> DashboardReportSignatureComponents {
     DashboardReportSignatureComponents {
         current_session_events: dashboard_report_events_signature(current_session_events),
@@ -9194,6 +9604,9 @@ fn dashboard_report_signature_components(
             lifetime_assistant_scope,
         ),
         client_live_meter: dashboard_client_live_meter_signature(client_live_meter_observation),
+        exact_client_limits: dashboard_exact_client_limits_signature(
+            exact_client_limits_observation,
+        ),
     }
 }
 
@@ -9206,6 +9619,7 @@ fn dashboard_report_signature(components: &DashboardReportSignatureComponents) -
         "rolling_window_assistant_scope": components.rolling_window_assistant_scope,
         "lifetime_assistant_scope": components.lifetime_assistant_scope,
         "client_live_meter": components.client_live_meter,
+        "exact_client_limits": components.exact_client_limits,
     });
     hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
 }
@@ -9402,6 +9816,12 @@ fn dashboard_report_cache_debug(
         }
         if previous.components.lifetime_assistant_scope != components.lifetime_assistant_scope {
             reasons.push("lifetime_assistant_scope");
+        }
+        if previous.components.client_live_meter != components.client_live_meter {
+            reasons.push("client_live_meter");
+        }
+        if previous.components.exact_client_limits != components.exact_client_limits {
+            reasons.push("exact_client_limits");
         }
     } else {
         reasons.push("cold_start");
@@ -9953,6 +10373,7 @@ async fn collect_report(
     let lifetime_assistant_scope = derive_rollout_assistant_generation_scope(db, &events).await?;
     let client_live_meter_observation =
         preferred_rollout_client_meter_observation(db, repo_root, repo_root_str).await?;
+    let exact_client_limits_observation = dashboard_exact_client_rate_limits_observation().await?;
 
     let latest_event = events
         .last()
@@ -10388,6 +10809,7 @@ async fn collect_report(
             },
             "client_live_meter": build_client_live_meter_json(
                 client_live_meter_observation.as_ref(),
+                exact_client_limits_observation.as_ref(),
             ),
             "source_breakdown": source_breakdown,
             "query_slices": query_slices,
@@ -23977,6 +24399,7 @@ effective_to_epoch_ms = 2000
             Some(&scope),
             &scope,
             None,
+            None,
         ));
         let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
@@ -23985,6 +24408,7 @@ effective_to_epoch_ms = 2000
             &scope,
             Some(&scope),
             &scope,
+            None,
             None,
         ));
 
@@ -24054,6 +24478,7 @@ effective_to_epoch_ms = 2000
             Some(&base_scope),
             &base_scope,
             None,
+            None,
         ));
         let right = dashboard_report_signature(&dashboard_report_signature_components(
             &events,
@@ -24063,6 +24488,111 @@ effective_to_epoch_ms = 2000
             Some(&base_scope),
             &base_scope,
             None,
+            None,
+        ));
+
+        assert_ne!(left, right);
+    }
+
+    #[test]
+    fn dashboard_report_signature_changes_when_exact_client_limits_change() {
+        let events = vec![token_event! {
+            created_at_epoch_ms: 10,
+            event_id: "event-a".to_string(),
+            correlation_id: "ctx-a".to_string(),
+            session_id: "session-1".to_string(),
+            rolling_window_profile: "codex_5h".to_string(),
+            timestamp_utc: 10,
+            occurred_at_epoch_ms: 10,
+            ingested_at_epoch_ms: 10,
+            query: "q-a".to_string(),
+            query_hash: "hash-a".to_string(),
+            query_type: "code_lookup".to_string(),
+            target_kind: "file".to_string(),
+            baseline_hit_target: true,
+            amai_hit_target: true,
+            cold_warm_state: "warm".to_string(),
+            baseline_strategy: "naive_top_files".to_string(),
+            retrieval_mode: Some("local_strict".to_string()),
+            tokenizer: "o200k_base".to_string(),
+            latency_ms: 1.0,
+            saved_tokens: 10,
+            naive_tokens: 20,
+            context_tokens: 10,
+            recovery_tokens: 0,
+            effective_saved_tokens: 10,
+            savings_factor: 2.0,
+            savings_percent: 50.0,
+            effective_savings_percent: 50.0,
+            quality_ok: true,
+            quality_score: 1.0,
+            quality_method: "retrieval_parity".to_string(),
+            quality_tier: "retrieval".to_string(),
+            head_hit_target: true,
+            needed_followup: false,
+            followup_count: 0,
+            followup_of_event_id: None,
+            resolved_by_event_id: None,
+            fallback_triggered: false,
+            fallback_count: 0,
+            document_hits: 1,
+            symbol_hits_count: 0,
+            file_hits: 1,
+            sources_count: 1,
+            chunks_count: 1,
+            pack_token_count: 10,
+            deduped_token_count: 10,
+        }];
+        let scope = AssistantGenerationScopeObservation::default();
+        let baseline_limits = super::CodexAppServerRateLimitsObservation {
+            observed_at_epoch_ms: 100,
+            rate_limits: super::CodexAppServerRateLimitSnapshot {
+                limit_id: Some("codex".to_string()),
+                limit_name: None,
+                plan_type: None,
+                primary: Some(super::CodexAppServerRateLimitWindow {
+                    used_percent: 22.0,
+                    window_duration_mins: Some(300),
+                    resets_at: Some(1_774_625_102),
+                }),
+                secondary: Some(super::CodexAppServerRateLimitWindow {
+                    used_percent: 37.0,
+                    window_duration_mins: Some(10_080),
+                    resets_at: Some(1_774_700_000),
+                }),
+                credits: None,
+            },
+        };
+        let changed_limits = super::CodexAppServerRateLimitsObservation {
+            observed_at_epoch_ms: 101,
+            rate_limits: super::CodexAppServerRateLimitSnapshot {
+                primary: Some(super::CodexAppServerRateLimitWindow {
+                    used_percent: 23.0,
+                    window_duration_mins: Some(300),
+                    resets_at: Some(1_774_625_202),
+                }),
+                ..baseline_limits.rate_limits.clone()
+            },
+        };
+        let left = dashboard_report_signature(&dashboard_report_signature_components(
+            &events,
+            &events,
+            &events,
+            &scope,
+            Some(&scope),
+            &scope,
+            None,
+            Some(&baseline_limits),
+        ));
+        let right = dashboard_report_signature(&dashboard_report_signature_components(
+            &events,
+            &events,
+            &events,
+            &scope,
+            Some(&scope),
+            &scope,
+            None,
+            Some(&changed_limits),
         ));
 
         assert_ne!(left, right);
