@@ -1241,6 +1241,12 @@ fn build_startup_runtime_state_artifact(
     let mut continuity_startup_summary = mcp::continuity_startup_summary_json(payload);
     if let Some(summary) = continuity_startup_summary.as_object_mut() {
         summary.insert(
+            "startup_next_action".to_string(),
+            compact_startup_runtime_startup_next_action(
+                summary.get("startup_next_action").unwrap_or(&Value::Null),
+            ),
+        );
+        summary.insert(
             "project_task_tree".to_string(),
             compact_project_task_tree_for_startup(
                 summary.get("project_task_tree").unwrap_or(&Value::Null),
@@ -1357,6 +1363,15 @@ fn build_startup_execution_gate(payload: &Value) -> Value {
     })
 }
 
+fn copy_if_present(target: &mut serde_json::Map<String, Value>, source: &Value, fields: &[&str]) {
+    for field in fields {
+        let value = &source[*field];
+        if !value.is_null() {
+            target.insert((*field).to_string(), value.clone());
+        }
+    }
+}
+
 fn compact_startup_runtime_client_budget_guard(guard: &Value) -> Value {
     if !guard.is_object() {
         return Value::Null;
@@ -1370,6 +1385,87 @@ fn compact_startup_runtime_client_budget_guard(guard: &Value) -> Value {
         "should_rotate_chat_soon": guard["should_rotate_chat_soon"].clone(),
         "reply_execution_gate": compact_startup_runtime_reply_execution_gate(&guard["reply_execution_gate"]),
     })
+}
+
+fn compact_startup_runtime_startup_next_action(action: &Value) -> Value {
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        action,
+        &[
+            "action_version",
+            "action_kind",
+            "blocking",
+            "reason",
+            "resume_state",
+            "no_silent_drop",
+            "headline",
+            "next_step",
+            "client_budget_status_label",
+            "preserves_return_obligation",
+        ],
+    );
+    let action_bundle = compact_startup_runtime_startup_action_bundle(&action["action_bundle"]);
+    if !action_bundle.is_null() {
+        compact.insert("action_bundle".to_string(), action_bundle);
+    }
+    Value::Object(compact)
+}
+
+fn compact_startup_runtime_startup_action_bundle(action_bundle: &Value) -> Value {
+    let Some(bundle) = action_bundle.as_object() else {
+        return Value::Null;
+    };
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        action_bundle,
+        &[
+            "bundle_version",
+            "ready_for_automation",
+            "preserves_return_obligation",
+        ],
+    );
+    if let Some(missing_inputs) = bundle
+        .get("missing_inputs")
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty())
+    {
+        compact.insert(
+            "missing_inputs".to_string(),
+            Value::Array(missing_inputs.clone()),
+        );
+    }
+    if action_bundle["recommended_handoff"].is_object() {
+        let mut recommended = serde_json::Map::new();
+        copy_if_present(
+            &mut recommended,
+            &action_bundle["recommended_handoff"],
+            &["available", "headline", "next_step"],
+        );
+        if !recommended.is_empty() {
+            compact.insert("recommended_handoff".to_string(), Value::Object(recommended));
+        }
+    }
+    if action_bundle["operator_flow"].is_object() {
+        let mut operator_flow = serde_json::Map::new();
+        copy_if_present(
+            &mut operator_flow,
+            &action_bundle["operator_flow"],
+            &[
+                "rotate_helper_command",
+                "handoff_command",
+                "startup_command",
+                "startup_after_recovery_command",
+                "wait_summary",
+                "resume_after_recovery_summary",
+            ],
+        );
+        if !operator_flow.is_empty() {
+            compact.insert("operator_flow".to_string(), Value::Object(operator_flow));
+        }
+    }
+    Value::Object(compact)
 }
 
 fn compact_startup_runtime_reply_execution_gate(reply_execution_gate: &Value) -> Value {
@@ -6382,6 +6478,108 @@ mod tests {
             artifact["working_state_restore_lineage"]["authoritative_event_id"],
             json!("evt_123")
         );
+    }
+
+    #[test]
+    fn startup_runtime_state_artifact_compacts_startup_next_action_bundle() {
+        let payload = json!({
+            "continuity_startup": {
+                "project": {
+                    "code": "art",
+                    "display_name": "Art",
+                    "repo_root": "/tmp/amai-art"
+                },
+                "namespace": {
+                    "code": "continuity",
+                    "display_name": "Continuity"
+                }
+            },
+            "chat_start_restore": {
+                "headline": "Current active line",
+                "next_step": "Ship runtime return enforcement.",
+                "restore_confidence": "high",
+                "prompt_text": "CHAT_START_RESTORE\nCurrent active line",
+                "execctl_resume_state": "pending_return_queue_present",
+                "startup_next_action": {
+                    "action_version": "startup-next-action-v1",
+                    "action_kind": "rotate_chat_for_client_budget",
+                    "blocking": true,
+                    "reason": "client_budget_guard_pressure",
+                    "resume_state": "return_required",
+                    "no_silent_drop": true,
+                    "headline": "Клиентский лимит: новый чат нужен сейчас",
+                    "next_step": "сохрани handoff и продолжай только в свежем чате через continuity startup",
+                    "client_budget_status_label": "новый чат нужен сейчас",
+                    "preserves_return_obligation": true,
+                    "action_bundle": working_state::build_rotate_chat_action_bundle(
+                        Some("art"),
+                        Some("continuity"),
+                        Some("/tmp/amai-art"),
+                        true,
+                        Some("Current active line"),
+                        Some("Ship runtime return enforcement."),
+                    )
+                },
+                "required_return_task": {
+                    "headline": "Pending line",
+                    "next_step": "Close same-meter live gap."
+                },
+                "execctl_active_lease": {
+                    "lease_owner_state": "previous_session_owner",
+                    "headline": "Current active line"
+                },
+                "project_task_tree": {
+                    "summary_only": true,
+                    "summary": "active: Current active line; pending_return(1): Pending line"
+                },
+                "project_task_tree_summary": "active: Current active line; pending_return(1): Pending line",
+                "project_task_ledger": {
+                    "summary_only": true,
+                    "summary": "active: Current active line; historical_handoffs(1)"
+                },
+                "project_task_ledger_summary": "active: Current active line; historical_handoffs(1)"
+            },
+            "working_state_restore": {
+                "client_budget_guard": {
+                    "status_label": "новый чат нужен сейчас",
+                    "reply_execution_gate": {
+                        "gate_version": "client-reply-budget-gate-v1",
+                        "must_rotate_before_reply": true,
+                        "blocking_reply_contract": {
+                            "contract_version": "client-budget-blocked-reply-v1",
+                            "response_kind": "rotate_chat_only",
+                            "template": "Лимит клиента почти исчерпан. Сохрани handoff и продолжай только в свежем чате через continuity startup."
+                        }
+                    }
+                },
+                "state_lineage": {
+                    "authoritative_event_id": "evt_123",
+                    "session_id": "sess_123"
+                }
+            }
+        });
+
+        let artifact =
+            build_startup_runtime_state_artifact(Path::new("/tmp/amai-art"), &payload, 42)
+                .expect("startup runtime state artifact");
+        let bundle = &artifact["continuity_startup_summary"]["startup_next_action"]["action_bundle"];
+
+        assert_eq!(bundle["bundle_version"], json!("rotate-chat-action-bundle-v1"));
+        assert_eq!(bundle["ready_for_automation"], json!(true));
+        assert_eq!(bundle["preserves_return_obligation"], json!(true));
+        assert!(bundle["capture_continuity_handoff"].is_null());
+        assert!(bundle["open_fresh_chat"].is_null());
+        assert!(bundle["run_continuity_startup"].is_null());
+        assert!(bundle["order"].is_null());
+        assert!(bundle["operator_flow"]["rotate_helper_command"]
+            .as_str()
+            .is_some_and(|value| value.contains("continuity' 'rotate-chat")));
+        assert!(bundle["operator_flow"]["handoff_command"]
+            .as_str()
+            .is_some_and(|value| value.contains("continuity' 'handoff")));
+        assert!(bundle["operator_flow"]["startup_command"]
+            .as_str()
+            .is_some_and(|value| value.contains("continuity' 'startup")));
     }
 
     #[test]
