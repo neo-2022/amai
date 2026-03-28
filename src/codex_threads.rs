@@ -1180,38 +1180,6 @@ pub fn rollout_assistant_generation_observations(
     parse_rollout_assistant_generation_observations(&thread_id, &rollout_path)
 }
 
-pub fn rollout_client_meter_observations(
-    repo_root: &str,
-    explicit_rollout_path: Option<&Path>,
-) -> Result<Vec<RolloutClientMeterObservation>> {
-    let (thread_id, rollout_path) = if let Some(path) = explicit_rollout_path {
-        let path = path.to_path_buf();
-        let thread_id = rollout_thread_id_from_path(&path).unwrap_or_default();
-        (thread_id, path)
-    } else {
-        let current_thread_id = current_thread_id();
-        let record =
-            current_thread_record(repo_root, current_thread_id.as_deref())?.or_else(|| {
-                if current_thread_id.is_some() {
-                    None
-                } else {
-                    latest_thread_record().ok().flatten()
-                }
-            });
-        let Some(record) = record else {
-            return Ok(Vec::new());
-        };
-        if record.rollout_path.is_empty() {
-            return Ok(Vec::new());
-        }
-        (record.thread_id, PathBuf::from(record.rollout_path))
-    };
-    if !rollout_path.exists() {
-        return Ok(Vec::new());
-    }
-    parse_rollout_client_meter_observations(&thread_id, &rollout_path)
-}
-
 pub fn latest_rollout_client_meter_observation_for_thread(
     thread_id: &str,
 ) -> Result<Option<RolloutClientMeterObservation>> {
@@ -1226,22 +1194,6 @@ pub fn latest_rollout_client_meter_observation_for_thread(
         return Ok(None);
     }
     latest_rollout_client_meter_observation_from_path(thread_id, &rollout_path)
-}
-
-pub fn rollout_client_meter_observations_for_thread(
-    thread_id: &str,
-) -> Result<Vec<RolloutClientMeterObservation>> {
-    let Some(record) = thread_record_by_id(thread_id)? else {
-        return Ok(Vec::new());
-    };
-    if record.rollout_path.is_empty() {
-        return Ok(Vec::new());
-    }
-    let rollout_path = PathBuf::from(record.rollout_path);
-    if !rollout_path.exists() {
-        return Ok(Vec::new());
-    }
-    parse_rollout_client_meter_observations(thread_id, &rollout_path)
 }
 
 pub fn current_rollout_source_signature(repo_root: &str) -> Result<Option<String>> {
