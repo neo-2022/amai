@@ -582,6 +582,22 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract lost live_client_budget_enforcement reply_execution_gate mapping"
         ));
     }
+    if startup_contract["live_client_budget_enforcement"]["reply_budget_mode_field"].as_str()
+        != Some("reply_budget_mode")
+        || startup_contract["live_client_budget_enforcement"]["reply_budget_contract_field"]
+            .as_str()
+            != Some("reply_budget_contract")
+        || startup_contract["live_client_budget_enforcement"]["compact_reply_mode_value"]
+            .as_str()
+            != Some(working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL)
+        || startup_contract["live_client_budget_enforcement"]["compact_reply_contract_version"]
+            .as_str()
+            != Some(working_state::CLIENT_REPLY_BUDGET_CONTRACT_VERSION)
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement compact reply mapping"
+        ));
+    }
     if startup_contract["live_client_budget_enforcement"]["guard_enforcement_flag"].as_str()
         != Some("--enforce-reply-gate")
         || startup_contract["live_client_budget_enforcement"]["guard_enforcement_exit_on_blocking"]
@@ -2907,6 +2923,10 @@ fn protocol_manifest() -> Value {
                     "guard_summary_field": "client_budget_guard",
                     "reply_execution_gate_field": "reply_execution_gate",
                     "reply_execution_gate_version": "client-reply-budget-gate-v1",
+                    "reply_budget_mode_field": "reply_budget_mode",
+                    "reply_budget_contract_field": "reply_budget_contract",
+                    "compact_reply_mode_value": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
+                    "compact_reply_contract_version": working_state::CLIENT_REPLY_BUDGET_CONTRACT_VERSION,
                     "guard_enforcement_flag": "--enforce-reply-gate",
                     "guard_enforcement_exit_on_blocking": true,
                     "must_check_before_each_substantive_reply": true,
@@ -5401,6 +5421,30 @@ mod tests {
                 ["reply_execution_gate_version"]
                 .as_str(),
             Some("client-reply-budget-gate-v1")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["reply_budget_mode_field"]
+                .as_str(),
+            Some("reply_budget_mode")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["reply_budget_contract_field"]
+                .as_str(),
+            Some("reply_budget_contract")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["compact_reply_mode_value"]
+                .as_str(),
+            Some(working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["compact_reply_contract_version"]
+                .as_str(),
+            Some(working_state::CLIENT_REPLY_BUDGET_CONTRACT_VERSION)
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]

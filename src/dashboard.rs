@@ -2941,6 +2941,10 @@ fn current_session_budget_guard_with_restore_context(
                 "blocking": false,
                 "must_rotate_before_reply": false,
                 "unrelated_reply_allowed": true,
+                "reply_budget_mode": working_state::CLIENT_REPLY_BUDGET_MODE_NORMAL,
+                "reply_budget_contract": working_state::build_client_reply_budget_contract(
+                    working_state::ClientReplyBudgetMode::Normal,
+                ),
                 "save_handoff_before_rotate": false,
                 "fresh_chat_requires_continuity_startup": false,
                 "full_scale_client_truth_required": true,
@@ -3000,6 +3004,9 @@ fn current_session_budget_guard_with_restore_context(
     let should_rotate_chat_now = compact_status_label == "новый чат нужен сейчас";
     let should_rotate_chat_soon =
         compact_status_label == "новый чат рекомендован" || should_rotate_chat_now;
+    let compact_reply_required = !should_rotate_chat_now
+        && (should_rotate_chat_soon
+            || report["client_limit_hourly_burn"]["classification"].as_str() == Some("overspend"));
     let requires_global_budget_recovery_before_reply =
         global_limit_guard.is_some_and(|guard| guard.severity == "critical");
     let status = global_limit_guard
@@ -3038,6 +3045,7 @@ fn current_session_budget_guard_with_restore_context(
         max_guard_age_seconds,
         should_rotate_chat_now,
         should_rotate_chat_soon,
+        compact_reply_required,
         requires_global_budget_recovery_before_reply,
         preserves_return_obligation,
         restore_context["project"]["code"].as_str(),
@@ -3101,6 +3109,7 @@ fn build_client_budget_reply_execution_gate(
     max_guard_age_seconds: u64,
     should_rotate_chat_now: bool,
     should_rotate_chat_soon: bool,
+    compact_reply_required: bool,
     requires_global_budget_recovery_before_reply: bool,
     preserves_return_obligation: bool,
     project_code: Option<&str>,
@@ -3111,6 +3120,13 @@ fn build_client_budget_reply_execution_gate(
 ) -> Value {
     let rotate_blocking = should_rotate_chat_now;
     let blocking = rotate_blocking || requires_global_budget_recovery_before_reply;
+    let reply_budget_mode = if blocking {
+        working_state::ClientReplyBudgetMode::Normal
+    } else if compact_reply_required {
+        working_state::ClientReplyBudgetMode::CompactHighSignal
+    } else {
+        working_state::ClientReplyBudgetMode::Normal
+    };
     let (
         action_kind,
         reason,
@@ -3183,6 +3199,13 @@ fn build_client_budget_reply_execution_gate(
         "must_rotate_before_reply": must_rotate_before_reply,
         "must_wait_for_budget_recovery_before_reply": requires_global_budget_recovery_before_reply,
         "unrelated_reply_allowed": !blocking,
+        "reply_budget_mode": match reply_budget_mode {
+            working_state::ClientReplyBudgetMode::Normal => working_state::CLIENT_REPLY_BUDGET_MODE_NORMAL,
+            working_state::ClientReplyBudgetMode::CompactHighSignal => working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
+        },
+        "reply_budget_contract": working_state::build_client_reply_budget_contract(
+            reply_budget_mode,
+        ),
         "save_handoff_before_rotate": save_handoff_before_rotate,
         "fresh_chat_requires_continuity_startup": fresh_chat_requires_continuity_startup,
         "full_scale_client_truth_required": true,
@@ -13808,6 +13831,10 @@ mod tests {
             json!("rotate_chat_for_client_budget")
         );
         assert_eq!(
+            guard["reply_execution_gate"]["reply_budget_mode"],
+            json!(working_state::CLIENT_REPLY_BUDGET_MODE_NORMAL)
+        );
+        assert_eq!(
             guard["reply_execution_gate"]["blocking_reply_contract"]["contract_version"],
             json!(working_state::CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION)
         );
@@ -13952,6 +13979,18 @@ mod tests {
             json!("continue_current_chat")
         );
         assert_eq!(
+            guard["reply_execution_gate"]["reply_budget_mode"],
+            json!(working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["reply_budget_contract"]["contract_version"],
+            json!(working_state::CLIENT_REPLY_BUDGET_CONTRACT_VERSION)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["reply_budget_contract"]["must_avoid_unrequested_recaps"],
+            json!(true)
+        );
+        assert_eq!(
             guard["reply_execution_gate"]["blocking_reply_contract"]["active"],
             json!(false)
         );
@@ -14030,6 +14069,10 @@ mod tests {
         assert_eq!(
             guard["reply_execution_gate"]["action_kind"],
             json!("continue_current_chat")
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["reply_budget_mode"],
+            json!(working_state::CLIENT_REPLY_BUDGET_MODE_NORMAL)
         );
         assert_eq!(
             guard["reply_execution_gate"]["must_rotate_before_reply"],

@@ -30,6 +30,7 @@ const PROJECT_TASK_TREE_VERSION: &str = "project-task-tree-v1";
 const PROJECT_TASK_LEDGER_VERSION: &str = "project-task-ledger-v2";
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION: &str =
     "client-budget-blocked-reply-v1";
+pub(crate) const CLIENT_REPLY_BUDGET_CONTRACT_VERSION: &str = "client-reply-budget-v1";
 pub(crate) const CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND: &str = "rotate_chat_only";
 pub(crate) const CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND: &str = "wait_for_budget_only";
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND: &str =
@@ -42,12 +43,20 @@ pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE: &str =
 pub(crate) const GLOBAL_CLIENT_LIMIT_SOURCE_KIND: &str =
     "latest_observed_client_limits_without_current_thread_binding";
 pub(crate) const GLOBAL_CLIENT_LIMIT_SOURCE_SUMMARY: &str = "При отсутствии current-thread binding Amai использует только последнее observed значение client limits. Этого достаточно для global warning hint и hard wait при критическом исчерпании, но недостаточно для thread-local rotate pressure.";
+pub(crate) const CLIENT_REPLY_BUDGET_MODE_NORMAL: &str = "normal";
+pub(crate) const CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL: &str = "compact_high_signal";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClientBudgetBlockingReplyMode {
     Inactive,
     RotateChatOnly,
     WaitForGlobalBudgetRecovery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClientReplyBudgetMode {
+    Normal,
+    CompactHighSignal,
 }
 
 fn shell_quote(value: &str) -> String {
@@ -87,6 +96,46 @@ pub(crate) fn build_client_budget_blocking_reply_contract(
         "must_avoid_substantive_work": true,
         "must_use_action_bundle_operator_flow": true,
         "template": template,
+    })
+}
+
+pub(crate) fn build_client_reply_budget_contract(mode: ClientReplyBudgetMode) -> Value {
+    let (active, mode_label, max_paragraphs_soft, max_bullets_soft, max_sentences_soft, summary) =
+        match mode {
+            ClientReplyBudgetMode::Normal => (
+                false,
+                CLIENT_REPLY_BUDGET_MODE_NORMAL,
+                None,
+                None,
+                None,
+                "Обычный режим ответа без дополнительного client-budget сжатия.",
+            ),
+            ClientReplyBudgetMode::CompactHighSignal => (
+                true,
+                CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
+                Some(2),
+                Some(4),
+                Some(6),
+                "KPI 5ч уходит в overspend или advisory rotate. Ответ остаётся содержательным, но должен быть компактным: сначала прямой результат, затем только изменившиеся факты и минимум повторов.",
+            ),
+        };
+    json!({
+        "contract_version": CLIENT_REPLY_BUDGET_CONTRACT_VERSION,
+        "active": active,
+        "mode": mode_label,
+        "must_preserve_truthfulness": true,
+        "must_preserve_technical_accuracy": true,
+        "must_disclose_unknowns_instead_of_guessing": true,
+        "must_answer_directly_first": active,
+        "must_avoid_unrequested_recaps": active,
+        "must_avoid_repeating_known_context": active,
+        "must_keep_only_changed_facts_when_possible": active,
+        "must_prefer_patch_or_result_over_narration_when_coding": active,
+        "must_prefer_short_paragraphs": active,
+        "max_paragraphs_soft": max_paragraphs_soft,
+        "max_bullets_soft": max_bullets_soft,
+        "max_sentences_soft": max_sentences_soft,
+        "summary": summary,
     })
 }
 
