@@ -1135,13 +1135,14 @@ pub fn latest_rollout_client_meter_observation(
         (thread_id, path)
     } else {
         let current_thread_id = current_thread_id();
-        let record = current_thread_record(repo_root, current_thread_id.as_deref())?.or_else(|| {
-            if current_thread_id.is_some() {
-                None
-            } else {
-                latest_thread_record().ok().flatten()
-            }
-        });
+        let record =
+            current_thread_record(repo_root, current_thread_id.as_deref())?.or_else(|| {
+                if current_thread_id.is_some() {
+                    None
+                } else {
+                    latest_thread_record().ok().flatten()
+                }
+            });
         let Some(record) = record else {
             return Ok(None);
         };
@@ -1189,13 +1190,14 @@ pub fn rollout_client_meter_observations(
         (thread_id, path)
     } else {
         let current_thread_id = current_thread_id();
-        let record = current_thread_record(repo_root, current_thread_id.as_deref())?.or_else(|| {
-            if current_thread_id.is_some() {
-                None
-            } else {
-                latest_thread_record().ok().flatten()
-            }
-        });
+        let record =
+            current_thread_record(repo_root, current_thread_id.as_deref())?.or_else(|| {
+                if current_thread_id.is_some() {
+                    None
+                } else {
+                    latest_thread_record().ok().flatten()
+                }
+            });
         let Some(record) = record else {
             return Ok(Vec::new());
         };
@@ -2003,14 +2005,14 @@ fn latest_rollout_client_meter_observation_from_path(
             rollout_path,
             &snapshot,
         )),
-        (Some(observation), Some(snapshot)) => Some(
-            merge_client_meter_observation_with_latest_snapshot(
+        (Some(observation), Some(snapshot)) => {
+            Some(merge_client_meter_observation_with_latest_snapshot(
                 observation,
                 thread_id,
                 rollout_path,
                 &snapshot,
-            ),
-        ),
+            ))
+        }
     })
 }
 
@@ -2041,7 +2043,8 @@ fn latest_rollout_token_count_snapshot_from_text(
     let mut task_started_row: Option<Value> = None;
     let mut seen_token = false;
     for line in text.lines().rev() {
-        let row: Value = serde_json::from_str(line).context("failed to parse rollout jsonl line")?;
+        let row: Value =
+            serde_json::from_str(line).context("failed to parse rollout jsonl line")?;
         let row_type = row["type"].as_str().unwrap_or_default();
         let payload_type = row["payload"]["type"].as_str().unwrap_or_default();
         if !seen_token {
@@ -2073,12 +2076,18 @@ fn latest_rollout_token_count_snapshot_from_text(
             .map(timestamp_epoch_ms_from_rollout_row)
             .unwrap_or_default(),
         ended_at_epoch_ms: timestamp_epoch_ms_from_rollout_row(&token_row),
-        client_turn_total_tokens: last_token_usage["total_tokens"].as_u64().unwrap_or_default(),
-        client_turn_input_tokens: last_token_usage["input_tokens"].as_u64().unwrap_or_default(),
+        client_turn_total_tokens: last_token_usage["total_tokens"]
+            .as_u64()
+            .unwrap_or_default(),
+        client_turn_input_tokens: last_token_usage["input_tokens"]
+            .as_u64()
+            .unwrap_or_default(),
         client_turn_cached_input_tokens: last_token_usage["cached_input_tokens"]
             .as_u64()
             .unwrap_or_default(),
-        client_turn_output_tokens: last_token_usage["output_tokens"].as_u64().unwrap_or_default(),
+        client_turn_output_tokens: last_token_usage["output_tokens"]
+            .as_u64()
+            .unwrap_or_default(),
         client_turn_reasoning_output_tokens: last_token_usage["reasoning_output_tokens"]
             .as_u64()
             .unwrap_or_default(),
@@ -2154,7 +2163,9 @@ fn merge_client_meter_observation_with_latest_snapshot(
         observation.started_at_epoch_ms = snapshot.started_at_epoch_ms;
     }
     if snapshot.ended_at_epoch_ms > 0 {
-        observation.ended_at_epoch_ms = observation.ended_at_epoch_ms.max(snapshot.ended_at_epoch_ms);
+        observation.ended_at_epoch_ms = observation
+            .ended_at_epoch_ms
+            .max(snapshot.ended_at_epoch_ms);
     }
     if snapshot.client_turn_total_tokens > 0 {
         observation.client_turn_total_tokens = snapshot.client_turn_total_tokens;
@@ -2182,7 +2193,8 @@ fn merge_client_meter_observation_with_latest_snapshot(
         observation.latest_primary_limit_used_percent = snapshot.latest_primary_limit_used_percent;
     }
     if snapshot.latest_secondary_limit_used_percent > 0 {
-        observation.latest_secondary_limit_used_percent = snapshot.latest_secondary_limit_used_percent;
+        observation.latest_secondary_limit_used_percent =
+            snapshot.latest_secondary_limit_used_percent;
     }
     observation.observation_source = "codex_rollout_client_meter_v2".to_string();
     observation
@@ -2341,18 +2353,24 @@ fn process_rollout_turn_observation_line(
             if let Some(turn) = state.current_turn.as_mut() {
                 turn.ended_at_epoch_ms = timestamp_epoch_ms;
                 let last_token_usage = &payload["info"]["last_token_usage"];
-                let output_tokens = last_token_usage["output_tokens"].as_u64().unwrap_or_default();
+                let output_tokens = last_token_usage["output_tokens"]
+                    .as_u64()
+                    .unwrap_or_default();
                 if output_tokens > 0 {
                     turn.assistant_generation_tokens = turn
                         .assistant_generation_tokens
                         .saturating_add(output_tokens);
                     turn.token_count_events += 1;
                 }
-                let turn_total_tokens = last_token_usage["total_tokens"].as_u64().unwrap_or_default();
+                let turn_total_tokens = last_token_usage["total_tokens"]
+                    .as_u64()
+                    .unwrap_or_default();
                 if turn_total_tokens > 0 {
                     turn.client_turn_total_tokens = turn_total_tokens;
                 }
-                let turn_input_tokens = last_token_usage["input_tokens"].as_u64().unwrap_or_default();
+                let turn_input_tokens = last_token_usage["input_tokens"]
+                    .as_u64()
+                    .unwrap_or_default();
                 if turn_input_tokens > 0 {
                     turn.client_turn_input_tokens = turn_input_tokens;
                 }
@@ -2372,13 +2390,15 @@ fn process_rollout_turn_observation_line(
                     turn.client_turn_reasoning_output_tokens = turn_reasoning_output_tokens;
                 }
                 let total_token_usage = &payload["info"]["total_token_usage"];
-                let cumulative_total_tokens =
-                    total_token_usage["total_tokens"].as_u64().unwrap_or_default();
+                let cumulative_total_tokens = total_token_usage["total_tokens"]
+                    .as_u64()
+                    .unwrap_or_default();
                 if cumulative_total_tokens > 0 {
                     turn.latest_cumulative_total_tokens = cumulative_total_tokens;
                 }
-                let model_context_window =
-                    payload["info"]["model_context_window"].as_u64().unwrap_or_default();
+                let model_context_window = payload["info"]["model_context_window"]
+                    .as_u64()
+                    .unwrap_or_default();
                 if model_context_window > 0 {
                     turn.latest_model_context_window = model_context_window;
                 }
@@ -2389,11 +2409,11 @@ fn process_rollout_turn_observation_line(
                 if primary_limit_used_percent > 0 {
                     turn.latest_primary_limit_used_percent = primary_limit_used_percent;
                 }
-                let secondary_limit_used_percent = payload["rate_limits"]["secondary"]
-                    ["used_percent"]
-                    .as_f64()
-                    .map(|value| value.round() as u64)
-                    .unwrap_or_default();
+                let secondary_limit_used_percent =
+                    payload["rate_limits"]["secondary"]["used_percent"]
+                        .as_f64()
+                        .map(|value| value.round() as u64)
+                        .unwrap_or_default();
                 if secondary_limit_used_percent > 0 {
                     turn.latest_secondary_limit_used_percent = secondary_limit_used_percent;
                 }
@@ -3849,7 +3869,10 @@ mod tests {
         assert_eq!(observation.latest_cumulative_total_tokens, 65000);
         assert_eq!(observation.latest_primary_limit_used_percent, 70);
         assert_eq!(observation.latest_secondary_limit_used_percent, 22);
-        assert_eq!(observation.observation_source, "codex_rollout_client_meter_v2");
+        assert_eq!(
+            observation.observation_source,
+            "codex_rollout_client_meter_v2"
+        );
     }
 
     #[test]

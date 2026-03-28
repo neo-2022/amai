@@ -7423,7 +7423,10 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         &config.contract,
     );
     let rolling_window_statement_export_preview = if profile.rolling_window_hours.is_some() {
-        build_dashboard_statement_export_preview(&rolling_window_statement_preview, &config.contract)
+        build_dashboard_statement_export_preview(
+            &rolling_window_statement_preview,
+            &config.contract,
+        )
     } else {
         Value::Null
     };
@@ -7787,18 +7790,49 @@ fn dashboard_rollout_observation_signature(
 fn dashboard_client_live_meter_signature(
     observation: Option<&codex_threads::RolloutClientMeterObservation>,
 ) -> String {
-    let payload = observation.map(|item| {
-        json!({
-            "thread_id": item.thread_id,
-            "turn_id": item.turn_id,
-            "client_turn_total_tokens": item.client_turn_total_tokens,
-            "latest_cumulative_total_tokens": item.latest_cumulative_total_tokens,
-            "latest_model_context_window": item.latest_model_context_window,
-            "latest_primary_limit_used_percent": item.latest_primary_limit_used_percent,
-            "latest_secondary_limit_used_percent": item.latest_secondary_limit_used_percent,
+    let current_thread_id = codex_threads::current_thread_id();
+    let payload = observation
+        .map(|item| {
+            let (thread_binding_state, current_thread_bound) =
+                client_live_meter_thread_binding_state(
+                    current_thread_id.as_deref(),
+                    &item.thread_id,
+                );
+            json!({
+                "thread_id": item.thread_id,
+                "turn_id": item.turn_id,
+                "client_turn_total_tokens": item.client_turn_total_tokens,
+                "latest_cumulative_total_tokens": item.latest_cumulative_total_tokens,
+                "latest_model_context_window": item.latest_model_context_window,
+                "latest_primary_limit_used_percent": item.latest_primary_limit_used_percent,
+                "latest_secondary_limit_used_percent": item.latest_secondary_limit_used_percent,
+                "thread_binding_state": thread_binding_state,
+                "current_thread_bound": current_thread_bound,
+            })
         })
-    }).unwrap_or(Value::Null);
+        .unwrap_or(Value::Null);
     hex_sha256(&serde_json::to_vec(&payload).unwrap_or_else(|_| payload.to_string().into_bytes()))
+}
+
+fn client_live_meter_thread_binding_state(
+    current_thread_id: Option<&str>,
+    observation_thread_id: &str,
+) -> (&'static str, bool) {
+    let current_thread_id = current_thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let observation_thread_id = observation_thread_id.trim();
+    match current_thread_id {
+        Some(current_thread_id) if !observation_thread_id.is_empty() => {
+            if current_thread_id == observation_thread_id {
+                ("current_thread_bound", true)
+            } else {
+                ("current_thread_mismatch", false)
+            }
+        }
+        Some(_) => ("current_thread_mismatch", false),
+        None => ("no_current_thread_binding", false),
+    }
 }
 
 fn build_client_live_meter_json(
@@ -7810,12 +7844,16 @@ fn build_client_live_meter_json(
             "note": "Текущий client-side live meter ещё не materialized из rollout token_count/rate_limits, поэтому карточки пока не могут честно показать полный turn/context pressure клиента."
         });
     };
+    let current_thread_id = codex_threads::current_thread_id();
+    let (thread_binding_state, current_thread_bound) = client_live_meter_thread_binding_state(
+        current_thread_id.as_deref(),
+        &observation.thread_id,
+    );
     let context_used_percent = if observation.latest_model_context_window == 0 {
         None
     } else {
         Some(
-            observation.client_turn_total_tokens as f64
-                * 100.0
+            observation.client_turn_total_tokens as f64 * 100.0
                 / observation.latest_model_context_window as f64,
         )
     };
@@ -7826,6 +7864,8 @@ fn build_client_live_meter_json(
         "status": "observed",
         "observation_source": observation.observation_source,
         "thread_id": observation.thread_id,
+        "thread_binding_state": thread_binding_state,
+        "current_thread_bound": current_thread_bound,
         "turn_id": observation.turn_id,
         "started_at_epoch_ms": observation.started_at_epoch_ms,
         "ended_at_epoch_ms": observation.ended_at_epoch_ms,
@@ -7842,7 +7882,11 @@ fn build_client_live_meter_json(
         "primary_limit_remaining_percent": 100_u64.saturating_sub(observation.latest_primary_limit_used_percent),
         "secondary_limit_used_percent": observation.latest_secondary_limit_used_percent,
         "secondary_limit_remaining_percent": 100_u64.saturating_sub(observation.latest_secondary_limit_used_percent),
-        "note": "Этот surface поднимает именно live meter клиента из rollout token_count/rate_limits: он нужен, чтобы отделять Amai-side same-meter delta от полного расхода turn/context в самом клиенте."
+        "note": if current_thread_bound {
+            "Этот surface поднимает именно live meter клиента из rollout token_count/rate_limits: он нужен, чтобы отделять Amai-side same-meter delta от полного расхода turn/context в самом клиенте."
+        } else {
+            "Этот surface поднят из rollout token_count/rate_limits, но текущий thread ещё не привязан к observation. Пока не materialized current-thread meter, live-turn rows и rotate-pressure должны деградировать до unknown/stale, а не наследоваться от предыдущего thread."
+        }
     })
 }
 
@@ -13894,23 +13938,22 @@ fn build_client_limit_exact_pair_status(
         let target_live_events = tool_overhead_observation_source["target_live_events"]
             .as_u64()
             .unwrap_or(0);
-        let irrecoverable_missing_live_events = tool_overhead_observation_source
-            ["irrecoverable_missing_live_events"]
-            .as_u64()
-            .unwrap_or(0);
-        let recoverable_missing_live_events = tool_overhead_observation_source
-            ["recoverable_missing_live_events"]
-            .as_u64()
-            .unwrap_or(0);
-        let blocking_reason = if irrecoverable_missing_live_events > 0
-            && recoverable_missing_live_events == 0
-        {
-            "tool_overhead_outside_retrieval_irrecoverable_debt"
-        } else if observed_live_events > 0 {
-            "tool_overhead_outside_retrieval_partially_measured"
-        } else {
-            "tool_overhead_outside_retrieval_unmeasured"
-        };
+        let irrecoverable_missing_live_events =
+            tool_overhead_observation_source["irrecoverable_missing_live_events"]
+                .as_u64()
+                .unwrap_or(0);
+        let recoverable_missing_live_events =
+            tool_overhead_observation_source["recoverable_missing_live_events"]
+                .as_u64()
+                .unwrap_or(0);
+        let blocking_reason =
+            if irrecoverable_missing_live_events > 0 && recoverable_missing_live_events == 0 {
+                "tool_overhead_outside_retrieval_irrecoverable_debt"
+            } else if observed_live_events > 0 {
+                "tool_overhead_outside_retrieval_partially_measured"
+            } else {
+                "tool_overhead_outside_retrieval_unmeasured"
+            };
         covered_reasons.insert(blocking_reason.to_string());
         blockers.push(json!({
             "code": "tool_overhead_outside_retrieval",
@@ -14040,10 +14083,11 @@ fn build_client_limit_frozen_gap_review_surface(
     exact_pair_status: &Value,
 ) -> Value {
     let exact_pair_available = exact_pair_status["exact_pair_available"].as_bool() == Some(true);
-    let blocker = exact_pair_status["blockers"].as_array().and_then(|items| items.first());
-    let review_required = blocker
-        .and_then(|value| value["frozen_gap_candidate"].as_bool())
-        == Some(true);
+    let blocker = exact_pair_status["blockers"]
+        .as_array()
+        .and_then(|items| items.first());
+    let review_required =
+        blocker.and_then(|value| value["frozen_gap_candidate"].as_bool()) == Some(true);
     let state = if exact_pair_available {
         "not_applicable_exact_pair_materialized"
     } else if review_required {
@@ -14054,7 +14098,10 @@ fn build_client_limit_frozen_gap_review_surface(
         "not_applicable"
     };
     let allowed_paths = if review_required {
-        json!(["keep_exact_pair_unavailable", "formalize_reviewed_frozen_debt_export"])
+        json!([
+            "keep_exact_pair_unavailable",
+            "formalize_reviewed_frozen_debt_export"
+        ])
     } else {
         json!([])
     };
@@ -14073,9 +14120,7 @@ fn build_client_limit_frozen_gap_review_surface(
         "not_applicable_without_frozen_gap_candidate" => {
             "Exact pair ещё blocked, но текущий blocker пока не классифицирован как irrecoverable frozen debt candidate."
         }
-        _ => {
-            "Frozen-gap review surface здесь не требуется."
-        }
+        _ => "Frozen-gap review surface здесь не требуется.",
     };
     json!({
         "model_version": contract.client_limit_frozen_gap_review_surface_version.clone(),
@@ -14154,18 +14199,14 @@ fn build_reviewed_frozen_debt_export_surface(
     };
     let review_bundle_command = if export_ready_report_only {
         scope_code.map(|scope_code| {
-            format!(
-                "cargo run --release -- observe token-statement-export --scope {scope_code}"
-            )
+            format!("cargo run --release -- observe token-statement-export --scope {scope_code}")
         })
     } else {
         None
     };
     let evidence_pack_command = if export_ready_report_only {
         scope_code.map(|scope_code| {
-            format!(
-                "cargo run --release -- observe token-evidence-pack --scope {scope_code}"
-            )
+            format!("cargo run --release -- observe token-evidence-pack --scope {scope_code}")
         })
     } else {
         None
@@ -14183,9 +14224,7 @@ fn build_reviewed_frozen_debt_export_surface(
         "not_applicable_without_frozen_gap_candidate" => {
             "Exact pair ещё blocked, но blocker пока не классифицирован как irrecoverable frozen debt candidate."
         }
-        _ => {
-            "Reviewed frozen-debt export surface здесь не требуется."
-        }
+        _ => "Reviewed frozen-debt export surface здесь не требуется.",
     };
     json!({
         "model_version": contract
@@ -15783,7 +15822,11 @@ fn apply_tool_overhead_observed_and_source_status(
             .cloned()
             .unwrap_or(Value::Null),
         node.get("whole_cycle_observed_source")
-            .and_then(|value| value["tool_overhead"].as_object().map(|_| value["tool_overhead"].clone()))
+            .and_then(|value| {
+                value["tool_overhead"]
+                    .as_object()
+                    .map(|_| value["tool_overhead"].clone())
+            })
             .unwrap_or_else(|| {
                 node.get("whole_cycle_observed_source")
                     .and_then(|value| value.get("tool_overhead"))
@@ -15818,17 +15861,12 @@ async fn attach_tool_overhead_observed_and_source_status_to_snapshot(
             .ok_or_else(|| anyhow!("token budget payload missing token_budget_event"))?;
         let event_id = node.get("event_id").cloned().unwrap_or(Value::Null);
         let correlation_id = node.get("correlation_id").cloned().unwrap_or(Value::Null);
-        let (
-            updated_fields,
-            retained_fields,
-            whole_cycle_observed,
-            tool_overhead_source,
-            attached,
-        ) = apply_tool_overhead_observed_and_source_status(
-            node,
-            tool_overhead_tokens,
-            &source_status,
-        )?;
+        let (updated_fields, retained_fields, whole_cycle_observed, tool_overhead_source, attached) =
+            apply_tool_overhead_observed_and_source_status(
+                node,
+                tool_overhead_tokens,
+                &source_status,
+            )?;
         (
             event_id,
             correlation_id,
@@ -21255,10 +21293,7 @@ effective_to_epoch_ms = 2000
             surface["state"],
             "reviewed_frozen_debt_export_ready_report_only"
         );
-        assert_eq!(
-            surface["surface_kind"],
-            "reviewed_frozen_debt_report_only"
-        );
+        assert_eq!(surface["surface_kind"], "reviewed_frozen_debt_report_only");
         assert_eq!(
             surface["forbidden_claims"],
             json!([
@@ -21968,9 +22003,11 @@ effective_to_epoch_ms = 2000
         let blockers = alignment["exact_pair_status"]["blockers"]
             .as_array()
             .expect("exact pair blockers");
-        assert!(!blockers
-            .iter()
-            .any(|blocker| blocker["code"].as_str() == Some("assistant_generation")));
+        assert!(
+            !blockers
+                .iter()
+                .any(|blocker| blocker["code"].as_str() == Some("assistant_generation"))
+        );
         let tool_blocker = blockers
             .iter()
             .find(|blocker| blocker["code"].as_str() == Some("tool_overhead_outside_retrieval"))
@@ -21980,10 +22017,7 @@ effective_to_epoch_ms = 2000
             "tool_overhead_outside_retrieval_irrecoverable_debt"
         );
         assert_eq!(tool_blocker["code"], "tool_overhead_outside_retrieval");
-        assert_eq!(
-            tool_blocker["blocker_kind"],
-            "whole_cycle_observation_gap"
-        );
+        assert_eq!(tool_blocker["blocker_kind"], "whole_cycle_observation_gap");
         assert_eq!(
             tool_blocker["recoverability_state"],
             "source_loss_irrecoverable"
@@ -22406,7 +22440,10 @@ effective_to_epoch_ms = 2000
 
         assert_eq!(status["state"], "tool_overhead_irrecoverable_debt_only");
         assert_eq!(status["recoverability_state"], "source_loss_irrecoverable");
-        assert_eq!(status["gap_semantics"], "irrecoverable_historical_debt_only");
+        assert_eq!(
+            status["gap_semantics"],
+            "irrecoverable_historical_debt_only"
+        );
         assert_eq!(status["irrecoverable_missing_live_events"], 1);
         assert_eq!(
             status["missing_source_state_sample"][0]["state"],
@@ -22438,7 +22475,10 @@ effective_to_epoch_ms = 2000
 
         assert_eq!(status["state"], "tool_overhead_irrecoverable_debt_only");
         assert_eq!(status["recoverability_state"], "source_loss_irrecoverable");
-        assert_eq!(status["gap_semantics"], "irrecoverable_historical_debt_only");
+        assert_eq!(
+            status["gap_semantics"],
+            "irrecoverable_historical_debt_only"
+        );
         assert_eq!(status["irrecoverable_missing_live_events"], 1);
         assert_eq!(
             status["missing_source_state_sample"][0]["state"],
@@ -24319,5 +24359,30 @@ effective_to_epoch_ms = 2000
         assert_eq!(source["binding_status"], "default_but_unbound");
         assert_eq!(source["resolved_path"], default_path.display().to_string());
         fs::remove_dir_all(&repo_root).expect("cleanup repo root");
+    }
+
+    #[test]
+    fn client_live_meter_thread_binding_state_marks_matching_current_thread() {
+        let (state, bound) =
+            super::client_live_meter_thread_binding_state(Some("thread-current"), "thread-current");
+        assert_eq!(state, "current_thread_bound");
+        assert!(bound);
+    }
+
+    #[test]
+    fn client_live_meter_thread_binding_state_marks_missing_current_thread_as_unbound() {
+        let (state, bound) = super::client_live_meter_thread_binding_state(None, "thread-previous");
+        assert_eq!(state, "no_current_thread_binding");
+        assert!(!bound);
+    }
+
+    #[test]
+    fn client_live_meter_thread_binding_state_marks_mismatched_thread_as_unbound() {
+        let (state, bound) = super::client_live_meter_thread_binding_state(
+            Some("thread-current"),
+            "thread-previous",
+        );
+        assert_eq!(state, "current_thread_mismatch");
+        assert!(!bound);
     }
 }

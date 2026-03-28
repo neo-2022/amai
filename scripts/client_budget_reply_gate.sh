@@ -4,15 +4,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 guard_json="$(cargo run --quiet -- observe client-budget-guard)"
-must_rotate="$(printf '%s' "$guard_json" | jq -r '
-  .reply_execution_gate.must_rotate_before_reply
-  // .reply_execution_gate.blocking
+reply_blocked="$(printf '%s' "$guard_json" | jq -r '
+  .reply_execution_gate.blocking
+  // .reply_execution_gate.must_rotate_before_reply
+  // .reply_execution_gate.must_wait_for_budget_recovery_before_reply
+  // .requires_global_budget_recovery_before_reply
   // .should_rotate_chat_now
-  // .should_rotate_chat_soon
   // false
 ')"
 
-if [[ "$must_rotate" != "true" ]]; then
+if [[ "$reply_blocked" != "true" ]]; then
   exit 0
 fi
 

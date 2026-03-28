@@ -634,13 +634,13 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         })?;
     if !rotate_status_labels
         .iter()
-        .any(|value| value.as_str() == Some("новый чат рекомендован"))
-        || !rotate_status_labels
+        .any(|value| value.as_str() == Some("новый чат нужен сейчас"))
+        || rotate_status_labels
             .iter()
-            .any(|value| value.as_str() == Some("новый чат нужен сейчас"))
+            .any(|value| value.as_str() == Some("новый чат рекомендован"))
     {
         return Err(anyhow!(
-            "MCP startup contract lost live_client_budget_enforcement rotate status labels"
+            "MCP startup contract lost hard rotate status labels or still treats advisory rotate labels as hard-stop"
         ));
     }
     if startup_contract["live_client_budget_enforcement"]["save_handoff_before_rotate"]
@@ -685,6 +685,59 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     {
         return Err(anyhow!(
             "MCP startup contract lost live_client_budget_enforcement blocked reply contract"
+        ));
+    }
+    let blocking_action_kinds =
+        startup_contract["live_client_budget_enforcement"]["blocking_action_kinds"]
+            .as_array()
+            .ok_or_else(|| {
+                anyhow!(
+                    "MCP startup contract lost live_client_budget_enforcement.blocking_action_kinds"
+                )
+            })?;
+    if !blocking_action_kinds
+        .iter()
+        .any(|value| value.as_str() == Some("rotate_chat_for_client_budget"))
+        || !blocking_action_kinds
+            .iter()
+            .any(|value| value.as_str() == Some("wait_for_global_client_budget_recovery"))
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement blocking action kinds"
+        ));
+    }
+    let allowed_response_kinds = startup_contract["live_client_budget_enforcement"]
+        ["blocking_reply_allowed_response_kinds"]
+        .as_array()
+        .ok_or_else(|| {
+            anyhow!(
+                "MCP startup contract lost live_client_budget_enforcement.blocking_reply_allowed_response_kinds"
+            )
+        })?;
+    if !allowed_response_kinds.iter().any(|value| {
+        value.as_str() == Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND)
+    }) || !allowed_response_kinds.iter().any(|value| {
+        value.as_str() == Some(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND)
+    }) {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement allowed blocked-reply kinds"
+        ));
+    }
+    let allowed_templates = startup_contract["live_client_budget_enforcement"]
+        ["blocking_reply_allowed_templates"]
+        .as_array()
+        .ok_or_else(|| {
+            anyhow!(
+                "MCP startup contract lost live_client_budget_enforcement.blocking_reply_allowed_templates"
+            )
+        })?;
+    if !allowed_templates.iter().any(|value| {
+        value.as_str() == Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE)
+    }) || !allowed_templates.iter().any(|value| {
+        value.as_str() == Some(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE)
+    }) {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement allowed blocked-reply templates"
         ));
     }
 
@@ -2866,19 +2919,30 @@ fn protocol_manifest() -> Value {
                     "rotate_soon_field": "should_rotate_chat_soon",
                     "status_label_field": "status_label",
                     "rotate_status_labels": [
-                        "новый чат рекомендован",
                         "новый чат нужен сейчас"
                     ],
                     "save_handoff_before_rotate": true,
                     "fresh_chat_requires_continuity_startup": true,
                     "full_scale_client_truth_required": true,
+                    "blocking_action_kinds": [
+                        "rotate_chat_for_client_budget",
+                        "wait_for_global_client_budget_recovery"
+                    ],
                     "blocking_reply_contract_field": "blocking_reply_contract",
                     "blocking_reply_contract_version": working_state::CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION,
                     "blocking_reply_response_kind": working_state::CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND,
+                    "blocking_reply_allowed_response_kinds": [
+                        working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND,
+                        working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND
+                    ],
                     "blocking_reply_max_sentences": working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES,
                     "blocking_reply_must_avoid_substantive_work": true,
                     "blocking_reply_must_use_action_bundle_operator_flow": true,
-                    "blocking_reply_template": working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE
+                    "blocking_reply_template": working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE,
+                    "blocking_reply_allowed_templates": [
+                        working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE,
+                        working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE
+                    ]
                 },
                 "required_arguments": ["project"],
                 "optional_arguments": ["repo_root", "namespace", "token_source_kind"],

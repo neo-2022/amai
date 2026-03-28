@@ -45,6 +45,14 @@ struct ClientTurnPressureGuard {
     full_turn_savings_pct: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct GlobalClientLimitGuard {
+    severity: &'static str,
+    status_label: &'static str,
+    primary_remaining_percent: f64,
+    secondary_remaining_percent: f64,
+}
+
 #[derive(Debug, Default)]
 struct AgentHierarchyProjectBucket {
     label: String,
@@ -2764,6 +2772,7 @@ fn current_session_budget_guard_with_restore_context(
     restore_context: &Value,
 ) -> Value {
     let client_live_meter = &report["client_live_meter"];
+    let current_thread_bound = client_live_meter_current_thread_bound(client_live_meter);
     let current_session_summary = &report["current_session"];
     let current_session_statement = &report["statement_previews"]["current_session"];
     let current_session_alignment = &current_session_statement["client_limit_meter_alignment"];
@@ -2801,7 +2810,10 @@ fn current_session_budget_guard_with_restore_context(
                 "guard_fresh_until_epoch_ms": null,
                 "rotate_now": false,
                 "rotate_soon": false,
-                "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(false),
+                "must_wait_for_budget_recovery_before_reply": false,
+                "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(
+                    working_state::ClientBudgetBlockingReplyMode::Inactive,
+                ),
                 "action_bundle": working_state::build_rotate_chat_action_bundle(
                     None,
                     None,
@@ -2816,14 +2828,15 @@ fn current_session_budget_guard_with_restore_context(
         });
     };
     let compact = compact_token_hero_card(session_card);
-    let status = compact["status"].as_str().unwrap_or("unknown");
-    let status_label = compact["status_label"].as_str().unwrap_or(status);
+    let compact_status = compact["status"].as_str().unwrap_or("unknown");
+    let compact_status_label = compact["status_label"].as_str().unwrap_or(compact_status);
     let value = compact["value"].as_str().unwrap_or_default();
     let rows = compact["rows"].as_array().cloned().unwrap_or_default();
     let last_request = client_live_context_metric_row(client_live_meter)
         .and_then(|row| row["value"].as_str().map(str::to_string));
     let client_limits = client_live_limit_metric_row(client_live_meter)
         .and_then(|row| row["value"].as_str().map(str::to_string));
+    let global_limit_guard = global_client_limit_guard(client_live_meter);
     let row_value = |label: &str| {
         rows.iter()
             .find(|row| row["label"].as_str() == Some(label))
@@ -2836,11 +2849,34 @@ fn current_session_budget_guard_with_restore_context(
             .and_then(|row| row["tooltip"].as_str())
             .map(str::to_string)
     };
-    let observed_at_epoch_ms = client_live_meter["ended_at_epoch_ms"].as_u64();
+    let observed_at_epoch_ms = if current_session_client_live_meter_available(client_live_meter)
+        || global_limit_guard.is_some()
+    {
+        client_live_meter["ended_at_epoch_ms"].as_u64()
+    } else {
+        None
+    };
     let max_guard_age_seconds = 10_u64;
-    let should_rotate_chat_now = status_label == "новый чат нужен сейчас";
+    let should_rotate_chat_now = compact_status_label == "новый чат нужен сейчас";
     let should_rotate_chat_soon =
-        status_label == "новый чат рекомендован" || should_rotate_chat_now;
+        compact_status_label == "новый чат рекомендован" || should_rotate_chat_now;
+    let requires_global_budget_recovery_before_reply =
+        global_limit_guard.is_some_and(|guard| guard.severity == "critical");
+    let status = global_limit_guard
+        .map(|guard| guard.severity)
+        .unwrap_or(compact_status);
+    let status_label = global_limit_guard
+        .map(|guard| guard.status_label)
+        .unwrap_or(compact_status_label);
+    let global_limit_note = global_limit_guard
+        .map(|guard| global_client_limit_guard_note(guard, client_limits.as_deref()));
+    let status_tooltip = global_limit_note
+        .clone()
+        .or_else(|| compact["status_tooltip"].as_str().map(str::to_string));
+    let note = global_limit_note
+        .clone()
+        .or_else(|| compact["note"].as_str().map(str::to_string))
+        .unwrap_or_default();
     let recommended_headline = restore_context["current_goal"]
         .as_str()
         .filter(|value| !value.is_empty());
@@ -2857,6 +2893,7 @@ fn current_session_budget_guard_with_restore_context(
         max_guard_age_seconds,
         should_rotate_chat_now,
         should_rotate_chat_soon,
+        requires_global_budget_recovery_before_reply,
         preserves_return_obligation,
         restore_context["project"]["code"].as_str(),
         restore_context["namespace"]["code"].as_str(),
@@ -2884,22 +2921,27 @@ fn current_session_budget_guard_with_restore_context(
         "source": "dashboard_current_session_budget_guard_v2",
         "status": status,
         "status_label": status_label,
-        "status_tooltip": compact["status_tooltip"].as_str(),
+        "status_tooltip": status_tooltip,
         "full_turn_savings_proven": value != "не доказано",
         "full_turn_savings_percent": if value == "не доказано" { None } else { Some(value.to_string()) },
         "should_rotate_chat_now": should_rotate_chat_now,
         "should_rotate_chat_soon": should_rotate_chat_soon,
+        "requires_global_budget_recovery_before_reply": requires_global_budget_recovery_before_reply,
         "next_action": row_value("Следующее действие"),
         "last_request": last_request,
         "client_limits": client_limits,
         "observed_at_epoch_ms": observed_at_epoch_ms,
+        "client_live_meter_current_thread_bound": current_thread_bound,
+        "client_live_meter_thread_binding_state": client_live_meter["thread_binding_state"]
+            .as_str()
+            .unwrap_or("current_thread_bound"),
         "max_guard_age_seconds": max_guard_age_seconds,
         "reply_execution_gate": reply_execution_gate,
         "tracked_slice": tracked_slice,
         "tracked_slice_truth": tracked_slice_truth,
         "tracked_slice_tooltip": row_tooltip("Экономия на учтённой части"),
-        "reason": compact["note"].as_str(),
-        "note": compact["note"].as_str(),
+        "reason": note.clone(),
+        "note": note,
     })
 }
 
@@ -2910,6 +2952,7 @@ fn build_client_budget_reply_execution_gate(
     max_guard_age_seconds: u64,
     should_rotate_chat_now: bool,
     should_rotate_chat_soon: bool,
+    requires_global_budget_recovery_before_reply: bool,
     preserves_return_obligation: bool,
     project_code: Option<&str>,
     namespace_code: Option<&str>,
@@ -2917,16 +2960,67 @@ fn build_client_budget_reply_execution_gate(
     recommended_headline: Option<&str>,
     recommended_next_step: Option<&str>,
 ) -> Value {
-    let blocking = should_rotate_chat_now || should_rotate_chat_soon;
-    let action_kind = if blocking {
-        "rotate_chat_for_client_budget"
+    let rotate_blocking = should_rotate_chat_now;
+    let blocking = rotate_blocking || requires_global_budget_recovery_before_reply;
+    let (
+        action_kind,
+        reason,
+        must_rotate_before_reply,
+        save_handoff_before_rotate,
+        fresh_chat_requires_continuity_startup,
+        blocking_reply_mode,
+        action_bundle,
+    ) = if requires_global_budget_recovery_before_reply {
+        (
+            "wait_for_global_client_budget_recovery",
+            "client_budget_guard_global_exhaustion",
+            false,
+            false,
+            false,
+            working_state::ClientBudgetBlockingReplyMode::WaitForGlobalBudgetRecovery,
+            working_state::build_wait_for_global_client_budget_action_bundle(
+                project_code,
+                namespace_code,
+                repo_root,
+                preserves_return_obligation,
+                recommended_headline,
+                recommended_next_step,
+            ),
+        )
+    } else if rotate_blocking {
+        (
+            "rotate_chat_for_client_budget",
+            "client_budget_guard_pressure",
+            true,
+            true,
+            true,
+            working_state::ClientBudgetBlockingReplyMode::RotateChatOnly,
+            working_state::build_rotate_chat_action_bundle(
+                project_code,
+                namespace_code,
+                repo_root,
+                preserves_return_obligation,
+                recommended_headline,
+                recommended_next_step,
+            ),
+        )
     } else {
-        "continue_current_chat"
-    };
-    let reason = if blocking {
-        "client_budget_guard_pressure"
-    } else {
-        "client_budget_guard_clear"
+        (
+            "continue_current_chat",
+            "client_budget_guard_clear",
+            false,
+            false,
+            false,
+            working_state::ClientBudgetBlockingReplyMode::Inactive,
+            working_state::build_rotate_chat_action_bundle(
+                project_code,
+                namespace_code,
+                repo_root,
+                preserves_return_obligation,
+                recommended_headline,
+                recommended_next_step,
+            ),
+        )
     };
     let gate_fresh_until_epoch_ms =
         observed_at_epoch_ms.map(|value| value.saturating_add(max_guard_age_seconds * 1000));
@@ -2937,25 +3031,21 @@ fn build_client_budget_reply_execution_gate(
         "action_kind": action_kind,
         "reason": reason,
         "blocking": blocking,
-        "must_rotate_before_reply": blocking,
+        "must_rotate_before_reply": must_rotate_before_reply,
+        "must_wait_for_budget_recovery_before_reply": requires_global_budget_recovery_before_reply,
         "unrelated_reply_allowed": !blocking,
-        "save_handoff_before_rotate": blocking,
-        "fresh_chat_requires_continuity_startup": blocking,
+        "save_handoff_before_rotate": save_handoff_before_rotate,
+        "fresh_chat_requires_continuity_startup": fresh_chat_requires_continuity_startup,
         "full_scale_client_truth_required": true,
         "guard_observed_at_epoch_ms": observed_at_epoch_ms,
         "max_guard_age_seconds": max_guard_age_seconds,
         "guard_fresh_until_epoch_ms": gate_fresh_until_epoch_ms,
         "rotate_now": should_rotate_chat_now,
         "rotate_soon": should_rotate_chat_soon,
-        "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(blocking),
-        "action_bundle": working_state::build_rotate_chat_action_bundle(
-            project_code,
-            namespace_code,
-            repo_root,
-            preserves_return_obligation,
-            recommended_headline,
-            recommended_next_step,
+        "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(
+            blocking_reply_mode,
         ),
+        "action_bundle": action_bundle,
     })
 }
 
@@ -4823,9 +4913,10 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if let Some(row) = client_live_limit_metric_row(client_live_meter) {
         session_rows.push(row);
     }
-    if let Some(row) =
-        client_turn_pressure_metric_row(session_client_turn_pressure, session_rotate_bundle.as_ref())
-    {
+    if let Some(row) = client_turn_pressure_metric_row(
+        session_client_turn_pressure,
+        session_rotate_bundle.as_ref(),
+    ) {
         session_rows.push(row);
     }
     if let Some(row) = client_limit_alignment_metric_row(current_session_alignment) {
@@ -4869,7 +4960,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             &client_turn_pressure_tooltip(guard, session_rotate_bundle.as_ref()),
         );
     } else if session_full_turn_savings_pct.is_none()
-        && client_live_meter["status"].as_str() == Some("observed")
+        && current_session_client_live_meter_available(client_live_meter)
     {
         session_card = with_status(session_card, "alert");
         session_card = with_status_label(session_card, "реальная экономия не доказана");
@@ -8342,11 +8433,93 @@ fn exact_model_component_delta_note_sentence(alignment: &Value) -> Option<String
     })
 }
 
+fn client_live_meter_is_observed(client_live_meter: &Value) -> bool {
+    client_live_meter["status"].as_str() == Some("observed")
+}
+
+fn client_live_meter_current_thread_bound(client_live_meter: &Value) -> bool {
+    client_live_meter["current_thread_bound"]
+        .as_bool()
+        .unwrap_or_else(|| {
+            client_live_meter["thread_binding_state"]
+                .as_str()
+                .map(|value| value == "current_thread_bound")
+                .unwrap_or(true)
+        })
+}
+
+fn current_session_client_live_meter_available(client_live_meter: &Value) -> bool {
+    client_live_meter_is_observed(client_live_meter)
+        && client_live_meter_current_thread_bound(client_live_meter)
+}
+
+fn global_client_limit_guard(client_live_meter: &Value) -> Option<GlobalClientLimitGuard> {
+    if !client_live_meter_is_observed(client_live_meter)
+        || client_live_meter_current_thread_bound(client_live_meter)
+    {
+        return None;
+    }
+    let primary_remaining_percent = client_live_meter["primary_limit_remaining_percent"]
+        .as_f64()
+        .or_else(|| {
+            client_live_meter["primary_limit_used_percent"]
+                .as_f64()
+                .map(|used| 100.0 - used)
+        })
+        .unwrap_or(100.0);
+    let secondary_remaining_percent = client_live_meter["secondary_limit_remaining_percent"]
+        .as_f64()
+        .or_else(|| {
+            client_live_meter["secondary_limit_used_percent"]
+                .as_f64()
+                .map(|used| 100.0 - used)
+        })
+        .unwrap_or(100.0);
+    if primary_remaining_percent <= 5.0 || secondary_remaining_percent <= 5.0 {
+        Some(GlobalClientLimitGuard {
+            severity: "critical",
+            status_label: "глобальный лимит клиента почти исчерпан",
+            primary_remaining_percent,
+            secondary_remaining_percent,
+        })
+    } else if primary_remaining_percent <= 10.0 || secondary_remaining_percent <= 10.0 {
+        Some(GlobalClientLimitGuard {
+            severity: "alert",
+            status_label: "глобальный лимит клиента на исходе",
+            primary_remaining_percent,
+            secondary_remaining_percent,
+        })
+    } else {
+        None
+    }
+}
+
+fn global_client_limit_guard_note(
+    guard: GlobalClientLimitGuard,
+    client_limits_value: Option<&str>,
+) -> String {
+    let rendered_limits =
+        client_limits_value.unwrap_or("последнее observed значение лимита клиента");
+    if guard.severity == "critical" {
+        format!(
+            "Current thread binding ещё не materialized, но последнее observed значение client limits уже показывает 5ч {}, 7д {}. Это truly-global pressure: новый чат не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее observed значение: {rendered_limits}.",
+            format_percent(Some(guard.primary_remaining_percent)),
+            format_percent(Some(guard.secondary_remaining_percent)),
+        )
+    } else {
+        format!(
+            "Current thread binding ещё не materialized, но последнее observed значение client limits уже показывает 5ч {}, 7д {}. Это пока только global warning hint: rotate gate не включается, но следующий substantive reply стоит делать только после повторной проверки budget. Текущее observed значение: {rendered_limits}.",
+            format_percent(Some(guard.primary_remaining_percent)),
+            format_percent(Some(guard.secondary_remaining_percent)),
+        )
+    }
+}
+
 fn client_turn_pressure_guard(
     client_live_meter: &Value,
     exact_pair: Option<(u64, u64, i64, f64)>,
 ) -> Option<ClientTurnPressureGuard> {
-    if client_live_meter["status"].as_str() != Some("observed") {
+    if !current_session_client_live_meter_available(client_live_meter) {
         return None;
     }
     let turn_total_tokens = client_live_meter["client_turn_total_tokens"]
@@ -8526,7 +8699,9 @@ fn client_turn_pressure_tooltip(
             tooltip.push_str(&format!("\n- Готовая команда handoff: {command}"));
         }
         if let Some(command) = bundle["operator_flow"]["startup_command"].as_str() {
-            tooltip.push_str(&format!("\n- После открытия нового чата запусти startup: {command}"));
+            tooltip.push_str(&format!(
+                "\n- После открытия нового чата запусти startup: {command}"
+            ));
         }
     }
     tooltip
@@ -8536,7 +8711,7 @@ fn client_live_meter_note_sentence(
     client_live_meter: &Value,
     exact_pair: Option<(u64, u64, i64, f64)>,
 ) -> Option<String> {
-    if client_live_meter["status"].as_str() != Some("observed") {
+    if !current_session_client_live_meter_available(client_live_meter) {
         return None;
     }
     let turn_total_tokens = client_live_meter["client_turn_total_tokens"]
@@ -8579,7 +8754,7 @@ fn client_live_meter_note_sentence(
 }
 
 fn client_live_context_metric_row(client_live_meter: &Value) -> Option<Value> {
-    if client_live_meter["status"].as_str() != Some("observed") {
+    if !current_session_client_live_meter_available(client_live_meter) {
         return None;
     }
     let turn_total_tokens = client_live_meter["client_turn_total_tokens"]
@@ -8630,9 +8805,10 @@ fn client_live_context_metric_row(client_live_meter: &Value) -> Option<Value> {
 }
 
 fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
-    if client_live_meter["status"].as_str() != Some("observed") {
+    if !client_live_meter_is_observed(client_live_meter) {
         return None;
     }
+    let current_thread_bound = client_live_meter_current_thread_bound(client_live_meter);
     let primary_remaining_percent = client_live_meter["primary_limit_remaining_percent"]
         .as_u64()
         .or_else(|| {
@@ -8657,24 +8833,44 @@ fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
         .as_u64()
         .filter(|value| *value > 0)
         .map(human_timestamp_clock);
-    let tooltip = format!(
-        "Этот ряд показывает live rate-limit contour клиента из rollout token_count/rate_limits.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- Снято из raw token_count: {}",
-        format_percent(Some(primary_remaining_percent as f64)),
-        format_percent(client_live_meter["primary_limit_used_percent"].as_f64()),
-        format_percent(Some(secondary_remaining_percent as f64)),
-        format_percent(client_live_meter["secondary_limit_used_percent"].as_f64()),
-        observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
-    );
+    let (tooltip, value_suffix) = if current_thread_bound {
+        (
+            format!(
+                "Этот ряд показывает live rate-limit contour клиента из rollout token_count/rate_limits.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- Снято из raw token_count: {}",
+                format_percent(Some(primary_remaining_percent as f64)),
+                format_percent(client_live_meter["primary_limit_used_percent"].as_f64()),
+                format_percent(Some(secondary_remaining_percent as f64)),
+                format_percent(client_live_meter["secondary_limit_used_percent"].as_f64()),
+                observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
+            ),
+            observed_at_short
+                .as_ref()
+                .map(|stamp| format!(" · raw {stamp}"))
+                .unwrap_or_default(),
+        )
+    } else {
+        (
+            format!(
+                "Этот ряд показывает последнее observed значение клиентского rate-limit contour из rollout token_count/rate_limits.\n- Current thread binding ещё не materialized, поэтому это global client limit hint, а не pressure текущего thread.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- Последнее observed значение снято из raw token_count: {}",
+                format_percent(Some(primary_remaining_percent as f64)),
+                format_percent(client_live_meter["primary_limit_used_percent"].as_f64()),
+                format_percent(Some(secondary_remaining_percent as f64)),
+                format_percent(client_live_meter["secondary_limit_used_percent"].as_f64()),
+                observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
+            ),
+            observed_at_short
+                .as_ref()
+                .map(|stamp| format!(" · latest observed {stamp}"))
+                .unwrap_or_default(),
+        )
+    };
     Some(metric_row(
         "Лимит клиента сейчас",
         format!(
             "5ч остаётся {}, 7д остаётся {}{}",
             format_percent(Some(primary_remaining_percent as f64)),
             format_percent(Some(secondary_remaining_percent as f64)),
-            observed_at_short
-                .as_ref()
-                .map(|stamp| format!(" · raw {stamp}"))
-                .unwrap_or_default()
+            value_suffix
         ),
         Some(tooltip.as_str()),
     ))
@@ -8689,7 +8885,7 @@ fn live_turn_exact_pair(
     if current_session["counted_events"].as_u64().unwrap_or(0) != 1 {
         return None;
     }
-    if client_live_meter["status"].as_str() != Some("observed") {
+    if !current_session_client_live_meter_available(client_live_meter) {
         return None;
     }
     let session_started = current_session["started_at_epoch_ms"].as_i64().unwrap_or(0);
@@ -8714,7 +8910,7 @@ fn full_turn_savings_pct_from_live_meter(
     client_live_meter: &Value,
     exact_pair: Option<(u64, u64, i64, f64)>,
 ) -> Option<f64> {
-    if client_live_meter["status"].as_str() != Some("observed") {
+    if !current_session_client_live_meter_available(client_live_meter) {
         return None;
     }
     let (_, _, saved_tokens, _) = exact_pair?;
@@ -8739,7 +8935,7 @@ fn client_full_turn_savings_metric_row(
     client_live_meter: &Value,
     exact_pair: Option<(u64, u64, i64, f64)>,
 ) -> Option<Value> {
-    if client_live_meter["status"].as_str() != Some("observed") {
+    if !current_session_client_live_meter_available(client_live_meter) {
         return None;
     }
     let (_, _, saved_tokens, _) = exact_pair?;
@@ -10458,12 +10654,13 @@ mod tests {
         agent_scope_activity_card, artifact_cleanup_warning, benchmark_qdrant_live_card,
         browser_base_url, build_benchmark_cards, build_continuity_correctness_card,
         build_degradation_model_card, build_hero_cards, build_links, build_machine_cards,
-        build_top_cards, format_ms, format_time_compare_pair, human_elapsed_ms, render_html,
-        live_latency_compare_card, monitoring_url, working_state_live_card, worst_status,
+        build_top_cards, format_ms, format_time_compare_pair, human_elapsed_ms,
+        live_latency_compare_card, monitoring_url, render_html, working_state_live_card,
+        worst_status,
     };
     use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary};
     use crate::working_state;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     fn synthetic_machine_summary(
         disk_available_gib: f64,
@@ -12265,6 +12462,30 @@ mod tests {
     }
 
     #[test]
+    fn client_turn_pressure_guard_requires_current_thread_binding() {
+        let meter = json!({
+            "status": "observed",
+            "thread_binding_state": "no_current_thread_binding",
+            "current_thread_bound": false,
+            "client_turn_total_tokens": 140921,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 54.54,
+            "primary_limit_remaining_percent": 61.0,
+            "secondary_limit_remaining_percent": 88.0,
+            "ended_at_epoch_ms": 1774622949000u64
+        });
+        assert!(super::client_turn_pressure_guard(&meter, None).is_none());
+        assert!(super::client_live_context_metric_row(&meter).is_none());
+        let row = super::client_live_limit_metric_row(&meter).expect("limit row");
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("latest observed")
+        );
+    }
+
+    #[test]
     fn client_turn_pressure_guard_triggers_on_large_thread_with_weak_full_turn_share() {
         let snapshot = json!({
             "token_budget_report": {
@@ -12410,9 +12631,7 @@ mod tests {
         let guard = super::client_turn_pressure_guard(&meter, None).expect("pressure guard");
         assert_eq!(guard.severity, "critical");
         assert_eq!(guard.status_label, "новый чат нужен сейчас");
-        assert!(
-            super::client_turn_pressure_tooltip(guard, None).contains("слишком раздут")
-        );
+        assert!(super::client_turn_pressure_tooltip(guard, None).contains("слишком раздут"));
     }
 
     #[test]
@@ -12568,66 +12787,68 @@ mod tests {
     #[test]
     fn current_session_budget_guard_surfaces_machine_readable_rotate_flags() {
         let snapshot = json!({
+        "token_budget_report": {
             "token_budget_report": {
-                "token_budget_report": {
+                "current_session": {
+                    "events_total": 1,
+                    "counted_events": 1,
+                    "verified_effective_saved_tokens": 138,
+                    "verified_effective_savings_pct": 56.56,
+                    "started_at_epoch_ms": 1774622516860u64,
+                    "ended_at_epoch_ms": 1774622516860u64,
+                    "verified_baseline_tokens": 240,
+                    "verified_observed_whole_cycle_with_amai_tokens": 106
+                },
+                "rolling_window": {"events_total": 0, "counted_events": 0},
+                "lifetime": {"events_total": 0, "counted_events": 0},
+                "statement_previews": {
                     "current_session": {
-                        "events_total": 1,
-                        "counted_events": 1,
-                        "verified_effective_saved_tokens": 138,
-                        "verified_effective_savings_pct": 56.56,
-                        "started_at_epoch_ms": 1774622516860u64,
-                        "ended_at_epoch_ms": 1774622516860u64,
-                        "verified_baseline_tokens": 240,
-                        "verified_observed_whole_cycle_with_amai_tokens": 106
-                    },
-                    "rolling_window": {"events_total": 0, "counted_events": 0},
-                    "lifetime": {"events_total": 0, "counted_events": 0},
-                    "statement_previews": {
-                        "current_session": {
-                            "verified_observed_whole_cycle_with_amai_tokens": 106,
-                            "client_limit_meter_alignment": {
-                                "same_meter_as_client_limit": true,
-                                "exact_pair_status": {"exact_pair_available": true},
-                                "strict_client_meter_slice": {"lower_bound_tokens": 240},
-                                "explicit_boundary_surface": {
-                                    "blocks_full_same_meter_equivalence": false
-                                }
+                        "verified_observed_whole_cycle_with_amai_tokens": 106,
+                        "client_limit_meter_alignment": {
+                            "same_meter_as_client_limit": true,
+                            "exact_pair_status": {"exact_pair_available": true},
+                            "strict_client_meter_slice": {"lower_bound_tokens": 240},
+                            "explicit_boundary_surface": {
+                                "blocks_full_same_meter_equivalence": false
                             }
-                        },
-                        "rolling_window": {},
-                        "lifetime": {}
+                        }
                     },
-                    "statement_export_previews": {"lifetime": {}},
-	                "client_live_meter": {
-	                    "status": "observed",
-	                    "client_turn_total_tokens": 140921,
-	                    "latest_model_context_window": 258400,
-	                    "context_used_percent": 54.54,
-                        "primary_limit_remaining_percent": 61.0,
-                        "secondary_limit_remaining_percent": 88.0,
-                        "started_at_epoch_ms": 1774622174000u64,
-                        "ended_at_epoch_ms": 1774622949000u64
+                    "rolling_window": {},
+                    "lifetime": {}
+                },
+                "statement_export_previews": {"lifetime": {}},
+                "client_live_meter": {
+                    "status": "observed",
+                    "thread_binding_state": "current_thread_bound",
+                    "current_thread_bound": true,
+                    "client_turn_total_tokens": 140921,
+                    "latest_model_context_window": 258400,
+                    "context_used_percent": 54.54,
+                    "primary_limit_remaining_percent": 61.0,
+                    "secondary_limit_remaining_percent": 88.0,
+                    "started_at_epoch_ms": 1774622174000u64,
+                    "ended_at_epoch_ms": 1774622949000u64
+                },
+                    "profile": {"display_name": "Обычная рабочая машина"}
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": {
+                        "code": "amai",
+                        "display_name": "Amai",
+                        "repo_root": "/home/art/agent-memory-index"
                     },
-	                    "profile": {"display_name": "Обычная рабочая машина"}
-	                }
-	            },
-	            "latest_repo_working_state_restore": {
-	                "working_state_restore": {
-	                    "project": {
-	                        "code": "amai",
-	                        "display_name": "Amai",
-	                        "repo_root": "/home/art/agent-memory-index"
-	                    },
-	                    "namespace": {
-	                        "code": "continuity",
-	                        "display_name": "Continuity"
-	                    },
-	                    "execctl_resume_state": "pending_return_queue_present",
-                        "current_goal": "Same-meter spend control",
-                        "next_step": "Materialize live assistant generation source."
-	                }
-	            }
-	        });
+                    "namespace": {
+                        "code": "continuity",
+                        "display_name": "Continuity"
+                    },
+                    "execctl_resume_state": "pending_return_queue_present",
+                    "current_goal": "Same-meter spend control",
+                    "next_step": "Materialize live assistant generation source."
+                }
+            }
+        });
 
         let guard = super::current_session_budget_guard(&snapshot);
         assert_eq!(
@@ -12672,9 +12893,9 @@ mod tests {
             json!("rotate-chat-action-bundle-v1")
         );
         assert_eq!(
-	            guard["reply_execution_gate"]["action_bundle"]["run_continuity_startup"]["project"],
-	            json!("amai")
-	        );
+            guard["reply_execution_gate"]["action_bundle"]["run_continuity_startup"]["project"],
+            json!("amai")
+        );
         assert_eq!(
             guard["reply_execution_gate"]["action_bundle"]["recommended_handoff"]["headline"],
             json!("Same-meter spend control")
@@ -12721,6 +12942,307 @@ mod tests {
                 .unwrap_or_default()
                 .contains("continuity startup")
         );
+        assert_eq!(guard["client_live_meter_current_thread_bound"], json!(true));
+        assert_eq!(
+            guard["client_live_meter_thread_binding_state"],
+            json!("current_thread_bound")
+        );
+    }
+
+    #[test]
+    fn current_session_budget_guard_keeps_rotate_soon_as_advisory_only() {
+        let snapshot = json!({
+        "token_budget_report": {
+            "token_budget_report": {
+                "current_session": {
+                    "events_total": 1,
+                    "counted_events": 1,
+                    "verified_effective_saved_tokens": 320,
+                    "verified_effective_savings_pct": 49.0,
+                    "started_at_epoch_ms": 1774622516860u64,
+                    "ended_at_epoch_ms": 1774622516860u64,
+                    "verified_baseline_tokens": 65320,
+                    "verified_observed_whole_cycle_with_amai_tokens": 65000
+                },
+                "rolling_window": {"events_total": 0, "counted_events": 0},
+                "lifetime": {"events_total": 0, "counted_events": 0},
+                "statement_previews": {
+                    "current_session": {
+                        "verified_observed_whole_cycle_with_amai_tokens": 65000,
+                        "client_limit_meter_alignment": {
+                            "same_meter_as_client_limit": true,
+                            "exact_pair_status": {"exact_pair_available": true},
+                            "strict_client_meter_slice": {"lower_bound_tokens": 65320},
+                            "explicit_boundary_surface": {
+                                "blocks_full_same_meter_equivalence": false
+                            }
+                        }
+                    },
+                    "rolling_window": {},
+                    "lifetime": {}
+                },
+                "statement_export_previews": {"lifetime": {}},
+                "client_live_meter": {
+                    "status": "observed",
+                    "thread_binding_state": "current_thread_bound",
+                    "current_thread_bound": true,
+                    "client_turn_total_tokens": 65000,
+                    "latest_model_context_window": 258400,
+                    "context_used_percent": 25.15,
+                    "primary_limit_remaining_percent": 94.0,
+                    "secondary_limit_remaining_percent": 97.0,
+                    "started_at_epoch_ms": 1774622174000u64,
+                    "ended_at_epoch_ms": 1774622949000u64
+                },
+                    "profile": {"display_name": "Обычная рабочая машина"}
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": {
+                        "code": "amai",
+                        "display_name": "Amai",
+                        "repo_root": "/home/art/agent-memory-index"
+                    },
+                    "namespace": {
+                        "code": "continuity",
+                        "display_name": "Continuity"
+                    },
+                    "execctl_resume_state": "pending_return_queue_present",
+                    "current_goal": "Same-meter spend control",
+                    "next_step": "Materialize live assistant generation source."
+                }
+            }
+        });
+
+        let guard = super::current_session_budget_guard(&snapshot);
+        assert_eq!(guard["should_rotate_chat_now"], json!(false));
+        assert_eq!(guard["should_rotate_chat_soon"], json!(true));
+        assert_eq!(guard["status_label"], json!("новый чат рекомендован"));
+        assert_eq!(guard["reply_execution_gate"]["blocking"], json!(false));
+        assert_eq!(
+            guard["reply_execution_gate"]["must_rotate_before_reply"],
+            json!(false)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_kind"],
+            json!("continue_current_chat")
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["blocking_reply_contract"]["active"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn current_session_budget_guard_ignores_unbound_previous_thread_meter() {
+        let snapshot = json!({
+        "token_budget_report": {
+            "token_budget_report": {
+                "current_session": {
+                    "events_total": 1,
+                    "counted_events": 1,
+                    "verified_effective_saved_tokens": 138,
+                    "verified_effective_savings_pct": 56.56,
+                    "started_at_epoch_ms": 1774622516860u64,
+                    "ended_at_epoch_ms": 1774622516860u64,
+                    "verified_baseline_tokens": 240,
+                    "verified_observed_whole_cycle_with_amai_tokens": 106
+                },
+                "rolling_window": {"events_total": 0, "counted_events": 0},
+                "lifetime": {"events_total": 0, "counted_events": 0},
+                "statement_previews": {
+                    "current_session": {
+                        "verified_observed_whole_cycle_with_amai_tokens": 106,
+                        "client_limit_meter_alignment": {
+                            "same_meter_as_client_limit": true,
+                            "exact_pair_status": {"exact_pair_available": true},
+                            "strict_client_meter_slice": {"lower_bound_tokens": 240},
+                            "explicit_boundary_surface": {
+                                "blocks_full_same_meter_equivalence": false
+                            }
+                        }
+                    },
+                    "rolling_window": {},
+                    "lifetime": {}
+                },
+                "statement_export_previews": {"lifetime": {}},
+                "client_live_meter": {
+                    "status": "observed",
+                    "thread_binding_state": "no_current_thread_binding",
+                    "current_thread_bound": false,
+                    "thread_id": "thread-previous",
+                    "client_turn_total_tokens": 140921,
+                    "latest_model_context_window": 258400,
+                    "context_used_percent": 54.54,
+                    "primary_limit_remaining_percent": 61.0,
+                    "secondary_limit_remaining_percent": 88.0,
+                    "started_at_epoch_ms": 1774622174000u64,
+                    "ended_at_epoch_ms": 1774622949000u64
+                },
+                    "profile": {"display_name": "Обычная рабочая машина"}
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": {
+                        "code": "amai",
+                        "display_name": "Amai",
+                        "repo_root": "/home/art/agent-memory-index"
+                    },
+                    "namespace": {
+                        "code": "continuity",
+                        "display_name": "Continuity"
+                    },
+                    "execctl_resume_state": "pending_return_queue_present",
+                    "current_goal": "Same-meter spend control",
+                    "next_step": "Materialize live assistant generation source."
+                }
+            }
+        });
+
+        let guard = super::current_session_budget_guard(&snapshot);
+        assert_eq!(guard["should_rotate_chat_now"], json!(false));
+        assert_eq!(guard["should_rotate_chat_soon"], json!(false));
+        assert_eq!(
+            guard["reply_execution_gate"]["action_kind"],
+            json!("continue_current_chat")
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["must_rotate_before_reply"],
+            json!(false)
+        );
+        assert_eq!(guard["last_request"], Value::Null);
+        assert!(
+            guard["client_limits"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("5ч остаётся 61.00%, 7д остаётся 88.00%")
+        );
+        assert!(
+            guard["client_limits"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("latest observed")
+        );
+        assert_eq!(guard["observed_at_epoch_ms"], Value::Null);
+        assert_eq!(
+            guard["client_live_meter_current_thread_bound"],
+            json!(false)
+        );
+        assert_eq!(
+            guard["client_live_meter_thread_binding_state"],
+            json!("no_current_thread_binding")
+        );
+    }
+
+    #[test]
+    fn current_session_budget_guard_blocks_global_budget_exhaustion_without_thread_binding() {
+        let snapshot = json!({
+        "token_budget_report": {
+            "token_budget_report": {
+                "current_session": {
+                    "events_total": 1,
+                    "counted_events": 1,
+                    "verified_effective_saved_tokens": 138,
+                    "verified_effective_savings_pct": 56.56,
+                    "started_at_epoch_ms": 1774622516860u64,
+                    "ended_at_epoch_ms": 1774622516860u64,
+                    "verified_baseline_tokens": 240,
+                    "verified_observed_whole_cycle_with_amai_tokens": 106
+                },
+                "rolling_window": {"events_total": 0, "counted_events": 0},
+                "lifetime": {"events_total": 0, "counted_events": 0},
+                "statement_previews": {
+                    "current_session": {
+                        "verified_observed_whole_cycle_with_amai_tokens": 106,
+                        "client_limit_meter_alignment": {
+                            "same_meter_as_client_limit": true,
+                            "exact_pair_status": {"exact_pair_available": true},
+                            "strict_client_meter_slice": {"lower_bound_tokens": 240},
+                            "explicit_boundary_surface": {
+                                "blocks_full_same_meter_equivalence": false
+                            }
+                        }
+                    },
+                    "rolling_window": {},
+                    "lifetime": {}
+                },
+                "statement_export_previews": {"lifetime": {}},
+                "client_live_meter": {
+                    "status": "observed",
+                    "thread_binding_state": "no_current_thread_binding",
+                    "current_thread_bound": false,
+                    "thread_id": "thread-previous",
+                    "client_turn_total_tokens": 140921,
+                    "latest_model_context_window": 258400,
+                    "context_used_percent": 54.54,
+                    "primary_limit_remaining_percent": 5.0,
+                    "secondary_limit_remaining_percent": 71.0,
+                    "started_at_epoch_ms": 1774622174000u64,
+                    "ended_at_epoch_ms": 1774622949000u64
+                },
+                    "profile": {"display_name": "Обычная рабочая машина"}
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": {
+                        "code": "amai",
+                        "display_name": "Amai",
+                        "repo_root": "/home/art/agent-memory-index"
+                    },
+                    "namespace": {
+                        "code": "continuity",
+                        "display_name": "Continuity"
+                    },
+                    "execctl_resume_state": "pending_return_queue_present",
+                    "current_goal": "Same-meter spend control",
+                    "next_step": "Materialize live assistant generation source."
+                }
+            }
+        });
+
+        let guard = super::current_session_budget_guard(&snapshot);
+        assert_eq!(guard["should_rotate_chat_now"], json!(false));
+        assert_eq!(guard["should_rotate_chat_soon"], json!(false));
+        assert_eq!(
+            guard["requires_global_budget_recovery_before_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            guard["status_label"],
+            json!("глобальный лимит клиента почти исчерпан")
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_kind"],
+            json!("wait_for_global_client_budget_recovery")
+        );
+        assert_eq!(guard["reply_execution_gate"]["blocking"], json!(true));
+        assert_eq!(
+            guard["reply_execution_gate"]["must_rotate_before_reply"],
+            json!(false)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["must_wait_for_budget_recovery_before_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["blocking_reply_contract"]["response_kind"],
+            json!(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_bundle"]["bundle_version"],
+            json!("wait-client-budget-action-bundle-v1")
+        );
+        assert_eq!(guard["last_request"], Value::Null);
+        assert!(
+            guard["client_limits"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("latest observed")
+        );
+        assert_eq!(guard["observed_at_epoch_ms"], json!(1774622949000u64));
     }
 
     #[test]

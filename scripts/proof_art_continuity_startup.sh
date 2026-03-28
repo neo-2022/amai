@@ -5,9 +5,9 @@ cd "$(dirname "$0")/.."
 
 ./scripts/proof_art_continuity_migration.sh >/tmp/amai-art-continuity-migration-proof.log
 
-startup_output="$(./scripts/continuity_startup.sh --project art --namespace continuity --json)"
 art_repo_root="/home/art/Art"
 startup_state_artifact="${art_repo_root}/.amai/continuity/project-chat-startup-state.json"
+startup_output="$(./scripts/continuity_startup.sh --project art --namespace continuity --repo-root "${art_repo_root}" --json)"
 
 printf '%s\n' "$startup_output" | jq -e '.retrieval_science.suite_key == "continuity_startup"' >/dev/null
 printf '%s\n' "$startup_output" | jq -e '.continuity_startup.canonical_eval.eval_verdict_model_version == "memory-eval-verdict-v1"' >/dev/null
@@ -35,7 +35,7 @@ jq -e '.continuity_startup_summary.project_task_tree != null' "${startup_state_a
 jq -e '.continuity_startup_summary.project_task_tree_summary != null' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.project_task_ledger != null' "${startup_state_artifact}" >/dev/null
 jq -e '.continuity_startup_summary.project_task_ledger_summary != null' "${startup_state_artifact}" >/dev/null
-startup_state_output="$(./target/release/amai continuity startup-state --repo-root "${art_repo_root}" --json)"
+startup_state_output="$(cargo run --quiet -- continuity startup-state --repo-root "${art_repo_root}" --json)"
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.status == "ok"' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.prompt_text_present == true' >/dev/null
 printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.startup_next_action_present == true' >/dev/null

@@ -1,7 +1,7 @@
 use crate::config::{AppConfig, discover_repo_root};
 use crate::{
     artifact_cleanup, codex_threads, compatibility, dashboard, external_benchmark, nats,
-    observability_policy, postgres, retrieval_science, s3, token_budget,
+    observability_policy, postgres, retrieval_science, s3, token_budget, working_state,
 };
 use anyhow::{Context, Result, anyhow};
 use axum::{
@@ -236,20 +236,25 @@ pub async fn print_client_budget_guard(cfg: &AppConfig, enforce_reply_gate: bool
     let guard = dashboard::current_session_budget_guard(&snapshot);
     println!("{}", serde_json::to_string_pretty(&guard)?);
     if enforce_reply_gate && client_budget_guard_blocks_reply(&guard) {
+        let action_kind = guard["reply_execution_gate"]["action_kind"]
+            .as_str()
+            .unwrap_or("continue_current_chat");
+        let blocked_reply_hint = match action_kind {
+            "wait_for_global_client_budget_recovery" => {
+                "wait for global client budget recovery before replying"
+            }
+            "rotate_chat_for_client_budget" => "rotate into a fresh chat before replying",
+            _ => "refresh the live client budget gate before replying",
+        };
         return Err(anyhow!(
-            "client budget reply gate blocked this reply: rotate into a fresh chat first"
+            "client budget reply gate blocked this reply: {blocked_reply_hint}"
         ));
     }
     Ok(())
 }
 
 fn client_budget_guard_blocks_reply(guard: &Value) -> bool {
-    guard["reply_execution_gate"]["must_rotate_before_reply"]
-        .as_bool()
-        .or_else(|| guard["reply_execution_gate"]["blocking"].as_bool())
-        .or_else(|| guard["should_rotate_chat_now"].as_bool())
-        .or_else(|| guard["should_rotate_chat_soon"].as_bool())
-        .unwrap_or(false)
+    working_state::client_budget_guard_blocks_reply(guard)
 }
 
 pub async fn print_retention_cleanup(
@@ -4477,6 +4482,20 @@ mod tests {
             },
             "should_rotate_chat_now": false,
             "should_rotate_chat_soon": false
+        });
+        assert!(!super::client_budget_guard_blocks_reply(&guard));
+    }
+
+    #[test]
+    fn client_budget_guard_allows_reply_for_rotate_soon_advisory_only() {
+        let guard = json!({
+            "reply_execution_gate": {
+                "action_kind": "continue_current_chat",
+                "must_rotate_before_reply": false,
+                "blocking": false
+            },
+            "should_rotate_chat_now": false,
+            "should_rotate_chat_soon": true
         });
         assert!(!super::client_budget_guard_blocks_reply(&guard));
     }

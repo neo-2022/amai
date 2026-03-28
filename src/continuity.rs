@@ -2401,12 +2401,7 @@ fn continuity_answer_requires_live_reply_gate(token_source_kind: &str) -> bool {
 }
 
 fn client_budget_guard_blocks_reply(guard: &Value) -> bool {
-    guard["reply_execution_gate"]["must_rotate_before_reply"]
-        .as_bool()
-        .or_else(|| guard["reply_execution_gate"]["blocking"].as_bool())
-        .or_else(|| guard["should_rotate_chat_now"].as_bool())
-        .or_else(|| guard["should_rotate_chat_soon"].as_bool())
-        .unwrap_or(false)
+    working_state::client_budget_guard_blocks_reply(guard)
 }
 
 fn build_blocked_continuity_answer_payload(
@@ -3682,12 +3677,15 @@ fn default_startup_next_action(
     let required_next_step = execctl_resume_obligation["required_return_next_step"]
         .as_str()
         .filter(|value| !value.is_empty());
+    let reply_execution_gate = client_budget_guard
+        .and_then(|guard| guard.get("reply_execution_gate"))
+        .unwrap_or(&Value::Null);
     let should_rotate_chat = client_budget_guard
-        .map(|guard| {
-            guard["should_rotate_chat_now"].as_bool() == Some(true)
-                || guard["should_rotate_chat_soon"].as_bool() == Some(true)
-        })
+        .map(working_state::client_budget_guard_requires_rotate_before_reply)
         .unwrap_or(false);
+    let wait_for_global_budget_recovery = reply_execution_gate["action_kind"].as_str()
+        == Some("wait_for_global_client_budget_recovery")
+        && reply_execution_gate["blocking"].as_bool() == Some(true);
     let client_budget_status = client_budget_guard
         .and_then(|guard| guard["status_label"].as_str())
         .filter(|value| !value.is_empty())
@@ -3695,7 +3693,30 @@ fn default_startup_next_action(
     let client_budget_note = client_budget_guard
         .and_then(|guard| guard["note"].as_str())
         .filter(|value| !value.is_empty());
-    if should_rotate_chat {
+    if wait_for_global_budget_recovery {
+        let preserves_return_obligation = resume_state != "clear";
+        json!({
+            "action_version": "startup-next-action-v1",
+            "action_kind": "wait_for_global_client_budget_recovery",
+            "blocking": true,
+            "reason": "client_budget_guard_global_exhaustion",
+            "resume_state": resume_state,
+            "no_silent_drop": no_silent_drop,
+            "headline": format!("Клиентский лимит: {client_budget_status}"),
+            "next_step": "не продолжай содержательный reply, дождись восстановления внешнего клиентского лимита и только потом снова проверь continuity startup",
+            "client_budget_status_label": client_budget_status,
+            "client_budget_note": client_budget_note,
+            "preserves_return_obligation": preserves_return_obligation,
+            "action_bundle": working_state::build_wait_for_global_client_budget_action_bundle(
+                Some(project.code.as_str()),
+                Some(namespace.code.as_str()),
+                Some(project.repo_root.as_str()),
+                preserves_return_obligation,
+                Some(current_goal),
+                Some(next_step),
+            ),
+        })
+    } else if should_rotate_chat {
         let preserves_return_obligation = resume_state != "clear";
         json!({
             "action_version": "startup-next-action-v1",
@@ -3775,6 +3796,9 @@ fn summarize_startup_next_action_for_prompt(value: &Value) -> Option<String> {
         "resume_required_return_task" => {
             Some(format!("Сначала: вернись к линии: {compact_headline}"))
         }
+        "wait_for_global_client_budget_recovery" => Some(format!(
+            "Сначала: дождись восстановления client budget: {compact_headline}"
+        )),
         "continue_active_workline" => None,
         _ => Some(format!("Сначала: {action_kind} -> {compact_headline}")),
     }
@@ -3854,6 +3878,18 @@ fn render_chat_start_prompt(
             blocked_reply_text
                 .as_deref()
                 .unwrap_or(working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE)
+        ));
+    } else if startup_next_action["action_kind"].as_str()
+        == Some("wait_for_global_client_budget_recovery")
+    {
+        lines.push(
+            "До восстановления лимита разрешён только короткий budget-wait ответ.".to_string(),
+        );
+        lines.push(format!(
+            "Разрешённый ответ: {}",
+            blocked_reply_text
+                .as_deref()
+                .unwrap_or(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE)
         ));
     }
     if execctl_resume_state == "pending_return_queue_present" {
@@ -5226,6 +5262,22 @@ mod tests {
     }
 
     #[test]
+    fn blocked_continuity_answer_gate_ignores_rotate_soon_advisory_only() {
+        let client_budget_guard = json!({
+            "status_label": "новый чат рекомендован",
+            "should_rotate_chat_now": false,
+            "should_rotate_chat_soon": true,
+            "reply_execution_gate": {
+                "action_kind": "continue_current_chat",
+                "must_rotate_before_reply": false,
+                "blocking": false
+            }
+        });
+
+        assert!(!client_budget_guard_blocks_reply(&client_budget_guard));
+    }
+
+    #[test]
     fn continuity_answer_live_reply_gate_is_only_required_for_live_source_kinds() {
         assert!(continuity_answer_requires_live_reply_gate(
             "live_continuity_startup"
@@ -6291,11 +6343,116 @@ mod tests {
             Some(&client_budget_guard),
         );
 
-        assert_eq!(action["action_kind"], json!("rotate_chat_for_client_budget"));
+        assert_eq!(
+            action["action_kind"],
+            json!("rotate_chat_for_client_budget")
+        );
         assert_eq!(action["blocking"], json!(true));
         assert_eq!(action["resume_state"], json!("return_required"));
         assert_eq!(action["preserves_return_obligation"], json!(true));
-        assert_eq!(action["action_bundle"]["preserves_return_obligation"], json!(true));
+        assert_eq!(
+            action["action_bundle"]["preserves_return_obligation"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn default_startup_next_action_keeps_rotate_soon_as_advisory() {
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "art".to_string(),
+            display_name: "Art".to_string(),
+            repo_root: "/home/art/Art".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let execctl_resume_obligation = json!({
+            "resume_state": "return_required",
+            "no_silent_drop": true,
+            "active_task_headline": "Project relocation contour",
+            "required_return_headline": "Same-meter spend control",
+            "required_return_next_step": "Materialize live assistant generation source."
+        });
+        let client_budget_guard = json!({
+            "should_rotate_chat_now": false,
+            "should_rotate_chat_soon": true,
+            "status_label": "новый чат рекомендован",
+            "note": "soft rotate recommendation only",
+            "reply_execution_gate": {
+                "action_kind": "continue_current_chat",
+                "blocking": false,
+                "must_rotate_before_reply": false
+            }
+        });
+
+        let action = super::default_startup_next_action(
+            "Project relocation contour",
+            "Dovetail runtime auto-start guarantees.",
+            &project,
+            &namespace,
+            &execctl_resume_obligation,
+            Some(&client_budget_guard),
+        );
+
+        assert_eq!(action["action_kind"], json!("resume_required_return_task"));
+        assert_eq!(action["blocking"], json!(true));
+    }
+
+    #[test]
+    fn default_startup_next_action_waits_for_global_budget_recovery() {
+        let project = ProjectRecord {
+            project_id: uuid::Uuid::new_v4(),
+            code: "art".to_string(),
+            display_name: "Art".to_string(),
+            repo_root: "/home/art/Art".to_string(),
+            updated_at: String::new(),
+        };
+        let namespace = NamespaceRecord {
+            namespace_id: uuid::Uuid::new_v4(),
+            code: "continuity".to_string(),
+            display_name: "Continuity".to_string(),
+            retrieval_mode: "local_strict".to_string(),
+        };
+        let execctl_resume_obligation = json!({
+            "resume_state": "return_required",
+            "no_silent_drop": true,
+            "active_task_headline": "Project relocation contour",
+            "required_return_headline": Value::Null,
+            "required_return_next_step": Value::Null
+        });
+        let client_budget_guard = json!({
+            "status_label": "глобальный лимит клиента почти исчерпан",
+            "note": "global client budget is almost exhausted",
+            "reply_execution_gate": {
+                "action_kind": "wait_for_global_client_budget_recovery",
+                "blocking": true
+            }
+        });
+
+        let action = super::default_startup_next_action(
+            "Project relocation contour",
+            "Dovetail runtime auto-start guarantees.",
+            &project,
+            &namespace,
+            &execctl_resume_obligation,
+            Some(&client_budget_guard),
+        );
+
+        assert_eq!(
+            action["action_kind"],
+            json!("wait_for_global_client_budget_recovery")
+        );
+        assert_eq!(action["blocking"], json!(true));
+        assert_eq!(action["preserves_return_obligation"], json!(true));
+        assert_eq!(
+            action["action_bundle"]["bundle_version"],
+            json!("wait-client-budget-action-bundle-v1")
+        );
     }
 
     #[test]

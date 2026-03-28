@@ -2405,7 +2405,7 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
                 .join(", ")
         })
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "новый чат рекомендован, новый чат нужен сейчас".to_string());
+        .unwrap_or_else(|| "новый чат нужен сейчас".to_string());
     let client_budget_save_handoff_before_rotate =
         client_budget_enforcement["save_handoff_before_rotate"]
             .as_bool()
@@ -2872,14 +2872,13 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             text.contains("live_client_budget_enforcement.stale_guard_requires_refresh = true")
         );
         assert!(text.contains("blocking_reply_contract"));
-        assert!(text.contains(
-            "contract_version = \"client-budget-blocked-reply-v1\""
-        ));
+        assert!(text.contains("contract_version = \"client-budget-blocked-reply-v1\""));
         assert!(text.contains("response_kind = \"rotate_chat_only\""));
         assert!(text.contains("max_sentences = 2"));
         assert!(text.contains("must_avoid_substantive_work = true"));
         assert!(text.contains("must_use_action_bundle_operator_flow = true"));
-        assert!(text.contains("новый чат рекомендован"));
+        assert!(text.contains("новый чат нужен сейчас"));
+        assert!(!text.contains("новый чат рекомендован, новый чат нужен сейчас"));
         assert!(text.contains("full_scale_client_truth_required = true"));
         assert!(text.contains("внутренний Amai-slice выглядит экономным"));
     }

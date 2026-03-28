@@ -30,10 +30,22 @@ const PROJECT_TASK_TREE_VERSION: &str = "project-task-tree-v1";
 const PROJECT_TASK_LEDGER_VERSION: &str = "project-task-ledger-v2";
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION: &str =
     "client-budget-blocked-reply-v1";
-pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND: &str = "rotate_chat_only";
+pub(crate) const CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND: &str = "rotate_chat_only";
+pub(crate) const CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND: &str = "wait_for_budget_only";
+pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND: &str =
+    CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND;
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES: u64 = 2;
+pub(crate) const CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE: &str = "Этот чат уже жжёт внешний лимит клиента. Сохрани handoff, открой новый чат и запусти continuity startup.";
+pub(crate) const CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE: &str = "Внешний лимит клиента почти исчерпан во всём клиенте. Не продолжай содержательный ответ, дождись восстановления окна лимита.";
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE: &str =
-    "Этот чат уже жжёт внешний лимит клиента. Сохрани handoff, открой новый чат и запусти continuity startup.";
+    CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClientBudgetBlockingReplyMode {
+    Inactive,
+    RotateChatOnly,
+    WaitForGlobalBudgetRecovery,
+}
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
@@ -46,20 +58,50 @@ fn shell_join_command(args: &[&str]) -> String {
         .join(" ")
 }
 
-pub(crate) fn build_client_budget_blocking_reply_contract(active: bool) -> Value {
+pub(crate) fn build_client_budget_blocking_reply_contract(
+    mode: ClientBudgetBlockingReplyMode,
+) -> Value {
+    let (active, response_kind, template) = match mode {
+        ClientBudgetBlockingReplyMode::Inactive => {
+            (false, CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND, None)
+        }
+        ClientBudgetBlockingReplyMode::RotateChatOnly => (
+            true,
+            CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND,
+            Some(CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE),
+        ),
+        ClientBudgetBlockingReplyMode::WaitForGlobalBudgetRecovery => (
+            true,
+            CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND,
+            Some(CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE),
+        ),
+    };
     json!({
         "contract_version": CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION,
         "active": active,
-        "response_kind": CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND,
+        "response_kind": response_kind,
         "max_sentences": CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES,
         "must_avoid_substantive_work": true,
         "must_use_action_bundle_operator_flow": true,
-        "template": if active {
-            Some(CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE)
-        } else {
-            None::<&str>
-        },
+        "template": template,
     })
+}
+
+pub(crate) fn client_budget_guard_requires_rotate_before_reply(guard: &Value) -> bool {
+    let reply_execution_gate = &guard["reply_execution_gate"];
+    reply_execution_gate["must_rotate_before_reply"].as_bool() == Some(true)
+        || (reply_execution_gate["action_kind"].as_str() == Some("rotate_chat_for_client_budget")
+            && reply_execution_gate["blocking"].as_bool() != Some(false))
+        || guard["should_rotate_chat_now"].as_bool() == Some(true)
+}
+
+pub(crate) fn client_budget_guard_blocks_reply(guard: &Value) -> bool {
+    let reply_execution_gate = &guard["reply_execution_gate"];
+    reply_execution_gate["blocking"].as_bool() == Some(true)
+        || reply_execution_gate["must_wait_for_budget_recovery_before_reply"].as_bool()
+            == Some(true)
+        || guard["requires_global_budget_recovery_before_reply"].as_bool() == Some(true)
+        || client_budget_guard_requires_rotate_before_reply(guard)
 }
 
 pub async fn record_handoff_event(
@@ -358,12 +400,10 @@ pub async fn build_restore_bundle(
     )
     .await?;
     overlay_execctl_active_lease(&mut bundle, active_lease.as_ref());
-    let client_budget_guard = token_budget::collect_live_current_session_budget_guard(
-        db,
-        Some(&bundle),
-    )
-        .await
-        .unwrap_or_else(|error| fallback_client_budget_guard_from_error(&error.to_string()));
+    let client_budget_guard =
+        token_budget::collect_live_current_session_budget_guard(db, Some(&bundle))
+            .await
+            .unwrap_or_else(|error| fallback_client_budget_guard_from_error(&error.to_string()));
     overlay_client_budget_guard(&mut bundle, &client_budget_guard);
     Ok(Some(bundle))
 }
@@ -2260,8 +2300,8 @@ pub(crate) fn build_rotate_chat_action_bundle(
         recommended_headline,
         recommended_next_step,
     ) {
-        (Some(project), Some(namespace), Some(headline), Some(next_step)) => Some(
-            shell_join_command(&[
+        (Some(project), Some(namespace), Some(headline), Some(next_step)) => {
+            Some(shell_join_command(&[
                 "amai",
                 "continuity",
                 "handoff",
@@ -2273,8 +2313,8 @@ pub(crate) fn build_rotate_chat_action_bundle(
                 headline,
                 "--next-step",
                 next_step,
-            ]),
-        ),
+            ]))
+        }
         _ => None,
     };
     let startup_command = match (project_code, namespace_code, repo_root) {
@@ -2378,6 +2418,148 @@ pub(crate) fn build_rotate_chat_action_bundle(
     })
 }
 
+pub(crate) fn build_wait_for_global_client_budget_action_bundle(
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
+    repo_root: Option<&str>,
+    preserves_return_obligation: bool,
+    recommended_headline: Option<&str>,
+    recommended_next_step: Option<&str>,
+) -> Value {
+    let project_code = project_code.filter(|value| !value.is_empty());
+    let namespace_code = namespace_code.filter(|value| !value.is_empty());
+    let repo_root = repo_root.filter(|value| !value.is_empty());
+    let recommended_headline = recommended_headline
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let recommended_next_step = recommended_next_step
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut missing_inputs = Vec::new();
+    if project_code.is_none() {
+        missing_inputs.push("project_code");
+    }
+    if namespace_code.is_none() {
+        missing_inputs.push("namespace_code");
+    }
+    if repo_root.is_none() {
+        missing_inputs.push("repo_root");
+    }
+    let project_arg = project_code.unwrap_or("<project_code_required>");
+    let namespace_arg = namespace_code.unwrap_or("<namespace_code_required>");
+    let repo_root_arg = repo_root.unwrap_or("<repo_root_required>");
+    let handoff_command = match (
+        project_code,
+        namespace_code,
+        recommended_headline,
+        recommended_next_step,
+    ) {
+        (Some(project), Some(namespace), Some(headline), Some(next_step)) => {
+            Some(shell_join_command(&[
+                "amai",
+                "continuity",
+                "handoff",
+                "--project",
+                project,
+                "--namespace",
+                namespace,
+                "--headline",
+                headline,
+                "--next-step",
+                next_step,
+            ]))
+        }
+        _ => None,
+    };
+    let startup_command = match (project_code, namespace_code, repo_root) {
+        (Some(project), Some(namespace), Some(root)) => Some(shell_join_command(&[
+            "amai",
+            "continuity",
+            "startup",
+            "--project",
+            project,
+            "--namespace",
+            namespace,
+            "--repo-root",
+            root,
+            "--token-source-kind",
+            "live_continuity_startup",
+            "--json",
+        ])),
+        _ => None,
+    };
+    json!({
+        "bundle_version": "wait-client-budget-action-bundle-v1",
+        "ready_for_automation": missing_inputs.is_empty(),
+        "missing_inputs": missing_inputs,
+        "preserves_return_obligation": preserves_return_obligation,
+        "recommended_handoff": {
+            "available": recommended_headline.is_some() && recommended_next_step.is_some(),
+            "headline": recommended_headline,
+            "next_step": recommended_next_step,
+        },
+        "operator_flow": {
+            "copy_paste_ready": handoff_command.is_some() && startup_command.is_some(),
+            "handoff_command": handoff_command,
+            "wait_summary": "не отвечай содержательно, пока не восстановится окно клиентского лимита",
+            "resume_after_recovery_summary": "после восстановления лимита снова проверь continuity startup или client-budget guard перед следующим substantive reply",
+            "startup_after_recovery_command": startup_command,
+        },
+        "order": [
+            "capture_continuity_handoff",
+            "wait_for_budget_recovery",
+            "recheck_after_recovery"
+        ],
+        "capture_continuity_handoff": {
+            "subcommand": "continuity handoff",
+            "argv_template": [
+                "amai",
+                "continuity",
+                "handoff",
+                "--project",
+                project_arg,
+                "--namespace",
+                namespace_arg,
+                "--headline",
+                "<headline_required>",
+                "--next-step",
+                "<next_step_required>"
+            ],
+            "project": project_code,
+            "namespace": namespace_code,
+            "requires_caller_supplied": ["headline", "next_step"],
+            "details_file_optional": true
+        },
+        "wait_for_budget_recovery": {
+            "action_kind": "wait_for_global_client_budget_recovery",
+            "required": true,
+            "summary": "дождись нового окна клиентского лимита или снижения внешнего расхода"
+        },
+        "recheck_after_recovery": {
+            "subcommand": "continuity startup",
+            "argv_template": [
+                "amai",
+                "continuity",
+                "startup",
+                "--project",
+                project_arg,
+                "--namespace",
+                namespace_arg,
+                "--repo-root",
+                repo_root_arg,
+                "--token-source-kind",
+                "live_continuity_startup",
+                "--json"
+            ],
+            "project": project_code,
+            "namespace": namespace_code,
+            "repo_root": repo_root,
+            "token_source_kind": "live_continuity_startup",
+            "summary": "после восстановления лимита заново проверь continuity startup и только потом продолжай substantive reply"
+        }
+    })
+}
+
 fn build_startup_next_action(
     current_goal: &str,
     next_step: &str,
@@ -2405,8 +2587,11 @@ fn build_startup_next_action(
     let required_next_step = required_return_task["next_step"]
         .as_str()
         .filter(|value| !value.is_empty());
-    let should_rotate_chat = client_budget_guard["should_rotate_chat_now"].as_bool() == Some(true)
-        || client_budget_guard["should_rotate_chat_soon"].as_bool() == Some(true);
+    let reply_execution_gate = &client_budget_guard["reply_execution_gate"];
+    let should_rotate_chat = client_budget_guard_requires_rotate_before_reply(client_budget_guard);
+    let wait_for_global_budget_recovery = reply_execution_gate["action_kind"].as_str()
+        == Some("wait_for_global_client_budget_recovery")
+        && reply_execution_gate["blocking"].as_bool() == Some(true);
     let client_budget_status = client_budget_guard["status_label"]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -2414,7 +2599,30 @@ fn build_startup_next_action(
     let client_budget_note = client_budget_guard["note"]
         .as_str()
         .filter(|value| !value.is_empty());
-    if should_rotate_chat {
+    if wait_for_global_budget_recovery {
+        let preserves_return_obligation = resume_state != "clear";
+        json!({
+            "action_version": "startup-next-action-v1",
+            "action_kind": "wait_for_global_client_budget_recovery",
+            "blocking": true,
+            "reason": "client_budget_guard_global_exhaustion",
+            "resume_state": resume_state,
+            "no_silent_drop": no_silent_drop,
+            "headline": format!("Клиентский лимит: {client_budget_status}"),
+            "next_step": "не продолжай содержательный reply, дождись восстановления внешнего клиентского лимита и только потом снова проверь continuity startup",
+            "client_budget_status_label": client_budget_status,
+            "client_budget_note": client_budget_note,
+            "preserves_return_obligation": preserves_return_obligation,
+            "action_bundle": build_wait_for_global_client_budget_action_bundle(
+                project_code,
+                namespace_code,
+                repo_root,
+                preserves_return_obligation,
+                Some(active_headline),
+                Some(active_next_step),
+            ),
+        })
+    } else if should_rotate_chat {
         let preserves_return_obligation = resume_state != "clear";
         json!({
             "action_version": "startup-next-action-v1",
@@ -3725,10 +3933,7 @@ mod tests {
             bundle["recommended_handoff"]["next_step"],
             json!("Materialize live assistant generation source.")
         );
-        assert_eq!(
-            bundle["operator_flow"]["copy_paste_ready"],
-            json!(true)
-        );
+        assert_eq!(bundle["operator_flow"]["copy_paste_ready"], json!(true));
         assert!(
             bundle["operator_flow"]["rotate_helper_command"]
                 .as_str()
@@ -3741,6 +3946,155 @@ mod tests {
                 .unwrap_or_default()
                 .contains("--headline")
         );
+    }
+
+    #[test]
+    fn wait_for_global_client_budget_action_bundle_exposes_recovery_guidance() {
+        let bundle = super::build_wait_for_global_client_budget_action_bundle(
+            Some("amai"),
+            Some("continuity"),
+            Some("/tmp/amai"),
+            true,
+            Some("Same-meter spend control"),
+            Some("Materialize live assistant generation source."),
+        );
+        assert_eq!(
+            bundle["bundle_version"],
+            json!("wait-client-budget-action-bundle-v1")
+        );
+        assert_eq!(bundle["preserves_return_obligation"], json!(true));
+        assert_eq!(
+            bundle["wait_for_budget_recovery"]["action_kind"],
+            json!("wait_for_global_client_budget_recovery")
+        );
+        assert!(
+            bundle["operator_flow"]["wait_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("не отвечай содержательно")
+        );
+        assert!(
+            bundle["operator_flow"]["startup_after_recovery_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("continuity")
+        );
+    }
+
+    #[test]
+    fn build_client_budget_blocking_reply_contract_supports_wait_mode() {
+        let contract = super::build_client_budget_blocking_reply_contract(
+            super::ClientBudgetBlockingReplyMode::WaitForGlobalBudgetRecovery,
+        );
+        assert_eq!(
+            contract["response_kind"],
+            json!(super::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND)
+        );
+        assert_eq!(contract["active"], json!(true));
+        assert_eq!(
+            contract["template"],
+            json!(super::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE)
+        );
+    }
+
+    #[test]
+    fn client_budget_guard_blocks_reply_ignores_rotate_soon_advisory() {
+        let guard = json!({
+            "reply_execution_gate": {
+                "action_kind": "continue_current_chat",
+                "blocking": false,
+                "must_rotate_before_reply": false
+            },
+            "should_rotate_chat_now": false,
+            "should_rotate_chat_soon": true
+        });
+        assert!(!super::client_budget_guard_requires_rotate_before_reply(
+            &guard
+        ));
+        assert!(!super::client_budget_guard_blocks_reply(&guard));
+    }
+
+    #[test]
+    fn build_startup_next_action_waits_for_global_budget_recovery() {
+        let contract = json!({
+            "resume_state": "return_required",
+            "no_silent_drop": true,
+            "active_task": {
+                "headline": "Same-meter spend control",
+                "next_step": "Materialize live assistant generation source."
+            },
+            "required_return_task": {
+                "headline": "",
+                "next_step": ""
+            }
+        });
+        let client_budget_guard = json!({
+            "status_label": "глобальный лимит клиента почти исчерпан",
+            "note": "global client budget is almost exhausted",
+            "reply_execution_gate": {
+                "action_kind": "wait_for_global_client_budget_recovery",
+                "blocking": true
+            }
+        });
+
+        let action = super::build_startup_next_action(
+            "Same-meter spend control",
+            "Materialize live assistant generation source.",
+            &contract,
+            &client_budget_guard,
+            Some("amai"),
+            Some("continuity"),
+            Some("/tmp/amai"),
+        );
+        assert_eq!(
+            action["action_kind"],
+            json!("wait_for_global_client_budget_recovery")
+        );
+        assert_eq!(action["blocking"], json!(true));
+        assert_eq!(
+            action["action_bundle"]["bundle_version"],
+            json!("wait-client-budget-action-bundle-v1")
+        );
+    }
+
+    #[test]
+    fn build_startup_next_action_does_not_block_on_rotate_soon_advisory() {
+        let contract = json!({
+            "resume_state": "return_required",
+            "no_silent_drop": true,
+            "active_task": {
+                "headline": "Same-meter spend control",
+                "next_step": "Materialize live assistant generation source."
+            },
+            "required_return_task": {
+                "headline": "Same-meter spend control",
+                "next_step": "Materialize live assistant generation source."
+            }
+        });
+        let client_budget_guard = json!({
+            "status_label": "новый чат рекомендован",
+            "note": "soft rotate recommendation only",
+            "reply_execution_gate": {
+                "action_kind": "continue_current_chat",
+                "blocking": false,
+                "must_rotate_before_reply": false
+            },
+            "should_rotate_chat_now": false,
+            "should_rotate_chat_soon": true
+        });
+
+        let action = super::build_startup_next_action(
+            "Same-meter spend control",
+            "Materialize live assistant generation source.",
+            &contract,
+            &client_budget_guard,
+            Some("amai"),
+            Some("continuity"),
+            Some("/tmp/amai"),
+        );
+
+        assert_eq!(action["action_kind"], json!("resume_required_return_task"));
+        assert_eq!(action["blocking"], json!(true));
     }
 
     #[test]

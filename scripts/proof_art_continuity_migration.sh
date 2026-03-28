@@ -7,7 +7,6 @@ ART_REPO_ROOT="${ART_REPO_ROOT:-/home/art/Art}"
 AMAI_REPO_ROOT="${AMAI_REPO_ROOT:-/home/art/agent-memory-index}"
 ART_BOOTSTRAP_SCRIPT="${ART_BOOTSTRAP_SCRIPT:-$ART_REPO_ROOT/scripts/tools/amai_art_project_bootstrap.py}"
 ART_BOOTSTRAP_FILE="${ART_BOOTSTRAP_FILE:-$AMAI_REPO_ROOT/state/continuity-imports/art/continuity-snapshot-home-art-art.md}"
-ART_LEGACY_NOTES_DIR="${ART_LEGACY_NOTES_DIR:-$ART_REPO_ROOT/.codex}"
 ART_MEMORY_DIR="${ART_MEMORY_DIR:-/home/art/.memory/vault/Art}"
 ART_INCLUDE_MEMORY_BRIDGE="${ART_INCLUDE_MEMORY_BRIDGE:-0}"
 
@@ -45,7 +44,6 @@ if [[ "$ART_INCLUDE_MEMORY_BRIDGE" == "1" && -d "$ART_MEMORY_DIR" ]]; then
     > /tmp/amai-art-continuity-import.json
 fi
 
-ART_LEGACY_NOTES_DIR="$ART_LEGACY_NOTES_DIR" \
 ./scripts/continuity_handoff.sh \
   --project art \
   --namespace continuity \
@@ -61,7 +59,9 @@ assert node["project"]["code"] == "art", node
 assert node["namespace"]["code"] == "continuity", node
 assert node["documents_imported"] >= 2, node
 assert node["rendered_transcript_files"] >= 1, node
+assert node["session_memory_files"] == 0, node
 assert "continuity-snapshot-home-art-art.md" in node["bootstrap_summary"]["bootstrap_file"], node
+assert all(source["source_kind"] != "continuity_session_memory" for source in node["sources"]), node
 PY
 
 ./scripts/continuity_startup.sh --project art --namespace continuity > /tmp/amai-art-continuity-startup.txt
@@ -71,6 +71,10 @@ grep -q "Проект: Art (art)" /tmp/amai-art-continuity-startup.txt
 grep -q "Namespace continuity: continuity" /tmp/amai-art-continuity-startup.txt
 grep -q "Ближайший обязательный следующий шаг:" /tmp/amai-art-continuity-startup.txt
 grep -q "Amai continuity migration proof" /tmp/amai-art-continuity-startup.txt
+if grep -q "${ART_REPO_ROOT}/\\.codex" /tmp/amai-art-continuity-startup.txt; then
+  echo "startup output leaked project-local .codex path" >&2
+  exit 1
+fi
 
 cargo run --quiet -- context pack \
   --project art \
@@ -95,6 +99,11 @@ paths = [item["relative_path"] for item in retrieval["exact_documents"]]
 paths.extend(item["relative_path"] for item in retrieval["lexical_chunks"])
 assert any(
     "continuity-snapshot.md" in path or "live-handoff" in path
+    for path in paths
+), payload
+assert any(path.startswith(".amai-continuity/") for path in paths), payload
+assert all(
+    not path.startswith(".amai-continuity/external-memory-bridge/")
     for path in paths
 ), payload
 PY
