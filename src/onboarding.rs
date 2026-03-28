@@ -654,9 +654,9 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
             Some(content.contains(".amai/continuity/project-chat-startup-state.json")),
             Some(
                 content.contains(
-                    "workspace_runtime_state_artifact_version = \"workspace-startup-runtime-state-v3\"",
+                    "workspace_runtime_state_artifact_version = \"workspace-startup-runtime-state-v4\"",
                 ) || content.contains(
-                    "`workspace_runtime_state_artifact_version` должен быть `workspace-startup-runtime-state-v3`",
+                    "`workspace_runtime_state_artifact_version` должен быть `workspace-startup-runtime-state-v4`",
                 ),
             ),
             Some(content.contains("его пишет `amai_continuity_startup`")),
@@ -802,7 +802,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
                         && payload["startup_contract"]["runtime_state_artifact"]
                             ["workspace_runtime_state_artifact_version"]
                             .as_str()
-                            == Some("workspace-startup-runtime-state-v3")
+                            == Some("workspace-startup-runtime-state-v4")
                         && payload["startup_contract"]["runtime_state_artifact"]["written_by_tool"]
                             .as_str()
                             == Some("amai_continuity_startup")
@@ -815,7 +815,7 @@ pub(crate) fn inspect_startup_artifacts(repo_root: &Path) -> Result<Option<Start
                     payload["startup_contract"]["runtime_state_artifact"]
                         ["workspace_runtime_state_artifact_version"]
                         .as_str()
-                        == Some("workspace-startup-runtime-state-v3"),
+                        == Some("workspace-startup-runtime-state-v4"),
                 ),
                 Some(
                     payload["startup_contract"]["runtime_state_artifact"]
@@ -2276,7 +2276,7 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     let runtime_state_artifact_version =
         runtime_state_artifact["workspace_runtime_state_artifact_version"]
             .as_str()
-            .unwrap_or("workspace-startup-runtime-state-v3");
+            .unwrap_or("workspace-startup-runtime-state-v4");
     let runtime_state_written_by_tool = runtime_state_artifact["written_by_tool"]
         .as_str()
         .unwrap_or("amai_continuity_startup");
@@ -2892,7 +2892,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("sha256_mismatch_fail_closed = true"));
         assert!(text.contains(".amai/continuity/project-chat-startup-state.json"));
         assert!(text.contains(
-            "`workspace_runtime_state_artifact_version` должен быть `workspace-startup-runtime-state-v3`"
+            "`workspace_runtime_state_artifact_version` должен быть `workspace-startup-runtime-state-v4`"
         ));
         assert!(text.contains("его пишет `amai_continuity_startup`"));
         assert!(text.contains("он обязан нести `continuity_startup_summary`"));
@@ -2989,7 +2989,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["startup_contract"]["runtime_state_artifact"]["workspace_runtime_state_artifact_version"],
-            json!("workspace-startup-runtime-state-v3")
+            json!("workspace-startup-runtime-state-v4")
         );
         assert_eq!(
             payload["startup_contract"]["runtime_state_artifact"]["source_summary_field"],

@@ -79,6 +79,10 @@ struct ContinuityThreadIndexEntry {
 }
 
 const MAX_SEARCHABLE_CONTINUITY_BYTES: usize = 12_000;
+const STARTUP_RUNTIME_STATE_ARTIFACT_VERSION: &str = "workspace-startup-runtime-state-v4";
+const STARTUP_TASK_TREE_PREVIEW_LIMIT: usize = 4;
+const STARTUP_LEDGER_ENTRY_PREVIEW_LIMIT: usize = 3;
+const STARTUP_LEDGER_QUEUE_PREVIEW_LIMIT: usize = 3;
 
 struct ContinuityStartupContext {
     project: ProjectRecord,
@@ -267,6 +271,124 @@ fn evaluate_startup_execution_gate_consistency(
     }
 }
 
+fn compact_project_task_tree_for_startup(tree: &Value) -> Value {
+    let Some(tree_object) = tree.as_object() else {
+        return Value::Null;
+    };
+    let nodes = tree["nodes"].as_array().cloned().unwrap_or_default();
+    let edges = tree["edges"].as_array().cloned().unwrap_or_default();
+    let nodes_preview = nodes
+        .iter()
+        .take(STARTUP_TASK_TREE_PREVIEW_LIMIT)
+        .map(|node| {
+            json!({
+                "task_id": node["task_id"].clone(),
+                "task_role": node["task_role"].clone(),
+                "task_state": node["task_state"].clone(),
+                "resume_state": node["resume_state"].clone(),
+                "headline": node["headline"].clone(),
+                "next_step": node["next_step"].clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let edges_preview = edges
+        .iter()
+        .take(STARTUP_TASK_TREE_PREVIEW_LIMIT)
+        .map(|edge| {
+            json!({
+                "from_task_id": edge["from_task_id"].clone(),
+                "to_task_id": edge["to_task_id"].clone(),
+                "relation": edge["relation"].clone(),
+                "priority_rank": edge["priority_rank"].clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "tree_version": tree["tree_version"].clone(),
+        "project_code": tree["project_code"].clone(),
+        "namespace_code": tree["namespace_code"].clone(),
+        "root_task_id": tree["root_task_id"].clone(),
+        "open_tasks_count": tree["open_tasks_count"].clone(),
+        "pending_return_count": tree["pending_return_count"].clone(),
+        "nodes_total": nodes.len(),
+        "edges_total": edges.len(),
+        "nodes_preview": nodes_preview,
+        "edges_preview": edges_preview,
+        "preview_truncated": nodes.len() > STARTUP_TASK_TREE_PREVIEW_LIMIT
+            || edges.len() > STARTUP_TASK_TREE_PREVIEW_LIMIT,
+        "summary_only": true,
+        "full_shape_preserved_in_working_state_restore": tree_object.contains_key("nodes")
+            && tree_object.contains_key("edges"),
+    })
+}
+
+fn compact_pending_return_queue_for_startup(queue: &Value) -> Value {
+    Value::Array(
+        queue.as_array()
+            .into_iter()
+            .flatten()
+            .take(STARTUP_LEDGER_QUEUE_PREVIEW_LIMIT)
+            .map(|item| {
+                json!({
+                    "headline": item["headline"].clone(),
+                    "next_step": item["next_step"].clone(),
+                    "resume_state": item["resume_state"].clone(),
+                    "queued_at_epoch_ms": item["queued_at_epoch_ms"].clone(),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn compact_project_task_ledger_for_startup(ledger: &Value) -> Value {
+    let Some(ledger_object) = ledger.as_object() else {
+        return Value::Null;
+    };
+    let entries = ledger["entries"].as_array().cloned().unwrap_or_default();
+    let entries_preview = entries
+        .iter()
+        .take(STARTUP_LEDGER_ENTRY_PREVIEW_LIMIT)
+        .map(|entry| {
+            let active_files = entry["active_files"].as_array().cloned().unwrap_or_default();
+            let notes = entry["materialized_notes"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let queue = entry["pending_return_queue"].as_array().cloned().unwrap_or_default();
+            json!({
+                "headline": entry["headline"].clone(),
+                "next_step": entry["next_step"].clone(),
+                "resume_state": entry["resume_state"].clone(),
+                "task_role": entry["task_role"].clone(),
+                "task_state": entry["task_state"].clone(),
+                "recorded_at_epoch_ms": entry["recorded_at_epoch_ms"].clone(),
+                "task_id": entry["task_id"].clone(),
+                "agent_scope": entry["agent_scope"].clone(),
+                "active_files_count": active_files.len(),
+                "active_files_preview": active_files.into_iter().take(3).collect::<Vec<_>>(),
+                "materialized_notes_count": notes.len(),
+                "materialized_notes_preview": notes.into_iter().take(3).collect::<Vec<_>>(),
+                "pending_return_queue_count": queue.len(),
+                "pending_return_queue_preview": compact_pending_return_queue_for_startup(&Value::Array(queue)),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "ledger_version": ledger["ledger_version"].clone(),
+        "project_code": ledger["project_code"].clone(),
+        "namespace_code": ledger["namespace_code"].clone(),
+        "open_tasks_count": ledger["open_tasks_count"].clone(),
+        "historical_handoffs_count": ledger["historical_handoffs_count"].clone(),
+        "persistence_state": ledger["persistence_state"].clone(),
+        "storage_lane": ledger["storage_lane"].clone(),
+        "entries_count": entries.len(),
+        "entries_preview": entries_preview,
+        "preview_truncated": entries.len() > STARTUP_LEDGER_ENTRY_PREVIEW_LIMIT,
+        "summary_only": true,
+        "full_shape_preserved_in_working_state_restore": ledger_object.contains_key("entries"),
+    })
+}
+
 pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupRuntimeStateAudit> {
     let output_path = startup_runtime_state_artifact_path(repo_root);
     let Some(payload) = load_startup_runtime_state_artifact(repo_root)? else {
@@ -379,7 +501,7 @@ pub(crate) fn inspect_startup_runtime_state(repo_root: &Path) -> Result<StartupR
     };
 
     let status = if payload["artifact_version"].as_str()
-        != Some("workspace-startup-runtime-state-v3")
+        != Some(STARTUP_RUNTIME_STATE_ARTIFACT_VERSION)
         || payload["source_tool"].as_str() != Some("amai_continuity_startup")
         || startup_contract_sha_matches_current_contract != Some(true)
         || source_summary_field_matches != Some(true)
@@ -1187,7 +1309,21 @@ fn build_startup_runtime_state_artifact(
 ) -> Result<Value> {
     let startup_contract_sha256 =
         hex_sha256(&serde_json::to_vec(&mcp::project_chat_startup_contract())?);
-    let continuity_startup_summary = mcp::continuity_startup_summary_json(payload);
+    let mut continuity_startup_summary = mcp::continuity_startup_summary_json(payload);
+    if let Some(summary) = continuity_startup_summary.as_object_mut() {
+        summary.insert(
+            "project_task_tree".to_string(),
+            compact_project_task_tree_for_startup(
+                summary.get("project_task_tree").unwrap_or(&Value::Null),
+            ),
+        );
+        summary.insert(
+            "project_task_ledger".to_string(),
+            compact_project_task_ledger_for_startup(
+                summary.get("project_task_ledger").unwrap_or(&Value::Null),
+            ),
+        );
+    }
     let startup_execution_gate = build_startup_execution_gate(payload);
     let prompt_text_present = Some(
         payload["chat_start_restore"]["prompt_text"]
@@ -1216,7 +1352,7 @@ fn build_startup_runtime_state_artifact(
         Value::Null
     };
     Ok(json!({
-        "artifact_version": "workspace-startup-runtime-state-v3",
+        "artifact_version": STARTUP_RUNTIME_STATE_ARTIFACT_VERSION,
         "repo_root": repo_root.display().to_string(),
         "generated_at_epoch_ms": generated_at_epoch_ms,
         "source_tool": "amai_continuity_startup",
@@ -6034,11 +6170,95 @@ mod tests {
                     "headline": "Current active line"
                 },
                 "project_task_tree": {
-                    "open_tasks_count": 2
+                    "tree_version": "project-task-tree-v1",
+                    "project_code": "art",
+                    "namespace_code": "continuity",
+                    "root_task_id": "root",
+                    "open_tasks_count": 2,
+                    "pending_return_count": 1,
+                    "nodes": [
+                        {"task_id": "t1", "task_role": "active", "task_state": "active", "resume_state": "active", "headline": "Current active line", "next_step": "Ship runtime return enforcement."},
+                        {"task_id": "t2", "task_role": "pending_return", "task_state": "suspended", "resume_state": "pending_return", "headline": "Pending line", "next_step": "Close same-meter live gap."},
+                        {"task_id": "t3", "task_role": "pending_return", "task_state": "suspended", "resume_state": "pending_return", "headline": "Older line", "next_step": "Keep compact."},
+                        {"task_id": "t4", "task_role": "pending_return", "task_state": "suspended", "resume_state": "pending_return", "headline": "Another line", "next_step": "Keep compact."},
+                        {"task_id": "t5", "task_role": "pending_return", "task_state": "suspended", "resume_state": "pending_return", "headline": "Extra line", "next_step": "Should truncate."}
+                    ],
+                    "edges": [
+                        {"from_task_id": "root", "to_task_id": "t1", "relation": "tracks_open_task", "priority_rank": 0},
+                        {"from_task_id": "root", "to_task_id": "t2", "relation": "tracks_open_task", "priority_rank": 1},
+                        {"from_task_id": "root", "to_task_id": "t3", "relation": "tracks_open_task", "priority_rank": 2},
+                        {"from_task_id": "root", "to_task_id": "t4", "relation": "tracks_open_task", "priority_rank": 3},
+                        {"from_task_id": "root", "to_task_id": "t5", "relation": "tracks_open_task", "priority_rank": 4}
+                    ]
                 },
                 "project_task_tree_summary": "active: Current active line; pending_return(1): Pending line",
                 "project_task_ledger": {
-                    "open_tasks_count": 2
+                    "ledger_version": "project-task-ledger-v2",
+                    "project_code": "art",
+                    "namespace_code": "continuity",
+                    "open_tasks_count": 2,
+                    "historical_handoffs_count": 4,
+                    "persistence_state": "durable_postgres",
+                    "storage_lane": "ami.execctl_task_ledger_entries",
+                    "entries": [
+                        {
+                            "headline": "Current active line",
+                            "next_step": "Ship runtime return enforcement.",
+                            "resume_state": "active",
+                            "task_role": "active",
+                            "task_state": "active",
+                            "recorded_at_epoch_ms": 1,
+                            "task_id": "t1",
+                            "agent_scope": "art::continuity::default",
+                            "active_files": ["/tmp/a", "/tmp/b", "/tmp/c", "/tmp/d"],
+                            "materialized_notes": ["n1", "n2", "n3", "n4"],
+                            "pending_return_queue": [
+                                {"headline": "Pending line", "next_step": "Close same-meter live gap.", "resume_state": "pending_return", "queued_at_epoch_ms": 2},
+                                {"headline": "Older pending", "next_step": "Keep compact.", "resume_state": "pending_return", "queued_at_epoch_ms": 3},
+                                {"headline": "Another pending", "next_step": "Keep compact.", "resume_state": "pending_return", "queued_at_epoch_ms": 4},
+                                {"headline": "Extra pending", "next_step": "Should truncate.", "resume_state": "pending_return", "queued_at_epoch_ms": 5}
+                            ]
+                        },
+                        {
+                            "headline": "Pending line",
+                            "next_step": "Close same-meter live gap.",
+                            "resume_state": "pending_return",
+                            "task_role": "pending_return",
+                            "task_state": "suspended",
+                            "recorded_at_epoch_ms": 6,
+                            "task_id": "t2",
+                            "agent_scope": "art::continuity::default",
+                            "active_files": ["/tmp/e"],
+                            "materialized_notes": ["n5"],
+                            "pending_return_queue": []
+                        },
+                        {
+                            "headline": "Older line",
+                            "next_step": "Keep compact.",
+                            "resume_state": "historical_only",
+                            "task_role": "historical_handoff",
+                            "task_state": "superseded",
+                            "recorded_at_epoch_ms": 7,
+                            "task_id": "t3",
+                            "agent_scope": "art::continuity::default",
+                            "active_files": [],
+                            "materialized_notes": [],
+                            "pending_return_queue": []
+                        },
+                        {
+                            "headline": "Extra line",
+                            "next_step": "Should truncate.",
+                            "resume_state": "historical_only",
+                            "task_role": "historical_handoff",
+                            "task_state": "superseded",
+                            "recorded_at_epoch_ms": 8,
+                            "task_id": "t4",
+                            "agent_scope": "art::continuity::default",
+                            "active_files": [],
+                            "materialized_notes": [],
+                            "pending_return_queue": []
+                        }
+                    ]
                 },
                 "project_task_ledger_summary": "active: Current active line; historical_handoffs(1)"
             },
@@ -6068,7 +6288,7 @@ mod tests {
 
         assert_eq!(
             artifact["artifact_version"],
-            json!("workspace-startup-runtime-state-v3")
+            json!(super::STARTUP_RUNTIME_STATE_ARTIFACT_VERSION)
         );
         assert_eq!(artifact["source_tool"], json!("amai_continuity_startup"));
         assert_eq!(
@@ -6141,12 +6361,55 @@ mod tests {
             json!("active: Current active line; pending_return(1): Pending line")
         );
         assert_eq!(
+            artifact["continuity_startup_summary"]["project_task_tree"]["summary_only"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["project_task_tree"]["nodes_total"],
+            json!(5)
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["project_task_tree"]["nodes_preview"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(4)
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["project_task_tree"]["preview_truncated"],
+            json!(true)
+        );
+        assert_eq!(
             artifact["continuity_startup_summary"]["execctl_active_lease"]["lease_owner_state"],
             json!("previous_session_owner")
         );
         assert_eq!(
             artifact["continuity_startup_summary"]["project_task_ledger_summary"],
             json!("active: Current active line; historical_handoffs(1)")
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["project_task_ledger"]["summary_only"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["project_task_ledger"]["entries_count"],
+            json!(4)
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["project_task_ledger"]["entries_preview"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(3)
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["project_task_ledger"]["entries_preview"][0]
+                ["pending_return_queue_preview"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(3)
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["project_task_ledger"]["preview_truncated"],
+            json!(true)
         );
         assert_eq!(
             artifact["working_state_restore_lineage"]["authoritative_event_id"],
@@ -6268,7 +6531,7 @@ mod tests {
             gate_semantics_consistent: Some(true),
         };
         let artifact = json!({
-            "artifact_version": "workspace-startup-runtime-state-v3",
+            "artifact_version": super::STARTUP_RUNTIME_STATE_ARTIFACT_VERSION,
             "client_budget_guard": {
                 "status_label": "новый чат нужен сейчас"
             },

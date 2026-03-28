@@ -2891,7 +2891,7 @@ fn protocol_manifest() -> Value {
                 },
                 "runtime_state_artifact": {
                     "workspace_runtime_state_relative_path": ".amai/continuity/project-chat-startup-state.json",
-                    "workspace_runtime_state_artifact_version": "workspace-startup-runtime-state-v3",
+                    "workspace_runtime_state_artifact_version": "workspace-startup-runtime-state-v4",
                     "written_by_tool": "amai_continuity_startup",
                     "source_summary_field": "continuity_startup_summary",
                     "contains_prompt_text": true,
@@ -5151,7 +5151,7 @@ mod tests {
             manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
                 ["workspace_runtime_state_artifact_version"]
                 .as_str(),
-            Some("workspace-startup-runtime-state-v3")
+            Some("workspace-startup-runtime-state-v4")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
