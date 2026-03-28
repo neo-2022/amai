@@ -9703,15 +9703,14 @@ fn model_token_savings_tooltip(statement_preview: &Value, alignment: &Value) -> 
     let counted_events = statement_preview["counted_events"].as_u64().unwrap_or(0);
     let events_total = statement_preview["events_total"].as_u64().unwrap_or(0);
 
-    if let Some((verified_without, verified_with, verified_saved, verified_pct)) =
+    if let Some((verified_without, verified_with, verified_saved, _verified_pct)) =
         exact_model_token_pair(statement_preview, alignment)
     {
         let mut tooltip = format!(
-            "Этот ряд показывает exact same-meter pair для учтённого среза, а не для всей сессии.\n- Без Amai: {}\n- С Amai: {}\n- Экономия: {}\n- Процент: {}",
+            "Этот ряд показывает exact same-meter pair для учтённого среза, а не для всей сессии.\n- Без Amai: {}\n- С Amai: {}\n- Экономия: {}",
             format_u64(Some(verified_without)),
             format_u64(Some(verified_with)),
-            format_signed_count(Some(verified_saved)),
-            format_percent(Some(verified_pct))
+            format_signed_count(Some(verified_saved))
         );
         if let Some(components) =
             human_client_limit_components(&alignment["strict_client_meter_slice"]["components"])
@@ -9726,7 +9725,9 @@ fn model_token_savings_tooltip(statement_preview: &Value, alignment: &Value) -> 
             ));
         }
         tooltip.push_str(
-            "\n- В этом scope same-meter alignment уже materialized, поэтому процент можно читать как тот же meter, которым клиент считает лимит.",
+            &format!(
+                "\n- Slice math здесь exact и идёт по тому же meter, которым клиент считает лимит.\n- Сам процент этого slice intentionally не показывается как user-facing claim: процент на карточке разрешён только для строки «Экономия на реальной шкале».",
+            ),
         );
         return tooltip;
     }
@@ -12265,11 +12266,11 @@ mod tests {
         assert!(row["tooltip"]
             .as_str()
             .unwrap_or_default()
-            .contains("Процент: 25.00%"));
+            .contains("Сам процент этого slice intentionally не показывается"));
         assert!(row["tooltip"]
             .as_str()
             .unwrap_or_default()
-            .contains("тот же meter, которым клиент считает лимит"));
+            .contains("идёт по тому же meter, которым клиент считает лимит"));
 
         let note =
             super::model_token_savings_note_sentence(&statement_preview, &alignment).expect("note");
@@ -12303,7 +12304,7 @@ mod tests {
         assert!(row["tooltip"]
             .as_str()
             .unwrap_or_default()
-            .contains("Процент: 0.66%"));
+            .contains("Сам процент этого slice intentionally не показывается"));
     }
 
     #[test]
@@ -12349,7 +12350,7 @@ mod tests {
         assert!(row["tooltip"]
             .as_str()
             .unwrap_or_default()
-            .contains("Процент: 84.53%"));
+            .contains("Сам процент этого slice intentionally не показывается"));
         assert!(row["tooltip"]
             .as_str()
             .unwrap_or_default()
