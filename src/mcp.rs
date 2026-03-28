@@ -5640,6 +5640,32 @@ mod tests {
     }
 
     #[test]
+    fn startup_contract_exposes_global_budget_wait_reply_contract() {
+        let contract = super::project_chat_startup_contract();
+        let enforcement = &contract["live_client_budget_enforcement"];
+        let blocking_action_kinds = enforcement["blocking_action_kinds"]
+            .as_array()
+            .expect("blocking action kinds");
+        assert!(blocking_action_kinds
+            .iter()
+            .any(|value| value.as_str() == Some("wait_for_global_client_budget_recovery")));
+
+        let allowed_response_kinds = enforcement["blocking_reply_allowed_response_kinds"]
+            .as_array()
+            .expect("allowed response kinds");
+        assert!(allowed_response_kinds.iter().any(|value| {
+            value.as_str() == Some(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND)
+        }));
+
+        let allowed_templates = enforcement["blocking_reply_allowed_templates"]
+            .as_array()
+            .expect("allowed templates");
+        assert!(allowed_templates.iter().any(|value| {
+            value.as_str() == Some(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE)
+        }));
+    }
+
+    #[test]
     fn tool_error_result_carries_machine_readable_taxonomy() {
         let result = mcp_tool_error_result(&McpError::tool_not_found("missing_tool"));
         assert_eq!(result["isError"].as_bool(), Some(true));

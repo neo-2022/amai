@@ -4499,4 +4499,17 @@ mod tests {
         });
         assert!(!super::client_budget_guard_blocks_reply(&guard));
     }
+
+    #[test]
+    fn client_budget_guard_blocks_reply_when_waiting_for_global_budget_recovery() {
+        let guard = json!({
+            "reply_execution_gate": {
+                "action_kind": "wait_for_global_client_budget_recovery",
+                "blocking": true,
+                "must_wait_for_budget_recovery_before_reply": true
+            },
+            "requires_global_budget_recovery_before_reply": true
+        });
+        assert!(super::client_budget_guard_blocks_reply(&guard));
+    }
 }
