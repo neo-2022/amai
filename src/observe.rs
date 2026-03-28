@@ -62,6 +62,7 @@ struct CachedClientLiveMeterState {
 
 const SNAPSHOT_RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 const CLIENT_LIMIT_TREND_ANALYSIS_INTERVAL: Duration = Duration::from_secs(900);
+const CLIENT_LIMIT_LIVE_SOURCE_TTL_MS: u64 = 3_000;
 
 #[derive(Debug, Clone, Deserialize)]
 struct ObservabilityProfile {
@@ -2418,6 +2419,27 @@ async fn maybe_refresh_client_live_meter(state: &ObserveState) -> Result<()> {
         .await;
     };
 
+    let now_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if cached_exact_client_limit_refresh_needed(
+        &snapshot,
+        now_epoch_ms,
+        CLIENT_LIMIT_LIVE_SOURCE_TTL_MS,
+    ) {
+        if refresh_in_progress {
+            return Ok(());
+        }
+        return refresh_observe_cache(
+            state.cache.clone(),
+            state.cfg.clone(),
+            state.bind.clone(),
+            state.dashboard_refresh_ms,
+        )
+        .await;
+    }
+
     let cached_meter = cached_client_live_meter_state(&snapshot);
     let preferred_thread_id = codex_threads::current_thread_id()
         .or_else(|| cached_meter.working_state_thread_id.clone())
@@ -2440,6 +2462,26 @@ async fn maybe_refresh_client_live_meter(state: &ObserveState) -> Result<()> {
         state.dashboard_refresh_ms,
     )
     .await
+}
+
+fn cached_exact_client_limit_refresh_needed(
+    snapshot: &Value,
+    now_epoch_ms: u64,
+    max_source_age_ms: u64,
+) -> bool {
+    let report = if snapshot["token_budget_report"]["token_budget_report"].is_object() {
+        &snapshot["token_budget_report"]["token_budget_report"]
+    } else {
+        &snapshot["token_budget_report"]
+    };
+    let hourly_burn = &report["client_limit_hourly_burn"];
+    if hourly_burn["status"].as_str() != Some("observed") {
+        return true;
+    }
+    let Some(observed_at_epoch_ms) = hourly_burn["latest_observed_at_epoch_ms"].as_u64() else {
+        return true;
+    };
+    now_epoch_ms.saturating_sub(observed_at_epoch_ms) > max_source_age_ms.max(1)
 }
 
 fn cached_client_live_meter_state(snapshot: &Value) -> CachedClientLiveMeterState {
@@ -4937,6 +4979,50 @@ mod tests {
         assert!(payload["reply_execution_gate"]["reply_budget_contract"].is_null());
         assert!(payload["reply_execution_gate"]["blocking_reply_contract"].is_null());
         assert!(payload["reply_execution_gate"]["action_bundle"].is_null());
+    }
+
+    #[test]
+    fn cached_exact_client_limit_refresh_needed_when_hourly_burn_is_missing() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "client_limit_hourly_burn": {
+                        "status": "missing"
+                    }
+                }
+            }
+        });
+
+        assert!(super::cached_exact_client_limit_refresh_needed(
+            &snapshot,
+            10_000,
+            3_000
+        ));
+    }
+
+    #[test]
+    fn cached_exact_client_limit_refresh_needed_when_hourly_burn_is_stale() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "latest_observed_at_epoch_ms": 1_000
+                    }
+                }
+            }
+        });
+
+        assert!(super::cached_exact_client_limit_refresh_needed(
+            &snapshot,
+            5_001,
+            3_000
+        ));
+        assert!(!super::cached_exact_client_limit_refresh_needed(
+            &snapshot,
+            4_000,
+            3_000
+        ));
     }
 
     #[test]
