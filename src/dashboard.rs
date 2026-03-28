@@ -1463,7 +1463,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       client_live_full_turn_savings: ["client_live_full_turn_savings", "Amai в полном live-turn"],
       client_live_context: ["client_live_context", "Последний запрос клиента"],
       client_live_limit: ["client_live_limit", "Лимит клиента сейчас", "Последний observed лимит клиента"],
-      client_limit_hourly_burn: ["client_limit_hourly_burn", "5ч burn за последний час"],
+      client_limit_hourly_burn: ["client_limit_hourly_burn", "KPI 5ч лимита"],
     };
     const errorBanner = document.getElementById("error-banner");
     const tooltipLayer = document.getElementById("tooltip-layer");
@@ -9157,7 +9157,7 @@ fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
 
 fn client_limit_hourly_burn_metric_row(hourly_burn: &Value) -> Option<Value> {
     let status = hourly_burn["status"].as_str().unwrap_or("missing");
-    let label = "5ч burn за последний час";
+    let label = "KPI 5ч лимита";
     match status {
         "observed" => {
             let projected = hourly_burn["projected_primary_used_per_hour_percent"].as_f64();
@@ -9166,72 +9166,84 @@ fn client_limit_hourly_burn_metric_row(hourly_burn: &Value) -> Option<Value> {
             let reply_prefix = hourly_burn["reply_prefix"]
                 .as_str()
                 .unwrap_or("5ч KPI: н/д");
-            let actual_span_minutes = hourly_burn["actual_history_span_minutes"]
+            let remaining_window_minutes = hourly_burn["remaining_window_minutes"]
                 .as_f64()
                 .unwrap_or(0.0);
-            let start_at = hourly_burn["start_sample"]["observed_at_epoch_ms"]
+            let observed_at = hourly_burn["latest_observed_at_epoch_ms"]
                 .as_u64()
                 .filter(|value| *value > 0)
                 .map(human_timestamp_clock)
                 .unwrap_or_else(|| "ещё нет данных".to_string());
-            let end_at = hourly_burn["end_sample"]["observed_at_epoch_ms"]
-                .as_u64()
-                .filter(|value| *value > 0)
-                .map(human_timestamp_clock)
-                .unwrap_or_else(|| "ещё нет данных".to_string());
+            let actual_remaining_percent = hourly_burn["actual_remaining_percent"].as_f64();
+            let ideal_remaining_percent = hourly_burn["ideal_remaining_percent"].as_f64();
+            let projected_reset_delta_minutes =
+                hourly_burn["projected_reset_delta_minutes"].as_f64();
             let verdict = match classification {
                 "overspend" => format!(
-                    "Переплата к идеальным 20.00%/ч: {}.",
+                    "Переплата к идеальному окну: {}.",
                     format_percent(kpi_percent)
                 ),
                 "saving" => format!(
-                    "Экономия к идеальным 20.00%/ч: {}.",
+                    "Экономия к идеальному окну: {}.",
                     format_percent(kpi_percent)
                 ),
-                _ => "Идёт почти 1:1 к идеальным 20.00%/ч.".to_string(),
+                _ => "Идёт почти 1:1 к идеальному окну 5ч.".to_string(),
             };
+            let reset_delta = projected_reset_delta_minutes
+                .map(|value| {
+                    if value < -0.5 {
+                        format!("При таком темпе лимит закончится примерно на {:.2} мин раньше сброса.", value.abs())
+                    } else if value > 0.5 {
+                        format!("При таком темпе к сбросу останется запас примерно {:.2} мин окна.", value)
+                    } else {
+                        "При таком темпе лимит идёт почти ровно к моменту сброса.".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "Точное смещение к моменту сброса пока не вычислено.".to_string());
             let tooltip = format!(
-                "Этот ряд считает exact burn 5ч лимита по тому же upstream source, что и VS Code status bar.\n- Start sample: {}\n- End sample: {}\n- Исторический span: {:.2} мин\n- Exact burn за час: {}\n- {}\n- Это и есть источник для короткого reply-prefix `{}'`.",
-                start_at,
-                end_at,
-                actual_span_minutes,
+                "Этот ряд считает KPI 5ч лимита по тому же upstream source, что и VS Code status bar.\n- Снято из upstream: {}\n- До сброса остаётся {:.2} мин окна\n- Реально остаётся лимита: {}\n- Идеально к этому моменту должно оставаться: {}\n- Текущий темп burn: {}\n- {}\n- {}\n- Это и есть источник для короткого reply-prefix `{}'`.",
+                observed_at,
+                remaining_window_minutes,
+                format_percent(actual_remaining_percent),
+                format_percent(ideal_remaining_percent),
                 format_percent(projected),
                 verdict,
+                reset_delta,
                 reply_prefix,
             );
             Some(metric_row_with_key(
                 CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
                 label,
                 format!(
-                    "{} · burn {}",
+                    "{} · tempo {}",
                     reply_prefix,
                     format_percent(projected)
                 ),
                 Some(tooltip.as_str()),
             ))
         }
-        "insufficient_history" => Some(metric_row_with_key(
-            CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
-            label,
-            "ещё набираю 1ч exact history".to_string(),
-            Some(
-                "Exact source для 5ч burn уже выбран правильно, но полного часового history span пока не хватает. До materialization полной истории KPI честно не считается.",
-            ),
-        )),
         "stale" => Some(metric_row_with_key(
             CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
             label,
-            "exact burn устарел".to_string(),
+            "exact KPI устарел".to_string(),
             Some(
-                "Последний exact sample 5ч лимита устарел, поэтому hourly burn fail-closed не считается.",
+                "Последний exact sample 5ч лимита устарел, поэтому KPI fail-closed не считается.",
+            ),
+        )),
+        "missing_reset" => Some(metric_row_with_key(
+            CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
+            label,
+            "нет reset time".to_string(),
+            Some(
+                "Exact source не дал reset time для 5ч окна, поэтому KPI fail-closed не считается.",
             ),
         )),
         _ => Some(metric_row_with_key(
             CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
             label,
-            "exact burn ещё нет".to_string(),
+            "exact KPI ещё нет".to_string(),
             Some(
-                "Exact history 5ч лимита ещё не materialized, поэтому hourly burn пока не посчитан.",
+                "Exact source 5ч лимита ещё не materialized, поэтому KPI пока не посчитан.",
             ),
         )),
     }
@@ -14975,13 +14987,11 @@ mod tests {
                         "reply_prefix": "5ч KPI: экономия 50.00%",
                         "projected_primary_used_per_hour_percent": 10.0,
                         "kpi_percent": 50.0,
-                        "actual_history_span_minutes": 60.0,
-                        "start_sample": {
-                            "observed_at_epoch_ms": 1000
-                        },
-                        "end_sample": {
-                            "observed_at_epoch_ms": 2000
-                        }
+                        "remaining_window_minutes": 30.0,
+                        "actual_remaining_percent": 75.0,
+                        "ideal_remaining_percent": 50.0,
+                        "latest_observed_at_epoch_ms": 2000,
+                        "projected_reset_delta_minutes": 30.0
                     }
                 }
             }

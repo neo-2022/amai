@@ -672,7 +672,8 @@ struct CodexAppServerRateLimitsObservation {
 struct ExactClientLimitSample {
     observed_at_epoch_ms: u64,
     primary_used_percent: f64,
-    secondary_used_percent: f64,
+    primary_window_duration_mins: Option<u64>,
+    primary_resets_at_epoch_seconds: Option<u64>,
     source: String,
 }
 
@@ -8464,13 +8465,8 @@ fn exact_client_limit_sample_from_surface(surface: &Value) -> Option<ExactClient
                 .as_u64()
                 .map(|value| value as f64)
         })?;
-    let secondary_used_percent = surface["secondary_limit_used_percent"]
-        .as_f64()
-        .or_else(|| {
-            surface["secondary_limit_used_percent"]
-                .as_u64()
-                .map(|value| value as f64)
-        })?;
+    let primary_window_duration_mins = surface["primary_window_duration_mins"].as_u64();
+    let primary_resets_at_epoch_seconds = surface["primary_resets_at_epoch_seconds"].as_u64();
     let source = surface["source"]
         .as_str()
         .unwrap_or("codex_app_server_account_rate_limits_read_v1")
@@ -8478,7 +8474,8 @@ fn exact_client_limit_sample_from_surface(surface: &Value) -> Option<ExactClient
     Some(ExactClientLimitSample {
         observed_at_epoch_ms,
         primary_used_percent,
-        secondary_used_percent,
+        primary_window_duration_mins,
+        primary_resets_at_epoch_seconds,
         source,
     })
 }
@@ -8502,12 +8499,10 @@ fn exact_client_limit_hourly_burn_value(
     now_epoch_ms: u64,
     window_minutes: u64,
     max_live_age_seconds: u64,
-    min_history_span_minutes: u64,
+    _min_history_span_minutes: u64,
 ) -> Value {
     let window_minutes = window_minutes.max(1);
     let max_live_age_seconds = max_live_age_seconds.max(1);
-    let min_history_span_minutes = min_history_span_minutes.min(window_minutes);
-    let target_start_epoch_ms = now_epoch_ms.saturating_sub(window_minutes * 60 * 1000);
     let latest = match samples.last() {
         Some(sample) => sample,
         None => {
@@ -8516,7 +8511,7 @@ fn exact_client_limit_hourly_burn_value(
                 "status_bar_correlated": true,
                 "source": "codex_app_server_account_rate_limits_read_v1",
                 "window_minutes": window_minutes,
-                "summary": "Exact history 5ч лимита ещё не materialized, поэтому hourly burn честно не посчитан.",
+                "summary": "Exact 5ч source пока недоступен, поэтому KPI честно не посчитан.",
                 "reply_prefix": "5ч KPI: н/д",
             });
         }
@@ -8530,56 +8525,52 @@ fn exact_client_limit_hourly_burn_value(
             "window_minutes": window_minutes,
             "latest_observed_at_epoch_ms": latest.observed_at_epoch_ms,
             "latest_live_age_seconds": live_age_ms as f64 / 1000.0,
-            "summary": "Exact sample 5ч лимита устарел, поэтому hourly burn fail-closed не считается.",
+            "summary": "Exact sample 5ч лимита устарел, поэтому KPI fail-closed не считается.",
             "reply_prefix": "5ч KPI: н/д",
         });
     }
-    let start = match samples
-        .iter()
-        .min_by_key(|sample| sample.observed_at_epoch_ms.abs_diff(target_start_epoch_ms))
-    {
-        Some(sample) => sample,
-        None => {
-            return json!({
-                "status": "missing",
-                "status_bar_correlated": true,
-                "source": latest.source,
-                "window_minutes": window_minutes,
-                "summary": "Не удалось подобрать стартовый exact sample для расчёта hourly burn.",
-                "reply_prefix": "5ч KPI: н/д",
-            });
-        }
-    };
-    let actual_span_ms = latest
-        .observed_at_epoch_ms
-        .saturating_sub(start.observed_at_epoch_ms);
-    let actual_span_minutes = actual_span_ms as f64 / 60_000.0;
-    if actual_span_minutes + f64::EPSILON < min_history_span_minutes as f64 {
+    let window_duration_minutes = latest.primary_window_duration_mins.unwrap_or(window_minutes);
+    let Some(primary_resets_at_epoch_seconds) = latest.primary_resets_at_epoch_seconds else {
         return json!({
-            "status": "insufficient_history",
+            "status": "missing_reset",
             "status_bar_correlated": true,
             "source": latest.source,
-            "window_minutes": window_minutes,
-            "min_history_span_minutes": min_history_span_minutes,
-            "actual_history_span_minutes": actual_span_minutes,
+            "window_minutes": window_duration_minutes,
             "latest_observed_at_epoch_ms": latest.observed_at_epoch_ms,
-            "summary": "Ещё не набрана полная exact history для честного hourly burn 5ч лимита.",
+            "summary": "Exact 5ч source не дал reset time, поэтому KPI fail-closed не считается.",
             "reply_prefix": "5ч KPI: н/д",
         });
-    }
-    let primary_used_delta_percent = latest.primary_used_percent - start.primary_used_percent;
-    let secondary_used_delta_percent = latest.secondary_used_percent - start.secondary_used_percent;
-    let projected_primary_used_per_hour_percent =
-        if actual_span_minutes <= f64::EPSILON {
-            0.0
-        } else {
-            primary_used_delta_percent * 60.0 / actual_span_minutes
-        };
-    let ideal_primary_used_per_hour_percent = 20.0;
-    let ratio_to_ideal = if ideal_primary_used_per_hour_percent <= f64::EPSILON {
-        1.0
+    };
+    let reset_at_epoch_ms = primary_resets_at_epoch_seconds.saturating_mul(1000);
+    let remaining_window_minutes = if reset_at_epoch_ms <= latest.observed_at_epoch_ms {
+        0.0
     } else {
-        projected_primary_used_per_hour_percent / ideal_primary_used_per_hour_percent
+        (reset_at_epoch_ms - latest.observed_at_epoch_ms) as f64 / 60_000.0
+    };
+    let elapsed_window_minutes =
+        (window_duration_minutes as f64 - remaining_window_minutes).max(0.0);
+    let actual_remaining_percent = (100.0 - latest.primary_used_percent).clamp(0.0, 100.0);
+    let ideal_remaining_percent = if window_duration_minutes == 0 {
+        0.0
+    } else {
+        (remaining_window_minutes * 100.0 / window_duration_minutes as f64).clamp(0.0, 100.0)
+    };
+    let actual_used_percent = (100.0 - actual_remaining_percent).clamp(0.0, 100.0);
+    let ideal_used_percent = (100.0 - ideal_remaining_percent).clamp(0.0, 100.0);
+    let projected_primary_used_per_hour_percent = if elapsed_window_minutes <= f64::EPSILON {
+        0.0
+    } else {
+        actual_used_percent * 60.0 / elapsed_window_minutes
+    };
+    let ideal_primary_used_per_hour_percent = 20.0;
+    let ratio_to_ideal = if ideal_used_percent <= 0.01 {
+        if actual_used_percent <= 0.01 {
+            1.0
+        } else {
+            f64::INFINITY
+        }
+    } else {
+        actual_used_percent / ideal_used_percent
     };
     let classification = if (ratio_to_ideal - 1.0).abs() <= 0.005 {
         "one_to_one"
@@ -8598,44 +8589,48 @@ fn exact_client_limit_hourly_burn_value(
         "saving" => format!("5ч KPI: экономия {kpi_percent:.2}%"),
         _ => "5ч KPI: 1:1".to_string(),
     };
+    let projected_full_window_minutes = if actual_used_percent <= 0.01 || elapsed_window_minutes <= 0.01 {
+        Value::Null
+    } else {
+        Value::from(elapsed_window_minutes * 100.0 / actual_used_percent)
+    };
+    let projected_reset_delta_minutes = projected_full_window_minutes
+        .as_f64()
+        .map(|value| value - window_duration_minutes as f64)
+        .map(Value::from)
+        .unwrap_or(Value::Null);
     json!({
         "status": "observed",
         "status_bar_correlated": true,
         "source": latest.source,
-        "window_minutes": window_minutes,
-        "min_history_span_minutes": min_history_span_minutes,
+        "window_minutes": window_duration_minutes,
         "latest_observed_at_epoch_ms": latest.observed_at_epoch_ms,
         "latest_live_age_seconds": live_age_ms as f64 / 1000.0,
-        "actual_history_span_minutes": actual_span_minutes,
-        "start_sample": {
-            "observed_at_epoch_ms": start.observed_at_epoch_ms,
-            "primary_used_percent": start.primary_used_percent,
-            "secondary_used_percent": start.secondary_used_percent,
-        },
-        "end_sample": {
-            "observed_at_epoch_ms": latest.observed_at_epoch_ms,
-            "primary_used_percent": latest.primary_used_percent,
-            "secondary_used_percent": latest.secondary_used_percent,
-        },
-        "primary_used_delta_percent": primary_used_delta_percent,
-        "secondary_used_delta_percent": secondary_used_delta_percent,
-        "primary_remaining_delta_percent": -primary_used_delta_percent,
-        "secondary_remaining_delta_percent": -secondary_used_delta_percent,
+        "window_duration_minutes": window_duration_minutes,
+        "reset_at_epoch_ms": reset_at_epoch_ms,
+        "remaining_window_minutes": remaining_window_minutes,
+        "elapsed_window_minutes": elapsed_window_minutes,
+        "actual_remaining_percent": actual_remaining_percent,
+        "ideal_remaining_percent": ideal_remaining_percent,
+        "actual_used_percent": actual_used_percent,
+        "ideal_used_percent": ideal_used_percent,
         "projected_primary_used_per_hour_percent": projected_primary_used_per_hour_percent,
         "ideal_primary_used_per_hour_percent": ideal_primary_used_per_hour_percent,
         "equivalent_5h_budget_minutes_per_hour": projected_primary_used_per_hour_percent * 3.0,
+        "projected_full_window_minutes": projected_full_window_minutes,
+        "projected_reset_delta_minutes": projected_reset_delta_minutes,
         "classification": classification,
         "kpi_percent": kpi_percent,
         "reply_prefix": reply_prefix,
         "summary": match classification {
             "overspend" => format!(
-                "За последний час exact 5ч burn идёт быстрее нормы: {projected_primary_used_per_hour_percent:.2}%/ч против идеальных 20.00%/ч."
+                "По текущему положению окна 5ч burn идёт быстрее нормы: использовано {actual_used_percent:.2}% вместо идеальных {ideal_used_percent:.2}% к этому моменту."
             ),
             "saving" => format!(
-                "За последний час exact 5ч burn идёт экономно: {projected_primary_used_per_hour_percent:.2}%/ч против идеальных 20.00%/ч."
+                "По текущему положению окна 5ч burn идёт экономно: использовано {actual_used_percent:.2}% вместо идеальных {ideal_used_percent:.2}% к этому моменту."
             ),
             _ => format!(
-                "За последний час exact 5ч burn идёт почти один в один: {projected_primary_used_per_hour_percent:.2}%/ч против идеальных 20.00%/ч."
+                "По текущему положению окна 5ч burn идёт почти один в один: использовано {actual_used_percent:.2}% при идеальных {ideal_used_percent:.2}%."
             ),
         },
     })
@@ -26675,19 +26670,14 @@ effective_to_epoch_ms = 2000
     fn exact_client_limit_hourly_burn_value_classifies_saving() {
         let samples = vec![
             super::ExactClientLimitSample {
-                observed_at_epoch_ms: 1_000,
-                primary_used_percent: 10.0,
-                secondary_used_percent: 20.0,
+                observed_at_epoch_ms: 1_800_000,
+                primary_used_percent: 25.0,
+                primary_window_duration_mins: Some(60),
+                primary_resets_at_epoch_seconds: Some(3_600),
                 source: "codex_app_server_account_rate_limits_read_v1".to_string(),
-            },
-            super::ExactClientLimitSample {
-                observed_at_epoch_ms: 3_601_000,
-                primary_used_percent: 20.0,
-                secondary_used_percent: 28.0,
-                source: "codex_app_server_account_rate_limits_read_v1".to_string(),
-            },
+            }
         ];
-        let value = super::exact_client_limit_hourly_burn_value(&samples, 3_601_000, 60, 10, 55);
+        let value = super::exact_client_limit_hourly_burn_value(&samples, 1_800_000, 60, 10, 55);
         assert_eq!(value["status"].as_str(), Some("observed"));
         assert_eq!(value["classification"].as_str(), Some("saving"));
         assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: экономия 50.00%"));
@@ -26697,21 +26687,33 @@ effective_to_epoch_ms = 2000
     fn exact_client_limit_hourly_burn_value_classifies_one_to_one() {
         let samples = vec![
             super::ExactClientLimitSample {
-                observed_at_epoch_ms: 1_000,
-                primary_used_percent: 10.0,
-                secondary_used_percent: 20.0,
+                observed_at_epoch_ms: 1_800_000,
+                primary_used_percent: 50.0,
+                primary_window_duration_mins: Some(60),
+                primary_resets_at_epoch_seconds: Some(3_600),
                 source: "codex_app_server_account_rate_limits_read_v1".to_string(),
-            },
-            super::ExactClientLimitSample {
-                observed_at_epoch_ms: 3_601_000,
-                primary_used_percent: 30.0,
-                secondary_used_percent: 35.0,
-                source: "codex_app_server_account_rate_limits_read_v1".to_string(),
-            },
+            }
         ];
-        let value = super::exact_client_limit_hourly_burn_value(&samples, 3_601_000, 60, 10, 55);
+        let value = super::exact_client_limit_hourly_burn_value(&samples, 1_800_000, 60, 10, 55);
         assert_eq!(value["status"].as_str(), Some("observed"));
         assert_eq!(value["classification"].as_str(), Some("one_to_one"));
         assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: 1:1"));
+    }
+
+    #[test]
+    fn exact_client_limit_hourly_burn_value_classifies_overspend() {
+        let samples = vec![
+            super::ExactClientLimitSample {
+                observed_at_epoch_ms: 1_800_000,
+                primary_used_percent: 75.0,
+                primary_window_duration_mins: Some(60),
+                primary_resets_at_epoch_seconds: Some(3_600),
+                source: "codex_app_server_account_rate_limits_read_v1".to_string(),
+            }
+        ];
+        let value = super::exact_client_limit_hourly_burn_value(&samples, 1_800_000, 60, 10, 55);
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["classification"].as_str(), Some("overspend"));
+        assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: переплата 50.00%"));
     }
 }
