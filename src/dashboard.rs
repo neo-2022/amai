@@ -2836,6 +2836,7 @@ fn current_session_budget_guard_with_restore_context(
         .and_then(|row| row["value"].as_str().map(str::to_string));
     let client_limits = client_live_limit_metric_row(client_live_meter)
         .and_then(|row| row["value"].as_str().map(str::to_string));
+    let global_limit_source = global_client_limit_source(client_live_meter);
     let global_limit_guard = global_client_limit_guard(client_live_meter);
     let row_value = |label: &str| {
         rows.iter()
@@ -2930,6 +2931,7 @@ fn current_session_budget_guard_with_restore_context(
         "next_action": row_value("Следующее действие"),
         "last_request": last_request,
         "client_limits": client_limits,
+        "global_client_limit_source": global_limit_source.unwrap_or(Value::Null),
         "observed_at_epoch_ms": observed_at_epoch_ms,
         "client_live_meter_current_thread_bound": current_thread_bound,
         "client_live_meter_thread_binding_state": client_live_meter["thread_binding_state"]
@@ -8453,6 +8455,15 @@ fn current_session_client_live_meter_available(client_live_meter: &Value) -> boo
         && client_live_meter_current_thread_bound(client_live_meter)
 }
 
+fn global_client_limit_source(client_live_meter: &Value) -> Option<Value> {
+    if !client_live_meter_is_observed(client_live_meter)
+        || client_live_meter_current_thread_bound(client_live_meter)
+    {
+        return None;
+    }
+    Some(working_state::build_global_client_limit_source_contract())
+}
+
 fn global_client_limit_guard(client_live_meter: &Value) -> Option<GlobalClientLimitGuard> {
     if !client_live_meter_is_observed(client_live_meter)
         || client_live_meter_current_thread_bound(client_live_meter)
@@ -8502,13 +8513,13 @@ fn global_client_limit_guard_note(
         client_limits_value.unwrap_or("последнее observed значение лимита клиента");
     if guard.severity == "critical" {
         format!(
-            "Current thread binding ещё не materialized, но последнее observed значение client limits уже показывает 5ч {}, 7д {}. Это truly-global pressure: новый чат не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее observed значение: {rendered_limits}.",
+            "Current thread binding ещё не materialized, поэтому Amai видит только последнее observed значение client limits: 5ч {}, 7д {}. Этого уже достаточно для fail-closed wait path: новый чат не поможет, нужно дождаться восстановления внешнего клиентского лимита. Текущее observed значение: {rendered_limits}.",
             format_percent(Some(guard.primary_remaining_percent)),
             format_percent(Some(guard.secondary_remaining_percent)),
         )
     } else {
         format!(
-            "Current thread binding ещё не materialized, но последнее observed значение client limits уже показывает 5ч {}, 7д {}. Это пока только global warning hint: rotate gate не включается, но следующий substantive reply стоит делать только после повторной проверки budget. Текущее observed значение: {rendered_limits}.",
+            "Current thread binding ещё не materialized, поэтому Amai видит только последнее observed значение client limits: 5ч {}, 7д {}. Это пока только global warning hint: rotate gate не включается, но следующий substantive reply стоит делать только после повторной проверки budget. Текущее observed значение: {rendered_limits}.",
             format_percent(Some(guard.primary_remaining_percent)),
             format_percent(Some(guard.secondary_remaining_percent)),
         )
@@ -13134,6 +13145,20 @@ mod tests {
             guard["client_live_meter_thread_binding_state"],
             json!("no_current_thread_binding")
         );
+        assert_eq!(
+            guard["global_client_limit_source"]["source_kind"],
+            json!(working_state::GLOBAL_CLIENT_LIMIT_SOURCE_KIND)
+        );
+        assert_eq!(
+            guard["global_client_limit_source"]["truly_global_source_materialized"],
+            json!(false)
+        );
+        assert!(
+            guard["global_client_limit_source"]["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("последнее observed значение client limits")
+        );
     }
 
     #[test]
@@ -13234,6 +13259,14 @@ mod tests {
         assert_eq!(
             guard["reply_execution_gate"]["action_bundle"]["bundle_version"],
             json!("wait-client-budget-action-bundle-v1")
+        );
+        assert_eq!(
+            guard["global_client_limit_source"]["source_kind"],
+            json!(working_state::GLOBAL_CLIENT_LIMIT_SOURCE_KIND)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_bundle"]["budget_source"]["source_kind"],
+            json!(working_state::GLOBAL_CLIENT_LIMIT_SOURCE_KIND)
         );
         assert_eq!(guard["last_request"], Value::Null);
         assert!(

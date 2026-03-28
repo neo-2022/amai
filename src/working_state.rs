@@ -39,6 +39,9 @@ pub(crate) const CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE: &str = "Этот 
 pub(crate) const CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE: &str = "Внешний лимит клиента почти исчерпан во всём клиенте. Не продолжай содержательный ответ, дождись восстановления окна лимита.";
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE: &str =
     CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE;
+pub(crate) const GLOBAL_CLIENT_LIMIT_SOURCE_KIND: &str =
+    "latest_observed_client_limits_without_current_thread_binding";
+pub(crate) const GLOBAL_CLIENT_LIMIT_SOURCE_SUMMARY: &str = "При отсутствии current-thread binding Amai использует только последнее observed значение client limits. Этого достаточно для global warning hint и hard wait при критическом исчерпании, но недостаточно для thread-local rotate pressure.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClientBudgetBlockingReplyMode {
@@ -84,6 +87,23 @@ pub(crate) fn build_client_budget_blocking_reply_contract(
         "must_avoid_substantive_work": true,
         "must_use_action_bundle_operator_flow": true,
         "template": template,
+    })
+}
+
+pub(crate) fn build_global_client_limit_source_contract() -> Value {
+    json!({
+        "source_kind": GLOBAL_CLIENT_LIMIT_SOURCE_KIND,
+        "derived_from_latest_observed_client_limits": true,
+        "truly_global_source_materialized": false,
+        "authoritative_for": [
+            "global_client_limit_hint",
+            "wait_for_global_client_budget_recovery_when_critical"
+        ],
+        "not_authoritative_for": [
+            "thread_local_rotate_pressure",
+            "live_turn_rows"
+        ],
+        "summary": GLOBAL_CLIENT_LIMIT_SOURCE_SUMMARY,
     })
 }
 
@@ -2526,6 +2546,7 @@ pub(crate) fn build_wait_for_global_client_budget_action_bundle(
         "ready_for_automation": missing_inputs.is_empty(),
         "missing_inputs": missing_inputs,
         "preserves_return_obligation": preserves_return_obligation,
+        "budget_source": build_global_client_limit_source_contract(),
         "recommended_handoff": {
             "available": recommended_headline.is_some() && recommended_next_step.is_some(),
             "headline": recommended_headline,
@@ -4079,6 +4100,20 @@ mod tests {
         assert_eq!(
             bundle["wait_for_budget_recovery"]["action_kind"],
             json!("wait_for_global_client_budget_recovery")
+        );
+        assert_eq!(
+            bundle["budget_source"]["source_kind"],
+            json!(super::GLOBAL_CLIENT_LIMIT_SOURCE_KIND)
+        );
+        assert_eq!(
+            bundle["budget_source"]["truly_global_source_materialized"],
+            json!(false)
+        );
+        assert!(
+            bundle["budget_source"]["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("последнее observed значение client limits")
         );
         assert!(
             bundle["operator_flow"]["wait_summary"]
