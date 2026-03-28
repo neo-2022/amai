@@ -3017,9 +3017,14 @@ fn current_session_budget_guard_with_restore_context(
     let should_rotate_chat_now = compact_status_label == "новый чат нужен сейчас";
     let should_rotate_chat_soon =
         compact_status_label == "новый чат рекомендован" || should_rotate_chat_now;
-    let compact_reply_required = !should_rotate_chat_now
+    let hourly_burn_classification = report["client_limit_hourly_burn"]["classification"].as_str();
+    let compact_reply_required = current_thread_bound
+        && !should_rotate_chat_now
         && (should_rotate_chat_soon
-            || report["client_limit_hourly_burn"]["classification"].as_str() == Some("overspend"));
+            || matches!(
+                hourly_burn_classification,
+                Some("overspend" | "one_to_one")
+            ));
     let requires_global_budget_recovery_before_reply =
         global_limit_guard.is_some_and(|guard| guard.severity == "critical");
     let status = global_limit_guard
@@ -14449,6 +14454,99 @@ mod tests {
         assert_eq!(
             guard["reply_execution_gate"]["reply_budget_contract"]["contract_version"],
             json!(working_state::CLIENT_REPLY_BUDGET_CONTRACT_VERSION)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["reply_budget_contract"]["must_avoid_unrequested_recaps"],
+            json!(true)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["blocking_reply_contract"]["active"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn current_session_budget_guard_uses_compact_mode_for_thread_bound_one_to_one_hourly_burn() {
+        let snapshot = json!({
+        "token_budget_report": {
+            "token_budget_report": {
+                "current_session": {
+                    "events_total": 1,
+                    "counted_events": 1,
+                    "verified_effective_saved_tokens": 138,
+                    "verified_effective_savings_pct": 56.56,
+                    "started_at_epoch_ms": 1774622516860u64,
+                    "ended_at_epoch_ms": 1774622516860u64,
+                    "verified_baseline_tokens": 240,
+                    "verified_observed_whole_cycle_with_amai_tokens": 106
+                },
+                "rolling_window": {"events_total": 0, "counted_events": 0},
+                "lifetime": {"events_total": 0, "counted_events": 0},
+                "statement_previews": {
+                    "current_session": {
+                        "verified_observed_whole_cycle_with_amai_tokens": 106,
+                        "client_limit_meter_alignment": {
+                            "same_meter_as_client_limit": true,
+                            "exact_pair_status": {"exact_pair_available": true},
+                            "strict_client_meter_slice": {"lower_bound_tokens": 240},
+                            "explicit_boundary_surface": {
+                                "blocks_full_same_meter_equivalence": false
+                            }
+                        }
+                    },
+                    "rolling_window": {},
+                    "lifetime": {}
+                },
+                "statement_export_previews": {"lifetime": {}},
+                "client_live_meter": {
+                    "status": "observed",
+                    "thread_binding_state": "current_thread_bound",
+                    "current_thread_bound": true,
+                    "thread_id": "thread-current",
+                    "client_turn_total_tokens": 30240,
+                    "latest_model_context_window": 258400,
+                    "context_used_percent": 11.70,
+                    "primary_limit_remaining_percent": 90.0,
+                    "secondary_limit_remaining_percent": 95.0,
+                    "started_at_epoch_ms": 1774622174000u64,
+                    "ended_at_epoch_ms": 1774622949000u64
+                },
+                "client_limit_hourly_burn": {
+                    "status": "observed",
+                    "classification": "one_to_one",
+                    "kpi_percent": 0.41
+                },
+                    "profile": {"display_name": "Обычная рабочая машина"}
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": {
+                        "code": "amai",
+                        "display_name": "Amai",
+                        "repo_root": "/home/art/agent-memory-index"
+                    },
+                    "namespace": {
+                        "code": "continuity",
+                        "display_name": "Continuity"
+                    },
+                    "execctl_resume_state": "pending_return_queue_present",
+                    "current_goal": "Same-meter spend control",
+                    "next_step": "Materialize live assistant generation source."
+                }
+            }
+        });
+
+        let guard = super::current_session_budget_guard(&snapshot);
+        assert_eq!(guard["should_rotate_chat_now"], json!(false));
+        assert_eq!(guard["should_rotate_chat_soon"], json!(false));
+        assert_eq!(
+            guard["reply_execution_gate"]["action_kind"],
+            json!("continue_current_chat")
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["reply_budget_mode"],
+            json!(working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL)
         );
         assert_eq!(
             guard["reply_execution_gate"]["reply_budget_contract"]["must_avoid_unrequested_recaps"],
