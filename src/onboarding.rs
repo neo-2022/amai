@@ -1963,6 +1963,10 @@ fn startup_contract_artifact_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".amai/onboarding/project-chat-startup-contract.json")
 }
 
+fn startup_agent_contract_artifact_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(".amai/onboarding/project-chat-startup-agent-contract.json")
+}
+
 fn managed_startup_block_bounds(content: &str) -> Result<Option<(usize, usize)>> {
     let start = content.find(STARTUP_INSTRUCTIONS_MARKER);
     let end = content.find(STARTUP_INSTRUCTIONS_END_MARKER);
@@ -2133,13 +2137,17 @@ fn install_startup_contract_artifact(
     repo_root: &Path,
 ) -> Result<Option<StartupContractInstallSummary>> {
     let output_path = startup_contract_artifact_path(repo_root);
+    let agent_output_path = startup_agent_contract_artifact_path(repo_root);
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let (content, sha256) = render_startup_contract_artifact(repo_root)?;
+    let agent_content = render_startup_agent_contract_artifact(repo_root)?;
     fs::write(&output_path, content.as_bytes())
         .with_context(|| format!("failed to write {}", output_path.display()))?;
+    fs::write(&agent_output_path, agent_content.as_bytes())
+        .with_context(|| format!("failed to write {}", agent_output_path.display()))?;
     Ok(Some(StartupContractInstallSummary {
         status: "workspace_startup_contract_materialized".to_string(),
         output_path,
@@ -2238,6 +2246,7 @@ fn render_startup_instructions(
 fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     let contract = mcp::project_chat_startup_contract();
     let contract_path = startup_contract_artifact_path(repo_root);
+    let agent_contract_path = startup_agent_contract_artifact_path(repo_root);
     let startup_contract_sha256 = startup_contract_sha256(&contract)?;
     let tool = contract["tool"]
         .as_str()
@@ -2595,9 +2604,11 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     };
     let repo_root_display = repo_root.display().to_string();
     let contract_path_display = contract_path.display().to_string();
+    let agent_contract_path_display = agent_contract_path.display().to_string();
+    let startup_agent_contract_relative_path = ".amai/onboarding/project-chat-startup-agent-contract.json";
 
     Ok(format!(
-        "Перед первым содержательным ответом в новом или resumed чате, а затем перед каждым следующим содержательным ответом, пока этот чат жив:\n1. Считай текущий workspace проектом с repo root `{repo_root_display}`.\n2. Сначала прочитай machine-readable startup contract `{contract_path_display}` (relative path `{startup_contract_relative_path}`) и используй JSON как единственный source-of-truth; этот markdown только thin wrapper.\n3. До MCP tool call обязательно проверь literal `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call_text}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed_text}` и `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed_text}`.\n4. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"`; `project` передавай только при exact binding по repo_root.\n5. Не переходи к `amai_context_pack` и другим новым действиям, пока не получен `continuity_startup_summary`.\n6. После startup прочитай runtime artifact `{runtime_state_relative_path}`; его пишет `{runtime_state_written_by_tool}`, он обязан нести `{runtime_state_source_summary_field}`, а `workspace_runtime_state_artifact_version` должен быть `{runtime_state_artifact_version}`. Если direct file-read неудобен, используй `cargo run -- {startup_state_fallback_cli} --repo-root \"{repo_root_display}\" --json`.\n7. В runtime artifact используй как pinned pointers: `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. Все обязательные restore fields бери из массива `required_summary_fields`, а все обязательные workline obligations бери из массива `restored_obligations` внутри startup contract; не пересказывай и не подменяй эти списки вручную.\n8. Если `{gate_semantics_consistent_field} != true` (`gate_semantics_consistent_true_required = {gate_semantics_consistent_true_required_text}`), `{startup_execution_gate_field}.{gate_must_follow_field} != true`, `{startup_execution_gate_field}.{gate_unrelated_work_allowed_field} != false`, `{startup_execution_gate_field}.{gate_prompt_read_field} != true` или `{startup_execution_gate_field}.{gate_no_silent_drop_field} != true`, fail-closed и не делай unrelated work.\n9. Если `{startup_execution_gate_field}.{gate_required_action_kind_field} == \"{required_action_kind}\"`, `{startup_next_action_field}.action_kind == \"{required_action_kind}\"` (`must_resume_required_return_task_before_unrelated_work = {must_resume_before_unrelated_text}`) или `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"` (`previous_session_owner_must_follow_startup_next_action = {previous_session_owner_must_follow_startup_next_action_text}`), follow startup_next_action first. Silent drop запрещён: `no_silent_drop = {no_silent_drop_text}`.\n10. Перед каждым содержательным ответом обновляй guard `cargo run -- {client_budget_guard_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`, stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`), для hard gate automation используй `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`).\n11. Для KPI/guard/exact-pair root-cause сначала используй компактный diagnostics path `cargo run -- {client_budget_compact_diagnostics_command}`; `must_prefer_compact_diagnostics_over_full_snapshot = {client_budget_prefer_compact_diagnostics_text}` означает, что full `observe snapshot` без фильтра для этой задачи запрещён.\n12. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, substantive reply разрешён только по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts when possible, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing.\n13. Если `{client_budget_reply_execution_gate_field}.must_rotate_before_reply = true`, `{client_budget_rotate_now_field} = true` или `{client_budget_status_label_field}` равен одному из [{client_budget_rotate_status_labels}], сначала сохрани handoff (`save_handoff_before_rotate = {client_budget_save_handoff_before_rotate_text}`) и продолжай только в свежем чате через continuity startup (`fresh_chat_requires_continuity_startup = {client_budget_fresh_chat_requires_startup_text}`). В blocked path разрешён только `{client_budget_blocking_reply_contract_field}`: `contract_version = \"{client_budget_blocking_reply_contract_version}\"`, `response_kind = \"{client_budget_blocking_reply_response_kind}\"`, `max_sentences = {client_budget_blocking_reply_max_sentences}`, `must_avoid_substantive_work = {client_budget_blocking_reply_must_avoid_substantive_work_text}`, `must_use_action_bundle_operator_flow = {client_budget_blocking_reply_must_use_action_bundle_operator_flow_text}`. Pinned template: `{client_budget_blocking_reply_template}`.\n14. Не подменяй полную клиентскую шкалу внутренним Amai-slice: `full_scale_client_truth_required = {client_budget_full_scale_truth_required_text}`.\n15. Если startup вернул любой fail-closed scenario ({fail_closed}), прямо сообщай о блокере и не угадывай continuity."
+        "Перед первым содержательным ответом в новом или resumed чате, а затем перед каждым следующим содержательным ответом, пока этот чат жив:\n1. Считай текущий workspace проектом с repo root `{repo_root_display}`. Сначала прочитай compact agent contract `{agent_contract_path_display}` (relative path `{startup_agent_contract_relative_path}`), а полный machine-readable startup contract `{contract_path_display}` (relative path `{startup_contract_relative_path}`) используй как pinned source-of-truth для sha/fail-closed law. До MCP tool call проверь literal `{startup_contract_sha256_field} = \"{startup_contract_sha256}\"`, `workspace_contract_required_before_tool_call = {startup_contract_required_before_tool_call_text}`, `missing_or_unreadable_fail_closed = {startup_contract_missing_or_unreadable_fail_closed_text}`, `sha256_mismatch_fail_closed = {startup_contract_sha256_mismatch_fail_closed_text}`.\n2. Затем вызови MCP tool `{tool}` с `repo_root = \"{repo_root_display}\"` и `namespace = \"{namespace}\"`; `project` передавай только при exact binding по repo_root. Не переходи к `amai_context_pack` и другим новым действиям, пока не получен `continuity_startup_summary`.\n3. После startup прочитай runtime artifact `{runtime_state_relative_path}`; его пишет `{runtime_state_written_by_tool}`, он обязан нести `{runtime_state_source_summary_field}`, а `workspace_runtime_state_artifact_version` должен быть `{runtime_state_artifact_version}`. Если direct file-read неудобен, используй `cargo run -- {startup_state_fallback_cli} --repo-root \"{repo_root_display}\" --json`.\n4. В runtime artifact используй как pinned pointers: `{startup_execution_gate_field}`, `{resume_state_field}`, `{resume_contract_field}`, `{resume_obligation_field}`, `{startup_next_action_field}`, `{active_lease_field}`. Все обязательные restore fields бери из массива `required_summary_fields`, а все обязательные workline obligations бери из массива `restored_obligations`; не пересказывай и не подменяй эти списки вручную.\n5. Fail-closed, если `{gate_semantics_consistent_field} != true` (`gate_semantics_consistent_true_required = {gate_semantics_consistent_true_required_text}`), `{startup_execution_gate_field}.{gate_must_follow_field} != true`, `{startup_execution_gate_field}.{gate_unrelated_work_allowed_field} != false`, `{startup_execution_gate_field}.{gate_prompt_read_field} != true` или `{startup_execution_gate_field}.{gate_no_silent_drop_field} != true`.\n6. Resume law: если `{startup_execution_gate_field}.{gate_required_action_kind_field} == \"{required_action_kind}\"`, `{startup_next_action_field}.action_kind == \"{required_action_kind}\"` (`must_resume_required_return_task_before_unrelated_work = {must_resume_before_unrelated_text}`) или `{active_lease_field}.{active_lease_owner_state_field} == \"{previous_session_owner_value}\"` (`previous_session_owner_must_follow_startup_next_action = {previous_session_owner_must_follow_startup_next_action_text}`), follow startup_next_action first. Silent drop запрещён: `no_silent_drop = {no_silent_drop_text}`. Здесь же смотри `execctl_active_lease_summary`, `required_return_task`, `project_task_tree`, `project_task_tree_summary`, `project_task_ledger`, `project_task_ledger_summary`.\n7. Перед каждым содержательным ответом обновляй guard `cargo run -- {client_budget_guard_command}` и работай только по `{client_budget_guard_summary_field}.{client_budget_reply_execution_gate_field}`. `must_check_before_each_substantive_reply = {client_budget_must_check_before_each_reply_text}`, stale старше `{client_budget_max_guard_age_seconds_text}` секунд запрещён (`stale_guard_requires_refresh = {client_budget_stale_guard_requires_refresh_text}`), для hard gate automation используй `{client_budget_guard_enforcement_flag}` (`guard_enforcement_exit_on_blocking = {client_budget_guard_enforcement_exit_on_blocking_text}`).\n8. Для KPI/guard/exact-pair root-cause сначала используй `cargo run -- {client_budget_compact_diagnostics_command}`; `must_prefer_compact_diagnostics_over_full_snapshot = {client_budget_prefer_compact_diagnostics_text}` означает, что full `observe snapshot` без фильтра для этой задачи запрещён.\n9. Gate version pinned: `{client_budget_reply_execution_gate_version}`. Если `{client_budget_reply_budget_mode_field} == \"{client_budget_compact_reply_mode_value}\"`, substantive reply разрешён только по `{client_budget_reply_budget_contract_field}` с `contract_version = \"{client_budget_compact_reply_contract_version}\"`: direct answer first, no unrequested recap, no repeated known context, keep only changed facts when possible, prefer patch/result over narration when coding, preserve truthfulness/technical accuracy, disclose unknowns instead of guessing.\n10. Если `{client_budget_reply_execution_gate_field}.must_rotate_before_reply = true`, `{client_budget_rotate_now_field} = true` или `{client_budget_status_label_field}` равен одному из [{client_budget_rotate_status_labels}], сначала сохрани handoff (`save_handoff_before_rotate = {client_budget_save_handoff_before_rotate_text}`) и продолжай только в свежем чате через continuity startup (`fresh_chat_requires_continuity_startup = {client_budget_fresh_chat_requires_startup_text}`). В blocked path разрешён только `{client_budget_blocking_reply_contract_field}`: `contract_version = \"{client_budget_blocking_reply_contract_version}\"`, `response_kind = \"{client_budget_blocking_reply_response_kind}\"`, `max_sentences = {client_budget_blocking_reply_max_sentences}`, `must_avoid_substantive_work = {client_budget_blocking_reply_must_avoid_substantive_work_text}`, `must_use_action_bundle_operator_flow = {client_budget_blocking_reply_must_use_action_bundle_operator_flow_text}`. Pinned template: `{client_budget_blocking_reply_template}`.\n11. Не подменяй полную клиентскую шкалу внутренним Amai-slice: `full_scale_client_truth_required = {client_budget_full_scale_truth_required_text}`. Если startup вернул любой fail-closed scenario ({fail_closed}), прямо сообщай о блокере и не угадывай continuity."
     ))
 }
 
@@ -2631,6 +2642,90 @@ fn render_startup_contract_artifact(repo_root: &Path) -> Result<(String, String)
     let content = serde_json::to_string_pretty(&payload)
         .context("failed to serialize startup contract artifact")?;
     Ok((content, startup_contract_sha256))
+}
+
+fn render_startup_agent_contract_artifact(repo_root: &Path) -> Result<String> {
+    let contract = mcp::project_chat_startup_contract();
+    let startup_contract_sha256 = startup_contract_sha256(&contract)?;
+    let tool = contract["tool"]
+        .as_str()
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing tool"))?;
+    let namespace = contract["default_namespace"]
+        .as_str()
+        .ok_or_else(|| anyhow!("project_chat_startup contract is missing default_namespace"))?;
+    let payload = json!({
+        "artifact_version": "workspace-startup-agent-contract-v1",
+        "contract_kind": "project_chat_startup_agent_read",
+        "repo_root": repo_root.display().to_string(),
+        "default_namespace": namespace,
+        "tool": tool,
+        "full_startup_contract_relative_path": ".amai/onboarding/project-chat-startup-contract.json",
+        "full_startup_contract_sha256": startup_contract_sha256,
+        "recommended_startup_call": {
+            "tool": tool,
+            "arguments": {
+                "repo_root": repo_root.display().to_string(),
+                "namespace": namespace
+            }
+        },
+        "artifact_enforcement": contract["artifact_enforcement"].clone(),
+        "runtime_state_artifact": contract["runtime_state_artifact"].clone(),
+        "required_summary_fields": contract["required_summary_fields"].clone(),
+        "restored_obligations": contract["restored_obligations"].clone(),
+        "resume_enforcement": {
+            "contract_field": contract["resume_enforcement"]["contract_field"].clone(),
+            "resume_state_field": contract["resume_enforcement"]["resume_state_field"].clone(),
+            "obligation_field": contract["resume_enforcement"]["obligation_field"].clone(),
+            "startup_next_action_field": contract["resume_enforcement"]["startup_next_action_field"].clone(),
+            "active_lease_field": contract["resume_enforcement"]["active_lease_field"].clone(),
+            "active_lease_owner_state_field": contract["resume_enforcement"]["active_lease_owner_state_field"].clone(),
+            "previous_session_owner_value": contract["resume_enforcement"]["previous_session_owner_value"].clone(),
+            "must_resume_required_return_task_before_unrelated_work": contract["resume_enforcement"]["must_resume_required_return_task_before_unrelated_work"].clone(),
+            "previous_session_owner_must_follow_startup_next_action": contract["resume_enforcement"]["previous_session_owner_must_follow_startup_next_action"].clone(),
+            "required_action_kind_when_resume_required": contract["resume_enforcement"]["required_action_kind_when_resume_required"].clone(),
+            "no_silent_drop": contract["resume_enforcement"]["no_silent_drop"].clone()
+        },
+        "startup_execution_gate_enforcement": {
+            "must_follow_field": contract["startup_execution_gate_enforcement"]["must_follow_field"].clone(),
+            "unrelated_work_allowed_field": contract["startup_execution_gate_enforcement"]["unrelated_work_allowed_field"].clone(),
+            "must_read_prompt_text_before_reply_field": contract["startup_execution_gate_enforcement"]["must_read_prompt_text_before_reply_field"].clone(),
+            "required_action_kind_field": contract["startup_execution_gate_enforcement"]["required_action_kind_field"].clone(),
+            "no_silent_drop_field": contract["startup_execution_gate_enforcement"]["no_silent_drop_field"].clone()
+        },
+        "live_client_budget_enforcement": {
+            "guard_command": contract["live_client_budget_enforcement"]["guard_command"].clone(),
+            "guard_summary_field": contract["live_client_budget_enforcement"]["guard_summary_field"].clone(),
+            "reply_execution_gate_field": contract["live_client_budget_enforcement"]["reply_execution_gate_field"].clone(),
+            "reply_execution_gate_version": contract["live_client_budget_enforcement"]["reply_execution_gate_version"].clone(),
+            "reply_budget_mode_field": contract["live_client_budget_enforcement"]["reply_budget_mode_field"].clone(),
+            "reply_budget_contract_field": contract["live_client_budget_enforcement"]["reply_budget_contract_field"].clone(),
+            "compact_reply_mode_value": contract["live_client_budget_enforcement"]["compact_reply_mode_value"].clone(),
+            "compact_reply_contract_version": contract["live_client_budget_enforcement"]["compact_reply_contract_version"].clone(),
+            "compact_diagnostics_command": contract["live_client_budget_enforcement"]["compact_diagnostics_command"].clone(),
+            "must_prefer_compact_diagnostics_over_full_snapshot": contract["live_client_budget_enforcement"]["must_prefer_compact_diagnostics_over_full_snapshot"].clone(),
+            "guard_enforcement_flag": contract["live_client_budget_enforcement"]["guard_enforcement_flag"].clone(),
+            "guard_enforcement_exit_on_blocking": contract["live_client_budget_enforcement"]["guard_enforcement_exit_on_blocking"].clone(),
+            "must_check_before_each_substantive_reply": contract["live_client_budget_enforcement"]["must_check_before_each_substantive_reply"].clone(),
+            "max_guard_age_seconds": contract["live_client_budget_enforcement"]["max_guard_age_seconds"].clone(),
+            "stale_guard_requires_refresh": contract["live_client_budget_enforcement"]["stale_guard_requires_refresh"].clone(),
+            "rotate_now_field": contract["live_client_budget_enforcement"]["rotate_now_field"].clone(),
+            "status_label_field": contract["live_client_budget_enforcement"]["status_label_field"].clone(),
+            "rotate_status_labels": contract["live_client_budget_enforcement"]["rotate_status_labels"].clone(),
+            "save_handoff_before_rotate": contract["live_client_budget_enforcement"]["save_handoff_before_rotate"].clone(),
+            "fresh_chat_requires_continuity_startup": contract["live_client_budget_enforcement"]["fresh_chat_requires_continuity_startup"].clone(),
+            "full_scale_client_truth_required": contract["live_client_budget_enforcement"]["full_scale_client_truth_required"].clone(),
+            "blocking_reply_contract_field": contract["live_client_budget_enforcement"]["blocking_reply_contract_field"].clone(),
+            "blocking_reply_contract_version": contract["live_client_budget_enforcement"]["blocking_reply_contract_version"].clone(),
+            "blocking_reply_response_kind": contract["live_client_budget_enforcement"]["blocking_reply_response_kind"].clone(),
+            "blocking_reply_max_sentences": contract["live_client_budget_enforcement"]["blocking_reply_max_sentences"].clone(),
+            "blocking_reply_must_avoid_substantive_work": contract["live_client_budget_enforcement"]["blocking_reply_must_avoid_substantive_work"].clone(),
+            "blocking_reply_must_use_action_bundle_operator_flow": contract["live_client_budget_enforcement"]["blocking_reply_must_use_action_bundle_operator_flow"].clone(),
+            "blocking_reply_template": contract["live_client_budget_enforcement"]["blocking_reply_template"].clone()
+        },
+        "fail_closed_conditions": contract["fail_closed_conditions"].clone()
+    });
+    serde_json::to_string_pretty(&payload)
+        .context("failed to serialize startup agent contract artifact")
 }
 
 fn startup_contract_sha256(contract: &Value) -> Result<String> {
@@ -2742,9 +2837,10 @@ mod tests {
     use super::{
         InstallState, detection_score, env_keys, expand_target_template, inspect_startup_artifacts,
         install_scope_status, merge_managed_startup_block, render_startup_contract_artifact,
-        render_startup_instructions, resolve_client_target, resolve_output_path,
-        save_install_state, startup_contract_artifact_path, startup_contract_sha256,
-        strip_managed_startup_block, working_state_reason_summary,
+        render_startup_agent_contract_artifact, render_startup_instructions,
+        resolve_client_target, resolve_output_path, save_install_state,
+        startup_agent_contract_artifact_path, startup_contract_artifact_path,
+        startup_contract_sha256, strip_managed_startup_block, working_state_reason_summary,
     };
     use crate::mcp;
     use crate::working_state;
@@ -2869,7 +2965,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains("/AMAI MANAGED STARTUP INSTRUCTIONS v1"));
         assert!(text.contains("amai_continuity_startup"));
         assert!(text.contains("/tmp/amai"));
-        assert!(text.contains("thin wrapper"));
+        assert!(text.contains("pinned source-of-truth"));
         assert!(text.contains("continuity_startup_summary"));
         assert!(text.contains("required_summary_fields"));
         assert!(text.contains("restored_obligations"));
@@ -2886,7 +2982,16 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
                     .as_str()
             )
         );
+        assert!(
+            text.contains(
+                startup_agent_contract_artifact_path(repo)
+                    .display()
+                    .to_string()
+                    .as_str()
+            )
+        );
         assert!(text.contains("machine-readable startup contract"));
+        assert!(text.contains("compact agent contract"));
         assert!(text.contains("workspace_contract_required_before_tool_call = true"));
         assert!(text.contains("missing_or_unreadable_fail_closed = true"));
         assert!(text.contains("sha256_mismatch_fail_closed = true"));
@@ -3116,6 +3221,38 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["stale_guard_requires_refresh"],
             json!(true)
+        );
+    }
+
+    #[test]
+    fn renders_compact_startup_agent_contract_artifact() {
+        let repo = Path::new("/tmp/amai");
+        let (full_text, sha256) =
+            render_startup_contract_artifact(repo).expect("startup contract must render");
+        let text = render_startup_agent_contract_artifact(repo)
+            .expect("startup agent contract must render");
+        let payload: Value = serde_json::from_str(&text).expect("startup agent contract json");
+
+        assert_eq!(
+            payload["artifact_version"],
+            json!("workspace-startup-agent-contract-v1")
+        );
+        assert_eq!(
+            payload["full_startup_contract_relative_path"],
+            json!(".amai/onboarding/project-chat-startup-contract.json")
+        );
+        assert_eq!(payload["full_startup_contract_sha256"], json!(sha256));
+        assert_eq!(
+            payload["runtime_state_artifact"]["workspace_runtime_state_artifact_version"],
+            json!("workspace-startup-runtime-state-v4")
+        );
+        assert_eq!(
+            payload["live_client_budget_enforcement"]["compact_diagnostics_command"],
+            json!("observe client-budget-root-cause")
+        );
+        assert!(
+            text.len() < full_text.len(),
+            "startup agent contract must be smaller than full contract"
         );
     }
 
