@@ -8,7 +8,6 @@ reply_blocked="$(printf '%s' "$guard_json" | jq -r '
   .client_budget_reply_gate.reply_execution_gate.blocking
   // .client_budget_reply_gate.reply_execution_gate.must_rotate_before_reply
   // .client_budget_reply_gate.reply_execution_gate.must_wait_for_budget_recovery_before_reply
-  // .client_budget_reply_gate.should_rotate_chat_now
   // false
 ')"
 
@@ -21,7 +20,13 @@ blocked_reply="$(printf '%s' "$guard_json" | jq -r '
 ')"
 
 if [[ -z "$blocked_reply" ]]; then
-  echo "client budget guard blocked the reply, but blocking_reply_contract.template is missing" >&2
+  blocked_reply="$(jq -r '
+    .startup_contract.live_client_budget_enforcement.blocking_reply_template // empty
+  ' .amai/onboarding/project-chat-startup-contract.json)"
+fi
+
+if [[ -z "$blocked_reply" ]]; then
+  echo "client budget guard blocked the reply, but no blocking reply template is available" >&2
   exit 11
 fi
 

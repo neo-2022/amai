@@ -309,14 +309,9 @@ fn client_budget_guard_blocks_reply(guard: &Value) -> bool {
 fn compact_client_budget_gate_payload(guard: &Value) -> Value {
     let reply_execution_gate = &guard["reply_execution_gate"];
     json!({
-        "source": "client_budget_reply_gate_v1",
-        "status": guard["status"].clone(),
         "status_label": guard["status_label"].clone(),
-        "reason_code": reply_execution_gate["reason"].clone(),
         "observed_at_epoch_ms": guard["observed_at_epoch_ms"].clone(),
         "max_guard_age_seconds": guard["max_guard_age_seconds"].clone(),
-        "should_rotate_chat_now": guard["should_rotate_chat_now"].clone(),
-        "should_rotate_chat_soon": guard["should_rotate_chat_soon"].clone(),
         "reply_execution_gate": compact_reply_execution_gate(reply_execution_gate),
     })
 }
@@ -326,33 +321,14 @@ fn compact_reply_execution_gate(reply_execution_gate: &Value) -> Value {
         .as_bool()
         .map(Value::from)
         .unwrap_or_else(|| reply_execution_gate["action_bundle"]["preserves_return_obligation"].clone());
-    let blocking_reply_contract = if reply_execution_gate["blocking"].as_bool() == Some(true) {
-        let contract = &reply_execution_gate["blocking_reply_contract"];
-        if contract["active"].as_bool() == Some(true) {
-            json!({
-                "contract_version": contract["contract_version"].clone(),
-                "response_kind": contract["response_kind"].clone(),
-                "max_sentences": contract["max_sentences"].clone(),
-                "template": contract["template"].clone(),
-            })
-        } else {
-            Value::Null
-        }
-    } else {
-        Value::Null
-    };
     json!({
-        "gate_version": reply_execution_gate["gate_version"].clone(),
         "action_kind": reply_execution_gate["action_kind"].clone(),
         "blocking": reply_execution_gate["blocking"].clone(),
         "must_rotate_before_reply": reply_execution_gate["must_rotate_before_reply"].clone(),
         "must_wait_for_budget_recovery_before_reply":
             reply_execution_gate["must_wait_for_budget_recovery_before_reply"].clone(),
         "reply_budget_mode": reply_execution_gate["reply_budget_mode"].clone(),
-        "rotate_now": reply_execution_gate["rotate_now"].clone(),
-        "rotate_soon": reply_execution_gate["rotate_soon"].clone(),
         "preserves_return_obligation": preserves_return_obligation,
-        "blocking_reply_contract": blocking_reply_contract,
     })
 }
 
@@ -4980,10 +4956,6 @@ mod tests {
             "client_limits": "heavy row"
         });
         let payload = super::compact_client_budget_gate_payload(&guard);
-        assert_eq!(
-            payload["source"].as_str(),
-            Some("client_budget_reply_gate_v1")
-        );
         assert_eq!(payload["status_label"].as_str(), Some("новый чат нужен сейчас"));
         assert_eq!(
             payload["reply_execution_gate"]["reply_budget_mode"].as_str(),
@@ -4993,10 +4965,6 @@ mod tests {
             payload["reply_execution_gate"]["preserves_return_obligation"].as_bool(),
             Some(false)
         );
-        assert_eq!(
-            payload["reason_code"].as_str(),
-            Some("client_budget_guard_pressure")
-        );
         assert!(payload.get("last_request").is_none());
         assert!(payload.get("tracked_slice").is_none());
         assert!(payload.get("client_limits").is_none());
@@ -5004,10 +4972,7 @@ mod tests {
         assert!(payload.get("requires_global_budget_recovery_before_reply").is_none());
         assert!(payload["reply_execution_gate"]["reply_budget_contract"].is_null());
         assert!(payload["reply_execution_gate"]["action_bundle"].is_null());
-        assert_eq!(
-            payload["reply_execution_gate"]["blocking_reply_contract"]["template"].as_str(),
-            Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE)
-        );
+        assert!(payload["reply_execution_gate"]["blocking_reply_contract"].is_null());
     }
 
     #[test]
