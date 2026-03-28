@@ -1670,7 +1670,9 @@ fn prepend_pending_return_item(queue: &mut Vec<Value>, candidate: Value) {
 
 fn is_meaningful_pending_return_headline(value: &str) -> bool {
     let trimmed = value.trim();
-    !trimmed.is_empty() && trimmed != "ещё нет данных"
+    !trimmed.is_empty()
+        && trimmed != "ещё нет данных"
+        && trimmed != "Продолжить активную рабочую линию"
 }
 
 fn summarize_pending_return_queue(value: &Value) -> Option<String> {
@@ -3438,6 +3440,31 @@ mod tests {
     }
 
     #[test]
+    fn derive_pending_return_queue_skips_generic_continue_workline_placeholder() {
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Продолжить активную рабочую линию",
+                "next_step": "продолжить работу в свежем чате через continuity startup",
+                "pending_return_queue": [],
+                "state_lineage": {
+                    "authoritative_event_id": "event-123",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/home/art/agent-memory-index"
+                }
+            }
+        });
+        let queue = derive_pending_return_queue(
+            Some(&restore["working_state_restore"]),
+            "Project relocation contour",
+            "Document automatic startup behavior.",
+            42,
+            false,
+            &[],
+        );
+        assert!(queue.is_empty());
+    }
+
+    #[test]
     fn derive_pending_return_queue_can_resolve_current_goal_without_requeue() {
         let restore = json!({
             "working_state_restore": {
@@ -4203,6 +4230,36 @@ mod tests {
             action["action_bundle"]["bundle_version"],
             json!("wait-client-budget-action-bundle-v1")
         );
+    }
+
+    #[test]
+    fn build_execctl_resume_contract_ignores_generic_continue_workline_placeholder() {
+        let project_task_tree = json!({
+            "nodes": [
+                {
+                    "task_role": "active",
+                    "headline": "Current active line",
+                    "next_step": "Do real work."
+                },
+                {
+                    "task_role": "pending_return",
+                    "headline": "Продолжить активную рабочую линию",
+                    "next_step": "продолжить работу в свежем чате через continuity startup",
+                    "resume_state": "pending_return"
+                }
+            ]
+        });
+        let pending_return_queue = json!([
+            {
+                "headline": "Продолжить активную рабочую линию",
+                "next_step": "продолжить работу в свежем чате через continuity startup",
+                "resume_state": "pending_return"
+            }
+        ]);
+        let contract =
+            super::build_execctl_resume_contract(&project_task_tree, &pending_return_queue);
+        assert_eq!(contract["resume_state"], json!("clear"));
+        assert_eq!(contract["required_return_task"], Value::Null);
     }
 
     #[test]

@@ -2238,7 +2238,9 @@ fn slugify_repo_root(value: &str) -> String {
 
 fn is_meaningful_restore_value(value: &str) -> bool {
     let trimmed = value.trim();
-    !trimmed.is_empty() && trimmed != "ещё нет данных"
+    !trimmed.is_empty()
+        && trimmed != "ещё нет данных"
+        && trimmed != "Продолжить активную рабочую линию"
 }
 
 async fn capture_handoff_payload(
@@ -5983,8 +5985,11 @@ mod tests {
         assert!(!super::is_meaningful_restore_value(""));
         assert!(!super::is_meaningful_restore_value("   "));
         assert!(!super::is_meaningful_restore_value("ещё нет данных"));
-        assert!(super::is_meaningful_restore_value(
+        assert!(!super::is_meaningful_restore_value(
             "Продолжить активную рабочую линию"
+        ));
+        assert!(super::is_meaningful_restore_value(
+            "Same-meter spend control"
         ));
     }
 
