@@ -559,14 +559,14 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         ));
     }
     if startup_contract["live_client_budget_enforcement"]["guard_command"].as_str()
-        != Some("observe client-budget-guard")
+        != Some("observe client-budget-gate")
     {
         return Err(anyhow!(
             "MCP startup contract lost live_client_budget_enforcement.guard_command"
         ));
     }
     if startup_contract["live_client_budget_enforcement"]["guard_summary_field"].as_str()
-        != Some("client_budget_guard")
+        != Some("client_budget_reply_gate")
     {
         return Err(anyhow!(
             "MCP startup contract lost live_client_budget_enforcement.guard_summary_field"
@@ -2980,8 +2980,8 @@ fn protocol_manifest() -> Value {
                     "no_silent_drop_must_be_true": true
                 },
                 "live_client_budget_enforcement": {
-                    "guard_command": "observe client-budget-guard",
-                    "guard_summary_field": "client_budget_guard",
+                    "guard_command": "observe client-budget-gate",
+                    "guard_summary_field": "client_budget_reply_gate",
                     "reply_execution_gate_field": "reply_execution_gate",
                     "reply_execution_gate_version": "client-reply-budget-gate-v1",
                     "reply_budget_mode_field": "reply_budget_mode",
@@ -5648,7 +5648,13 @@ mod tests {
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
                 ["guard_command"]
                 .as_str(),
-            Some("observe client-budget-guard")
+            Some("observe client-budget-gate")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["guard_summary_field"]
+                .as_str(),
+            Some("client_budget_reply_gate")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]

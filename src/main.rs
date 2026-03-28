@@ -395,6 +395,11 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 observe::print_guardrails(&cfg).await?;
             }
+            ObserveCommand::ClientBudgetGate(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                observe::print_client_budget_gate(&cfg, args.enforce_reply_gate).await?;
+            }
             ObserveCommand::ClientBudgetGuard(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

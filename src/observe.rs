@@ -267,6 +267,32 @@ pub async fn print_client_budget_guard(cfg: &AppConfig, enforce_reply_gate: bool
     Ok(())
 }
 
+pub async fn print_client_budget_gate(cfg: &AppConfig, enforce_reply_gate: bool) -> Result<()> {
+    maybe_cleanup_local_artifacts().await?;
+    let snapshot = collect_snapshot_preview(cfg).await?;
+    let guard = dashboard::current_session_budget_guard(&snapshot);
+    let payload = json!({
+        "client_budget_reply_gate": compact_client_budget_gate_payload(&guard)
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    if enforce_reply_gate && client_budget_guard_blocks_reply(&payload["client_budget_reply_gate"]) {
+        let action_kind = payload["client_budget_reply_gate"]["reply_execution_gate"]["action_kind"]
+            .as_str()
+            .unwrap_or("continue_current_chat");
+        let blocked_reply_hint = match action_kind {
+            "wait_for_global_client_budget_recovery" => {
+                "wait for global client budget recovery before replying"
+            }
+            "rotate_chat_for_client_budget" => "rotate into a fresh chat before replying",
+            _ => "refresh the live client budget gate before replying",
+        };
+        return Err(anyhow!(
+            "client budget reply gate blocked this reply: {blocked_reply_hint}"
+        ));
+    }
+    Ok(())
+}
+
 pub async fn print_client_budget_root_cause(cfg: &AppConfig) -> Result<()> {
     maybe_cleanup_local_artifacts().await?;
     let snapshot = collect_snapshot_preview(cfg).await?;
@@ -277,6 +303,53 @@ pub async fn print_client_budget_root_cause(cfg: &AppConfig) -> Result<()> {
 
 fn client_budget_guard_blocks_reply(guard: &Value) -> bool {
     working_state::client_budget_guard_blocks_reply(guard)
+}
+
+fn compact_client_budget_gate_payload(guard: &Value) -> Value {
+    let reply_execution_gate = &guard["reply_execution_gate"];
+    json!({
+        "source": "client_budget_reply_gate_v1",
+        "status": guard["status"].clone(),
+        "status_label": guard["status_label"].clone(),
+        "reason_code": reply_execution_gate["reason"].clone(),
+        "observed_at_epoch_ms": guard["observed_at_epoch_ms"].clone(),
+        "max_guard_age_seconds": guard["max_guard_age_seconds"].clone(),
+        "should_rotate_chat_now": guard["should_rotate_chat_now"].clone(),
+        "should_rotate_chat_soon": guard["should_rotate_chat_soon"].clone(),
+        "requires_global_budget_recovery_before_reply":
+            guard["requires_global_budget_recovery_before_reply"].clone(),
+        "reply_execution_gate": compact_reply_execution_gate(reply_execution_gate),
+    })
+}
+
+fn compact_reply_execution_gate(reply_execution_gate: &Value) -> Value {
+    json!({
+        "gate_version": reply_execution_gate["gate_version"].clone(),
+        "action_kind": reply_execution_gate["action_kind"].clone(),
+        "blocking": reply_execution_gate["blocking"].clone(),
+        "must_rotate_before_reply": reply_execution_gate["must_rotate_before_reply"].clone(),
+        "must_wait_for_budget_recovery_before_reply":
+            reply_execution_gate["must_wait_for_budget_recovery_before_reply"].clone(),
+        "reply_budget_mode": reply_execution_gate["reply_budget_mode"].clone(),
+        "reply_budget_contract": reply_execution_gate["reply_budget_contract"].clone(),
+        "save_handoff_before_rotate": reply_execution_gate["save_handoff_before_rotate"].clone(),
+        "fresh_chat_requires_continuity_startup":
+            reply_execution_gate["fresh_chat_requires_continuity_startup"].clone(),
+        "rotate_now": reply_execution_gate["rotate_now"].clone(),
+        "rotate_soon": reply_execution_gate["rotate_soon"].clone(),
+        "blocking_reply_contract": reply_execution_gate["blocking_reply_contract"].clone(),
+        "action_bundle": compact_reply_gate_action_bundle(
+            &reply_execution_gate["action_bundle"],
+        ),
+    })
+}
+
+fn compact_reply_gate_action_bundle(action_bundle: &Value) -> Value {
+    json!({
+        "operator_flow": action_bundle["operator_flow"].clone(),
+        "preserves_return_obligation": action_bundle["preserves_return_obligation"].clone(),
+        "recommended_handoff": action_bundle["recommended_handoff"].clone(),
+    })
 }
 
 pub async fn print_retention_cleanup(
@@ -4803,5 +4876,82 @@ mod tests {
             "requires_global_budget_recovery_before_reply": true
         });
         assert!(super::client_budget_guard_blocks_reply(&guard));
+    }
+
+    #[test]
+    fn compact_client_budget_gate_payload_keeps_only_gate_fields() {
+        let guard = json!({
+            "status": "critical",
+            "status_label": "новый чат нужен сейчас",
+            "reason": "heavy human explanation",
+            "observed_at_epoch_ms": 1774622949000u64,
+            "max_guard_age_seconds": 10,
+            "should_rotate_chat_now": true,
+            "should_rotate_chat_soon": true,
+            "requires_global_budget_recovery_before_reply": false,
+            "reply_execution_gate": {
+                "gate_version": "client-reply-budget-gate-v1",
+                "reason": "client_budget_guard_pressure",
+                "action_kind": "rotate_chat_for_client_budget",
+                "blocking": true,
+                "must_rotate_before_reply": true,
+                "must_wait_for_budget_recovery_before_reply": false,
+                "reply_budget_mode": "compact_high_signal",
+                "reply_budget_contract": {
+                    "contract_version": "client-reply-budget-v1"
+                },
+                "save_handoff_before_rotate": true,
+                "fresh_chat_requires_continuity_startup": true,
+                "rotate_now": true,
+                "rotate_soon": true,
+                "blocking_reply_contract": {
+                    "contract_version": "client-budget-blocked-reply-v1"
+                },
+                "action_bundle": {
+                    "bundle_version": "rotate-chat-action-bundle-v1",
+                    "operator_flow": {
+                        "handoff_command": "handoff",
+                        "rotate_helper_command": "rotate",
+                        "startup_command": "startup"
+                    },
+                    "preserves_return_obligation": false,
+                    "recommended_handoff": {
+                        "headline": "headline",
+                        "next_step": "next"
+                    },
+                    "capture_continuity_handoff": {
+                        "argv_template": ["heavy"]
+                    }
+                }
+            },
+            "last_request": "heavy row",
+            "tracked_slice": "heavy row",
+            "client_limits": "heavy row"
+        });
+        let payload = super::compact_client_budget_gate_payload(&guard);
+        assert_eq!(
+            payload["source"].as_str(),
+            Some("client_budget_reply_gate_v1")
+        );
+        assert_eq!(payload["status_label"].as_str(), Some("новый чат нужен сейчас"));
+        assert_eq!(
+            payload["reply_execution_gate"]["reply_budget_mode"].as_str(),
+            Some("compact_high_signal")
+        );
+        assert_eq!(
+            payload["reason_code"].as_str(),
+            Some("client_budget_guard_pressure")
+        );
+        assert!(payload.get("last_request").is_none());
+        assert!(payload.get("tracked_slice").is_none());
+        assert!(payload.get("client_limits").is_none());
+        assert!(payload.get("reason").is_none());
+        assert!(
+            payload["reply_execution_gate"]["action_bundle"]["capture_continuity_handoff"]
+                .is_null()
+        );
+        assert!(
+            payload["reply_execution_gate"]["action_bundle"]["bundle_version"].is_null()
+        );
     }
 }

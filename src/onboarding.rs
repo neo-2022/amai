@@ -2402,7 +2402,7 @@ fn render_startup_instruction_body(repo_root: &Path) -> Result<String> {
     let client_budget_enforcement = &contract["live_client_budget_enforcement"];
     let client_budget_guard_command = client_budget_enforcement["guard_command"]
         .as_str()
-        .unwrap_or("observe client-budget-guard");
+        .unwrap_or("observe client-budget-gate");
     let client_budget_guard_summary_field = client_budget_enforcement["guard_summary_field"]
         .as_str()
         .unwrap_or("client_budget_guard");
@@ -3021,13 +3021,13 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         assert!(text.contains(expected_sha.as_str()));
         assert!(text.contains("previous_session_owner_must_follow_startup_next_action = true"));
         assert!(text.contains("no_silent_drop = true"));
-        assert!(text.contains("cargo run -- observe client-budget-guard"));
+        assert!(text.contains("cargo run -- observe client-budget-gate"));
         assert!(text.contains("must_check_before_each_substantive_reply = true"));
         assert!(text.contains("--enforce-reply-gate"));
         assert!(text.contains("guard_enforcement_exit_on_blocking = true"));
         assert!(text.contains("cargo run -- observe client-budget-root-cause"));
         assert!(text.contains("must_prefer_compact_diagnostics_over_full_snapshot = true"));
-        assert!(text.contains("client_budget_guard.reply_execution_gate"));
+        assert!(text.contains("client_budget_reply_gate.reply_execution_gate"));
         assert!(text.contains("Gate version pinned: `client-reply-budget-gate-v1`"));
         assert!(text.contains("reply_budget_mode == \"compact_high_signal\""));
         assert!(text.contains("reply_budget_contract"));
@@ -3169,7 +3169,7 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["guard_command"],
-            json!("observe client-budget-guard")
+            json!("observe client-budget-gate")
         );
         assert_eq!(
             payload["startup_contract"]["live_client_budget_enforcement"]["reply_execution_gate_field"],

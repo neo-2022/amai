@@ -169,6 +169,7 @@ pub enum ObserveCommand {
     SnapshotPreview,
     SlaCheck,
     Guardrails,
+    ClientBudgetGate(ObserveClientBudgetGuardArgs),
     ClientBudgetGuard(ObserveClientBudgetGuardArgs),
     ClientBudgetRootCause,
     ClientLimitHourlyBurn(ObserveClientLimitHourlyBurnArgs),
@@ -1144,6 +1145,18 @@ mod tests {
             panic!("expected client-budget-guard command");
         };
         assert!(args.enforce_reply_gate);
+    }
+
+    #[test]
+    fn observe_client_budget_gate_cli_parses() {
+        let cli = Cli::parse_from(["amai", "observe", "client-budget-gate"]);
+        let Command::Observe { command } = cli.command else {
+            panic!("expected observe command");
+        };
+        let ObserveCommand::ClientBudgetGate(args) = command else {
+            panic!("expected client-budget-gate command");
+        };
+        assert!(!args.enforce_reply_gate);
     }
 
     #[test]
