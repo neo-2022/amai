@@ -1,5 +1,5 @@
-modified_at: 2026-03-28 15:43 MSK
-Ручная сверка guide/docs: 2026-03-28 15:43 MSK
+modified_at: 2026-03-29 01:46 MSK
+Ручная сверка guide/docs: 2026-03-29 01:46 MSK
 
 # Operations
 
@@ -953,17 +953,22 @@ cargo run -- mcp serve
   - `rotate_status_labels = ["новый чат рекомендован", "новый чат нужен сейчас"]`;
   - `save_handoff_before_rotate = true`;
   - `fresh_chat_requires_continuity_startup = true`.
-- Это значит, что supported client обязан recheck-ить `cargo run -- observe client-budget-guard`
+- Это значит, что supported client обязан recheck-ить `cargo run -- observe client-budget-gate`
   не только при startup нового/resumed чата, но и перед каждым следующим содержательным ответом,
   если последняя проверка старше `10` секунд или её нет.
 - После такого recheck automation больше не должна читать только human rows или `status_label`:
-  source-of-truth для решения о следующем ответе теперь `client_budget_guard.reply_execution_gate`
-  с explicit `blocking`, `must_rotate_before_reply`, `action_kind`,
-  `guard_observed_at_epoch_ms`, `guard_fresh_until_epoch_ms` и `action_bundle`.
+  source-of-truth для решения о следующем ответе теперь
+  `client_budget_reply_gate.reply_execution_gate` с explicit `blocking`,
+  `must_rotate_before_reply`, `action_kind`, `reply_budget_mode`,
+  `preserves_return_obligation`.
 - Если automation нужен hard stop без разбора JSON вручную, используйте
-  `cargo run -- observe client-budget-guard --enforce-reply-gate`:
-  он печатает тот же guard, но завершает команду non-zero exit code, когда reply уже должен
-  быть остановлен и переведён в свежий чат.
+  `cargo run -- observe client-budget-gate --enforce-reply-gate`:
+  он печатает тот же compact gate, но завершает команду non-zero exit code, когда reply уже
+  должен быть остановлен и переведён в свежий чат.
+- `cargo run -- observe client-budget-guard` остаётся legacy/debug surface:
+  там разрешены `status_label`, `full_turn_savings_*`, `next_action`, `last_request`,
+  `client_limits`, `tracked_slice` и compact `reply_execution_gate`, но этот CLI больше не
+  должен тащить длинный prose, `status_tooltip`, `action_bundle` и operator-flow.
 - status/runtime audit теперь ещё отдельно публикует `gate_semantics_consistent`;
   он обязан падать в `false`, если live gate противоречит:
   - pinned contract semantics;

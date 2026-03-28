@@ -249,7 +249,8 @@ pub async fn print_client_budget_guard(cfg: &AppConfig, enforce_reply_gate: bool
     maybe_cleanup_local_artifacts().await?;
     let snapshot = collect_snapshot_preview(cfg).await?;
     let guard = dashboard::current_session_budget_guard(&snapshot);
-    println!("{}", serde_json::to_string(&guard)?);
+    let payload = compact_current_session_budget_guard_payload(&guard);
+    println!("{}", serde_json::to_string(&payload)?);
     if enforce_reply_gate && client_budget_guard_blocks_reply(&guard) {
         let action_kind = guard["reply_execution_gate"]["action_kind"]
             .as_str()
@@ -304,6 +305,30 @@ pub async fn print_client_budget_root_cause(cfg: &AppConfig) -> Result<()> {
 
 fn client_budget_guard_blocks_reply(guard: &Value) -> bool {
     working_state::client_budget_guard_blocks_reply(guard)
+}
+
+fn compact_current_session_budget_guard_payload(guard: &Value) -> Value {
+    json!({
+        "status_label": guard["status_label"].clone(),
+        "full_turn_savings_proven": guard["full_turn_savings_proven"].clone(),
+        "full_turn_savings_percent": guard["full_turn_savings_percent"].clone(),
+        "should_rotate_chat_now": guard["should_rotate_chat_now"].clone(),
+        "should_rotate_chat_soon": guard["should_rotate_chat_soon"].clone(),
+        "requires_global_budget_recovery_before_reply":
+            guard["requires_global_budget_recovery_before_reply"].clone(),
+        "next_action": guard["next_action"].clone(),
+        "last_request": guard["last_request"].clone(),
+        "client_limits": guard["client_limits"].clone(),
+        "tracked_slice": guard["tracked_slice"].clone(),
+        "tracked_slice_truth": guard["tracked_slice_truth"].clone(),
+        "client_live_meter_current_thread_bound":
+            guard["client_live_meter_current_thread_bound"].clone(),
+        "client_live_meter_thread_binding_state":
+            guard["client_live_meter_thread_binding_state"].clone(),
+        "observed_at_epoch_ms": guard["observed_at_epoch_ms"].clone(),
+        "max_guard_age_seconds": guard["max_guard_age_seconds"].clone(),
+        "reply_execution_gate": compact_reply_execution_gate(&guard["reply_execution_gate"]),
+    })
 }
 
 fn compact_client_budget_gate_payload(guard: &Value) -> Value {
@@ -5003,6 +5028,60 @@ mod tests {
         });
         let payload = super::compact_client_budget_gate_payload(&guard);
         assert!(payload["reply_execution_gate"]["blocking_reply_contract"].is_null());
+    }
+
+    #[test]
+    fn compact_current_session_budget_guard_payload_drops_prose_and_operator_flow() {
+        let guard = json!({
+            "status_label": "новый чат нужен сейчас",
+            "status_tooltip": "long prose",
+            "reason": "long prose",
+            "note": "long prose",
+            "full_turn_savings_proven": true,
+            "full_turn_savings_percent": "0.00%",
+            "should_rotate_chat_now": true,
+            "should_rotate_chat_soon": true,
+            "requires_global_budget_recovery_before_reply": false,
+            "next_action": "rotate now",
+            "last_request": "154048 из 258400",
+            "client_limits": "5ч остаётся 69%",
+            "tracked_slice": "экономия 490",
+            "tracked_slice_truth": "учтённая часть",
+            "client_live_meter_current_thread_bound": true,
+            "client_live_meter_thread_binding_state": "current_thread_bound",
+            "observed_at_epoch_ms": 1774622949000u64,
+            "max_guard_age_seconds": 10,
+            "reply_execution_gate": {
+                "gate_version": "client-reply-budget-gate-v1",
+                "reason": "client_budget_guard_pressure",
+                "action_kind": "rotate_chat_for_client_budget",
+                "blocking": true,
+                "must_rotate_before_reply": true,
+                "must_wait_for_budget_recovery_before_reply": false,
+                "reply_budget_mode": "compact_high_signal",
+                "rotate_now": true,
+                "rotate_soon": true,
+                "reply_budget_contract": {
+                    "active": true
+                },
+                "action_bundle": {
+                    "operator_flow": {
+                        "copy_paste_ready": true
+                    },
+                    "preserves_return_obligation": false
+                }
+            }
+        });
+        let payload = super::compact_current_session_budget_guard_payload(&guard);
+        assert_eq!(payload["status_label"].as_str(), Some("новый чат нужен сейчас"));
+        assert_eq!(payload["full_turn_savings_percent"].as_str(), Some("0.00%"));
+        assert_eq!(payload["last_request"].as_str(), Some("154048 из 258400"));
+        assert_eq!(payload["client_limits"].as_str(), Some("5ч остаётся 69%"));
+        assert!(payload.get("status_tooltip").is_none());
+        assert!(payload.get("reason").is_none());
+        assert!(payload.get("note").is_none());
+        assert!(payload["reply_execution_gate"]["reply_budget_contract"].is_null());
+        assert!(payload["reply_execution_gate"]["action_bundle"].is_null());
     }
 
     #[test]

@@ -1,5 +1,5 @@
-modified_at: 2026-03-27 21:39 MSK
-Ручная сверка guide/docs: 2026-03-27 21:39 MSK
+modified_at: 2026-03-29 01:46 MSK
+Ручная сверка guide/docs: 2026-03-29 01:46 MSK
 
 # Art-memory-agent-index (Amai)
 
@@ -1847,20 +1847,23 @@ Fail-closed правило для расхождений:
     continuity startup;
   - этот же закон теперь требует recheck не реже, чем раз в `10` секунд:
     если последняя machine-readable проверка старше `max_guard_age_seconds`, supported client
-    обязан сначала обновить `cargo run -- observe client-budget-guard`, а уже потом отвечать;
-  - после такого recheck клиент больше не должен разбирать только prose/status-label:
-    `client_budget_guard.reply_execution_gate` теперь даёт pinned object для следующего ответа
-    с полями вроде `blocking`, `must_rotate_before_reply`, `action_kind`,
-    `guard_observed_at_epoch_ms`, `guard_fresh_until_epoch_ms` и `action_bundle`.
+    обязан сначала обновить `cargo run -- observe client-budget-gate`, а уже потом отвечать;
+  - после такого recheck клиент больше не должен разбирать prose/status-label:
+    `client_budget_reply_gate.reply_execution_gate` теперь даёт compact pinned object
+    для следующего ответа с полями `blocking`, `must_rotate_before_reply`, `action_kind`,
+    `reply_budget_mode`, `preserves_return_obligation`;
+  - operator-flow, startup command и blocked-reply template больше не дублируются в этом
+    per-reply JSON: их source-of-truth живёт в startup contract / runtime state;
   - для automation теперь есть и hard gate path:
-    `cargo run -- observe client-budget-guard --enforce-reply-gate` обязан печатать тот же JSON,
-    но выходить с non-zero exit code, если текущий reply уже должен быть остановлен и переведён
-    в свежий чат через continuity startup;
+    `cargo run -- observe client-budget-gate --enforce-reply-gate` обязан печатать тот же
+    compact JSON, но выходить с non-zero exit code, если текущий reply уже должен быть
+    остановлен и переведён в свежий чат через continuity startup;
   - для этого в observe-layer теперь есть отдельный machine-readable truth-source:
-    `cargo run -- observe client-budget-guard`;
-  - этот contour обязан говорить не prose-эвфемизмами, а прямыми полями вроде
-    `should_rotate_chat_now`, `should_rotate_chat_soon`, `full_turn_savings_proven`,
-    `next_action`, `last_request`, `client_limits`.
+    `cargo run -- observe client-budget-gate`;
+  - `cargo run -- observe client-budget-guard` остаётся legacy/debug surface и теперь тоже
+    обязан быть compact: он показывает `status_label`, `full_turn_savings_*`, `next_action`,
+    `last_request`, `client_limits`, `tracked_slice` и compact `reply_execution_gate`,
+    но не должен тащить длинный prose, `status_tooltip`, `action_bundle` и operator-flow.
   - строки `Последний запрос клиента` и `Лимит клиента сейчас` теперь обязаны показывать
     не только процент/токены, но и короткую метку свежести `· raw HH:MM:SS MSK`, чтобы
     оператор видел прямо на карточке, из какого raw `token_count` пришёл текущий live meter;
