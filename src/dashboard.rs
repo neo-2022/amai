@@ -8895,6 +8895,8 @@ fn client_turn_pressure_guard(
     let generous_primary_limit = primary_remaining_percent <= 95.0;
 
     let (severity, status_label) = if (no_amai_activity_in_current_live_turn
+        && huge_live_thread)
+        || (no_amai_activity_in_current_live_turn
         && hourly_burn_overspend
         && moderate_kpi_thread)
         || (no_amai_activity_in_current_live_turn && hourly_burn_target_not_met && large_kpi_thread)
@@ -8919,6 +8921,8 @@ fn client_turn_pressure_guard(
     {
         ("critical", "новый чат нужен сейчас")
     } else if (no_amai_activity_in_current_live_turn
+        && inflation_locking_in_burn)
+        || (no_amai_activity_in_current_live_turn
         && hourly_burn_target_not_met
         && early_kpi_thread)
         || (hourly_burn_target_not_met
@@ -14035,6 +14039,64 @@ mod tests {
         assert_eq!(guard.status_label, "новый чат нужен сейчас");
         assert_eq!(guard.hourly_burn_classification, Some("overspend"));
         assert!(!guard.no_amai_activity_in_current_live_turn);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_now_for_huge_no_amai_thread_without_hourly_burn_surface()
+    {
+        let hourly_burn = json!({});
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn",
+            "retrieval_context_pack_count": 0
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 130000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 50.31,
+            "primary_limit_remaining_percent": 96.0,
+            "secondary_limit_remaining_percent": 98.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((0, 0, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+        assert!(guard.no_amai_activity_in_current_live_turn);
+        assert_eq!(guard.hourly_burn_classification, None);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_for_large_no_amai_thread_without_hourly_burn_surface()
+    {
+        let hourly_burn = json!({});
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn",
+            "retrieval_context_pack_count": 0
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 76000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 30.44,
+            "primary_limit_remaining_percent": 97.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((0, 0, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "alert");
+        assert_eq!(guard.status_label, "новый чат рекомендован");
+        assert!(guard.no_amai_activity_in_current_live_turn);
+        assert_eq!(guard.hourly_burn_classification, None);
     }
 
     #[test]
