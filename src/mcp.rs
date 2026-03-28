@@ -587,8 +587,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
         || startup_contract["live_client_budget_enforcement"]["reply_budget_contract_field"]
             .as_str()
             != Some("reply_budget_contract")
-        || startup_contract["live_client_budget_enforcement"]["compact_reply_mode_value"]
-            .as_str()
+        || startup_contract["live_client_budget_enforcement"]["compact_reply_mode_value"].as_str()
             != Some(working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL)
         || startup_contract["live_client_budget_enforcement"]["compact_reply_contract_version"]
             .as_str()
@@ -606,6 +605,17 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     {
         return Err(anyhow!(
             "MCP startup contract lost live_client_budget_enforcement hard exit gate semantics"
+        ));
+    }
+    if startup_contract["live_client_budget_enforcement"]["compact_diagnostics_command"].as_str()
+        != Some("observe client-budget-root-cause")
+        || startup_contract["live_client_budget_enforcement"]
+            ["must_prefer_compact_diagnostics_over_full_snapshot"]
+            .as_bool()
+            != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost compact diagnostics semantics for live client-budget enforcement"
         ));
     }
     if startup_contract["live_client_budget_enforcement"]
@@ -2927,6 +2937,8 @@ fn protocol_manifest() -> Value {
                     "reply_budget_contract_field": "reply_budget_contract",
                     "compact_reply_mode_value": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
                     "compact_reply_contract_version": working_state::CLIENT_REPLY_BUDGET_CONTRACT_VERSION,
+                    "compact_diagnostics_command": "observe client-budget-root-cause",
+                    "must_prefer_compact_diagnostics_over_full_snapshot": true,
                     "guard_enforcement_flag": "--enforce-reply-gate",
                     "guard_enforcement_exit_on_blocking": true,
                     "must_check_before_each_substantive_reply": true,
@@ -5448,6 +5460,18 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["compact_diagnostics_command"]
+                .as_str(),
+            Some("observe client-budget-root-cause")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["must_prefer_compact_diagnostics_over_full_snapshot"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
                 ["guard_enforcement_flag"]
                 .as_str(),
             Some("--enforce-reply-gate")
@@ -5687,9 +5711,11 @@ mod tests {
         let blocking_action_kinds = enforcement["blocking_action_kinds"]
             .as_array()
             .expect("blocking action kinds");
-        assert!(blocking_action_kinds
-            .iter()
-            .any(|value| value.as_str() == Some("wait_for_global_client_budget_recovery")));
+        assert!(
+            blocking_action_kinds
+                .iter()
+                .any(|value| value.as_str() == Some("wait_for_global_client_budget_recovery"))
+        );
 
         let allowed_response_kinds = enforcement["blocking_reply_allowed_response_kinds"]
             .as_array()

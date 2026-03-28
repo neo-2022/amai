@@ -395,6 +395,11 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 observe::print_client_budget_guard(&cfg, args.enforce_reply_gate).await?;
             }
+            ObserveCommand::ClientBudgetRootCause => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                observe::print_client_budget_root_cause(&cfg).await?;
+            }
             ObserveCommand::ClientLimitHourlyBurn(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

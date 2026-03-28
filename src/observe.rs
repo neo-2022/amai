@@ -254,6 +254,14 @@ pub async fn print_client_budget_guard(cfg: &AppConfig, enforce_reply_gate: bool
     Ok(())
 }
 
+pub async fn print_client_budget_root_cause(cfg: &AppConfig) -> Result<()> {
+    maybe_cleanup_local_artifacts().await?;
+    let snapshot = collect_snapshot_preview(cfg).await?;
+    let payload = dashboard::client_budget_root_cause_payload(&snapshot);
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
 fn client_budget_guard_blocks_reply(guard: &Value) -> bool {
     working_state::client_budget_guard_blocks_reply(guard)
 }

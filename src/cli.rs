@@ -169,6 +169,7 @@ pub enum ObserveCommand {
     SlaCheck,
     Guardrails,
     ClientBudgetGuard(ObserveClientBudgetGuardArgs),
+    ClientBudgetRootCause,
     ClientLimitHourlyBurn(ObserveClientLimitHourlyBurnArgs),
     ClientLimitTrendAnalysis(ObserveClientLimitTrendAnalysisArgs),
     TokenReport(ObserveTokenReportArgs),
