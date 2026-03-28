@@ -1259,6 +1259,12 @@ fn build_startup_runtime_state_artifact(
             ),
         );
         summary.insert(
+            "execctl_resume_obligation".to_string(),
+            compact_startup_runtime_execctl_resume_obligation(
+                summary.get("execctl_resume_obligation").unwrap_or(&Value::Null),
+            ),
+        );
+        summary.insert(
             "project_task_tree".to_string(),
             compact_project_task_tree_for_startup(
                 summary.get("project_task_tree").unwrap_or(&Value::Null),
@@ -1458,6 +1464,22 @@ fn compact_startup_runtime_required_return_task(task: &Value) -> Value {
             "task_id",
             "task_role",
             "task_state",
+        ],
+    );
+    Value::Object(compact)
+}
+
+fn compact_startup_runtime_execctl_resume_obligation(obligation: &Value) -> Value {
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        obligation,
+        &[
+            "resume_state",
+            "no_silent_drop",
+            "pending_return_count",
+            "required_return_headline",
+            "required_return_next_step",
         ],
     );
     Value::Object(compact)
@@ -6485,6 +6507,15 @@ mod tests {
         assert!(artifact["continuity_startup_summary"]["required_return_task"]["authoritative_event_id"].is_null());
         assert!(artifact["continuity_startup_summary"]["required_return_task"]["parent_task_id"].is_null());
         assert!(artifact["continuity_startup_summary"]["required_return_task"]["queued_at_epoch_ms"].is_null());
+        assert_eq!(
+            artifact["continuity_startup_summary"]["execctl_resume_obligation"]["resume_state"],
+            json!("pending_return_queue_present")
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["execctl_resume_obligation"]["pending_return_count"],
+            json!(0)
+        );
+        assert!(artifact["continuity_startup_summary"]["execctl_resume_obligation"]["active_task_headline"].is_null());
         assert_eq!(
             artifact["continuity_startup_summary"]["project_task_tree_summary"],
             json!("active: Current active line; pending_return(1): Pending line")
