@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 pub const DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND: &str = "operator_continuity_startup";
@@ -731,6 +731,14 @@ pub struct VerifyMcpArgs {
     pub min_savings_factor: f64,
     #[arg(long, default_value_t = 15.0)]
     pub min_savings_percent: f64,
+    #[arg(long, value_enum, default_value_t = VerifyMcpScope::Full)]
+    pub proof_scope: VerifyMcpScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum VerifyMcpScope {
+    Full,
+    TokenLedger,
 }
 
 #[derive(Debug, Clone, Args)]

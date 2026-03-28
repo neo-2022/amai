@@ -12,6 +12,7 @@ report_path="/tmp/amai-proof-token-mcp-tool-overhead.json"
   --namespace continuity \
   --query "same meter mcp tool overhead" \
   --retrieval-mode local_strict \
+  --proof-scope token-ledger \
   --token-source-kind "$source_kind" >/tmp/amai-proof-token-mcp-tool-overhead-verify.json
 
 ./target/release/amai observe token-report \

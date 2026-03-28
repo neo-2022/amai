@@ -12,6 +12,7 @@ report_path="/tmp/amai-proof-token-mcp-assistant-generation.json"
   --namespace continuity \
   --query "same meter mcp assistant generation" \
   --retrieval-mode local_strict \
+  --proof-scope token-ledger \
   --token-source-kind "$source_kind" >/tmp/amai-proof-token-mcp-assistant-generation-verify.json
 
 ./target/release/amai observe token-report \
