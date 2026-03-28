@@ -5577,11 +5577,11 @@ fn humanize_full_turn_savings_value(value: &str) -> String {
 }
 
 fn humanize_tracked_slice_savings_value(value: &str) -> String {
-    if let Some(rest) = value.strip_prefix("Предварительно Amai сэкономил ") {
-        return format!("На учтённой части пока предварительно Amai сэкономил {rest}");
+    if let Some(rest) = value.strip_prefix("Предварительный учтённый same-meter срез: ") {
+        return format!("На учтённой части пока предварительно: {rest}");
     }
-    if let Some(rest) = value.strip_prefix("Amai сэкономил ") {
-        return format!("На учтённой части Amai сэкономил {rest}");
+    if let Some(rest) = value.strip_prefix("Учтённый same-meter срез: ") {
+        return format!("На учтённой части: {rest}");
     }
     if let Some(rest) = value.strip_prefix("Точного процента пока нет; ") {
         return format!("По полной шкале точного процента пока нет; на учтённой части {rest}");
@@ -5656,10 +5656,10 @@ fn truth_only_token_card_note(card: &Value) -> String {
         "Экономия токенов за текущую сессию" => {
             match card["value"].as_str() {
                 Some("не доказано") => format!(
-                    "Короткая карточка только с проверяемыми цифрами по текущей сессии: реальная экономия на полной шкале клиента пока не доказана, ниже остаётся только точная учтённая часть. Строка «Экономия на учтённой части» относится только к strict same-meter срезу уже учтённых компонентов; если она помечена как preliminary, это ещё не вся сессия. Статус: {status_label}."
+                    "Короткая карточка только с проверяемыми цифрами по текущей сессии: реальная экономия на полной шкале клиента пока не доказана, ниже остаётся только точная учтённая часть. Единственный процент, который должен напрямую совпадать с замедлением шкалы VS Code, живёт в строке «Экономия на реальной шкале» и показывается только после exact full-turn pair. Строка «Экономия на учтённой части» относится только к strict same-meter срезу уже учтённых компонентов; если она помечена как preliminary, это ещё не вся сессия. Статус: {status_label}."
                 ),
                 _ => format!(
-                    "Короткая карточка только с проверяемыми цифрами по текущей сессии: сверху реальная доля Amai на полной шкале текущего turn, ниже точность учтённой части. Строка «Экономия на учтённой части» относится только к strict same-meter срезу уже учтённых компонентов; если она помечена как preliminary, это ещё не вся сессия. Статус: {status_label}."
+                    "Короткая карточка только с проверяемыми цифрами по текущей сессии: сверху реальная доля Amai на полной шкале текущего turn, ниже точность учтённой части. Единственный процент, который должен напрямую совпадать с замедлением шкалы VS Code, живёт в строке «Экономия на реальной шкале». Строка «Экономия на учтённой части» относится только к strict same-meter срезу уже учтённых компонентов; если она помечена как preliminary, это ещё не вся сессия. Статус: {status_label}."
                 ),
             }
         }
@@ -9241,16 +9241,33 @@ fn client_full_turn_savings_metric_row(
     client_live_meter: &Value,
     exact_pair: Option<(u64, u64, i64, f64)>,
 ) -> Option<Value> {
-    if !current_session_client_live_meter_available(client_live_meter) {
+    if !client_live_meter_is_observed(client_live_meter) {
         return None;
     }
-    let (_, _, saved_tokens, _) = exact_pair?;
+    if !current_session_client_live_meter_available(client_live_meter) {
+        return Some(metric_row(
+            "Amai в полном live-turn",
+            "точный процент по шкале VS Code пока не доказан".to_string(),
+            Some(
+                "Этот ряд должен показывать единственный процент, который напрямую коррелирует с замедлением расхода шкалы VS Code. Сейчас current-thread binding для live meter ещё не materialized, поэтому exact full-turn pair для текущего чата честно не доказывается.",
+            ),
+        ));
+    }
     let turn_total_tokens = client_live_meter["client_turn_total_tokens"]
         .as_u64()
         .unwrap_or(0);
     if turn_total_tokens == 0 {
         return None;
     }
+    let Some((_, _, saved_tokens, _)) = exact_pair else {
+        return Some(metric_row(
+            "Amai в полном live-turn",
+            "точный процент по шкале VS Code пока не доказан".to_string(),
+            Some(
+                "Этот ряд должен показывать единственный процент, который напрямую коррелирует с замедлением расхода шкалы VS Code. Пока exact full-turn pair для текущего live turn ещё не materialized, поэтому процент здесь честно не показывается.",
+            ),
+        ));
+    };
     let without_amai_total_tokens = if saved_tokens >= 0 {
         turn_total_tokens.saturating_add(saved_tokens as u64)
     } else {
@@ -9262,7 +9279,7 @@ fn client_full_turn_savings_metric_row(
     let full_turn_savings_pct =
         full_turn_savings_pct_from_live_meter(client_live_meter, exact_pair)?;
     let tooltip = format!(
-        "Этот ряд показывает реальный вклад Amai в полный live-turn клиента, а не только во внутренний Amai-side slice.\n- Без Amai: {}\n- С Amai: {}\n- Delta Amai: {}\n- Процент от полного turn: {}\n- Источник observed full turn: rollout token_count.last_token_usage.total_tokens",
+        "Этот ряд показывает реальный вклад Amai в полный live-turn клиента, а не только во внутренний Amai-side slice.\n- Без Amai: {}\n- С Amai: {}\n- Delta Amai: {}\n- Процент от полного turn: {}\n- Этот процент должен напрямую коррелировать с замедлением расхода шкалы VS Code.\n- Источник observed full turn: rollout token_count.last_token_usage.total_tokens",
         format_u64(Some(without_amai_total_tokens)),
         format_u64(Some(turn_total_tokens)),
         format_signed_count(Some(saved_tokens)),
@@ -9590,21 +9607,20 @@ fn model_token_savings_metric_row(scope_summary: &Value, alignment: &Value) -> V
     let strict_components =
         human_client_limit_components(&alignment["strict_client_meter_slice"]["components"]);
 
-    let value = if let Some((verified_without, verified_with, verified_saved, verified_pct)) =
+    let value = if let Some((verified_without, verified_with, verified_saved, _verified_pct)) =
         exact_model_token_pair(scope_summary, alignment)
     {
         let prefix = if preliminary {
-            "Предварительно Amai сэкономил"
+            "Предварительный учтённый same-meter срез"
         } else {
-            "Amai сэкономил"
+            "Учтённый same-meter срез"
         };
         let scope_suffix = strict_components
             .as_deref()
-            .map(|components| format!(" на strict same-meter срезе ({components})"))
+            .map(|components| format!(" ({components})"))
             .unwrap_or_default();
         format!(
-            "{prefix} {} токенов модели{scope_suffix}: без Amai {}, с Amai {}, экономия {}",
-            format_percent(Some(verified_pct)),
+            "{prefix}{scope_suffix}: без Amai {}, с Amai {}, экономия {}",
             format_u64(Some(verified_without)),
             format_u64(Some(verified_with)),
             format_signed_count(Some(verified_saved))
@@ -9629,15 +9645,14 @@ fn model_token_savings_note_sentence(scope_summary: &Value, alignment: &Value) -
     let counted_events = scope_summary["counted_events"].as_u64().unwrap_or(0);
     let events_total = scope_summary["events_total"].as_u64().unwrap_or(0);
 
-    if let Some((verified_without, verified_with, verified_saved, verified_pct)) =
+    if let Some((verified_without, verified_with, verified_saved, _verified_pct)) =
         exact_model_token_pair(scope_summary, alignment)
     {
         let mut note = format!(
-            "Здесь уже есть полное совпадение с реальной шкалой лимита модели: без Amai было {}, с Amai стало {}, экономия {}, точный процент {}.",
+            "Здесь уже есть полное совпадение с реальной шкалой лимита модели для учтённого среза: без Amai было {}, с Amai стало {}, экономия {}.",
             format_u64(Some(verified_without)),
             format_u64(Some(verified_with)),
-            format_signed_count(Some(verified_saved)),
-            format_percent(Some(verified_pct))
+            format_signed_count(Some(verified_saved))
         );
         if let Some(components) =
             human_client_limit_components(&alignment["strict_client_meter_slice"]["components"])
@@ -12245,8 +12260,12 @@ mod tests {
         assert_eq!(row["label"].as_str(), Some("Экономия токенов модели"));
         assert_eq!(
             row["value"].as_str(),
-            Some("Amai сэкономил 25.00% токенов модели: без Amai 320, с Amai 240, экономия 80")
+            Some("Учтённый same-meter срез: без Amai 320, с Amai 240, экономия 80")
         );
+        assert!(row["tooltip"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Процент: 25.00%"));
         assert!(row["tooltip"]
             .as_str()
             .unwrap_or_default()
@@ -12254,8 +12273,8 @@ mod tests {
 
         let note =
             super::model_token_savings_note_sentence(&statement_preview, &alignment).expect("note");
-        assert!(note.contains("25.00%"));
-        assert!(note.contains("точный процент"));
+        assert!(note.contains("учтённого среза"));
+        assert!(!note.contains("25.00%"));
     }
 
     #[test]
@@ -12279,8 +12298,12 @@ mod tests {
         let row = super::model_token_savings_metric_row(&statement_preview, &alignment);
         assert_eq!(
             row["value"].as_str(),
-            Some("Amai сэкономил 0.66% токенов модели: без Amai 609, с Amai 605, экономия 4")
+            Some("Учтённый same-meter срез: без Amai 609, с Amai 605, экономия 4")
         );
+        assert!(row["tooltip"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Процент: 0.66%"));
     }
 
     #[test]
@@ -12310,11 +12333,7 @@ mod tests {
         assert!(row["value"]
             .as_str()
             .unwrap_or_default()
-            .contains("Предварительно Amai сэкономил 84.53%"));
-        assert!(row["value"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("strict same-meter срезе"));
+            .contains("Предварительный учтённый same-meter срез"));
         assert!(row["value"]
             .as_str()
             .unwrap_or_default()
@@ -12322,7 +12341,15 @@ mod tests {
         assert!(row["value"]
             .as_str()
             .unwrap_or_default()
+            .contains("экономия 541"));
+        assert!(row["value"]
+            .as_str()
+            .unwrap_or_default()
             .contains("continuity-restore overhead вне retrieval"));
+        assert!(row["tooltip"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Процент: 84.53%"));
         assert!(row["tooltip"]
             .as_str()
             .unwrap_or_default()
@@ -12332,6 +12359,7 @@ mod tests {
             super::model_token_savings_note_sentence(&statement_preview, &alignment).expect("note");
         assert!(note.contains("strict same-meter срез"));
         assert!(note.contains("нельзя читать как экономию всей сессии целиком"));
+        assert!(!note.contains("84.53%"));
     }
 
     #[test]
@@ -12769,7 +12797,51 @@ mod tests {
         assert!(row["tooltip"]
             .as_str()
             .unwrap_or_default()
+            .contains("замедлением расхода шкалы VS Code"));
+        assert!(row["tooltip"]
+            .as_str()
+            .unwrap_or_default()
             .contains("rollout token_count.last_token_usage.total_tokens"));
+    }
+
+    #[test]
+    fn client_full_turn_savings_metric_row_hides_percent_until_exact_turn_pair_exists() {
+        let meter = json!({
+            "status": "observed",
+            "thread_binding_state": "current_thread_bound",
+            "current_thread_bound": true,
+            "client_turn_total_tokens": 35534
+        });
+        let row = super::client_full_turn_savings_metric_row(&meter, None).expect("full turn row");
+        assert_eq!(row["label"], "Amai в полном live-turn");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("точный процент по шкале VS Code пока не доказан")
+        );
+        assert!(row["tooltip"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("единственный процент"));
+    }
+
+    #[test]
+    fn client_full_turn_savings_metric_row_surfaces_unbound_meter_as_unproven() {
+        let meter = json!({
+            "status": "observed",
+            "thread_binding_state": "no_current_thread_binding",
+            "current_thread_bound": false,
+            "client_turn_total_tokens": 35534
+        });
+        let row = super::client_full_turn_savings_metric_row(&meter, None).expect("full turn row");
+        assert_eq!(row["label"], "Amai в полном live-turn");
+        assert_eq!(
+            row["value"].as_str(),
+            Some("точный процент по шкале VS Code пока не доказан")
+        );
+        assert!(row["tooltip"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("current-thread binding"));
     }
 
     #[test]
@@ -13373,7 +13445,7 @@ mod tests {
         assert!(guard["tracked_slice"]
             .as_str()
             .unwrap_or_default()
-            .contains("55.83%"));
+            .contains("без Amai 240, с Amai 106, экономия 134"));
         assert!(guard["next_action"]
             .as_str()
             .unwrap_or_default()
