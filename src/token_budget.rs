@@ -599,6 +599,24 @@ struct DashboardExactClientLimitsCache {
     observation: Option<CodexAppServerRateLimitsObservation>,
 }
 
+fn cached_dashboard_exact_client_limits_observation() -> Option<CodexAppServerRateLimitsObservation> {
+    let cache = DASHBOARD_EXACT_CLIENT_LIMITS_CACHE.get_or_init(|| Mutex::new(None));
+    cache.lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|entry| entry.observation.clone()))
+}
+
+fn best_effort_exact_client_limit_observation_from_result(
+    result: Result<Option<CodexAppServerRateLimitsObservation>>,
+    cached: Option<CodexAppServerRateLimitsObservation>,
+) -> Option<CodexAppServerRateLimitsObservation> {
+    match result {
+        Ok(Some(observation)) => Some(observation),
+        Ok(None) => cached,
+        Err(_) => cached,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct WorkingStateContextPackMeta {
     thread_id: String,
@@ -7471,7 +7489,12 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     );
 
     let stage_started_at = Instant::now();
-    let exact_client_limits_observation = dashboard_exact_client_rate_limits_observation().await?;
+    let cached_exact_client_limits_observation =
+        cached_dashboard_exact_client_limits_observation();
+    let exact_client_limits_observation = best_effort_exact_client_limit_observation_from_result(
+        dashboard_exact_client_rate_limits_observation().await,
+        cached_exact_client_limits_observation,
+    );
     record_dashboard_precache_stage_ms(
         &mut pre_cache_timings,
         "exact_client_limits_observation",
@@ -8879,7 +8902,11 @@ pub async fn collect_exact_client_limit_trend_analysis(
     lookback_minutes: u64,
     persist_snapshot: bool,
 ) -> Result<Value> {
-    let exact_observation = dashboard_exact_client_rate_limits_observation().await?;
+    let cached_observation = cached_dashboard_exact_client_limits_observation();
+    let exact_observation = best_effort_exact_client_limit_observation_from_result(
+        dashboard_exact_client_rate_limits_observation().await,
+        cached_observation,
+    );
     if let Some(observation) = exact_observation.as_ref() {
         persist_exact_client_limit_sample(db, observation).await?;
     }
@@ -11378,7 +11405,12 @@ async fn collect_report(
         client_live_meter_binding_hint.as_deref(),
     )
     .await?;
-    let exact_client_limits_observation = dashboard_exact_client_rate_limits_observation().await?;
+    let cached_exact_client_limits_observation =
+        cached_dashboard_exact_client_limits_observation();
+    let exact_client_limits_observation = best_effort_exact_client_limit_observation_from_result(
+        dashboard_exact_client_rate_limits_observation().await,
+        cached_exact_client_limits_observation,
+    );
     let current_live_turn = build_current_live_turn_surface(
         db,
         &events,
@@ -19202,6 +19234,7 @@ mod tests {
         suppress_shadowed_live_events,
     };
     use crate::postgres::{ObservabilitySnapshotKindSummary, ObservabilitySnapshotRecord};
+    use anyhow::anyhow;
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -26961,5 +26994,66 @@ effective_to_epoch_ms = 2000
             super::client_limit_trend_direction(Some("saving"), 12.0, Some("saving"), 28.0),
             "toward_saving"
         );
+    }
+
+    #[test]
+    fn best_effort_exact_client_limit_observation_from_result_prefers_live_observation() {
+        let cached = super::CodexAppServerRateLimitsObservation {
+            observed_at_epoch_ms: 100,
+            rate_limits: sample_rate_limits_snapshot(10.0),
+        };
+        let live = super::CodexAppServerRateLimitsObservation {
+            observed_at_epoch_ms: 200,
+            rate_limits: sample_rate_limits_snapshot(20.0),
+        };
+        let selected = super::best_effort_exact_client_limit_observation_from_result(
+            Ok(Some(live.clone())),
+            Some(cached),
+        );
+        let selected = selected.expect("selected observation");
+        assert_eq!(selected.observed_at_epoch_ms, live.observed_at_epoch_ms);
+        assert_eq!(
+            selected.rate_limits.primary.as_ref().map(|window| window.used_percent),
+            live.rate_limits.primary.as_ref().map(|window| window.used_percent)
+        );
+    }
+
+    #[test]
+    fn best_effort_exact_client_limit_observation_from_result_falls_back_to_cached_on_error() {
+        let cached = super::CodexAppServerRateLimitsObservation {
+            observed_at_epoch_ms: 100,
+            rate_limits: sample_rate_limits_snapshot(10.0),
+        };
+        let selected = super::best_effort_exact_client_limit_observation_from_result(
+            Err(anyhow!("timeout")),
+            Some(cached.clone()),
+        );
+        let selected = selected.expect("cached observation");
+        assert_eq!(selected.observed_at_epoch_ms, cached.observed_at_epoch_ms);
+        assert_eq!(
+            selected.rate_limits.primary.as_ref().map(|window| window.used_percent),
+            cached
+                .rate_limits
+                .primary
+                .as_ref()
+                .map(|window| window.used_percent)
+        );
+    }
+
+    fn sample_rate_limits_snapshot(
+        primary_used_percent: f64,
+    ) -> super::CodexAppServerRateLimitSnapshot {
+        super::CodexAppServerRateLimitSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: Some("Codex".to_string()),
+            plan_type: Some("plus".to_string()),
+            credits: None,
+            primary: Some(super::CodexAppServerRateLimitWindow {
+                window_duration_mins: Some(300),
+                resets_at: Some(1_000),
+                used_percent: primary_used_percent,
+            }),
+            secondary: None,
+        }
     }
 }
