@@ -1829,6 +1829,8 @@ pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> R
         &args.headline,
         &args.next_step,
         &details,
+        args.resolve_current_goal,
+        &args.resolved_headlines,
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -1957,6 +1959,8 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
         headline,
         &next_step,
         &details,
+        false,
+        &[],
     )
     .await?;
     let blocking_reply_contract =
@@ -2245,6 +2249,8 @@ async fn capture_handoff_payload(
     headline: &str,
     next_step: &str,
     details: &str,
+    resolve_current_goal: bool,
+    resolved_headlines: &[String],
 ) -> Result<Value> {
     let captured_at_epoch_ms = now_epoch_ms()?;
     let body = render_handoff_markdown(headline, next_step, details);
@@ -2294,6 +2300,8 @@ async fn capture_handoff_payload(
             "headline": headline,
             "next_step": next_step,
             "details": details,
+            "resolve_current_goal": resolve_current_goal,
+            "resolved_pending_return_headlines": resolved_headlines,
             "relative_path": ".amai-continuity/live-handoff/HANDOFF.md",
             "local_path": local_handoff_path.display().to_string(),
         }
@@ -2306,6 +2314,8 @@ async fn capture_handoff_payload(
         headline,
         next_step,
         &details,
+        resolve_current_goal,
+        resolved_headlines,
         &local_handoff_path.display().to_string(),
     )
     .await?;

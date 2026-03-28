@@ -111,6 +111,8 @@ pub async fn record_handoff_event(
     headline: &str,
     next_step: &str,
     details: &str,
+    resolve_current_goal: bool,
+    resolved_headlines: &[String],
     local_path: &str,
 ) -> Result<()> {
     let recorded_at_epoch_ms = now_epoch_ms()?;
@@ -124,6 +126,8 @@ pub async fn record_handoff_event(
         headline,
         &next_step,
         recorded_at_epoch_ms,
+        resolve_current_goal,
+        resolved_headlines,
     );
     let thread_id = current_thread_id();
     let session_id = resolve_session_id(
@@ -165,6 +169,8 @@ pub async fn record_handoff_event(
             "open_questions": open_questions,
             "materialized_notes": materialized_notes,
             "pending_return_queue": pending_return_queue,
+            "resolve_current_goal": resolve_current_goal,
+            "resolved_pending_return_headlines": resolved_headlines,
             "last_command": "continuity handoff".to_string(),
             "last_results_summary": format!("Зафиксирован handoff для {} :: {}", project.code, namespace.code),
             "local_path": local_path,
@@ -1526,11 +1532,14 @@ fn derive_pending_return_queue(
     new_headline: &str,
     new_next_step: &str,
     queued_at_epoch_ms: u64,
+    resolve_current_goal: bool,
+    resolved_headlines: &[String],
 ) -> Vec<Value> {
     let mut queue = restore_node
         .and_then(|node| node["pending_return_queue"].as_array())
         .cloned()
         .unwrap_or_default();
+    prune_resolved_pending_return_items(&mut queue, resolved_headlines);
     let Some(node) = restore_node else {
         return queue;
     };
@@ -1545,6 +1554,8 @@ fn derive_pending_return_queue(
     let normalized_new_next_step = normalize_next_step_hint(new_next_step);
     if !is_meaningful_pending_return_headline(previous_goal)
         || previous_goal == new_headline
+        || resolve_current_goal
+        || resolved_pending_return_headline_matches(previous_goal, resolved_headlines)
         || (!previous_next_step.is_empty() && previous_next_step == normalized_new_next_step)
     {
         return queue;
@@ -1562,6 +1573,28 @@ fn derive_pending_return_queue(
     prepend_pending_return_item(&mut queue, candidate);
     queue.truncate(MAX_PENDING_RETURN_QUEUE);
     queue
+}
+
+fn resolved_pending_return_headline_matches(value: &str, resolved_headlines: &[String]) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && resolved_headlines
+            .iter()
+            .map(|item| item.trim())
+            .filter(|item| !item.is_empty())
+            .any(|item| item == trimmed)
+}
+
+fn prune_resolved_pending_return_items(queue: &mut Vec<Value>, resolved_headlines: &[String]) {
+    if resolved_headlines.is_empty() {
+        return;
+    }
+    queue.retain(|item| {
+        !resolved_pending_return_headline_matches(
+            item["headline"].as_str().unwrap_or_default(),
+            resolved_headlines,
+        )
+    });
 }
 
 fn extract_pending_return_queue(
@@ -3340,6 +3373,8 @@ mod tests {
             "Project relocation contour",
             "Document automatic startup behavior.",
             42,
+            false,
+            &[],
         );
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0]["headline"], json!("Same-meter spend control"));
@@ -3375,8 +3410,86 @@ mod tests {
             "Project relocation contour",
             "Document automatic startup behavior.",
             42,
+            false,
+            &[],
         );
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn derive_pending_return_queue_can_resolve_current_goal_without_requeue() {
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Amai continuity migration proof",
+                "next_step": "Убедиться, что startup summary и retrieval уже живут без project .codex",
+                "pending_return_queue": [
+                    {
+                        "headline": "Older suspended line",
+                        "next_step": "Return there later.",
+                        "queued_at_epoch_ms": 5,
+                        "resume_state": "pending_return"
+                    }
+                ],
+                "state_lineage": {
+                    "authoritative_event_id": "event-123",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/home/art/agent-memory-index"
+                }
+            }
+        });
+        let queue = derive_pending_return_queue(
+            Some(&restore["working_state_restore"]),
+            "Art continuity proof contour green on source-current startup gate",
+            "Resume the next pending-return contour now that Art startup/migration proofs and client-budget gate semantics are green at commit 30feca3.",
+            42,
+            true,
+            &[],
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0]["headline"], json!("Older suspended line"));
+    }
+
+    #[test]
+    fn derive_pending_return_queue_prunes_explicitly_resolved_headlines() {
+        let restore = json!({
+            "working_state_restore": {
+                "current_goal": "Current active line",
+                "next_step": "Continue active work.",
+                "pending_return_queue": [
+                    {
+                        "headline": "Amai continuity migration proof",
+                        "next_step": "Убедиться, что startup summary и retrieval уже живут без project .codex",
+                        "queued_at_epoch_ms": 5,
+                        "resume_state": "pending_return"
+                    },
+                    {
+                        "headline": "Soft rotate recommendation no longer hard-blocks replies",
+                        "next_step": "Verify startup summary and retrieval keep advisory rotate as note-only without falling back to project .codex",
+                        "queued_at_epoch_ms": 4,
+                        "resume_state": "pending_return"
+                    }
+                ],
+                "state_lineage": {
+                    "authoritative_event_id": "event-123",
+                    "authoritative_event_kind": "continuity_handoff",
+                    "authoritative_local_path": "/home/art/agent-memory-index"
+                }
+            }
+        });
+        let resolved = vec![
+            "Amai continuity migration proof".to_string(),
+            "Soft rotate recommendation no longer hard-blocks replies".to_string(),
+        ];
+        let queue = derive_pending_return_queue(
+            Some(&restore["working_state_restore"]),
+            "ExecCtl stale pending-return closure semantics materialized",
+            "Recheck Art startup queue after explicit resolve path.",
+            42,
+            false,
+            &resolved,
+        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0]["headline"], json!("Current active line"));
     }
 
     #[test]

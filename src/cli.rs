@@ -329,6 +329,10 @@ pub struct ContinuityHandoffArgs {
     pub next_step: String,
     #[arg(long)]
     pub details_file: Option<PathBuf>,
+    #[arg(long = "resolved-headline", action = clap::ArgAction::Append)]
+    pub resolved_headlines: Vec<String>,
+    #[arg(long, default_value_t = false)]
+    pub resolve_current_goal: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1041,6 +1045,40 @@ mod tests {
         assert_eq!(args.project.as_deref(), Some("art"));
         assert!(args.json);
         assert!(!args.force);
+    }
+
+    #[test]
+    fn continuity_handoff_cli_parses_resolve_flags() {
+        let cli = Cli::parse_from([
+            "amai",
+            "continuity",
+            "handoff",
+            "--project",
+            "art",
+            "--headline",
+            "ExecCtl stale pending-return closure semantics materialized",
+            "--next-step",
+            "Recheck Art startup queue after explicit resolve path.",
+            "--resolve-current-goal",
+            "--resolved-headline",
+            "Amai continuity migration proof",
+            "--resolved-headline",
+            "Soft rotate recommendation no longer hard-blocks replies",
+        ]);
+        let Command::Continuity { command } = cli.command else {
+            panic!("expected continuity command");
+        };
+        let ContinuityCommand::Handoff(args) = command else {
+            panic!("expected continuity handoff command");
+        };
+        assert!(args.resolve_current_goal);
+        assert_eq!(
+            args.resolved_headlines,
+            vec![
+                "Amai continuity migration proof".to_string(),
+                "Soft rotate recommendation no longer hard-blocks replies".to_string()
+            ]
+        );
     }
 
     #[test]
