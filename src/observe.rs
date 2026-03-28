@@ -326,6 +326,21 @@ fn compact_reply_execution_gate(reply_execution_gate: &Value) -> Value {
         .as_bool()
         .map(Value::from)
         .unwrap_or_else(|| reply_execution_gate["action_bundle"]["preserves_return_obligation"].clone());
+    let blocking_reply_contract = if reply_execution_gate["blocking"].as_bool() == Some(true) {
+        let contract = &reply_execution_gate["blocking_reply_contract"];
+        if contract["active"].as_bool() == Some(true) {
+            json!({
+                "contract_version": contract["contract_version"].clone(),
+                "response_kind": contract["response_kind"].clone(),
+                "max_sentences": contract["max_sentences"].clone(),
+                "template": contract["template"].clone(),
+            })
+        } else {
+            Value::Null
+        }
+    } else {
+        Value::Null
+    };
     json!({
         "gate_version": reply_execution_gate["gate_version"].clone(),
         "action_kind": reply_execution_gate["action_kind"].clone(),
@@ -337,6 +352,7 @@ fn compact_reply_execution_gate(reply_execution_gate: &Value) -> Value {
         "rotate_now": reply_execution_gate["rotate_now"].clone(),
         "rotate_soon": reply_execution_gate["rotate_soon"].clone(),
         "preserves_return_obligation": preserves_return_obligation,
+        "blocking_reply_contract": blocking_reply_contract,
     })
 }
 
@@ -4128,6 +4144,7 @@ mod tests {
     };
     use crate::codex_threads::RolloutClientMeterObservation;
     use crate::postgres::ObservabilityRetentionCandidate;
+    use crate::working_state;
     use serde_json::json;
     use std::fs::{self, File};
     use std::path::PathBuf;
@@ -4947,6 +4964,13 @@ mod tests {
                 "reply_budget_mode": "compact_high_signal",
                 "rotate_now": true,
                 "rotate_soon": true,
+                "blocking_reply_contract": {
+                    "active": true,
+                    "contract_version": working_state::CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION,
+                    "response_kind": working_state::CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND,
+                    "max_sentences": working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES,
+                    "template": working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE,
+                },
                 "action_bundle": {
                     "preserves_return_obligation": false,
                 }
@@ -4979,8 +5003,41 @@ mod tests {
         assert!(payload.get("reason").is_none());
         assert!(payload.get("requires_global_budget_recovery_before_reply").is_none());
         assert!(payload["reply_execution_gate"]["reply_budget_contract"].is_null());
-        assert!(payload["reply_execution_gate"]["blocking_reply_contract"].is_null());
         assert!(payload["reply_execution_gate"]["action_bundle"].is_null());
+        assert_eq!(
+            payload["reply_execution_gate"]["blocking_reply_contract"]["template"].as_str(),
+            Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE)
+        );
+    }
+
+    #[test]
+    fn compact_client_budget_gate_payload_keeps_blocking_contract_null_when_not_blocking() {
+        let guard = json!({
+            "status": "alert",
+            "status_label": "цель >90% не достигнута",
+            "observed_at_epoch_ms": 1774622949000u64,
+            "max_guard_age_seconds": 10,
+            "should_rotate_chat_now": false,
+            "should_rotate_chat_soon": false,
+            "reply_execution_gate": {
+                "gate_version": "client-reply-budget-gate-v1",
+                "reason": "client_budget_guard_clear",
+                "action_kind": "continue_current_chat",
+                "blocking": false,
+                "must_rotate_before_reply": false,
+                "must_wait_for_budget_recovery_before_reply": false,
+                "reply_budget_mode": "compact_high_signal",
+                "rotate_now": false,
+                "rotate_soon": false,
+                "preserves_return_obligation": true,
+                "blocking_reply_contract": {
+                    "active": false,
+                    "template": "should not leak"
+                }
+            }
+        });
+        let payload = super::compact_client_budget_gate_payload(&guard);
+        assert!(payload["reply_execution_gate"]["blocking_reply_contract"].is_null());
     }
 
     #[test]

@@ -3,13 +3,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-guard_json="$(cargo run --quiet -- observe client-budget-guard)"
+guard_json="$(cargo run --quiet -- observe client-budget-gate)"
 reply_blocked="$(printf '%s' "$guard_json" | jq -r '
-  .reply_execution_gate.blocking
-  // .reply_execution_gate.must_rotate_before_reply
-  // .reply_execution_gate.must_wait_for_budget_recovery_before_reply
-  // .requires_global_budget_recovery_before_reply
-  // .should_rotate_chat_now
+  .client_budget_reply_gate.reply_execution_gate.blocking
+  // .client_budget_reply_gate.reply_execution_gate.must_rotate_before_reply
+  // .client_budget_reply_gate.reply_execution_gate.must_wait_for_budget_recovery_before_reply
+  // .client_budget_reply_gate.should_rotate_chat_now
   // false
 ')"
 
@@ -18,7 +17,7 @@ if [[ "$reply_blocked" != "true" ]]; then
 fi
 
 blocked_reply="$(printf '%s' "$guard_json" | jq -r '
-  .reply_execution_gate.blocking_reply_contract.template // empty
+  .client_budget_reply_gate.reply_execution_gate.blocking_reply_contract.template // empty
 ')"
 
 if [[ -z "$blocked_reply" ]]; then
