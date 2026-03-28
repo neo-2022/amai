@@ -113,10 +113,10 @@ pub(crate) fn build_client_reply_budget_contract(mode: ClientReplyBudgetMode) ->
             ClientReplyBudgetMode::CompactHighSignal => (
                 true,
                 CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
-                Some(2),
+                Some(1),
+                Some(3),
                 Some(4),
-                Some(6),
-                "KPI 5ч уходит в overspend или advisory rotate. Ответ остаётся содержательным, но должен быть компактным: сначала прямой результат, затем только изменившиеся факты и минимум повторов.",
+                "Exact 5ч KPI ниже целевого >90% или advisory rotate уже materialized. Ответ остаётся содержательным, но должен быть коротким: один абзац или короткий список, сначала прямой результат, затем только изменившиеся факты без повторов.",
             ),
         };
     json!({
