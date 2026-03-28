@@ -37,6 +37,12 @@ const CONTINUITY_SNAPSHOT_QUERY_LABEL: &str = "Continuity snapshot";
 const CONTINUITY_PRE_AMAI_BASELINE_STRATEGY: &str = "truthful_pre_amai_continuity_summaries_v1";
 const DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS: u64 = 3_000;
 const TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS: i64 = 5_000;
+const CLI_CONTEXT_PACK_TOOL_OVERHEAD_CONTRACT_VERSION: &str =
+    "context_pack_cli_model_visible_output_v2";
+const CLI_CONTEXT_PACK_TOOL_OVERHEAD_LEGACY_CONTRACT_VERSION: &str =
+    "context_pack_cli_raw_output_v1";
+const MCP_CONTEXT_PACK_TOOL_OVERHEAD_CONTRACT_VERSION: &str =
+    "context_pack_mcp_structured_content_v2";
 static DASHBOARD_ROLLOUT_OBSERVATION_CACHE: OnceLock<
     Mutex<Option<DashboardRolloutObservationCache>>,
 > = OnceLock::new();
@@ -7686,16 +7692,24 @@ pub async fn observe_context_pack_tool_overhead(
     let config = load_config(&repo_root)?;
     let tool_overhead_tokens =
         count_tool_overhead_tokens(&config.measurement, text, structured_content)?;
-    Ok(attach_context_pack_whole_cycle_observed(
+    let Some(row) = latest_token_budget_snapshot_for_context_pack(db, context_pack_id).await?
+    else {
+        return Ok(false);
+    };
+    Ok(attach_tool_overhead_observed_and_source_status_to_snapshot(
         db,
-        context_pack_id,
-        None,
-        None,
-        Some(tool_overhead_tokens),
+        &row,
+        Some(json!({ "context_pack_id": context_pack_id })),
+        tool_overhead_tokens,
+        mcp_context_pack_tool_overhead_source_status(),
         None,
     )
     .await?
-    .is_some())
+    .is_some_and(|value| {
+        value["tool_overhead_attach"]["attached"]
+            .as_bool()
+            .unwrap_or(false)
+    }))
 }
 
 pub async fn observe_cli_context_pack_tool_overhead(
@@ -7722,17 +7736,26 @@ pub async fn observe_cli_context_pack_tool_overhead(
         output_json,
         delivered_tokens,
     )?;
-    Ok(attach_context_pack_whole_cycle_observed(
+    let legacy_replace_from = legacy_cli_context_pack_tool_overhead_replacement(
         db,
         context_pack_id,
-        None,
-        None,
-        Some(tool_overhead_tokens),
-        None,
+        &config.measurement,
+        &row,
+        delivered_tokens,
+        tool_overhead_tokens,
+    )
+    .await?;
+    Ok(attach_tool_overhead_observed_and_source_status_to_snapshot(
+        db,
+        &row,
+        Some(json!({ "context_pack_id": context_pack_id })),
+        tool_overhead_tokens,
+        cli_context_pack_tool_overhead_source_status(),
+        legacy_replace_from,
     )
     .await?
     .is_some_and(|value| {
-        value["whole_cycle_observed_attach"]["attached"]
+        value["tool_overhead_attach"]["attached"]
             .as_bool()
             .unwrap_or(false)
     }))
@@ -8628,6 +8651,8 @@ async fn sync_context_pack_tool_overhead_for_events(
                 json!({
                     "state": "context_pack_payload_materialized",
                     "source_kind": "ami.context_packs",
+                    "tool_overhead_contract_version": CLI_CONTEXT_PACK_TOOL_OVERHEAD_LEGACY_CONTRACT_VERSION,
+                    "payload_surface": "stored_full_context_pack_json",
                     "resolution_condition": "already_materialized",
                     "note": "Tool-overhead payload was recovered directly from the stored context pack referenced by context_pack_id."
                 }),
@@ -8640,6 +8665,8 @@ async fn sync_context_pack_tool_overhead_for_events(
                     json!({
                         "state": "secondary_context_pack_match_materialized",
                         "source_kind": "context_pack_query_time_match_v1",
+                        "tool_overhead_contract_version": CLI_CONTEXT_PACK_TOOL_OVERHEAD_LEGACY_CONTRACT_VERSION,
+                        "payload_surface": "stored_full_context_pack_json",
                         "match_delta_ms": candidate.delta_ms,
                         "max_allowed_delta_ms": TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS,
                         "resolution_condition": "already_materialized",
@@ -8739,6 +8766,7 @@ async fn sync_context_pack_tool_overhead_for_events(
             Some(json!({ "context_pack_id": context_pack_id })),
             tool_overhead_tokens,
             source_status,
+            None,
         )
         .await?;
         if attached
@@ -10497,12 +10525,13 @@ async fn live_turn_retrieval_context_pack_ids(
     if thread_id.is_empty() {
         return Ok((BTreeSet::new(), 0));
     }
-    let upper_bound = ended_at_epoch_ms.max(started_at_epoch_ms);
-    if started_at_epoch_ms <= 0 || upper_bound <= 0 {
+    let Some((lower_bound, upper_bound)) = current_live_turn_context_pack_match_bounds(
+        started_at_epoch_ms,
+        ended_at_epoch_ms,
+        grace_ms,
+    ) else {
         return Ok((BTreeSet::new(), 0));
-    }
-    let lower_bound = started_at_epoch_ms.saturating_sub(grace_ms.max(0));
-    let upper_bound = upper_bound.saturating_add(grace_ms.max(0));
+    };
     let rows = db
         .query(
             "
@@ -10528,6 +10557,26 @@ async fn live_turn_retrieval_context_pack_ids(
         .filter(|value| !value.is_empty())
         .collect::<BTreeSet<_>>();
     Ok((context_pack_ids, retrieval_count))
+}
+
+fn current_live_turn_context_pack_match_grace_ms() -> i64 {
+    ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS
+}
+
+fn current_live_turn_context_pack_match_bounds(
+    started_at_epoch_ms: i64,
+    ended_at_epoch_ms: i64,
+    grace_ms: i64,
+) -> Option<(i64, i64)> {
+    let upper_bound = ended_at_epoch_ms.max(started_at_epoch_ms);
+    if started_at_epoch_ms <= 0 || upper_bound <= 0 {
+        return None;
+    }
+    let grace_ms = grace_ms.max(0);
+    Some((
+        started_at_epoch_ms.saturating_sub(grace_ms),
+        upper_bound.saturating_add(grace_ms),
+    ))
 }
 
 fn live_turn_token_budget_events(
@@ -10620,10 +10669,7 @@ async fn build_current_live_turn_surface(
         return Ok(surface);
     }
 
-    let grace_ms = measurement
-        .late_arrival_grace_minutes
-        .saturating_mul(60_000)
-        .max(ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS as u64) as i64;
+    let grace_ms = current_live_turn_context_pack_match_grace_ms();
     let (matched_context_pack_ids, retrieval_context_pack_count) = live_turn_retrieval_context_pack_ids(
         db,
         &observation.thread_id,
@@ -16539,6 +16585,85 @@ fn count_cli_context_pack_output_overhead_tokens(
     Ok(total_output_tokens.saturating_sub(delivered_tokens))
 }
 
+fn cli_context_pack_tool_overhead_source_status() -> Value {
+    json!({
+        "state": "context_pack_cli_model_visible_output_materialized",
+        "source_kind": "context_pack_cli_output_v2",
+        "tool_overhead_contract_version": CLI_CONTEXT_PACK_TOOL_OVERHEAD_CONTRACT_VERSION,
+        "legacy_replace_contract_version": CLI_CONTEXT_PACK_TOOL_OVERHEAD_LEGACY_CONTRACT_VERSION,
+        "payload_surface": "model_visible_compact_output",
+        "resolution_condition": "already_materialized",
+        "note": "Tool-overhead tokens were counted from the compact model-visible CLI JSON that is actually printed to the caller."
+    })
+}
+
+fn mcp_context_pack_tool_overhead_source_status() -> Value {
+    json!({
+        "state": "context_pack_mcp_structured_content_materialized",
+        "source_kind": "context_pack_mcp_structured_content_v2",
+        "tool_overhead_contract_version": MCP_CONTEXT_PACK_TOOL_OVERHEAD_CONTRACT_VERSION,
+        "payload_surface": "mcp_tool_result_text_plus_structured_content",
+        "resolution_condition": "already_materialized",
+        "note": "Tool-overhead tokens were counted from the MCP tool result that is actually surfaced to the model: summary text plus structuredContent."
+    })
+}
+
+async fn legacy_cli_context_pack_tool_overhead_replacement(
+    db: &Client,
+    context_pack_id: &str,
+    measurement: &MeasurementConfig,
+    row: &ObservabilitySnapshotRecord,
+    delivered_tokens: u64,
+    new_tool_overhead_tokens: u64,
+) -> Result<Option<u64>> {
+    let existing_tool_overhead = row.payload["token_budget_event"]["whole_cycle_observed"]
+        ["tool_overhead_tokens"]
+        .as_u64();
+    let existing_source = row.payload["token_budget_event"]["whole_cycle_observed_source"]["tool_overhead"]
+        .as_object()
+        .map(|_| row.payload["token_budget_event"]["whole_cycle_observed_source"]["tool_overhead"].clone());
+    let Some(existing_tool_overhead) = existing_tool_overhead else {
+        return Ok(None);
+    };
+    if existing_tool_overhead == new_tool_overhead_tokens {
+        return Ok(None);
+    }
+    if !existing_source
+        .as_ref()
+        .is_none_or(|value| is_replaceable_legacy_cli_tool_overhead_source(value))
+    {
+        return Ok(None);
+    }
+    let Some(legacy_output_json) = stored_context_pack_payload_json(db, context_pack_id).await?
+    else {
+        return Ok(None);
+    };
+    let legacy_raw_output_tool_overhead = count_cli_context_pack_output_overhead_tokens(
+        measurement,
+        &legacy_output_json,
+        delivered_tokens,
+    )?;
+    if legacy_raw_output_tool_overhead == existing_tool_overhead {
+        Ok(Some(existing_tool_overhead))
+    } else {
+        Ok(None)
+    }
+}
+
+fn is_replaceable_legacy_cli_tool_overhead_source(source_status: &Value) -> bool {
+    let contract_version = source_status["tool_overhead_contract_version"].as_str();
+    if contract_version == Some(CLI_CONTEXT_PACK_TOOL_OVERHEAD_LEGACY_CONTRACT_VERSION) {
+        return true;
+    }
+    if contract_version.is_some() {
+        return false;
+    }
+    matches!(
+        source_status["state"].as_str(),
+        Some("context_pack_payload_materialized" | "secondary_context_pack_match_materialized")
+    )
+}
+
 async fn latest_token_budget_snapshot_for_context_pack(
     db: &Client,
     context_pack_id: &str,
@@ -16843,15 +16968,16 @@ fn apply_tool_overhead_observed_and_source_status(
     node: &mut serde_json::Map<String, Value>,
     tool_overhead_tokens: u64,
     source_status: &Value,
+    legacy_replace_from: Option<u64>,
 ) -> Result<(Vec<String>, Vec<String>, Value, Value, bool)> {
     let mut updated_fields = Vec::new();
     let mut retained_fields = Vec::new();
     {
         let whole_cycle = ensure_nested_object(node, "whole_cycle_observed")?;
-        apply_whole_cycle_observed_token(
+        apply_tool_overhead_observed_token(
             whole_cycle,
-            "tool_overhead_tokens",
-            Some(tool_overhead_tokens),
+            tool_overhead_tokens,
+            legacy_replace_from,
             &mut updated_fields,
             &mut retained_fields,
         )?;
@@ -16893,6 +17019,7 @@ async fn attach_tool_overhead_observed_and_source_status_to_snapshot(
     selector: Option<Value>,
     tool_overhead_tokens: u64,
     source_status: Value,
+    legacy_replace_from: Option<u64>,
 ) -> Result<Option<Value>> {
     let mut payload = row.payload.clone();
     let preserved_source_event_id = preserved_snapshot_source_event_id(db, row).await?;
@@ -16916,6 +17043,7 @@ async fn attach_tool_overhead_observed_and_source_status_to_snapshot(
                 node,
                 tool_overhead_tokens,
                 &source_status,
+                legacy_replace_from,
             )?;
         (
             event_id,
@@ -17057,6 +17185,42 @@ fn apply_whole_cycle_observed_token(
         None => {
             whole_cycle.insert(field.to_string(), Value::from(new_value));
             updated_fields.push(field.to_string());
+        }
+    }
+    Ok(())
+}
+
+fn apply_tool_overhead_observed_token(
+    whole_cycle: &mut serde_json::Map<String, Value>,
+    tool_overhead_tokens: u64,
+    legacy_replace_from: Option<u64>,
+    updated_fields: &mut Vec<String>,
+    retained_fields: &mut Vec<String>,
+) -> Result<()> {
+    match whole_cycle.get("tool_overhead_tokens").and_then(Value::as_u64) {
+        Some(existing) if existing == tool_overhead_tokens => {
+            retained_fields.push("tool_overhead_tokens".to_string());
+        }
+        Some(existing) if legacy_replace_from == Some(existing) => {
+            whole_cycle.insert(
+                "tool_overhead_tokens".to_string(),
+                Value::from(tool_overhead_tokens),
+            );
+            updated_fields.push("tool_overhead_tokens".to_string());
+        }
+        Some(existing) => {
+            bail!(
+                "conflicting whole-cycle observed overwrite for tool_overhead_tokens: existing={} new={}",
+                existing,
+                tool_overhead_tokens
+            );
+        }
+        None => {
+            whole_cycle.insert(
+                "tool_overhead_tokens".to_string(),
+                Value::from(tool_overhead_tokens),
+            );
+            updated_fields.push("tool_overhead_tokens".to_string());
         }
     }
     Ok(())
@@ -23298,6 +23462,31 @@ effective_to_epoch_ms = 2000
     }
 
     #[test]
+    fn current_live_turn_context_pack_match_bounds_stay_turn_scoped() {
+        let measurement = measurement_fixture();
+        let started_at_epoch_ms = 1_000_000i64;
+        let ended_at_epoch_ms = 1_010_000i64;
+
+        let (lower_bound, upper_bound) = super::current_live_turn_context_pack_match_bounds(
+            started_at_epoch_ms,
+            ended_at_epoch_ms,
+            super::current_live_turn_context_pack_match_grace_ms(),
+        )
+        .expect("bounds");
+
+        assert_eq!(
+            super::current_live_turn_context_pack_match_grace_ms(),
+            super::ASSISTANT_GENERATION_TURN_MATCH_GRACE_MS
+        );
+        assert_eq!(lower_bound, 940_000);
+        assert_eq!(upper_bound, 1_070_000);
+        assert!(
+            super::current_live_turn_context_pack_match_grace_ms()
+                < (measurement.late_arrival_grace_minutes.saturating_mul(60_000)) as i64
+        );
+    }
+
+    #[test]
     fn current_live_turn_meter_summary_enables_same_meter_pair_without_quality_gate() {
         let measurement = measurement_fixture();
         let contract = contract_fixture();
@@ -23815,8 +24004,13 @@ effective_to_epoch_ms = 2000
         });
 
         let (updated_fields, retained_fields, whole_cycle_observed, tool_overhead_source, attached) =
-            super::apply_tool_overhead_observed_and_source_status(node, 2077, &source_status)
-                .expect("apply tool overhead attach");
+            super::apply_tool_overhead_observed_and_source_status(
+                node,
+                2077,
+                &source_status,
+                None,
+            )
+            .expect("apply tool overhead attach");
 
         assert!(attached);
         assert_eq!(updated_fields, vec!["tool_overhead_tokens".to_string()]);
@@ -23833,6 +24027,50 @@ effective_to_epoch_ms = 2000
         assert_eq!(
             payload["token_budget_event"]["whole_cycle_observed_source"]["tool_overhead"]["state"],
             "secondary_context_pack_match_materialized"
+        );
+    }
+
+    #[test]
+    fn tool_overhead_atomic_attach_replaces_exact_legacy_cli_raw_value_only() {
+        let mut payload = json!({
+            "token_budget_event": {
+                "event_id": "event-tool-overhead-replace",
+                "correlation_id": "event-tool-overhead-replace",
+                "whole_cycle_observed": {
+                    "tool_overhead_tokens": 3175
+                },
+                "whole_cycle_observed_source": {}
+            }
+        });
+        let node = payload["token_budget_event"]
+            .as_object_mut()
+            .expect("token budget event");
+        let source_status = json!({
+            "state": "context_pack_cli_model_visible_output_materialized",
+            "source_kind": "context_pack_cli_output_v2",
+            "tool_overhead_contract_version": super::CLI_CONTEXT_PACK_TOOL_OVERHEAD_CONTRACT_VERSION,
+        });
+
+        let (updated_fields, retained_fields, whole_cycle_observed, tool_overhead_source, attached) =
+            super::apply_tool_overhead_observed_and_source_status(
+                node,
+                1605,
+                &source_status,
+                Some(3175),
+            )
+            .expect("replace legacy cli tool overhead");
+
+        assert!(attached);
+        assert_eq!(updated_fields, vec!["tool_overhead_tokens".to_string()]);
+        assert!(retained_fields.is_empty());
+        assert_eq!(whole_cycle_observed["tool_overhead_tokens"], 1605);
+        assert_eq!(
+            tool_overhead_source["tool_overhead_contract_version"],
+            super::CLI_CONTEXT_PACK_TOOL_OVERHEAD_CONTRACT_VERSION
+        );
+        assert_eq!(
+            payload["token_budget_event"]["whole_cycle_observed"]["tool_overhead_tokens"],
+            1605
         );
     }
 
