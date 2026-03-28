@@ -8885,6 +8885,10 @@ fn client_turn_pressure_guard(
         && hourly_burn_overspend
         && moderate_kpi_thread)
         || (no_amai_activity_in_current_live_turn && hourly_burn_target_not_met && large_kpi_thread)
+        || (hourly_burn_overspend
+            && early_large_live_thread
+            && weak_amai_share
+            && softened_primary_limit)
         || (hourly_burn_target_not_met
             && large_kpi_thread
             && negligible_amai_share
@@ -13939,6 +13943,44 @@ mod tests {
         assert_eq!(guard.status_label, "новый чат нужен сейчас");
         assert_eq!(guard.hourly_burn_classification, Some("overspend"));
         assert!(guard.no_amai_activity_in_current_live_turn);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_now_when_5h_kpi_overspends_with_weak_live_gain() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "overspend",
+            "kpi_percent": 111.87
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 85681,
+                "with_amai_tokens": 84456,
+                "saved_tokens": 1225,
+                "saved_pct": 1.4297218753282526
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 84456,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 32.68421052631579,
+            "primary_limit_remaining_percent": 75.0,
+            "secondary_limit_remaining_percent": 88.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((85681, 84456, 1225, 1.4297218753282526)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+        assert_eq!(guard.hourly_burn_classification, Some("overspend"));
+        assert!(!guard.no_amai_activity_in_current_live_turn);
     }
 
     #[test]
