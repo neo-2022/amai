@@ -1587,9 +1587,6 @@ pub fn render_html(refresh_ms: u64) -> String {
     let clientBudgetLiveRefreshPromise = null;
 
     async function fetchClientBudgetLivePayload(force = false) {
-      if (!force && isRefreshPaused()) {
-        return null;
-      }
       if (clientBudgetLiveRefreshPromise) {
         return clientBudgetLiveRefreshPromise;
       }
@@ -10905,6 +10902,9 @@ mod tests {
             "setInterval(() => syncClientBudgetLiveRows(false), CLIENT_BUDGET_LIVE_REFRESH_MS);"
         ));
         assert!(!html.contains("setInterval(() => loadDashboard(false), REFRESH_MS);"));
+        assert!(!html.contains(
+            "async function fetchClientBudgetLivePayload(force = false) {\n      if (!force && isRefreshPaused()) {"
+        ));
         assert!(!html.contains("INTERACTION_HOLD_SELECTOR"));
     }
 
