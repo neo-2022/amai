@@ -1253,6 +1253,12 @@ fn build_startup_runtime_state_artifact(
             ),
         );
         summary.insert(
+            "required_return_task".to_string(),
+            compact_startup_runtime_required_return_task(
+                summary.get("required_return_task").unwrap_or(&Value::Null),
+            ),
+        );
+        summary.insert(
             "project_task_tree".to_string(),
             compact_project_task_tree_for_startup(
                 summary.get("project_task_tree").unwrap_or(&Value::Null),
@@ -1435,6 +1441,23 @@ fn compact_startup_runtime_summary_startup_execution_gate(gate: &Value) -> Value
             "must_read_prompt_text_before_reply",
             "required_action_kind_when_resume_required",
             "no_silent_drop",
+        ],
+    );
+    Value::Object(compact)
+}
+
+fn compact_startup_runtime_required_return_task(task: &Value) -> Value {
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        task,
+        &[
+            "headline",
+            "next_step",
+            "resume_state",
+            "task_id",
+            "task_role",
+            "task_state",
         ],
     );
     Value::Object(compact)
@@ -6459,6 +6482,9 @@ mod tests {
             artifact["continuity_startup_summary"]["required_return_task"]["headline"],
             json!("Pending line")
         );
+        assert!(artifact["continuity_startup_summary"]["required_return_task"]["authoritative_event_id"].is_null());
+        assert!(artifact["continuity_startup_summary"]["required_return_task"]["parent_task_id"].is_null());
+        assert!(artifact["continuity_startup_summary"]["required_return_task"]["queued_at_epoch_ms"].is_null());
         assert_eq!(
             artifact["continuity_startup_summary"]["project_task_tree_summary"],
             json!("active: Current active line; pending_return(1): Pending line")
