@@ -9472,54 +9472,135 @@ pub(crate) fn client_budget_root_cause_payload(snapshot: &Value) -> Value {
     } else {
         client_live_meter["status"].as_str().unwrap_or("missing")
     };
-    json!({
-        "status": live_status,
-        "reply_prefix": hourly_burn["reply_prefix"].clone(),
-        "thread_binding_state": client_live_meter["thread_binding_state"].clone(),
-        "current_thread_bound": client_live_meter["current_thread_bound"].clone(),
-        "current_live_meter": {
+    let mut current_live_turn_payload = serde_json::Map::new();
+    current_live_turn_payload.insert("status".to_string(), current_live_turn["status"].clone());
+    current_live_turn_payload.insert(
+        "exact_pair_available".to_string(),
+        current_live_turn["exact_pair_available"].clone(),
+    );
+    if current_live_turn["exact_pair_available"].as_bool() == Some(true) {
+        let exact_pair = &current_live_turn["exact_pair"];
+        let exact_pair_is_zero = exact_pair["without_amai_tokens"].as_u64().unwrap_or(0) == 0
+            && exact_pair["with_amai_tokens"].as_u64().unwrap_or(0) == 0
+            && exact_pair["saved_tokens"].as_i64().unwrap_or(0) == 0;
+        if exact_pair_is_zero
+            && current_live_turn["status"].as_str() == Some("no_amai_activity_in_current_live_turn")
+        {
+            current_live_turn_payload
+                .insert("saved_pct".to_string(), exact_pair["saved_pct"].clone());
+        } else {
+            current_live_turn_payload.insert("exact_pair".to_string(), exact_pair.clone());
+        }
+    }
+    for field in [
+        "observed_client_prompt_tokens",
+        "observed_assistant_generation_tokens",
+        "observed_continuity_restore_tokens",
+        "observed_tool_overhead_tokens",
+        "observed_whole_cycle_with_amai_tokens",
+        "verified_observed_whole_cycle_with_amai_tokens",
+    ] {
+        if !current_live_turn[field].is_null() {
+            current_live_turn_payload.insert(field.to_string(), current_live_turn[field].clone());
+        }
+    }
+
+    let mut exact_pair_status_payload = serde_json::Map::new();
+    exact_pair_status_payload.insert(
+        "state".to_string(),
+        alignment["exact_pair_status"]["state"].clone(),
+    );
+    exact_pair_status_payload.insert(
+        "exact_pair_available".to_string(),
+        alignment["exact_pair_status"]["exact_pair_available"].clone(),
+    );
+    for (field, value) in [
+        (
+            "primary_blocking_reason",
+            alignment["exact_pair_status"]["primary_blocking_reason"].clone(),
+        ),
+        ("primary_blocker_code", primary_blocker["code"].clone()),
+        ("primary_blocker_kind", primary_blocker["blocker_kind"].clone()),
+        ("blocking_reason", primary_blocker["blocking_reason"].clone()),
+        (
+            "note",
+            exact_pair_primary_blocker_note_sentence(alignment)
+                .map(Value::from)
+                .unwrap_or(Value::Null),
+        ),
+    ] {
+        if !value.is_null() {
+            exact_pair_status_payload.insert(field.to_string(), value);
+        }
+    }
+    if missing_live_events > 0 {
+        exact_pair_status_payload
+            .insert("missing_live_events".to_string(), Value::from(missing_live_events));
+    }
+    if irrecoverable_missing_live_events > 0 {
+        exact_pair_status_payload.insert(
+            "irrecoverable_missing_live_events".to_string(),
+            Value::from(irrecoverable_missing_live_events),
+        );
+    }
+    if recoverable_missing_live_events > 0 {
+        exact_pair_status_payload.insert(
+            "recoverable_missing_live_events".to_string(),
+            Value::from(recoverable_missing_live_events),
+        );
+    }
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("status".to_string(), json!(live_status));
+    payload.insert("reply_prefix".to_string(), hourly_burn["reply_prefix"].clone());
+    payload.insert(
+        "thread_binding_state".to_string(),
+        client_live_meter["thread_binding_state"].clone(),
+    );
+    payload.insert(
+        "current_thread_bound".to_string(),
+        client_live_meter["current_thread_bound"].clone(),
+    );
+    payload.insert(
+        "current_live_meter".to_string(),
+        json!({
             "ended_at_epoch_ms": preferred_client_limit_observed_at_epoch_ms(client_live_meter)
                 .map(Value::from)
                 .unwrap_or_else(|| client_live_meter["ended_at_epoch_ms"].clone()),
             "client_turn_total_tokens": client_live_meter["client_turn_total_tokens"].clone(),
             "context_used_percent": client_live_meter["context_used_percent"].clone(),
-        },
-        "guard": {
+        }),
+    );
+    payload.insert(
+        "guard".to_string(),
+        json!({
             "status_label": guard["status_label"].clone(),
             "should_rotate_chat_now": guard["should_rotate_chat_now"].clone(),
             "should_rotate_chat_soon": guard["should_rotate_chat_soon"].clone(),
             "action_kind": guard["reply_execution_gate"]["action_kind"].clone(),
             "reply_budget_mode": guard["reply_execution_gate"]["reply_budget_mode"].clone(),
             "must_rotate_before_reply": guard["reply_execution_gate"]["must_rotate_before_reply"].clone(),
-        },
-        "current_live_turn": {
-            "status": current_live_turn["status"].clone(),
-            "exact_pair_available": current_live_turn["exact_pair_available"].clone(),
-            "exact_pair": current_live_turn["exact_pair"].clone(),
-            "observed_client_prompt_tokens": current_live_turn["observed_client_prompt_tokens"].clone(),
-            "observed_assistant_generation_tokens": current_live_turn["observed_assistant_generation_tokens"].clone(),
-            "observed_continuity_restore_tokens": current_live_turn["observed_continuity_restore_tokens"].clone(),
-            "observed_tool_overhead_tokens": current_live_turn["observed_tool_overhead_tokens"].clone(),
-            "observed_whole_cycle_with_amai_tokens": current_live_turn["observed_whole_cycle_with_amai_tokens"].clone(),
-            "verified_observed_whole_cycle_with_amai_tokens": current_live_turn["verified_observed_whole_cycle_with_amai_tokens"].clone(),
-        },
-        "exact_pair_status": {
-            "state": alignment["exact_pair_status"]["state"].clone(),
-            "exact_pair_available": alignment["exact_pair_status"]["exact_pair_available"].clone(),
-            "primary_blocking_reason": alignment["exact_pair_status"]["primary_blocking_reason"].clone(),
-            "primary_blocker_code": primary_blocker["code"].clone(),
-            "primary_blocker_kind": primary_blocker["blocker_kind"].clone(),
-            "blocking_reason": primary_blocker["blocking_reason"].clone(),
-            "missing_live_events": missing_live_events,
-            "irrecoverable_missing_live_events": irrecoverable_missing_live_events,
-            "recoverable_missing_live_events": recoverable_missing_live_events,
-            "note": exact_pair_primary_blocker_note_sentence(alignment),
-        },
-        "measured_components": alignment["measured_components"].clone(),
-        "missing_components": alignment["missing_components"].clone(),
-        "partially_measured_components": alignment["partially_measured_components"].clone(),
-        "blocking_reasons": alignment["blocking_reasons"].clone(),
-    })
+        }),
+    );
+    payload.insert(
+        "current_live_turn".to_string(),
+        Value::Object(current_live_turn_payload),
+    );
+    payload.insert(
+        "exact_pair_status".to_string(),
+        Value::Object(exact_pair_status_payload),
+    );
+    for field in [
+        "measured_components",
+        "missing_components",
+        "partially_measured_components",
+        "blocking_reasons",
+    ] {
+        if alignment[field].as_array().is_some_and(|items| !items.is_empty()) {
+            payload.insert(field.to_string(), alignment[field].clone());
+        }
+    }
+    Value::Object(payload)
 }
 
 fn current_live_turn_exact_pair(current_live_turn: &Value) -> Option<(u64, u64, i64, f64)> {
@@ -13656,6 +13737,87 @@ mod tests {
                 .expect("compact payload")
                 .len()
                 < 2500
+        );
+    }
+
+    #[test]
+    fn client_budget_root_cause_payload_omits_zero_activity_noise() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "client_live_meter": {
+                        "status": "observed",
+                        "thread_binding_state": "current_thread_bound",
+                        "current_thread_bound": true,
+                        "client_turn_total_tokens": 172361,
+                        "context_used_percent": 66.7,
+                        "ended_at_epoch_ms": 2000,
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "observed_at_epoch_ms": 2000
+                        }
+                    },
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "exact_pair_available": true,
+                        "exact_pair": {
+                            "without_amai_tokens": 0,
+                            "with_amai_tokens": 0,
+                            "saved_tokens": 0,
+                            "saved_pct": 0.0
+                        },
+                        "observed_client_prompt_tokens": null,
+                        "observed_assistant_generation_tokens": null,
+                        "observed_continuity_restore_tokens": null,
+                        "observed_tool_overhead_tokens": null,
+                        "observed_whole_cycle_with_amai_tokens": null,
+                        "verified_observed_whole_cycle_with_amai_tokens": null
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "reply_prefix": "5ч KPI: переплата 75.41%"
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "client_limit_meter_alignment": {
+                                "exact_pair_status": {
+                                    "state": "exact_pair_materialized",
+                                    "exact_pair_available": true,
+                                    "primary_blocking_reason": null,
+                                    "blockers": []
+                                },
+                                "measured_components": ["retrieval_payload", "followup_recovery", "client_prompt", "continuity_restore_outside_retrieval"],
+                                "missing_components": [],
+                                "partially_measured_components": [],
+                                "blocking_reasons": []
+                            }
+                        }
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {}
+            }
+        });
+
+        let payload = super::client_budget_root_cause_payload(&snapshot);
+        assert_eq!(
+            payload["current_live_turn"]["status"].as_str(),
+            Some("no_amai_activity_in_current_live_turn")
+        );
+        assert_eq!(payload["current_live_turn"]["saved_pct"], json!(0.0));
+        assert!(payload["current_live_turn"]["exact_pair"].is_null());
+        assert!(payload["current_live_turn"]["observed_client_prompt_tokens"].is_null());
+        assert!(payload["exact_pair_status"]["primary_blocker_code"].is_null());
+        assert!(payload["exact_pair_status"]["missing_live_events"].is_null());
+        assert!(payload["missing_components"].is_null());
+        assert!(payload["partially_measured_components"].is_null());
+        assert!(payload["blocking_reasons"].is_null());
+        assert!(
+            serde_json::to_string(&payload)
+                .expect("compact payload")
+                .len()
+                < 1600
         );
     }
 
