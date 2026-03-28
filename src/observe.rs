@@ -349,6 +349,10 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
         .route("/brand/amai_lockup.svg", get(brand_lockup_handler))
         .route("/favicon.ico", get(favicon_handler))
         .route("/api/dashboard", get(dashboard_api_handler))
+        .route(
+            "/api/client-budget-live",
+            get(client_budget_live_api_handler),
+        )
         .route("/api/snapshot", get(snapshot_api_handler))
         .route("/metrics", get(metrics_handler))
         .route("/healthz", get(healthz_handler))
@@ -364,6 +368,7 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
     let base_url = human_dashboard_base_url(bind);
     println!("Amai human dashboard: {base_url}/");
     println!("Amai dashboard JSON: {base_url}/api/dashboard");
+    println!("Amai live client budget JSON: {base_url}/api/client-budget-live");
     println!("Amai raw snapshot JSON: {base_url}/api/snapshot");
     println!("Amai health JSON: {base_url}/healthz");
     println!("Amai Prometheus metrics: {base_url}/metrics");
@@ -1951,6 +1956,24 @@ async fn dashboard_api_handler(State(state): State<ObserveState>) -> impl IntoRe
             StatusCode::OK,
             no_store_headers("application/json; charset=utf-8"),
             serde_json::to_string_pretty(&payload).unwrap_or_default(),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn client_budget_live_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+    refresh_client_live_meter_on_request(&state).await;
+    match cached_snapshot_with_meta(&state).await {
+        Ok(snapshot) => (
+            StatusCode::OK,
+            no_store_headers("application/json; charset=utf-8"),
+            serde_json::to_string_pretty(&dashboard::client_budget_live_payload(&snapshot))
+                .unwrap_or_default(),
         )
             .into_response(),
         Err(error) => (
