@@ -395,6 +395,12 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 observe::print_client_budget_guard(&cfg, args.enforce_reply_gate).await?;
             }
+            ObserveCommand::ClientLimitHourlyBurn(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                let db = postgres::connect_admin(&cfg).await?;
+                token_budget::print_client_limit_hourly_burn(&db, &args).await?;
+            }
             ObserveCommand::TokenReport(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

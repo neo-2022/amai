@@ -1,6 +1,7 @@
 use crate::cli::{
-    ContextPackArgs, ObserveTokenAdjustmentAddArgs, ObserveTokenAdjustmentRegistryArgs,
-    ObserveTokenContractualSourcesArgs, ObserveTokenEvidencePackArgs, ObserveTokenReportArgs,
+    ContextPackArgs, ObserveClientLimitHourlyBurnArgs, ObserveTokenAdjustmentAddArgs,
+    ObserveTokenAdjustmentRegistryArgs, ObserveTokenContractualSourcesArgs,
+    ObserveTokenEvidencePackArgs, ObserveTokenReportArgs,
     ObserveTokenRolloutAssistantGenerationArgs, ObserveTokenStatementExportArgs,
     ObserveTokenWholeCycleAttachArgs, ObserveTokenWholeCycleTurnAttachArgs,
 };
@@ -36,6 +37,10 @@ const ASSISTANT_GENERATION_TURN_OBSERVED_SNAPSHOT_KIND: &str = "assistant_genera
 const CONTINUITY_SNAPSHOT_QUERY_LABEL: &str = "Continuity snapshot";
 const CONTINUITY_PRE_AMAI_BASELINE_STRATEGY: &str = "truthful_pre_amai_continuity_summaries_v1";
 const DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS: u64 = 3_000;
+const EXACT_CLIENT_LIMIT_SAMPLE_SNAPSHOT_KIND: &str = "client_status_bar_rate_limits";
+const DEFAULT_CLIENT_LIMIT_HOURLY_BURN_WINDOW_MINUTES: u64 = 60;
+const DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MAX_LIVE_AGE_SECONDS: u64 = 10;
+const DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MIN_HISTORY_SPAN_MINUTES: u64 = 55;
 const TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS: i64 = 5_000;
 const CLI_CONTEXT_PACK_TOOL_OVERHEAD_CONTRACT_VERSION: &str =
     "context_pack_cli_model_visible_output_v2";
@@ -661,6 +666,14 @@ struct CodexAppServerCreditsSnapshot {
 struct CodexAppServerRateLimitsObservation {
     observed_at_epoch_ms: u64,
     rate_limits: CodexAppServerRateLimitSnapshot,
+}
+
+#[derive(Debug, Clone)]
+struct ExactClientLimitSample {
+    observed_at_epoch_ms: u64,
+    primary_used_percent: f64,
+    secondary_used_percent: f64,
+    source: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -6790,6 +6803,23 @@ pub async fn print_report(db: &Client, args: &ObserveTokenReportArgs) -> Result<
     Ok(())
 }
 
+pub async fn print_client_limit_hourly_burn(
+    db: &Client,
+    args: &ObserveClientLimitHourlyBurnArgs,
+) -> Result<()> {
+    let observation = dashboard_exact_client_rate_limits_observation().await?;
+    let burn = collect_exact_client_limit_hourly_burn(
+        db,
+        observation.as_ref(),
+        args.window_minutes,
+        args.max_live_age_seconds,
+        args.min_history_span_minutes,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&burn)?);
+    Ok(())
+}
+
 fn select_scope_events(
     events: &[TokenBudgetEvent],
     profile: &ResolvedProfile,
@@ -7429,6 +7459,20 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         stage_started_at,
     );
     let stage_started_at = Instant::now();
+    let client_limit_hourly_burn = collect_exact_client_limit_hourly_burn(
+        db,
+        exact_client_limits_observation.as_ref(),
+        DEFAULT_CLIENT_LIMIT_HOURLY_BURN_WINDOW_MINUTES,
+        DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MAX_LIVE_AGE_SECONDS,
+        DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MIN_HISTORY_SPAN_MINUTES,
+    )
+    .await?;
+    record_dashboard_precache_stage_ms(
+        &mut pre_cache_timings,
+        "client_limit_hourly_burn",
+        stage_started_at,
+    );
+    let stage_started_at = Instant::now();
     let current_live_turn = build_current_live_turn_surface(
         db,
         &events,
@@ -7608,6 +7652,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
                 client_live_meter_binding_hint.as_deref(),
                 exact_client_limits_observation.as_ref(),
             ),
+            "client_limit_hourly_burn": client_limit_hourly_burn,
             "current_live_turn": current_live_turn,
             "cache_debug": cache_debug,
             "note": "Это облегчённый dashboard report: он сохраняет честные current_session / rolling_window / lifetime rollups, client-limit alignment и live client meter, не разворачивает полный contractual/export contour, но поднимает compact statement_export_previews для reviewed frozen-debt surfaces. Quiet same-meter sync/write-back всё так же ограничен active live scope текущей сессии и рабочего окна. Sync write-back может materialize-иться в этом тике, а обновлённые token events подхватываются следующим refresh, чтобы текущий pass не делал лишний full reload.",
@@ -8376,6 +8421,264 @@ fn build_status_bar_rate_limits_json(
         }).unwrap_or(Value::Null),
         "note": "Этот source поднимается через codex app-server account/rateLimits/read и совпадает с тем же upstream rate-limit contour, который extension использует для VS Code status bar и /wham/usage.",
     })
+}
+
+fn build_exact_client_limit_sample_payload(
+    observation: &CodexAppServerRateLimitsObservation,
+) -> Value {
+    json!({
+        "_observability": {
+            "source_event_id": format!(
+                "client-status-bar-rate-limits-{}",
+                observation.observed_at_epoch_ms
+            ),
+            "source_kind": "codex_app_server_account_rate_limits_read_v1",
+            "captured_at_epoch_ms": observation.observed_at_epoch_ms,
+        },
+        "captured_at_epoch_ms": observation.observed_at_epoch_ms,
+        "client_status_bar_rate_limits": build_status_bar_rate_limits_json(Some(observation)),
+    })
+}
+
+async fn persist_exact_client_limit_sample(
+    db: &Client,
+    observation: &CodexAppServerRateLimitsObservation,
+) -> Result<()> {
+    let payload = build_exact_client_limit_sample_payload(observation);
+    postgres::insert_observability_snapshot(db, EXACT_CLIENT_LIMIT_SAMPLE_SNAPSHOT_KIND, &payload)
+        .await?;
+    Ok(())
+}
+
+fn exact_client_limit_sample_from_surface(surface: &Value) -> Option<ExactClientLimitSample> {
+    if surface["status"].as_str() != Some("observed") {
+        return None;
+    }
+    let observed_at_epoch_ms = surface["observed_at_epoch_ms"]
+        .as_u64()
+        .or_else(|| surface["ended_at_epoch_ms"].as_u64())?;
+    let primary_used_percent = surface["primary_limit_used_percent"]
+        .as_f64()
+        .or_else(|| {
+            surface["primary_limit_used_percent"]
+                .as_u64()
+                .map(|value| value as f64)
+        })?;
+    let secondary_used_percent = surface["secondary_limit_used_percent"]
+        .as_f64()
+        .or_else(|| {
+            surface["secondary_limit_used_percent"]
+                .as_u64()
+                .map(|value| value as f64)
+        })?;
+    let source = surface["source"]
+        .as_str()
+        .unwrap_or("codex_app_server_account_rate_limits_read_v1")
+        .to_string();
+    Some(ExactClientLimitSample {
+        observed_at_epoch_ms,
+        primary_used_percent,
+        secondary_used_percent,
+        source,
+    })
+}
+
+fn exact_client_limit_sample_from_snapshot(row: &ObservabilitySnapshotRecord) -> Option<ExactClientLimitSample> {
+    exact_client_limit_sample_from_surface(&row.payload["client_status_bar_rate_limits"])
+}
+
+fn dedup_exact_client_limit_samples(
+    samples: impl IntoIterator<Item = ExactClientLimitSample>,
+) -> Vec<ExactClientLimitSample> {
+    let mut latest_by_observed = BTreeMap::<u64, ExactClientLimitSample>::new();
+    for sample in samples {
+        latest_by_observed.insert(sample.observed_at_epoch_ms, sample);
+    }
+    latest_by_observed.into_values().collect()
+}
+
+fn exact_client_limit_hourly_burn_value(
+    samples: &[ExactClientLimitSample],
+    now_epoch_ms: u64,
+    window_minutes: u64,
+    max_live_age_seconds: u64,
+    min_history_span_minutes: u64,
+) -> Value {
+    let window_minutes = window_minutes.max(1);
+    let max_live_age_seconds = max_live_age_seconds.max(1);
+    let min_history_span_minutes = min_history_span_minutes.min(window_minutes);
+    let target_start_epoch_ms = now_epoch_ms.saturating_sub(window_minutes * 60 * 1000);
+    let latest = match samples.last() {
+        Some(sample) => sample,
+        None => {
+            return json!({
+                "status": "missing",
+                "status_bar_correlated": true,
+                "source": "codex_app_server_account_rate_limits_read_v1",
+                "window_minutes": window_minutes,
+                "summary": "Exact history 5ч лимита ещё не materialized, поэтому hourly burn честно не посчитан.",
+                "reply_prefix": "5ч KPI: н/д",
+            });
+        }
+    };
+    let live_age_ms = now_epoch_ms.saturating_sub(latest.observed_at_epoch_ms);
+    if live_age_ms > max_live_age_seconds * 1000 {
+        return json!({
+            "status": "stale",
+            "status_bar_correlated": true,
+            "source": latest.source,
+            "window_minutes": window_minutes,
+            "latest_observed_at_epoch_ms": latest.observed_at_epoch_ms,
+            "latest_live_age_seconds": live_age_ms as f64 / 1000.0,
+            "summary": "Exact sample 5ч лимита устарел, поэтому hourly burn fail-closed не считается.",
+            "reply_prefix": "5ч KPI: н/д",
+        });
+    }
+    let start = match samples
+        .iter()
+        .min_by_key(|sample| sample.observed_at_epoch_ms.abs_diff(target_start_epoch_ms))
+    {
+        Some(sample) => sample,
+        None => {
+            return json!({
+                "status": "missing",
+                "status_bar_correlated": true,
+                "source": latest.source,
+                "window_minutes": window_minutes,
+                "summary": "Не удалось подобрать стартовый exact sample для расчёта hourly burn.",
+                "reply_prefix": "5ч KPI: н/д",
+            });
+        }
+    };
+    let actual_span_ms = latest
+        .observed_at_epoch_ms
+        .saturating_sub(start.observed_at_epoch_ms);
+    let actual_span_minutes = actual_span_ms as f64 / 60_000.0;
+    if actual_span_minutes + f64::EPSILON < min_history_span_minutes as f64 {
+        return json!({
+            "status": "insufficient_history",
+            "status_bar_correlated": true,
+            "source": latest.source,
+            "window_minutes": window_minutes,
+            "min_history_span_minutes": min_history_span_minutes,
+            "actual_history_span_minutes": actual_span_minutes,
+            "latest_observed_at_epoch_ms": latest.observed_at_epoch_ms,
+            "summary": "Ещё не набрана полная exact history для честного hourly burn 5ч лимита.",
+            "reply_prefix": "5ч KPI: н/д",
+        });
+    }
+    let primary_used_delta_percent = latest.primary_used_percent - start.primary_used_percent;
+    let secondary_used_delta_percent = latest.secondary_used_percent - start.secondary_used_percent;
+    let projected_primary_used_per_hour_percent =
+        if actual_span_minutes <= f64::EPSILON {
+            0.0
+        } else {
+            primary_used_delta_percent * 60.0 / actual_span_minutes
+        };
+    let ideal_primary_used_per_hour_percent = 20.0;
+    let ratio_to_ideal = if ideal_primary_used_per_hour_percent <= f64::EPSILON {
+        1.0
+    } else {
+        projected_primary_used_per_hour_percent / ideal_primary_used_per_hour_percent
+    };
+    let classification = if (ratio_to_ideal - 1.0).abs() <= 0.005 {
+        "one_to_one"
+    } else if ratio_to_ideal > 1.0 {
+        "overspend"
+    } else {
+        "saving"
+    };
+    let kpi_percent = match classification {
+        "overspend" => (ratio_to_ideal - 1.0) * 100.0,
+        "saving" => (1.0 - ratio_to_ideal) * 100.0,
+        _ => 0.0,
+    };
+    let reply_prefix = match classification {
+        "overspend" => format!("5ч KPI: переплата {kpi_percent:.2}%"),
+        "saving" => format!("5ч KPI: экономия {kpi_percent:.2}%"),
+        _ => "5ч KPI: 1:1".to_string(),
+    };
+    json!({
+        "status": "observed",
+        "status_bar_correlated": true,
+        "source": latest.source,
+        "window_minutes": window_minutes,
+        "min_history_span_minutes": min_history_span_minutes,
+        "latest_observed_at_epoch_ms": latest.observed_at_epoch_ms,
+        "latest_live_age_seconds": live_age_ms as f64 / 1000.0,
+        "actual_history_span_minutes": actual_span_minutes,
+        "start_sample": {
+            "observed_at_epoch_ms": start.observed_at_epoch_ms,
+            "primary_used_percent": start.primary_used_percent,
+            "secondary_used_percent": start.secondary_used_percent,
+        },
+        "end_sample": {
+            "observed_at_epoch_ms": latest.observed_at_epoch_ms,
+            "primary_used_percent": latest.primary_used_percent,
+            "secondary_used_percent": latest.secondary_used_percent,
+        },
+        "primary_used_delta_percent": primary_used_delta_percent,
+        "secondary_used_delta_percent": secondary_used_delta_percent,
+        "primary_remaining_delta_percent": -primary_used_delta_percent,
+        "secondary_remaining_delta_percent": -secondary_used_delta_percent,
+        "projected_primary_used_per_hour_percent": projected_primary_used_per_hour_percent,
+        "ideal_primary_used_per_hour_percent": ideal_primary_used_per_hour_percent,
+        "equivalent_5h_budget_minutes_per_hour": projected_primary_used_per_hour_percent * 3.0,
+        "classification": classification,
+        "kpi_percent": kpi_percent,
+        "reply_prefix": reply_prefix,
+        "summary": match classification {
+            "overspend" => format!(
+                "За последний час exact 5ч burn идёт быстрее нормы: {projected_primary_used_per_hour_percent:.2}%/ч против идеальных 20.00%/ч."
+            ),
+            "saving" => format!(
+                "За последний час exact 5ч burn идёт экономно: {projected_primary_used_per_hour_percent:.2}%/ч против идеальных 20.00%/ч."
+            ),
+            _ => format!(
+                "За последний час exact 5ч burn идёт почти один в один: {projected_primary_used_per_hour_percent:.2}%/ч против идеальных 20.00%/ч."
+            ),
+        },
+    })
+}
+
+async fn collect_exact_client_limit_hourly_burn(
+    db: &Client,
+    exact_observation: Option<&CodexAppServerRateLimitsObservation>,
+    window_minutes: u64,
+    max_live_age_seconds: u64,
+    min_history_span_minutes: u64,
+) -> Result<Value> {
+    if let Some(observation) = exact_observation {
+        persist_exact_client_limit_sample(db, observation).await?;
+    }
+    let rows = postgres::list_observability_snapshots_by_kinds(
+        db,
+        &[EXACT_CLIENT_LIMIT_SAMPLE_SNAPSHOT_KIND],
+        Some(2048),
+    )
+    .await?;
+    let mut samples = rows
+        .iter()
+        .filter_map(exact_client_limit_sample_from_snapshot)
+        .collect::<Vec<_>>();
+    if let Some(observation) = exact_observation {
+        if let Some(sample) =
+            exact_client_limit_sample_from_surface(&build_status_bar_rate_limits_json(Some(observation)))
+        {
+            samples.push(sample);
+        }
+    }
+    let samples = dedup_exact_client_limit_samples(samples);
+    let now_epoch_ms = exact_observation
+        .map(|observation| observation.observed_at_epoch_ms)
+        .unwrap_or_else(|| current_epoch_ms().unwrap_or_default() as u64);
+    Ok(exact_client_limit_hourly_burn_value(
+        &samples,
+        now_epoch_ms,
+        window_minutes,
+        max_live_age_seconds,
+        min_history_span_minutes,
+    ))
 }
 
 fn build_client_live_meter_json(
@@ -26366,5 +26669,49 @@ effective_to_epoch_ms = 2000
             .map(|event| event.event_id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(matched_ids, vec!["event-thread-turn", "event-context-pack"]);
+    }
+
+    #[test]
+    fn exact_client_limit_hourly_burn_value_classifies_saving() {
+        let samples = vec![
+            super::ExactClientLimitSample {
+                observed_at_epoch_ms: 1_000,
+                primary_used_percent: 10.0,
+                secondary_used_percent: 20.0,
+                source: "codex_app_server_account_rate_limits_read_v1".to_string(),
+            },
+            super::ExactClientLimitSample {
+                observed_at_epoch_ms: 3_601_000,
+                primary_used_percent: 20.0,
+                secondary_used_percent: 28.0,
+                source: "codex_app_server_account_rate_limits_read_v1".to_string(),
+            },
+        ];
+        let value = super::exact_client_limit_hourly_burn_value(&samples, 3_601_000, 60, 10, 55);
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["classification"].as_str(), Some("saving"));
+        assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: экономия 50.00%"));
+    }
+
+    #[test]
+    fn exact_client_limit_hourly_burn_value_classifies_one_to_one() {
+        let samples = vec![
+            super::ExactClientLimitSample {
+                observed_at_epoch_ms: 1_000,
+                primary_used_percent: 10.0,
+                secondary_used_percent: 20.0,
+                source: "codex_app_server_account_rate_limits_read_v1".to_string(),
+            },
+            super::ExactClientLimitSample {
+                observed_at_epoch_ms: 3_601_000,
+                primary_used_percent: 30.0,
+                secondary_used_percent: 35.0,
+                source: "codex_app_server_account_rate_limits_read_v1".to_string(),
+            },
+        ];
+        let value = super::exact_client_limit_hourly_burn_value(&samples, 3_601_000, 60, 10, 55);
+        assert_eq!(value["status"].as_str(), Some("observed"));
+        assert_eq!(value["classification"].as_str(), Some("one_to_one"));
+        assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: 1:1"));
     }
 }

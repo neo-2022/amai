@@ -169,6 +169,7 @@ pub enum ObserveCommand {
     SlaCheck,
     Guardrails,
     ClientBudgetGuard(ObserveClientBudgetGuardArgs),
+    ClientLimitHourlyBurn(ObserveClientLimitHourlyBurnArgs),
     TokenReport(ObserveTokenReportArgs),
     TokenEvidencePack(ObserveTokenEvidencePackArgs),
     TokenContractualSources(ObserveTokenContractualSourcesArgs),
@@ -189,6 +190,16 @@ pub enum ObserveCommand {
 pub struct ObserveClientBudgetGuardArgs {
     #[arg(long, default_value_t = false)]
     pub enforce_reply_gate: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveClientLimitHourlyBurnArgs {
+    #[arg(long, default_value_t = 60)]
+    pub window_minutes: u64,
+    #[arg(long, default_value_t = 10)]
+    pub max_live_age_seconds: u64,
+    #[arg(long, default_value_t = 55)]
+    pub min_history_span_minutes: u64,
 }
 
 #[derive(Debug, Subcommand)]

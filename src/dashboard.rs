@@ -1463,6 +1463,7 @@ pub fn render_html(refresh_ms: u64) -> String {
       client_live_full_turn_savings: ["client_live_full_turn_savings", "Amai в полном live-turn"],
       client_live_context: ["client_live_context", "Последний запрос клиента"],
       client_live_limit: ["client_live_limit", "Лимит клиента сейчас", "Последний observed лимит клиента"],
+      client_limit_hourly_burn: ["client_limit_hourly_burn", "5ч burn за последний час"],
     };
     const errorBanner = document.getElementById("error-banner");
     const tooltipLayer = document.getElementById("tooltip-layer");
@@ -7784,6 +7785,7 @@ fn metric_row_with_key(key: &str, label: &str, value: String, tooltip: Option<&s
 const CLIENT_LIVE_CONTEXT_ROW_KEY: &str = "client_live_context";
 const CLIENT_LIVE_FULL_TURN_SAVINGS_ROW_KEY: &str = "client_live_full_turn_savings";
 const CLIENT_LIVE_LIMIT_ROW_KEY: &str = "client_live_limit";
+const CLIENT_LIMIT_HOURLY_BURN_ROW_KEY: &str = "client_limit_hourly_burn";
 
 fn prefixed_metric_label(prefix: &str, metric: &str) -> String {
     if prefix.trim().is_empty() {
@@ -9153,6 +9155,88 @@ fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
     ))
 }
 
+fn client_limit_hourly_burn_metric_row(hourly_burn: &Value) -> Option<Value> {
+    let status = hourly_burn["status"].as_str().unwrap_or("missing");
+    let label = "5ч burn за последний час";
+    match status {
+        "observed" => {
+            let projected = hourly_burn["projected_primary_used_per_hour_percent"].as_f64();
+            let kpi_percent = hourly_burn["kpi_percent"].as_f64();
+            let classification = hourly_burn["classification"].as_str().unwrap_or("unknown");
+            let reply_prefix = hourly_burn["reply_prefix"]
+                .as_str()
+                .unwrap_or("5ч KPI: н/д");
+            let actual_span_minutes = hourly_burn["actual_history_span_minutes"]
+                .as_f64()
+                .unwrap_or(0.0);
+            let start_at = hourly_burn["start_sample"]["observed_at_epoch_ms"]
+                .as_u64()
+                .filter(|value| *value > 0)
+                .map(human_timestamp_clock)
+                .unwrap_or_else(|| "ещё нет данных".to_string());
+            let end_at = hourly_burn["end_sample"]["observed_at_epoch_ms"]
+                .as_u64()
+                .filter(|value| *value > 0)
+                .map(human_timestamp_clock)
+                .unwrap_or_else(|| "ещё нет данных".to_string());
+            let verdict = match classification {
+                "overspend" => format!(
+                    "Переплата к идеальным 20.00%/ч: {}.",
+                    format_percent(kpi_percent)
+                ),
+                "saving" => format!(
+                    "Экономия к идеальным 20.00%/ч: {}.",
+                    format_percent(kpi_percent)
+                ),
+                _ => "Идёт почти 1:1 к идеальным 20.00%/ч.".to_string(),
+            };
+            let tooltip = format!(
+                "Этот ряд считает exact burn 5ч лимита по тому же upstream source, что и VS Code status bar.\n- Start sample: {}\n- End sample: {}\n- Исторический span: {:.2} мин\n- Exact burn за час: {}\n- {}\n- Это и есть источник для короткого reply-prefix `{}'`.",
+                start_at,
+                end_at,
+                actual_span_minutes,
+                format_percent(projected),
+                verdict,
+                reply_prefix,
+            );
+            Some(metric_row_with_key(
+                CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
+                label,
+                format!(
+                    "{} · burn {}",
+                    reply_prefix,
+                    format_percent(projected)
+                ),
+                Some(tooltip.as_str()),
+            ))
+        }
+        "insufficient_history" => Some(metric_row_with_key(
+            CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
+            label,
+            "ещё набираю 1ч exact history".to_string(),
+            Some(
+                "Exact source для 5ч burn уже выбран правильно, но полного часового history span пока не хватает. До materialization полной истории KPI честно не считается.",
+            ),
+        )),
+        "stale" => Some(metric_row_with_key(
+            CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
+            label,
+            "exact burn устарел".to_string(),
+            Some(
+                "Последний exact sample 5ч лимита устарел, поэтому hourly burn fail-closed не считается.",
+            ),
+        )),
+        _ => Some(metric_row_with_key(
+            CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
+            label,
+            "exact burn ещё нет".to_string(),
+            Some(
+                "Exact history 5ч лимита ещё не materialized, поэтому hourly burn пока не посчитан.",
+            ),
+        )),
+    }
+}
+
 pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
     let nested_client_live_meter =
         &snapshot["token_budget_report"]["token_budget_report"]["client_live_meter"];
@@ -9168,6 +9252,13 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
     } else {
         &snapshot["token_budget_report"]["current_live_turn"]
     };
+    let nested_hourly_burn =
+        &snapshot["token_budget_report"]["token_budget_report"]["client_limit_hourly_burn"];
+    let client_limit_hourly_burn = if nested_hourly_burn.is_object() {
+        nested_hourly_burn
+    } else {
+        &snapshot["token_budget_report"]["client_limit_hourly_burn"]
+    };
     let mut rows = Vec::new();
     if let Some(row) = client_full_turn_savings_metric_row(
         client_live_meter,
@@ -9179,6 +9270,9 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
         rows.push(row);
     }
     if let Some(row) = client_live_limit_metric_row(client_live_meter) {
+        rows.push(row);
+    }
+    if let Some(row) = client_limit_hourly_burn_metric_row(client_limit_hourly_burn) {
         rows.push(row);
     }
     let live_status = if current_session_client_live_meter_available(client_live_meter)
@@ -9195,6 +9289,7 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
         "ended_at_epoch_ms": preferred_client_limit_observed_at_epoch_ms(client_live_meter)
             .map(Value::from)
             .unwrap_or_else(|| client_live_meter["ended_at_epoch_ms"].clone()),
+        "reply_prefix": client_limit_hourly_burn["reply_prefix"].clone(),
         "rows": rows,
     })
 }
@@ -13047,14 +13142,19 @@ mod tests {
                     "secondary_limit_remaining_percent": 63,
                     "secondary_limit_used_percent": 37,
                     "ended_at_epoch_ms": 1774683538000u64
+                },
+                "client_limit_hourly_burn": {
+                    "status": "insufficient_history",
+                    "reply_prefix": "5ч KPI: н/д"
                 }
             }
         });
         let payload = super::client_budget_live_payload(&snapshot);
         let rows = payload["rows"].as_array().expect("rows array");
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert_eq!(rows[0]["key"].as_str(), Some("client_live_full_turn_savings"));
         assert_eq!(rows[1]["key"].as_str(), Some("client_live_limit"));
+        assert_eq!(rows[2]["key"].as_str(), Some("client_limit_hourly_burn"));
         assert_eq!(
             rows[1]["label"].as_str(),
             Some("Последний observed лимит клиента")
@@ -13077,19 +13177,24 @@ mod tests {
                         "secondary_limit_used_percent": 42.0,
                         "secondary_limit_remaining_percent": 58.0
                     }
+                },
+                "client_limit_hourly_burn": {
+                    "status": "insufficient_history",
+                    "reply_prefix": "5ч KPI: н/д"
                 }
             }
         });
         let payload = super::client_budget_live_payload(&snapshot);
         let rows = payload["rows"].as_array().expect("rows array");
         assert_eq!(payload["status"], json!("observed"));
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["key"].as_str(), Some("client_live_limit"));
         assert_eq!(rows[0]["label"].as_str(), Some("Лимит клиента сейчас"));
         assert!(rows[0]["value"]
             .as_str()
             .unwrap_or_default()
             .contains("5ч остаётся 61.00%, 7д остаётся 58.00%"));
+        assert_eq!(rows[1]["key"].as_str(), Some("client_limit_hourly_burn"));
     }
 
     #[test]
@@ -14832,5 +14937,64 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("Сейчас индексируется репозиторий Amai"));
+    }
+
+    #[test]
+    fn client_budget_live_payload_surfaces_hourly_burn_reply_prefix() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "client_live_meter": {
+                        "status": "observed",
+                        "current_thread_bound": true,
+                        "thread_binding_state": "current_thread_bound",
+                        "ended_at_epoch_ms": 1000,
+                        "client_turn_total_tokens": 1000,
+                        "latest_model_context_window": 2000,
+                        "context_used_percent": 50.0,
+                        "primary_limit_used_percent": 57.0,
+                        "primary_limit_remaining_percent": 43.0,
+                        "secondary_limit_used_percent": 77.0,
+                        "secondary_limit_remaining_percent": 23.0,
+                        "status_bar_rate_limits": {
+                            "status": "observed",
+                            "source": "codex_app_server_account_rate_limits_read_v1",
+                            "observed_at_epoch_ms": 2000,
+                            "primary_limit_used_percent": 57.0,
+                            "primary_limit_remaining_percent": 43.0,
+                            "secondary_limit_used_percent": 77.0,
+                            "secondary_limit_remaining_percent": 23.0
+                        }
+                    },
+                    "current_live_turn": {
+                        "exact_pair_available": false
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "observed",
+                        "classification": "saving",
+                        "reply_prefix": "5ч KPI: экономия 50.00%",
+                        "projected_primary_used_per_hour_percent": 10.0,
+                        "kpi_percent": 50.0,
+                        "actual_history_span_minutes": 60.0,
+                        "start_sample": {
+                            "observed_at_epoch_ms": 1000
+                        },
+                        "end_sample": {
+                            "observed_at_epoch_ms": 2000
+                        }
+                    }
+                }
+            }
+        });
+
+        let payload = super::client_budget_live_payload(&snapshot);
+        assert_eq!(
+            payload["reply_prefix"].as_str(),
+            Some("5ч KPI: экономия 50.00%")
+        );
+        let rows = payload["rows"].as_array().expect("rows");
+        assert!(rows.iter().any(|row| {
+            row["key"].as_str() == Some(super::CLIENT_LIMIT_HOURLY_BURN_ROW_KEY)
+        }));
     }
 }
