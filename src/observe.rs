@@ -55,6 +55,7 @@ struct CachedClientLiveMeterState {
 }
 
 const SNAPSHOT_RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
+const CLIENT_LIMIT_TREND_ANALYSIS_INTERVAL: Duration = Duration::from_secs(900);
 
 #[derive(Debug, Clone, Deserialize)]
 struct ObservabilityProfile {
@@ -338,6 +339,20 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
             }
         }
     });
+    let trend_cfg = cfg.clone();
+    tokio::spawn(async move {
+        if let Err(error) = persist_periodic_client_limit_trend_analysis(&trend_cfg).await {
+            eprintln!("client limit trend analysis refresh failed: {error:#}");
+        }
+        let mut interval = tokio::time::interval(CLIENT_LIMIT_TREND_ANALYSIS_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) = persist_periodic_client_limit_trend_analysis(&trend_cfg).await {
+                eprintln!("client limit trend analysis refresh failed: {error:#}");
+            }
+        }
+    });
     let addr: SocketAddr = bind
         .parse()
         .with_context(|| format!("invalid observe bind address: {bind}"))?;
@@ -375,6 +390,20 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
     axum::serve(listener, app)
         .await
         .context("observe exporter stopped unexpectedly")
+}
+
+async fn persist_periodic_client_limit_trend_analysis(cfg: &AppConfig) -> Result<()> {
+    let db = postgres::connect_admin(cfg).await?;
+    postgres::bootstrap_schema(&db, cfg).await?;
+    let _ = token_budget::collect_exact_client_limit_trend_analysis(
+        &db,
+        300,
+        10,
+        token_budget::DEFAULT_CLIENT_LIMIT_TREND_ANALYSIS_LOOKBACK_MINUTES,
+        true,
+    )
+    .await?;
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]

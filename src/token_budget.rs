@@ -1,7 +1,7 @@
 use crate::cli::{
-    ContextPackArgs, ObserveClientLimitHourlyBurnArgs, ObserveTokenAdjustmentAddArgs,
-    ObserveTokenAdjustmentRegistryArgs, ObserveTokenContractualSourcesArgs,
-    ObserveTokenEvidencePackArgs, ObserveTokenReportArgs,
+    ContextPackArgs, ObserveClientLimitHourlyBurnArgs, ObserveClientLimitTrendAnalysisArgs,
+    ObserveTokenAdjustmentAddArgs, ObserveTokenAdjustmentRegistryArgs,
+    ObserveTokenContractualSourcesArgs, ObserveTokenEvidencePackArgs, ObserveTokenReportArgs,
     ObserveTokenRolloutAssistantGenerationArgs, ObserveTokenStatementExportArgs,
     ObserveTokenWholeCycleAttachArgs, ObserveTokenWholeCycleTurnAttachArgs,
 };
@@ -38,9 +38,11 @@ const CONTINUITY_SNAPSHOT_QUERY_LABEL: &str = "Continuity snapshot";
 const CONTINUITY_PRE_AMAI_BASELINE_STRATEGY: &str = "truthful_pre_amai_continuity_summaries_v1";
 const DASHBOARD_EXACT_CLIENT_LIMITS_SOURCE_TTL_MS: u64 = 3_000;
 const EXACT_CLIENT_LIMIT_SAMPLE_SNAPSHOT_KIND: &str = "client_status_bar_rate_limits";
+const CLIENT_LIMIT_TREND_ANALYSIS_SNAPSHOT_KIND: &str = "client_limit_hourly_burn_trend";
 const DEFAULT_CLIENT_LIMIT_HOURLY_BURN_WINDOW_MINUTES: u64 = 60;
 const DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MAX_LIVE_AGE_SECONDS: u64 = 10;
 const DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MIN_HISTORY_SPAN_MINUTES: u64 = 55;
+pub const DEFAULT_CLIENT_LIMIT_TREND_ANALYSIS_LOOKBACK_MINUTES: u64 = 15;
 const TOOL_OVERHEAD_SECONDARY_CONTEXT_PACK_MATCH_MAX_DELTA_MS: i64 = 5_000;
 const CLI_CONTEXT_PACK_TOOL_OVERHEAD_CONTRACT_VERSION: &str =
     "context_pack_cli_model_visible_output_v2";
@@ -6821,6 +6823,22 @@ pub async fn print_client_limit_hourly_burn(
     Ok(())
 }
 
+pub async fn print_client_limit_trend_analysis(
+    db: &Client,
+    args: &ObserveClientLimitTrendAnalysisArgs,
+) -> Result<()> {
+    let analysis = collect_exact_client_limit_trend_analysis(
+        db,
+        args.window_minutes,
+        args.max_live_age_seconds,
+        args.lookback_minutes,
+        args.persist_snapshot,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&analysis)?);
+    Ok(())
+}
+
 fn select_scope_events(
     events: &[TokenBudgetEvent],
     profile: &ResolvedProfile,
@@ -8674,6 +8692,230 @@ async fn collect_exact_client_limit_hourly_burn(
         max_live_age_seconds,
         min_history_span_minutes,
     ))
+}
+
+fn exact_client_limit_hourly_burn_point(
+    sample: &ExactClientLimitSample,
+    window_minutes: u64,
+) -> Value {
+    exact_client_limit_hourly_burn_value(
+        std::slice::from_ref(sample),
+        sample.observed_at_epoch_ms,
+        window_minutes,
+        DEFAULT_CLIENT_LIMIT_HOURLY_BURN_MAX_LIVE_AGE_SECONDS,
+        0,
+    )
+}
+
+fn client_limit_trend_score(classification: Option<&str>, kpi_percent: f64) -> f64 {
+    match classification {
+        Some("saving") => kpi_percent,
+        Some("overspend") => -kpi_percent,
+        Some("one_to_one") => 0.0,
+        _ => 0.0,
+    }
+}
+
+fn client_limit_trend_direction(
+    first_classification: Option<&str>,
+    first_kpi_percent: f64,
+    last_classification: Option<&str>,
+    last_kpi_percent: f64,
+) -> &'static str {
+    let delta = client_limit_trend_score(last_classification, last_kpi_percent)
+        - client_limit_trend_score(first_classification, first_kpi_percent);
+    if delta > 0.25 {
+        "toward_saving"
+    } else if delta < -0.25 {
+        "away_from_saving"
+    } else {
+        "stable"
+    }
+}
+
+fn build_exact_client_limit_trend_analysis_value(
+    samples: &[ExactClientLimitSample],
+    now_epoch_ms: u64,
+    window_minutes: u64,
+    max_live_age_seconds: u64,
+    lookback_minutes: u64,
+) -> Value {
+    let latest = match samples.last() {
+        Some(sample) => sample,
+        None => {
+            return json!({
+                "status": "missing",
+                "source": "codex_app_server_account_rate_limits_read_v1",
+                "status_bar_correlated": true,
+                "analysis_window_minutes": lookback_minutes,
+                "summary": "История exact 5ч samples пока пуста, поэтому тренд не посчитан.",
+            });
+        }
+    };
+    let latest_point = exact_client_limit_hourly_burn_value(
+        samples,
+        now_epoch_ms,
+        window_minutes,
+        max_live_age_seconds,
+        0,
+    );
+    if latest_point["status"].as_str() != Some("observed") {
+        return json!({
+            "status": latest_point["status"].clone(),
+            "source": latest_point["source"].clone(),
+            "status_bar_correlated": true,
+            "analysis_window_minutes": lookback_minutes,
+            "latest_observed_at_epoch_ms": latest_point["latest_observed_at_epoch_ms"].clone(),
+            "summary": "Последняя exact точка 5ч KPI сейчас не пригодна для тренд-анализа.",
+            "latest_point": latest_point,
+        });
+    }
+    let lookback_start_epoch_ms = latest
+        .observed_at_epoch_ms
+        .saturating_sub(lookback_minutes.saturating_mul(60_000));
+    let trend_samples = samples
+        .iter()
+        .filter(|sample| sample.observed_at_epoch_ms >= lookback_start_epoch_ms)
+        .cloned()
+        .collect::<Vec<_>>();
+    if trend_samples.len() < 2 {
+        return json!({
+            "status": "insufficient_history",
+            "source": latest_point["source"].clone(),
+            "status_bar_correlated": true,
+            "analysis_window_minutes": lookback_minutes,
+            "latest_observed_at_epoch_ms": latest.observed_at_epoch_ms,
+            "sample_count": trend_samples.len(),
+            "summary": format!(
+                "За последние {} мин пока меньше двух exact samples, поэтому направление KPI ещё не доказывается.",
+                lookback_minutes
+            ),
+            "latest_point": latest_point,
+        });
+    }
+    let first = trend_samples.first().expect("first trend sample");
+    let last = trend_samples.last().expect("last trend sample");
+    let first_point = exact_client_limit_hourly_burn_point(first, window_minutes);
+    let last_point = exact_client_limit_hourly_burn_point(last, window_minutes);
+    let first_kpi_percent = first_point["kpi_percent"].as_f64().unwrap_or(0.0);
+    let last_kpi_percent = last_point["kpi_percent"].as_f64().unwrap_or(0.0);
+    let first_classification = first_point["classification"].as_str();
+    let last_classification = last_point["classification"].as_str();
+    let direction = client_limit_trend_direction(
+        first_classification,
+        first_kpi_percent,
+        last_classification,
+        last_kpi_percent,
+    );
+    let direction_summary = match direction {
+        "toward_saving" => "KPI движется в сторону экономии.",
+        "away_from_saving" => "KPI уходит от экономии и становится дороже.",
+        _ => "KPI почти не меняет направление.",
+    };
+    let span_minutes =
+        (last.observed_at_epoch_ms.saturating_sub(first.observed_at_epoch_ms)) as f64 / 60_000.0;
+    let delta_kpi_percent = last_kpi_percent - first_kpi_percent;
+    json!({
+        "status": "observed",
+        "source": latest_point["source"].clone(),
+        "status_bar_correlated": true,
+        "analysis_window_minutes": lookback_minutes,
+        "analysis_span_minutes": span_minutes,
+        "sample_count": trend_samples.len(),
+        "first_observed_at_epoch_ms": first.observed_at_epoch_ms,
+        "last_observed_at_epoch_ms": last.observed_at_epoch_ms,
+        "first_reply_prefix": first_point["reply_prefix"].clone(),
+        "last_reply_prefix": last_point["reply_prefix"].clone(),
+        "first_classification": first_point["classification"].clone(),
+        "last_classification": last_point["classification"].clone(),
+        "first_kpi_percent": first_kpi_percent,
+        "last_kpi_percent": last_kpi_percent,
+        "delta_kpi_percent": delta_kpi_percent,
+        "trend_direction": direction,
+        "summary": format!(
+            "{} За последние {:.2} мин KPI был `{}` и стал `{}` (delta {:+.2} п.п.).",
+            direction_summary,
+            span_minutes,
+            first_point["reply_prefix"].as_str().unwrap_or("5ч KPI: н/д"),
+            last_point["reply_prefix"].as_str().unwrap_or("5ч KPI: н/д"),
+            delta_kpi_percent
+        ),
+        "latest_point": latest_point,
+    })
+}
+
+fn build_client_limit_trend_analysis_snapshot_payload(analysis: &Value) -> Value {
+    let captured_at_epoch_ms = analysis["last_observed_at_epoch_ms"]
+        .as_u64()
+        .or_else(|| analysis["latest_observed_at_epoch_ms"].as_u64())
+        .unwrap_or_default();
+    let lookback_minutes = analysis["analysis_window_minutes"].as_u64().unwrap_or_default();
+    json!({
+        "_observability": {
+            "source_event_id": format!(
+                "client-limit-hourly-burn-trend-{}-{}",
+                lookback_minutes,
+                captured_at_epoch_ms
+            ),
+            "source_kind": "client_limit_hourly_burn_trend_v1",
+            "captured_at_epoch_ms": captured_at_epoch_ms,
+        },
+        "captured_at_epoch_ms": captured_at_epoch_ms,
+        "client_limit_hourly_burn_trend": analysis.clone(),
+    })
+}
+
+async fn persist_client_limit_trend_analysis_snapshot(db: &Client, analysis: &Value) -> Result<()> {
+    let payload = build_client_limit_trend_analysis_snapshot_payload(analysis);
+    postgres::insert_observability_snapshot(db, CLIENT_LIMIT_TREND_ANALYSIS_SNAPSHOT_KIND, &payload)
+        .await?;
+    Ok(())
+}
+
+pub async fn collect_exact_client_limit_trend_analysis(
+    db: &Client,
+    window_minutes: u64,
+    max_live_age_seconds: u64,
+    lookback_minutes: u64,
+    persist_snapshot: bool,
+) -> Result<Value> {
+    let exact_observation = dashboard_exact_client_rate_limits_observation().await?;
+    if let Some(observation) = exact_observation.as_ref() {
+        persist_exact_client_limit_sample(db, observation).await?;
+    }
+    let rows = postgres::list_observability_snapshots_by_kinds(
+        db,
+        &[EXACT_CLIENT_LIMIT_SAMPLE_SNAPSHOT_KIND],
+        Some(2048),
+    )
+    .await?;
+    let mut samples = rows
+        .iter()
+        .filter_map(exact_client_limit_sample_from_snapshot)
+        .collect::<Vec<_>>();
+    if let Some(observation) = exact_observation.as_ref() {
+        if let Some(sample) =
+            exact_client_limit_sample_from_surface(&build_status_bar_rate_limits_json(Some(observation)))
+        {
+            samples.push(sample);
+        }
+    }
+    let samples = dedup_exact_client_limit_samples(samples);
+    let now_epoch_ms = exact_observation
+        .as_ref()
+        .map(|observation| observation.observed_at_epoch_ms)
+        .unwrap_or_else(|| current_epoch_ms().unwrap_or_default() as u64);
+    let analysis = build_exact_client_limit_trend_analysis_value(
+        &samples,
+        now_epoch_ms,
+        window_minutes,
+        max_live_age_seconds,
+        lookback_minutes,
+    );
+    if persist_snapshot {
+        persist_client_limit_trend_analysis_snapshot(db, &analysis).await?;
+    }
+    Ok(analysis)
 }
 
 fn build_client_live_meter_json(
@@ -18863,26 +19105,6 @@ pub(crate) fn render_context_pack_prompt(payload: &Value) -> String {
 
 fn render_same_thread_cache_reuse_prompt(payload: &Value) -> String {
     let mut prompt = String::new();
-    prompt.push_str("Q:");
-    prompt.push_str(payload["query"].as_str().unwrap_or_default());
-    prompt.push('\n');
-    prompt.push_str("M:");
-    prompt.push_str(
-        payload["effective_retrieval_mode"]
-            .as_str()
-            .unwrap_or_default(),
-    );
-    prompt.push('\n');
-    prompt.push_str("P\n");
-    for project in payload["visible_projects"].as_array().into_iter().flatten() {
-        prompt.push('[');
-        prompt.push_str(project["project_code"].as_str().unwrap_or_default());
-        prompt.push_str("] ");
-        prompt.push_str(project["repo_root"].as_str().unwrap_or_default());
-        prompt.push('\n');
-    }
-    prompt.push('\n');
-
     let mut reuse_lines = Vec::new();
     if let Some(context_pack_id) = payload["cache_reuse_reference"]["source_context_pack_id"]
         .as_str()
@@ -26715,5 +26937,29 @@ effective_to_epoch_ms = 2000
         assert_eq!(value["status"].as_str(), Some("observed"));
         assert_eq!(value["classification"].as_str(), Some("overspend"));
         assert_eq!(value["reply_prefix"].as_str(), Some("5ч KPI: переплата 50.00%"));
+    }
+
+    #[test]
+    fn client_limit_trend_direction_marks_overspend_growth_as_away_from_saving() {
+        assert_eq!(
+            super::client_limit_trend_direction(Some("overspend"), 35.0, Some("overspend"), 42.0),
+            "away_from_saving"
+        );
+    }
+
+    #[test]
+    fn client_limit_trend_direction_marks_overspend_drop_as_toward_saving() {
+        assert_eq!(
+            super::client_limit_trend_direction(Some("overspend"), 42.0, Some("overspend"), 35.0),
+            "toward_saving"
+        );
+    }
+
+    #[test]
+    fn client_limit_trend_direction_marks_stronger_saving_as_toward_saving() {
+        assert_eq!(
+            super::client_limit_trend_direction(Some("saving"), 12.0, Some("saving"), 28.0),
+            "toward_saving"
+        );
     }
 }

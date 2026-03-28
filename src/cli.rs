@@ -170,6 +170,7 @@ pub enum ObserveCommand {
     Guardrails,
     ClientBudgetGuard(ObserveClientBudgetGuardArgs),
     ClientLimitHourlyBurn(ObserveClientLimitHourlyBurnArgs),
+    ClientLimitTrendAnalysis(ObserveClientLimitTrendAnalysisArgs),
     TokenReport(ObserveTokenReportArgs),
     TokenEvidencePack(ObserveTokenEvidencePackArgs),
     TokenContractualSources(ObserveTokenContractualSourcesArgs),
@@ -200,6 +201,18 @@ pub struct ObserveClientLimitHourlyBurnArgs {
     pub max_live_age_seconds: u64,
     #[arg(long, default_value_t = 55)]
     pub min_history_span_minutes: u64,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveClientLimitTrendAnalysisArgs {
+    #[arg(long, default_value_t = 15)]
+    pub lookback_minutes: u64,
+    #[arg(long, default_value_t = 300)]
+    pub window_minutes: u64,
+    #[arg(long, default_value_t = 10)]
+    pub max_live_age_seconds: u64,
+    #[arg(long, default_value_t = false)]
+    pub persist_snapshot: bool,
 }
 
 #[derive(Debug, Subcommand)]

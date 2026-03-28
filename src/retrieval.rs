@@ -579,16 +579,6 @@ fn model_visible_same_thread_cache_reuse_payload(payload: &Value) -> Value {
         "namespace": {
             "code": payload["namespace"]["code"].clone(),
         },
-        "query": payload["query"].clone(),
-        "effective_retrieval_mode": payload["effective_retrieval_mode"].clone(),
-        "visible_projects": compact_visible_projects(&payload["visible_projects"]),
-        "decision_trace": compact_decision_trace(&payload["decision_trace"]),
-        "retrieval": {
-            "exact_documents": metadata_only_exact_documents(&payload["retrieval"]["exact_documents"]),
-            "symbol_hits": compact_symbol_hits(&payload["retrieval"]["symbol_hits"]),
-            "lexical_chunks": metadata_only_chunk_refs(&payload["retrieval"]["lexical_chunks"]),
-            "semantic_chunks": metadata_only_chunk_refs(&payload["retrieval"]["semantic_chunks"]),
-        },
         "cache_reuse_reference": compact_cache_reuse_reference(&payload["cache_reuse_reference"]),
     })
 }
@@ -597,13 +587,34 @@ fn compact_cache_reuse_reference(value: &Value) -> Value {
     if !value.is_object() {
         return Value::Null;
     }
-    json!({
+    let active_files = value["active_files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    let retrieval_counts = json!({
+        "exact_documents": value["retrieval_counts"]["exact_documents"].as_u64().unwrap_or(0),
+        "symbol_hits": value["retrieval_counts"]["symbol_hits"].as_u64().unwrap_or(0),
+        "lexical_chunks": value["retrieval_counts"]["lexical_chunks"].as_u64().unwrap_or(0),
+        "semantic_chunks": value["retrieval_counts"]["semantic_chunks"].as_u64().unwrap_or(0),
+    });
+    let has_non_zero_counts = retrieval_counts
+        .as_object()
+        .is_some_and(|items| items.values().any(|item| item.as_u64().unwrap_or(0) > 0));
+    let mut compact = json!({
         "state": value["state"].clone(),
         "source_context_pack_id": value["source_context_pack_id"].clone(),
-        "active_files": value["active_files"].clone(),
-        "retrieval_counts": value["retrieval_counts"].clone(),
-        "note": value["note"].clone(),
-    })
+    });
+    if let Some(object) = compact.as_object_mut() {
+        if !active_files.is_empty() {
+            object.insert("active_files".to_string(), json!(active_files));
+        }
+        if has_non_zero_counts {
+            object.insert("retrieval_counts".to_string(), retrieval_counts);
+        }
+    }
+    compact
 }
 
 fn compact_visible_projects(value: &Value) -> Vec<Value> {
@@ -3419,16 +3430,11 @@ mod tests {
             compact["cache_reuse_reference"]["source_context_pack_id"].as_str(),
             Some("ctx-reuse-visible")
         );
-        assert_eq!(
-            compact["retrieval"]["lexical_chunks"][0]["relative_path"].as_str(),
-            Some("docs/continuity.md")
-        );
-        assert!(
-            compact["retrieval"]["lexical_chunks"][0]
-                .get("content")
-                .is_none()
-        );
-        assert!(compact["decision_trace"]["included"][0].get("reason").is_none());
+        assert_eq!(compact["project"]["code"].as_str(), Some("art"));
+        assert_eq!(compact["namespace"]["code"].as_str(), Some("continuity"));
+        assert!(compact.get("retrieval").is_none());
+        assert!(compact.get("decision_trace").is_none());
+        assert!(compact.get("query").is_none());
     }
 
     #[test]
