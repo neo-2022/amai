@@ -299,26 +299,81 @@ fn with_whole_cycle_observed_overrides(payload: &Value, args: &ContextPackArgs) 
 }
 
 pub(crate) fn model_visible_context_pack_payload(payload: &Value) -> Value {
+    let (lexical_chunks, semantic_chunks) = compact_retrieval_chunks(&payload["retrieval"]);
     json!({
         "context_pack_id": payload["context_pack_id"].clone(),
         "project": {
             "code": payload["project"]["code"].clone(),
-            "display_name": payload["project"]["display_name"].clone(),
         },
         "namespace": {
             "code": payload["namespace"]["code"].clone(),
-            "display_name": payload["namespace"]["display_name"].clone(),
         },
         "query": payload["query"].clone(),
         "effective_retrieval_mode": payload["effective_retrieval_mode"].clone(),
-        "visible_projects": payload["visible_projects"].clone(),
-        "decision_trace": payload["decision_trace"].clone(),
+        "visible_projects": compact_visible_projects(&payload["visible_projects"]),
+        "decision_trace": compact_decision_trace(&payload["decision_trace"]),
         "retrieval": {
             "exact_documents": compact_exact_documents(&payload["retrieval"]["exact_documents"]),
             "symbol_hits": compact_symbol_hits(&payload["retrieval"]["symbol_hits"]),
-            "lexical_chunks": compact_chunks(&payload["retrieval"]["lexical_chunks"]),
-            "semantic_chunks": compact_chunks(&payload["retrieval"]["semantic_chunks"]),
+            "lexical_chunks": lexical_chunks,
+            "semantic_chunks": semantic_chunks,
         }
+    })
+}
+
+fn compact_visible_projects(value: &Value) -> Vec<Value> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| {
+            json!({
+                "project_code": item["project_code"].clone(),
+            })
+        })
+        .collect()
+}
+
+fn compact_decision_trace(value: &Value) -> Value {
+    json!({
+        "scope": {
+            "effective_retrieval_mode": value["scope"]["effective_retrieval_mode"].clone(),
+            "project_code": value["scope"]["project_code"].clone(),
+            "namespace_code": value["scope"]["namespace_code"].clone(),
+            "visible_projects_total": value["scope"]["visible_projects_total"].clone(),
+        },
+        "selection_priority": value["selection_priority"].clone(),
+        "included": compact_decision_trace_items(&value["included"]),
+        "not_included": compact_decision_trace_items(&value["not_included"]),
+        "semantic_guard": compact_semantic_guard(&value["semantic_guard"]),
+    })
+}
+
+fn compact_decision_trace_items(value: &Value) -> Vec<Value> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| {
+            json!({
+                "strategy": item["strategy"].clone(),
+                "count": item["count"].clone(),
+            })
+        })
+        .collect()
+}
+
+fn compact_semantic_guard(value: &Value) -> Value {
+    if !value.is_object() {
+        return Value::Null;
+    }
+    json!({
+        "abstained": value["abstained"].clone(),
+        "accepted_hits": value["accepted_hits"].clone(),
+        "rejected_hits": value["rejected_hits"].clone(),
+        "lexical_signal_count": value["lexical_signal_count"].clone(),
+        "query_terms": value["query_terms"].clone(),
+        "reason": value["reason"].clone(),
     })
 }
 
@@ -336,6 +391,13 @@ fn compact_exact_documents(value: &Value) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn compact_retrieval_chunks(retrieval: &Value) -> (Vec<Value>, Vec<Value>) {
+    let mut seen_signatures = HashSet::new();
+    let lexical_chunks = compact_chunks(&retrieval["lexical_chunks"], &mut seen_signatures);
+    let semantic_chunks = compact_chunks(&retrieval["semantic_chunks"], &mut seen_signatures);
+    (lexical_chunks, semantic_chunks)
 }
 
 fn compact_symbol_hits(value: &Value) -> Vec<Value> {
@@ -357,11 +419,21 @@ fn compact_symbol_hits(value: &Value) -> Vec<Value> {
         .collect()
 }
 
-fn compact_chunks(value: &Value) -> Vec<Value> {
+fn compact_chunks(
+    value: &Value,
+    seen_signatures: &mut HashSet<String>,
+) -> Vec<Value> {
     value
         .as_array()
         .into_iter()
         .flatten()
+        .filter_map(|item| {
+            let signature = compact_chunk_signature(item)?;
+            if !seen_signatures.insert(signature) {
+                return None;
+            }
+            Some(item)
+        })
         .map(|item| {
             json!({
                 "project_code": item["project_code"].clone(),
@@ -373,6 +445,19 @@ fn compact_chunks(value: &Value) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn compact_chunk_signature(item: &Value) -> Option<String> {
+    let project_code = item["project_code"]
+        .as_str()
+        .or_else(|| item["provenance"]["source_project"].as_str())
+        .unwrap_or_default();
+    let relative_path = item["relative_path"].as_str().unwrap_or_default();
+    let content = item["content"].as_str().unwrap_or_default();
+    if project_code.is_empty() && relative_path.is_empty() && content.is_empty() {
+        return None;
+    }
+    Some(format!("{project_code}\u{1f}{relative_path}\u{1f}{content}"))
 }
 
 pub fn try_execute_context_pack_fast_cached(
@@ -2529,6 +2614,13 @@ mod tests {
         assert_eq!(compact["context_pack_id"].as_str(), Some("ctx-1"));
         assert_eq!(compact["project"]["code"].as_str(), Some("art"));
         assert_eq!(compact["namespace"]["code"].as_str(), Some("continuity"));
+        assert!(compact["project"].get("display_name").is_none());
+        assert!(compact["namespace"].get("display_name").is_none());
+        assert_eq!(
+            compact["visible_projects"][0]["project_code"].as_str(),
+            Some("art")
+        );
+        assert!(compact["visible_projects"][0].get("repo_root").is_none());
         assert_eq!(
             compact["retrieval"]["exact_documents"][0]["relative_path"].as_str(),
             Some(".amai-continuity/live-handoff.md")
@@ -2545,6 +2637,8 @@ mod tests {
             compact["retrieval"]["symbol_hits"][0]["name"].as_str(),
             Some("build_context_pack")
         );
+        assert!(compact["decision_trace"]["included"][0].get("reason").is_none());
+        assert!(compact["decision_trace"]["semantic_guard"].get("detail").is_none());
         assert!(compact.get("workspace_graph").is_none());
         assert!(compact.get("retrieval_runtime").is_none());
         assert!(compact["retrieval"]["exact_documents"][0].get("score").is_none());
@@ -2567,6 +2661,83 @@ mod tests {
             serde_json::to_string(&compact).expect("compact json").len()
                 < serde_json::to_string(&payload).expect("full json").len()
         );
+    }
+
+    #[test]
+    fn model_visible_context_pack_payload_dedupes_duplicate_semantic_chunks_only() {
+        let payload = json!({
+            "context_pack_id": "ctx-dup",
+            "project": {
+                "code": "art",
+                "display_name": "Art",
+            },
+            "namespace": {
+                "code": "continuity",
+                "display_name": "Continuity"
+            },
+            "query": "Continuity snapshot",
+            "effective_retrieval_mode": "local_strict",
+            "visible_projects": [{
+                "project_code": "art",
+                "repo_root": "/home/art/Art"
+            }],
+            "decision_trace": {
+                "scope": {"effective_retrieval_mode": "local_strict"},
+                "selection_priority": ["exact_documents", "lexical_chunks", "semantic_chunks"],
+                "included": [{
+                    "strategy": "lexical_chunks",
+                    "count": 1,
+                    "reason": "verbose reason"
+                }],
+                "not_included": [{
+                    "strategy": "symbol_hits",
+                    "reason": "verbose miss reason"
+                }],
+                "semantic_guard": {
+                    "abstained": false,
+                    "accepted_hits": 1,
+                    "rejected_hits": 0,
+                    "lexical_signal_count": 2,
+                    "query_terms": ["continuity", "snapshot"],
+                    "reason": "no_vector_points_in_scope",
+                    "detail": "verbose detail"
+                }
+            },
+            "retrieval": {
+                "exact_documents": [{
+                    "project_code": "art",
+                    "relative_path": "docs/continuity.md",
+                    "snippet": "same excerpt",
+                    "source_kind": "docs"
+                }],
+                "symbol_hits": [],
+                "lexical_chunks": [{
+                    "project_code": "art",
+                    "relative_path": "docs/continuity.md",
+                    "content": "same excerpt",
+                    "provenance": {
+                        "source_project": "art",
+                    }
+                }],
+                "semantic_chunks": [{
+                    "project_code": "art",
+                    "relative_path": "docs/continuity.md",
+                    "content": "same excerpt",
+                    "provenance": {
+                        "source_project": "art",
+                    }
+                }]
+            }
+        });
+
+        let compact = model_visible_context_pack_payload(&payload);
+
+        assert_eq!(compact["retrieval"]["exact_documents"].as_array().unwrap().len(), 1);
+        assert_eq!(compact["retrieval"]["lexical_chunks"].as_array().unwrap().len(), 1);
+        assert_eq!(compact["retrieval"]["semantic_chunks"].as_array().unwrap().len(), 0);
+        assert!(compact["decision_trace"]["included"][0].get("reason").is_none());
+        assert!(compact["decision_trace"]["not_included"][0].get("reason").is_none());
+        assert!(compact["decision_trace"]["semantic_guard"].get("detail").is_none());
     }
 
     #[test]
