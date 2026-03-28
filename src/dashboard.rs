@@ -5475,6 +5475,7 @@ fn truth_only_token_card_labels(title: &str) -> &'static [&'static str] {
         "Экономия токенов за текущую сессию" => &[
             "Amai в полном live-turn",
             "Экономия токенов модели",
+            "Главный драйвер exact-пары",
             "Совпадение с реальным лимитом",
             "Последний запрос клиента",
             "Лимит клиента сейчас",
@@ -5506,6 +5507,9 @@ fn humanize_token_card_row_label<'a>(title: &str, label: &'a str) -> &'a str {
         | ("Экономия токенов за рабочее окно", "Экономия токенов модели")
         | ("Экономия токенов за всё время записи", "Экономия токенов модели") => {
             "Экономия на учтённой части"
+        }
+        ("Экономия токенов за текущую сессию", "Главный драйвер exact-пары") => {
+            "Что именно посчитано"
         }
         (_, "Совпадение с реальным лимитом") => "Точность учтённой части",
         (_, "Последний запрос клиента") => "Последний запрос в модель",
@@ -5573,6 +5577,9 @@ fn humanize_full_turn_savings_value(value: &str) -> String {
 }
 
 fn humanize_tracked_slice_savings_value(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix("Предварительно Amai сэкономил ") {
+        return format!("На учтённой части пока предварительно Amai сэкономил {rest}");
+    }
     if let Some(rest) = value.strip_prefix("Amai сэкономил ") {
         return format!("На учтённой части Amai сэкономил {rest}");
     }
@@ -5627,7 +5634,7 @@ fn truth_only_token_card_source_label(card: &Value) -> Option<String> {
     let title = card["title"].as_str()?;
     let source = match title {
         "Экономия токенов за текущую сессию" => {
-            "Источник: живая шкала клиента из rollout token_count и отдельно сведённая учтённая часть Amai."
+            "Источник: живая шкала клиента из rollout token_count и отдельно сведённая учтённая часть Amai по strict same-meter компонентам."
         }
         "Экономия токенов за рабочее окно" => {
             "Источник: подтверждённая учтённая часть окна и подтверждённый хвост прошлых стартов. Это не весь полный расход клиента за окно."
@@ -5649,10 +5656,10 @@ fn truth_only_token_card_note(card: &Value) -> String {
         "Экономия токенов за текущую сессию" => {
             match card["value"].as_str() {
                 Some("не доказано") => format!(
-                    "Короткая карточка только с проверяемыми цифрами по текущей сессии: реальная экономия на полной шкале клиента пока не доказана, ниже остаётся только точная учтённая часть. Статус: {status_label}."
+                    "Короткая карточка только с проверяемыми цифрами по текущей сессии: реальная экономия на полной шкале клиента пока не доказана, ниже остаётся только точная учтённая часть. Строка «Экономия на учтённой части» относится только к strict same-meter срезу уже учтённых компонентов; если она помечена как preliminary, это ещё не вся сессия. Статус: {status_label}."
                 ),
                 _ => format!(
-                    "Короткая карточка только с проверяемыми цифрами по текущей сессии: сверху реальная доля Amai на полной шкале текущего turn, ниже точность учтённой части. Статус: {status_label}."
+                    "Короткая карточка только с проверяемыми цифрами по текущей сессии: сверху реальная доля Amai на полной шкале текущего turn, ниже точность учтённой части. Строка «Экономия на учтённой части» относится только к strict same-meter срезу уже учтённых компонентов; если она помечена как preliminary, это ещё не вся сессия. Статус: {status_label}."
                 ),
             }
         }
@@ -9579,12 +9586,24 @@ fn model_token_savings_metric_row(scope_summary: &Value, alignment: &Value) -> V
         .as_u64()
         .unwrap_or(0);
     let tooltip = model_token_savings_tooltip(scope_summary, alignment);
+    let preliminary = scope_summary["preliminary"].as_bool().unwrap_or(false);
+    let strict_components =
+        human_client_limit_components(&alignment["strict_client_meter_slice"]["components"]);
 
     let value = if let Some((verified_without, verified_with, verified_saved, verified_pct)) =
         exact_model_token_pair(scope_summary, alignment)
     {
+        let prefix = if preliminary {
+            "Предварительно Amai сэкономил"
+        } else {
+            "Amai сэкономил"
+        };
+        let scope_suffix = strict_components
+            .as_deref()
+            .map(|components| format!(" на strict same-meter срезе ({components})"))
+            .unwrap_or_default();
         format!(
-            "Amai сэкономил {} токенов модели: без Amai {}, с Amai {}, экономия {}",
+            "{prefix} {} токенов модели{scope_suffix}: без Amai {}, с Amai {}, экономия {}",
             format_percent(Some(verified_pct)),
             format_u64(Some(verified_without)),
             format_u64(Some(verified_with)),
@@ -9606,17 +9625,37 @@ fn model_token_savings_note_sentence(scope_summary: &Value, alignment: &Value) -
     let observed_with_amai = scope_summary["verified_observed_whole_cycle_with_amai_tokens"]
         .as_u64()
         .unwrap_or(0);
+    let preliminary = scope_summary["preliminary"].as_bool().unwrap_or(false);
+    let counted_events = scope_summary["counted_events"].as_u64().unwrap_or(0);
+    let events_total = scope_summary["events_total"].as_u64().unwrap_or(0);
 
     if let Some((verified_without, verified_with, verified_saved, verified_pct)) =
         exact_model_token_pair(scope_summary, alignment)
     {
-        return Some(format!(
+        let mut note = format!(
             "Здесь уже есть полное совпадение с реальной шкалой лимита модели: без Amai было {}, с Amai стало {}, экономия {}, точный процент {}.",
             format_u64(Some(verified_without)),
             format_u64(Some(verified_with)),
             format_signed_count(Some(verified_saved)),
             format_percent(Some(verified_pct))
-        ));
+        );
+        if let Some(components) =
+            human_client_limit_components(&alignment["strict_client_meter_slice"]["components"])
+        {
+            note.push(' ');
+            note.push_str(&format!(
+                "В exact-пару здесь вошёл только strict same-meter срез: {components}."
+            ));
+        }
+        if preliminary {
+            note.push(' ');
+            note.push_str(&format!(
+                "Это пока предварительная выборка: учтено {} из {} событий, поэтому этот процент нельзя читать как экономию всей сессии целиком.",
+                format_u64(Some(counted_events)),
+                format_u64(Some(events_total))
+            ));
+        }
+        return Some(note);
     }
 
     if observed_with_amai > 0 {
@@ -9645,17 +9684,36 @@ fn model_token_savings_tooltip(statement_preview: &Value, alignment: &Value) -> 
     let observed_with_amai = statement_preview["verified_observed_whole_cycle_with_amai_tokens"]
         .as_u64()
         .unwrap_or(0);
+    let preliminary = statement_preview["preliminary"].as_bool().unwrap_or(false);
+    let counted_events = statement_preview["counted_events"].as_u64().unwrap_or(0);
+    let events_total = statement_preview["events_total"].as_u64().unwrap_or(0);
 
     if let Some((verified_without, verified_with, verified_saved, verified_pct)) =
         exact_model_token_pair(statement_preview, alignment)
     {
-        return format!(
-            "Этот ряд показывает точную корреляцию между токенами модели без Amai и с Amai за тот же time scope.\n- Без Amai: {}\n- С Amai: {}\n- Экономия: {}\n- Процент: {}\n- В этом scope same-meter alignment уже materialized, поэтому процент можно читать как тот же meter, которым клиент считает лимит.",
+        let mut tooltip = format!(
+            "Этот ряд показывает exact same-meter pair для учтённого среза, а не для всей сессии.\n- Без Amai: {}\n- С Amai: {}\n- Экономия: {}\n- Процент: {}",
             format_u64(Some(verified_without)),
             format_u64(Some(verified_with)),
             format_signed_count(Some(verified_saved)),
             format_percent(Some(verified_pct))
         );
+        if let Some(components) =
+            human_client_limit_components(&alignment["strict_client_meter_slice"]["components"])
+        {
+            tooltip.push_str(&format!("\n- Что вошло в срез: {components}"));
+        }
+        if preliminary {
+            tooltip.push_str(&format!(
+                "\n- Статус выборки: preliminary, учтено {} из {} событий",
+                format_u64(Some(counted_events)),
+                format_u64(Some(events_total))
+            ));
+        }
+        tooltip.push_str(
+            "\n- В этом scope same-meter alignment уже materialized, поэтому процент можно читать как тот же meter, которым клиент считает лимит.",
+        );
+        return tooltip;
     }
 
     if observed_with_amai > 0 {
@@ -12226,6 +12284,57 @@ mod tests {
     }
 
     #[test]
+    fn model_token_savings_row_marks_preliminary_same_meter_slice_and_components() {
+        let statement_preview = json!({
+            "preliminary": true,
+            "counted_events": 1,
+            "events_total": 1,
+            "observed_whole_cycle_with_amai_tokens": 99,
+            "verified_observed_whole_cycle_with_amai_tokens": 99
+        });
+        let alignment = json!({
+            "same_meter_as_client_limit": true,
+            "strict_client_meter_slice": {
+                "lower_bound_tokens": 640,
+                "components": [
+                    "client_prompt",
+                    "continuity_restore_outside_retrieval"
+                ]
+            },
+            "baseline_equivalence": {
+                "measured_baseline_tokens_lower_bound": 640
+            }
+        });
+
+        let row = super::model_token_savings_metric_row(&statement_preview, &alignment);
+        assert!(row["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Предварительно Amai сэкономил 84.53%"));
+        assert!(row["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("strict same-meter срезе"));
+        assert!(row["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("исходный запрос клиента"));
+        assert!(row["value"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("continuity-restore overhead вне retrieval"));
+        assert!(row["tooltip"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("preliminary, учтено 1 из 1 событий"));
+
+        let note =
+            super::model_token_savings_note_sentence(&statement_preview, &alignment).expect("note");
+        assert!(note.contains("strict same-meter срез"));
+        assert!(note.contains("нельзя читать как экономию всей сессии целиком"));
+    }
+
+    #[test]
     fn exact_model_component_delta_row_surfaces_top_same_meter_driver() {
         let alignment = json!({
             "baseline_equivalence": {
@@ -13043,6 +13152,7 @@ mod tests {
                 {"label": "Главный итог", "value": "x"},
                 {"label": "Amai в полном live-turn", "value": "0.30%: без Amai 1000, с Amai 997, delta 3"},
                 {"label": "Экономия токенов модели", "value": "y"},
+                {"label": "Главный драйвер exact-пары", "value": "continuity-restore overhead вне retrieval: 636 -> 95 (экономия 541)"},
                 {"label": "Совпадение с реальным лимитом", "value": "z"},
                 {"label": "Лимит клиента сейчас", "value": "l"},
                 {"label": "Следующее действие", "value": "n"},
@@ -13061,6 +13171,7 @@ mod tests {
             vec![
                 "Экономия на реальной шкале",
                 "Экономия на учтённой части",
+                "Что именно посчитано",
                 "Точность учтённой части",
                 "Лимит клиента сейчас",
                 "Следующее действие"
@@ -13069,13 +13180,17 @@ mod tests {
         assert_eq!(
             compact["source_label"].as_str(),
             Some(
-                "Источник: живая шкала клиента из rollout token_count и отдельно сведённая учтённая часть Amai."
+                "Источник: живая шкала клиента из rollout token_count и отдельно сведённая учтённая часть Amai по strict same-meter компонентам."
             )
         );
         assert!(compact["note"]
             .as_str()
             .unwrap_or_default()
             .contains("Короткая карточка только с проверяемыми цифрами по текущей сессии"));
+        assert!(compact["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("strict same-meter срезу"));
     }
 
     #[test]
