@@ -1782,49 +1782,13 @@ async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result
         "included_reasons_summary": context_summary.included_reasons_summary.clone(),
         "excluded_reasons_summary": context_summary.excluded_reasons_summary.clone(),
     });
-    let stats_block = json!({
-        "context_pack_id": result.stats.context_pack_id,
-        "exact_documents": result.stats.exact_documents,
-        "symbol_hits": result.stats.symbol_hits,
-        "lexical_chunks": result.stats.lexical_chunks,
-        "semantic_chunks": result.stats.semantic_chunks,
-        "cache_hit": result.stats.cache_hit,
-        "scope_signature": result.stats.scope_signature,
-        "timings_ms": {
-            "resolve_scope_ms": result.stats.timings.resolve_scope_ms,
-            "cache_lookup_ms": result.stats.timings.cache_lookup_ms,
-            "exact_lookup_ms": result.stats.timings.exact_lookup_ms,
-            "symbol_lookup_ms": result.stats.timings.symbol_lookup_ms,
-            "lexical_lookup_ms": result.stats.timings.lexical_lookup_ms,
-            "query_embed_ms": result.stats.timings.query_embed_ms,
-            "semantic_search_ms": result.stats.timings.semantic_search_ms,
-            "semantic_hydrate_ms": result.stats.timings.semantic_hydrate_ms,
-            "serialize_ms": result.stats.timings.serialize_ms,
-            "persist_ms": result.stats.timings.persist_ms,
-        }
-    });
+    let stats_block = context_pack_tool_stats_block(&result.stats);
     let structured = json!({
         "context_pack": model_visible_payload,
         "context_pack_summary": summary_block.clone(),
         "stats": stats_block.clone(),
     });
-    let summary = format!(
-        "context pack built for {}:{} :: docs={} symbols={} lexical={} semantic={} cache_hit={}",
-        context.project,
-        context.namespace,
-        result.stats.exact_documents,
-        result.stats.symbol_hits,
-        result.stats.lexical_chunks,
-        result.stats.semantic_chunks,
-        result.stats.cache_hit,
-    );
-    let mut summary = summary;
-    if let Some(value) = &context_summary.included_reasons_summary {
-        summary.push_str(&format!(" included={value}"));
-    }
-    if let Some(value) = &context_summary.excluded_reasons_summary {
-        summary.push_str(&format!(" excluded={value}"));
-    }
+    let summary = context_pack_tool_summary(&result.stats);
     token_budget::observe_context_pack_tool_overhead(
         &mut db,
         &result.stats.context_pack_id.to_string(),
@@ -1833,6 +1797,33 @@ async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result
     )
     .await?;
     Ok(tool_result(summary, structured))
+}
+
+fn context_pack_tool_stats_block(stats: &retrieval::ContextPackStats) -> Value {
+    let mut block = json!({
+        "context_pack_id": stats.context_pack_id,
+        "retrieval_counts": {
+            "exact_documents": stats.exact_documents,
+            "symbol_hits": stats.symbol_hits,
+            "lexical_chunks": stats.lexical_chunks,
+            "semantic_chunks": stats.semantic_chunks,
+        }
+    });
+    if stats.cache_hit {
+        block["cache_hit"] = Value::Bool(true);
+    }
+    block
+}
+
+fn context_pack_tool_summary(stats: &retrieval::ContextPackStats) -> String {
+    let mut summary = format!(
+        "ctx d={} s={} l={} m={}",
+        stats.exact_documents, stats.symbol_hits, stats.lexical_chunks, stats.semantic_chunks
+    );
+    if stats.cache_hit {
+        summary.push_str(" c=1");
+    }
+    summary
 }
 
 async fn tool_observe_whole_cycle(
@@ -4462,6 +4453,7 @@ mod tests {
     use super::{
         ContextPackToolArgs, ContinuityStartupToolArgs, McpConfigArgs, McpError,
         benchmark_coverage_summary, context_pack_input_schema, context_pack_summary,
+        context_pack_tool_stats_block, context_pack_tool_summary,
         continuity_startup_input_schema, continuity_startup_summary, inject_proof_tool_arguments,
         mcp_tool_error_result, memory_matrix_summary, observe_snapshot_summary,
         observe_whole_cycle_input_schema, observe_whole_cycle_turn_input_schema, prompt_result,
@@ -4469,9 +4461,11 @@ mod tests {
         summarize_namespace_modes, token_benchmark_summary, token_report_summary,
         warm_cache_summary,
     };
+    use crate::retrieval::{ContextPackStats, ContextPackTimings};
     use crate::working_state;
     use serde_json::json;
     use std::path::PathBuf;
+    use uuid::Uuid;
 
     #[test]
     fn renders_vscode_config() {
@@ -4968,6 +4962,81 @@ mod tests {
                 "semantic_chunks — Semantic layer не добавил новых фрагментов после scope и relevance проверки."
             )
         );
+    }
+
+    #[test]
+    fn context_pack_tool_payload_stays_compact_for_model_visible_output() {
+        let stats = ContextPackStats {
+            context_pack_id: Uuid::parse_str("12345678-1234-5678-9abc-123456789abc")
+                .expect("uuid"),
+            exact_documents: 2,
+            symbol_hits: 1,
+            lexical_chunks: 3,
+            semantic_chunks: 4,
+            cache_hit: true,
+            scope_signature: "scope-signature-heavy-value".to_string(),
+            timings: ContextPackTimings {
+                resolve_scope_ms: 11,
+                exact_lookup_ms: 12,
+                symbol_lookup_ms: 13,
+                lexical_lookup_ms: 14,
+                query_embed_ms: 15,
+                semantic_search_ms: 16,
+                semantic_hydrate_ms: 17,
+                ranking_ms: 18,
+                provenance_ms: 19,
+                pack_assembly_ms: 20,
+                cache_lookup_ms: 21,
+                serialize_ms: 22,
+                persist_ms: 23,
+            },
+        };
+
+        let compact_stats = context_pack_tool_stats_block(&stats);
+        let compact_summary = context_pack_tool_summary(&stats);
+        let legacy_stats = json!({
+            "context_pack_id": stats.context_pack_id,
+            "exact_documents": stats.exact_documents,
+            "symbol_hits": stats.symbol_hits,
+            "lexical_chunks": stats.lexical_chunks,
+            "semantic_chunks": stats.semantic_chunks,
+            "cache_hit": stats.cache_hit,
+            "scope_signature": stats.scope_signature,
+            "timings_ms": {
+                "resolve_scope_ms": stats.timings.resolve_scope_ms,
+                "cache_lookup_ms": stats.timings.cache_lookup_ms,
+                "exact_lookup_ms": stats.timings.exact_lookup_ms,
+                "symbol_lookup_ms": stats.timings.symbol_lookup_ms,
+                "lexical_lookup_ms": stats.timings.lexical_lookup_ms,
+                "query_embed_ms": stats.timings.query_embed_ms,
+                "semantic_search_ms": stats.timings.semantic_search_ms,
+                "semantic_hydrate_ms": stats.timings.semantic_hydrate_ms,
+                "serialize_ms": stats.timings.serialize_ms,
+                "persist_ms": stats.timings.persist_ms,
+            }
+        });
+        let legacy_summary = "context pack built for amai:continuity :: docs=2 symbols=1 lexical=3 semantic=4 cache_hit=true included=exact_documents (2) excluded=semantic_chunks";
+
+        assert_eq!(
+            compact_stats["retrieval_counts"],
+            json!({
+                "exact_documents": 2,
+                "symbol_hits": 1,
+                "lexical_chunks": 3,
+                "semantic_chunks": 4,
+            })
+        );
+        assert_eq!(compact_stats["cache_hit"], json!(true));
+        assert_eq!(compact_summary, "ctx d=2 s=1 l=3 m=4 c=1");
+        assert!(
+            serde_json::to_string(&compact_stats)
+                .expect("compact stats")
+                .len()
+                < serde_json::to_string(&legacy_stats)
+                    .expect("legacy stats")
+                    .len()
+        );
+        assert!(compact_summary.len() < legacy_summary.len());
     }
 
     #[test]
