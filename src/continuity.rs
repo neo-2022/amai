@@ -80,9 +80,11 @@ struct ContinuityThreadIndexEntry {
 
 const MAX_SEARCHABLE_CONTINUITY_BYTES: usize = 12_000;
 const STARTUP_RUNTIME_STATE_ARTIFACT_VERSION: &str = "workspace-startup-runtime-state-v4";
-const STARTUP_TASK_TREE_PREVIEW_LIMIT: usize = 4;
-const STARTUP_LEDGER_ENTRY_PREVIEW_LIMIT: usize = 3;
-const STARTUP_LEDGER_QUEUE_PREVIEW_LIMIT: usize = 3;
+const STARTUP_TASK_TREE_PREVIEW_LIMIT: usize = 2;
+const STARTUP_LEDGER_ENTRY_PREVIEW_LIMIT: usize = 2;
+const STARTUP_LEDGER_QUEUE_PREVIEW_LIMIT: usize = 2;
+const STARTUP_LEDGER_ACTIVE_FILE_PREVIEW_LIMIT: usize = 2;
+const STARTUP_LEDGER_NOTES_PREVIEW_LIMIT: usize = 2;
 
 struct ContinuityStartupContext {
     project: ProjectRecord,
@@ -366,9 +368,15 @@ fn compact_project_task_ledger_for_startup(ledger: &Value) -> Value {
                 "task_id": entry["task_id"].clone(),
                 "agent_scope": entry["agent_scope"].clone(),
                 "active_files_count": active_files.len(),
-                "active_files_preview": active_files.into_iter().take(3).collect::<Vec<_>>(),
+                "active_files_preview": active_files
+                    .into_iter()
+                    .take(STARTUP_LEDGER_ACTIVE_FILE_PREVIEW_LIMIT)
+                    .collect::<Vec<_>>(),
                 "materialized_notes_count": notes.len(),
-                "materialized_notes_preview": notes.into_iter().take(3).collect::<Vec<_>>(),
+                "materialized_notes_preview": notes
+                    .into_iter()
+                    .take(STARTUP_LEDGER_NOTES_PREVIEW_LIMIT)
+                    .collect::<Vec<_>>(),
                 "pending_return_queue_count": queue.len(),
                 "pending_return_queue_preview": compact_pending_return_queue_for_startup(&Value::Array(queue)),
             })
@@ -1336,22 +1344,22 @@ fn build_startup_runtime_state_artifact(
         &startup_execution_gate,
         prompt_text_present,
     );
-    let client_budget_guard = if payload["working_state_restore"]["client_budget_guard"].is_object()
-    {
-        payload["working_state_restore"]["client_budget_guard"].clone()
-    } else {
-        Value::Null
-    };
+    let raw_client_budget_guard = &payload["working_state_restore"]["client_budget_guard"];
+    let client_budget_guard =
+        compact_startup_runtime_client_budget_guard(raw_client_budget_guard);
     let reply_execution_gate = if client_budget_guard["reply_execution_gate"].is_object() {
         client_budget_guard["reply_execution_gate"].clone()
     } else {
         Value::Null
     };
-    let blocking_reply_contract = if reply_execution_gate["blocking_reply_contract"].is_object() {
-        reply_execution_gate["blocking_reply_contract"].clone()
-    } else {
-        Value::Null
-    };
+    let blocking_reply_contract =
+        if raw_client_budget_guard["reply_execution_gate"]["blocking_reply_contract"].is_object() {
+            raw_client_budget_guard["reply_execution_gate"]["blocking_reply_contract"].clone()
+        } else if reply_execution_gate["blocking_reply_contract"].is_object() {
+            reply_execution_gate["blocking_reply_contract"].clone()
+        } else {
+            Value::Null
+        };
     Ok(json!({
         "artifact_version": STARTUP_RUNTIME_STATE_ARTIFACT_VERSION,
         "repo_root": repo_root.display().to_string(),
@@ -1426,6 +1434,44 @@ fn build_startup_execution_gate(payload: &Value) -> Value {
         "no_silent_drop": resume_enforcement["no_silent_drop"]
             .as_bool()
             .unwrap_or(false),
+    })
+}
+
+fn compact_startup_runtime_client_budget_guard(guard: &Value) -> Value {
+    if !guard.is_object() {
+        return Value::Null;
+    }
+    json!({
+        "status": guard["status"].clone(),
+        "status_label": guard["status_label"].clone(),
+        "observed_at_epoch_ms": guard["observed_at_epoch_ms"].clone(),
+        "max_guard_age_seconds": guard["max_guard_age_seconds"].clone(),
+        "should_rotate_chat_now": guard["should_rotate_chat_now"].clone(),
+        "should_rotate_chat_soon": guard["should_rotate_chat_soon"].clone(),
+        "reply_execution_gate": compact_startup_runtime_reply_execution_gate(&guard["reply_execution_gate"]),
+    })
+}
+
+fn compact_startup_runtime_reply_execution_gate(reply_execution_gate: &Value) -> Value {
+    if !reply_execution_gate.is_object() {
+        return Value::Null;
+    }
+    let preserves_return_obligation = reply_execution_gate["action_bundle"]
+        ["preserves_return_obligation"]
+        .as_bool()
+        .or_else(|| reply_execution_gate["preserves_return_obligation"].as_bool())
+        .unwrap_or(false);
+    json!({
+        "gate_version": reply_execution_gate["gate_version"].clone(),
+        "action_kind": reply_execution_gate["action_kind"].clone(),
+        "blocking": reply_execution_gate["blocking"].clone(),
+        "must_rotate_before_reply": reply_execution_gate["must_rotate_before_reply"].clone(),
+        "must_wait_for_budget_recovery_before_reply":
+            reply_execution_gate["must_wait_for_budget_recovery_before_reply"].clone(),
+        "reply_budget_mode": reply_execution_gate["reply_budget_mode"].clone(),
+        "rotate_now": reply_execution_gate["rotate_now"].clone(),
+        "rotate_soon": reply_execution_gate["rotate_soon"].clone(),
+        "preserves_return_obligation": preserves_return_obligation,
     })
 }
 
@@ -6336,6 +6382,8 @@ mod tests {
             artifact["client_budget_guard"]["status_label"],
             json!("новый чат нужен сейчас")
         );
+        assert!(artifact["client_budget_guard"]["last_request"].is_null());
+        assert!(artifact["client_budget_guard"]["client_limits"].is_null());
         assert_eq!(
             artifact["reply_execution_gate"]["gate_version"],
             json!("client-reply-budget-gate-v1")
@@ -6343,6 +6391,11 @@ mod tests {
         assert_eq!(
             artifact["reply_execution_gate"]["must_rotate_before_reply"],
             json!(true)
+        );
+        assert!(artifact["reply_execution_gate"]["action_bundle"].is_null());
+        assert_eq!(
+            artifact["reply_execution_gate"]["preserves_return_obligation"],
+            json!(false)
         );
         assert_eq!(
             artifact["blocking_reply_contract"]["response_kind"],
@@ -6373,7 +6426,7 @@ mod tests {
             artifact["continuity_startup_summary"]["project_task_tree"]["nodes_preview"]
                 .as_array()
                 .map(|items| items.len()),
-            Some(4)
+            Some(2)
         );
         assert_eq!(
             artifact["continuity_startup_summary"]["project_task_tree"]["preview_truncated"],
@@ -6399,14 +6452,14 @@ mod tests {
             artifact["continuity_startup_summary"]["project_task_ledger"]["entries_preview"]
                 .as_array()
                 .map(|items| items.len()),
-            Some(3)
+            Some(2)
         );
         assert_eq!(
             artifact["continuity_startup_summary"]["project_task_ledger"]["entries_preview"][0]
                 ["pending_return_queue_preview"]
                 .as_array()
                 .map(|items| items.len()),
-            Some(3)
+            Some(2)
         );
         assert_eq!(
             artifact["continuity_startup_summary"]["project_task_ledger"]["preview_truncated"],
