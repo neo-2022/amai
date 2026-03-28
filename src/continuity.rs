@@ -1241,6 +1241,12 @@ fn build_startup_runtime_state_artifact(
     let mut continuity_startup_summary = mcp::continuity_startup_summary_json(payload);
     if let Some(summary) = continuity_startup_summary.as_object_mut() {
         summary.insert(
+            "startup_execution_gate".to_string(),
+            compact_startup_runtime_summary_startup_execution_gate(
+                summary.get("startup_execution_gate").unwrap_or(&Value::Null),
+            ),
+        );
+        summary.insert(
             "startup_next_action".to_string(),
             compact_startup_runtime_startup_next_action(
                 summary.get("startup_next_action").unwrap_or(&Value::Null),
@@ -1409,6 +1415,28 @@ fn compact_startup_runtime_startup_next_action(action: &Value) -> Value {
     if !action_bundle.is_null() {
         compact.insert("action_bundle".to_string(), action_bundle);
     }
+    Value::Object(compact)
+}
+
+fn compact_startup_runtime_summary_startup_execution_gate(gate: &Value) -> Value {
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        gate,
+        &[
+            "gate_version",
+            "action_kind",
+            "blocking",
+            "resume_state",
+            "required_return_task_present",
+            "lease_owner_state",
+            "must_follow_startup_next_action",
+            "unrelated_work_allowed",
+            "must_read_prompt_text_before_reply",
+            "required_action_kind_when_resume_required",
+            "no_silent_drop",
+        ],
+    );
     Value::Object(compact)
 }
 
@@ -6417,6 +6445,16 @@ mod tests {
             artifact["continuity_startup_summary"]["startup_next_action"]["action_kind"],
             json!("resume_required_return_task")
         );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["startup_execution_gate"]["gate_version"],
+            json!("startup-execution-gate-v1")
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["startup_execution_gate"]["required_return_task_present"],
+            json!(true)
+        );
+        assert!(artifact["continuity_startup_summary"]["startup_execution_gate"]["required_return_task_headline"].is_null());
+        assert!(artifact["continuity_startup_summary"]["startup_execution_gate"]["required_return_task_next_step"].is_null());
         assert_eq!(
             artifact["continuity_startup_summary"]["required_return_task"]["headline"],
             json!("Pending line")
