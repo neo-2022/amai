@@ -8850,11 +8850,9 @@ fn client_turn_pressure_guard(
     } else {
         None
     };
-    let hourly_burn_target_met = hourly_burn_classification == Some("saving")
-        && hourly_burn_kpi_percent.unwrap_or(0.0) >= 90.0;
-    let hourly_burn_target_not_met =
-        hourly_burn_classification.is_some() && !hourly_burn_target_met;
     let hourly_burn_overspend = hourly_burn_classification == Some("overspend");
+    let hourly_burn_known_good =
+        matches!(hourly_burn_classification, Some("saving") | Some("one_to_one"));
     let no_amai_activity_in_current_live_turn =
         current_live_turn["status"].as_str() == Some("no_amai_activity_in_current_live_turn");
     let full_turn_savings_pct = exact_pair.and_then(|(_, _, saved_tokens, _)| {
@@ -8883,9 +8881,7 @@ fn client_turn_pressure_guard(
     let moderate_context_pressure = context_used_percent >= 30.0;
     let extreme_context_pressure = context_used_percent >= 70.0;
     let high_context_pressure = context_used_percent >= 50.0;
-    let early_kpi_thread = turn_total_tokens >= 12_000 || context_used_percent >= 5.0;
     let moderate_kpi_thread = turn_total_tokens >= 18_000 || context_used_percent >= 7.0;
-    let large_kpi_thread = turn_total_tokens >= 30_000 || context_used_percent >= 12.0;
     let early_live_thread = turn_total_tokens >= 45_000 || very_early_context_pressure;
     let early_large_live_thread = turn_total_tokens >= 60_000 || early_context_pressure;
     let inflation_locking_in_burn = turn_total_tokens >= 75_000 || moderate_context_pressure;
@@ -8899,21 +8895,20 @@ fn client_turn_pressure_guard(
     let early_primary_limit = primary_remaining_percent <= 90.0;
     let generous_primary_limit = primary_remaining_percent <= 95.0;
 
+    if hourly_burn_known_good && !critical_primary_limit {
+        return None;
+    }
+
     let (severity, status_label) = if (no_amai_activity_in_current_live_turn
         && huge_live_thread)
         || (no_amai_activity_in_current_live_turn
         && hourly_burn_overspend
         && moderate_kpi_thread)
-        || (no_amai_activity_in_current_live_turn && hourly_burn_target_not_met && large_kpi_thread)
         || (hourly_burn_overspend
             && early_large_live_thread
             && weak_amai_share
             && softened_primary_limit)
         || (hourly_burn_overspend && large_live_thread && tiny_amai_share && generous_primary_limit)
-        || (hourly_burn_target_not_met
-            && large_kpi_thread
-            && negligible_amai_share
-            && generous_primary_limit)
         || (exact_pair_missing && inflation_locking_in_burn && softened_primary_limit)
         || (exact_pair_missing && large_live_thread)
         || (exact_pair_missing && emergency_primary_limit && early_live_thread)
@@ -8927,13 +8922,6 @@ fn client_turn_pressure_guard(
         ("critical", "новый чат нужен сейчас")
     } else if (no_amai_activity_in_current_live_turn
         && inflation_locking_in_burn)
-        || (no_amai_activity_in_current_live_turn
-        && hourly_burn_target_not_met
-        && early_kpi_thread)
-        || (hourly_burn_target_not_met
-            && moderate_kpi_thread
-            && weak_amai_share
-            && softened_primary_limit)
         || (exact_pair_missing && early_live_thread)
         || (early_live_thread && negligible_amai_share && generous_primary_limit)
         || (((high_context_pressure && low_primary_limit) || extreme_context_pressure)
@@ -14102,6 +14090,97 @@ mod tests {
         assert_eq!(guard.status_label, "новый чат рекомендован");
         assert!(guard.no_amai_activity_in_current_live_turn);
         assert_eq!(guard.hourly_burn_classification, None);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_stays_off_for_huge_no_amai_thread_when_exact_5h_kpi_is_saving() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 14.07
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn",
+            "retrieval_context_pack_count": 0
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 196009,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 75.85487616099071,
+            "primary_limit_remaining_percent": 85.0,
+            "secondary_limit_remaining_percent": 5.0
+        });
+        assert!(
+            super::client_turn_pressure_guard(
+                &meter,
+                Some((196009, 196009, 0, 0.0)),
+                &hourly_burn,
+                &current_live_turn,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_stays_off_for_huge_no_amai_thread_when_exact_5h_kpi_is_one_to_one(
+    ) {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "one_to_one",
+            "kpi_percent": 0.0
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn",
+            "retrieval_context_pack_count": 0
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 196009,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 75.85487616099071,
+            "primary_limit_remaining_percent": 85.0,
+            "secondary_limit_remaining_percent": 5.0
+        });
+        assert!(
+            super::client_turn_pressure_guard(
+                &meter,
+                Some((196009, 196009, 0, 0.0)),
+                &hourly_burn,
+                &current_live_turn,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_keeps_critical_primary_limit_even_when_exact_5h_kpi_is_saving() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 14.07
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn",
+            "retrieval_context_pack_count": 0
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 196009,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 75.85487616099071,
+            "primary_limit_remaining_percent": 18.0,
+            "secondary_limit_remaining_percent": 5.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((196009, 196009, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
     }
 
     #[test]
