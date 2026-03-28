@@ -52,7 +52,7 @@ printf '%s\n' "$startup_state_output" | jq -e '.startup_runtime_state.project_ta
 startup_action_kind="$(printf '%s\n' "$startup_state_output" | jq -r '.startup_runtime_state_audit.action_kind // empty')"
 case "$startup_action_kind" in
   rotate_chat_for_client_budget)
-    printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.prompt_text | contains("В старом чате разрешён только короткий rotate-ответ.")' >/dev/null
+    printf '%s\n' "$startup_output" | jq -e '.chat_start_restore.prompt_text | contains("Только rotate:")' >/dev/null
     printf '%s\n' "$startup_state_output" | jq -e '.reply_execution_gate.must_rotate_before_reply == true' >/dev/null
     printf '%s\n' "$startup_state_output" | jq -e '.blocking_reply_contract.response_kind == "rotate_chat_only"' >/dev/null
     ;;

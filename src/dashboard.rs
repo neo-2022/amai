@@ -5336,6 +5336,7 @@ fn truth_only_token_card_labels(title: &str) -> &'static [&'static str] {
             "Совпадение с реальным лимитом",
             "Последний запрос клиента",
             "Лимит клиента сейчас",
+            "Последний observed лимит клиента",
             "Следующее действие",
         ],
         "Экономия токенов за рабочее окно" => &[
@@ -8844,8 +8845,9 @@ fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
         .as_u64()
         .filter(|value| *value > 0)
         .map(human_timestamp_clock);
-    let (tooltip, value_suffix) = if current_thread_bound {
+    let (label, tooltip, value) = if current_thread_bound {
         (
+            "Лимит клиента сейчас",
             format!(
                 "Этот ряд показывает live rate-limit contour клиента из rollout token_count/rate_limits.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- Снято из raw token_count: {}",
                 format_percent(Some(primary_remaining_percent as f64)),
@@ -8854,13 +8856,19 @@ fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
                 format_percent(client_live_meter["secondary_limit_used_percent"].as_f64()),
                 observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
             ),
-            observed_at_short
-                .as_ref()
-                .map(|stamp| format!(" · raw {stamp}"))
-                .unwrap_or_default(),
+            format!(
+                "5ч остаётся {}, 7д остаётся {}{}",
+                format_percent(Some(primary_remaining_percent as f64)),
+                format_percent(Some(secondary_remaining_percent as f64)),
+                observed_at_short
+                    .as_ref()
+                    .map(|stamp| format!(" · raw {stamp}"))
+                    .unwrap_or_default()
+            ),
         )
     } else {
         (
+            "Последний observed лимит клиента",
             format!(
                 "Этот ряд показывает последнее observed значение клиентского rate-limit contour из rollout token_count/rate_limits.\n- Current thread binding ещё не materialized, поэтому это global client limit hint, а не pressure текущего thread.\n- Лимит 5ч: остаётся {} (использовано {})\n- Лимит 7д: остаётся {} (использовано {})\n- Последнее observed значение снято из raw token_count: {}",
                 format_percent(Some(primary_remaining_percent as f64)),
@@ -8869,20 +8877,20 @@ fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
                 format_percent(client_live_meter["secondary_limit_used_percent"].as_f64()),
                 observed_at.unwrap_or_else(|| "ещё нет данных".to_string()),
             ),
-            observed_at_short
-                .as_ref()
-                .map(|stamp| format!(" · latest observed {stamp}"))
-                .unwrap_or_default(),
+            format!(
+                "последнее observed: 5ч остаётся {}, 7д остаётся {}{}",
+                format_percent(Some(primary_remaining_percent as f64)),
+                format_percent(Some(secondary_remaining_percent as f64)),
+                observed_at_short
+                    .as_ref()
+                    .map(|stamp| format!(" · latest observed {stamp}"))
+                    .unwrap_or_default()
+            ),
         )
     };
     Some(metric_row(
-        "Лимит клиента сейчас",
-        format!(
-            "5ч остаётся {}, 7д остаётся {}{}",
-            format_percent(Some(primary_remaining_percent as f64)),
-            format_percent(Some(secondary_remaining_percent as f64)),
-            value_suffix
-        ),
+        label,
+        value,
         Some(tooltip.as_str()),
     ))
 }
@@ -12488,6 +12496,13 @@ mod tests {
         assert!(super::client_turn_pressure_guard(&meter, None).is_none());
         assert!(super::client_live_context_metric_row(&meter).is_none());
         let row = super::client_live_limit_metric_row(&meter).expect("limit row");
+        assert_eq!(row["label"], "Последний observed лимит клиента");
+        assert!(
+            row["value"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("последнее observed:")
+        );
         assert!(
             row["value"]
                 .as_str()

@@ -2046,7 +2046,10 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
     println!("Namespace continuity: {}", context.namespace.code);
     println!("Статус client-budget guard: {status_label}");
     println!("Последний запрос в модель: {last_request}");
-    println!("Лимит клиента сейчас: {client_limits}");
+    println!(
+        "{}: {client_limits}",
+        client_limits_surface_label(&payload["continuity_rotate_chat"]["client_budget_guard"])
+    );
     println!("Разрешённый короткий ответ в старом чате: {blocked_reply_text}");
     println!();
     println!("Handoff записан:");
@@ -2089,6 +2092,20 @@ fn read_optional_details_file(details_file: Option<&PathBuf>) -> Result<String> 
     Ok(String::new())
 }
 
+fn client_limits_surface_label(client_budget_guard: &Value) -> &'static str {
+    if client_budget_guard["client_live_meter_current_thread_bound"].as_bool() == Some(false)
+        || client_budget_guard["client_live_meter_thread_binding_state"].as_str()
+            == Some("no_current_thread_binding")
+        || client_budget_guard["client_limits"]
+            .as_str()
+            .is_some_and(|value| value.trim_start().starts_with("последнее observed:"))
+    {
+        "Последний observed лимит клиента"
+    } else {
+        "Лимит клиента сейчас"
+    }
+}
+
 fn build_rotate_chat_details(
     client_budget_guard: &Value,
     headline: &str,
@@ -2111,7 +2128,10 @@ fn build_rotate_chat_details(
         .as_str()
         .filter(|value| !value.is_empty())
     {
-        lines.push(format!("Лимит клиента сейчас: {client_limits}."));
+        lines.push(format!(
+            "{}: {client_limits}.",
+            client_limits_surface_label(client_budget_guard)
+        ));
     }
     if let Some(note) = client_budget_guard["note"]
         .as_str()
@@ -3803,16 +3823,14 @@ fn summarize_startup_next_action_for_prompt(value: &Value) -> Option<String> {
         .as_str()
         .filter(|item| !item.is_empty())
         .unwrap_or("ещё нет данных");
-    let compact_headline = compact_prompt_fragment(headline, 64);
+    let compact_headline = compact_prompt_fragment(headline, 48);
     match action_kind {
-        "resume_required_return_task" => {
-            Some(format!("Сначала: вернись к линии: {compact_headline}"))
+        "resume_required_return_task" => Some(format!("Сначала: вернись: {compact_headline}")),
+        "wait_for_global_client_budget_recovery" => {
+            Some(format!("Сначала: жди budget: {compact_headline}"))
         }
-        "wait_for_global_client_budget_recovery" => Some(format!(
-            "Сначала: дождись восстановления client budget: {compact_headline}"
-        )),
         "continue_active_workline" => None,
-        _ => Some(format!("Сначала: {action_kind} -> {compact_headline}")),
+        _ => Some(format!("Сначала: {compact_headline}")),
     }
 }
 
@@ -3826,21 +3844,17 @@ fn render_chat_start_prompt(
     let headline = handoff_summary["headline"]
         .as_str()
         .unwrap_or("ещё нет данных");
-    let compact_headline = compact_prompt_fragment(headline, 80);
+    let compact_headline = compact_prompt_fragment(headline, 64);
     let next_step = handoff_summary["next_step"]
         .as_str()
         .and_then(normalize_next_step_value)
         .unwrap_or_else(|| "ещё нет данных".to_string());
-    let compact_next_step = compact_prompt_fragment(&next_step, 120);
+    let compact_next_step = compact_prompt_fragment(&next_step, 80);
     let current_goal = restore_node
         .and_then(|value| value["current_goal"].as_str())
         .filter(|value| !value.is_empty())
         .unwrap_or(headline);
-    let compact_current_goal = compact_prompt_fragment(current_goal, 80);
     let materialized_summary = restore_node.and_then(summarize_startup_materialized_notes);
-    let compact_materialized_summary = materialized_summary
-        .as_deref()
-        .map(|value| compact_prompt_fragment(value, 88));
     let execctl_resume_obligation = restore_node
         .map(|value| summarize_execctl_resume_obligation(&value["execctl_resume_contract"]))
         .unwrap_or_else(|| default_execctl_resume_obligation(None, "clear"));
@@ -3864,53 +3878,39 @@ fn render_chat_start_prompt(
     let execctl_resume_state = restore_node
         .and_then(|value| value["execctl_resume_state"].as_str())
         .unwrap_or("clear");
-    let restore_confidence = restore_node
-        .and_then(|value| value["restore_confidence"].as_str())
-        .unwrap_or("preliminary");
+    let action_kind = startup_next_action["action_kind"].as_str();
+    let compact_materialized_summary = materialized_summary
+        .as_deref()
+        .map(|value| compact_prompt_fragment(value, 56))
+        .filter(|_| action_kind == Some("continue_active_workline"));
     let mut lines = vec![
         "CHAT_START_RESTORE".to_string(),
-        format!("Project: {} ({})", project.display_name, project.code),
-        format!("Namespace: {}", namespace.code),
         format!("Линия: {compact_headline}"),
         format!("Шаг: {compact_next_step}"),
     ];
-    if compact_current_goal != compact_headline {
-        lines.push(format!("Цель: {compact_current_goal}"));
-    }
     if let Some(value) = compact_materialized_summary {
         lines.push(format!("Сделано: {value}"));
     }
     if let Some(value) = summarize_startup_next_action_for_prompt(&startup_next_action) {
         lines.push(value);
     }
-    if startup_next_action["action_kind"].as_str() == Some("rotate_chat_for_client_budget") {
-        lines.push("В старом чате разрешён только короткий rotate-ответ.".to_string());
+    if action_kind == Some("rotate_chat_for_client_budget") {
         lines.push(format!(
-            "Разрешённый ответ: {}",
+            "Только rotate: {}",
             blocked_reply_text
                 .as_deref()
                 .unwrap_or(working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE)
         ));
-    } else if startup_next_action["action_kind"].as_str()
-        == Some("wait_for_global_client_budget_recovery")
-    {
-        lines.push(
-            "До восстановления лимита разрешён только короткий budget-wait ответ.".to_string(),
-        );
+    } else if action_kind == Some("wait_for_global_client_budget_recovery") {
         lines.push(format!(
-            "Разрешённый ответ: {}",
+            "Только wait: {}",
             blocked_reply_text
                 .as_deref()
                 .unwrap_or(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE)
         ));
+    } else if execctl_resume_state == "pending_return_queue_present" {
+        lines.push("Сначала закрой возврат.".to_string());
     }
-    if execctl_resume_state == "pending_return_queue_present" {
-        lines.push("Не переключайся до возврата.".to_string());
-    }
-    if restore_confidence == "preliminary" {
-        lines.push("Recovery: preliminary.".to_string());
-    }
-    lines.push("Правило: follow pack; continuity не поднимай.".to_string());
     lines.join("\n")
 }
 
@@ -4151,7 +4151,10 @@ fn startup_materialized_notes(restore_node: &Value) -> Vec<String> {
             .as_str()
             .filter(|value| !value.is_empty())
         {
-            notes.push(format!("Лимит клиента сейчас: {client_limits}."));
+            notes.push(format!(
+                "{}: {client_limits}.",
+                client_limits_surface_label(guard)
+            ));
         }
     }
     if let Some(items) = restore_node["materialized_notes"].as_array() {
@@ -4163,6 +4166,7 @@ fn startup_materialized_notes(restore_node: &Value) -> Vec<String> {
             if trimmed.starts_with("Client-budget guard:")
                 || trimmed.starts_with("Последний запрос в модель:")
                 || trimmed.starts_with("Лимит клиента сейчас:")
+                || trimmed.starts_with("Последний observed лимит клиента:")
             {
                 continue;
             }
@@ -5807,10 +5811,12 @@ mod tests {
         assert!(
             prompt.contains("Шаг: Сделать auto-injection restore pack прямо в chat-start prompt.")
         );
-        assert!(prompt.contains("Сделано: Enriched temporal summaries теперь пишутся upstream."));
-        assert!(prompt.contains("Сначала: вернись к линии: Same-meter spend control"));
-        assert!(prompt.contains("Не переключайся до возврата."));
-        assert!(prompt.contains("Правило: follow pack; continuity не поднимай."));
+        assert!(!prompt.contains("Project:"));
+        assert!(!prompt.contains("Namespace:"));
+        assert!(!prompt.contains("Сделано:"));
+        assert!(prompt.contains("Сначала: вернись: Same-meter spend control"));
+        assert!(!prompt.contains("Не переключайся до возврата."));
+        assert!(!prompt.contains("Правило: follow pack; continuity не поднимай."));
         assert!(!prompt.contains("Недавнее:"));
         assert!(!prompt.contains("Файлы:"));
         assert!(!prompt.contains("Задачи:"));
@@ -5908,7 +5914,7 @@ mod tests {
             .as_str()
             .expect("materialized summary");
 
-        assert!(prompt.contains("Client-budget guard: новый чат нужен сейчас."));
+        assert!(prompt.contains("Сделано: Client-budget guard: новый чат нужен сейчас."));
         assert!(!prompt.contains("190690 из 258400"));
         assert!(materialized.contains("162594 из 258400"));
         assert!(materialized.contains("23:27:06 MSK"));
@@ -5968,8 +5974,8 @@ mod tests {
             .as_str()
             .expect("prompt text");
 
-        assert!(prompt.contains("В старом чате разрешён только короткий rotate-ответ."));
-        assert!(prompt.contains("Разрешённый ответ: Этот чат уже жжёт внешний лимит клиента."));
+        assert!(prompt.contains("Сначала: Клиентский лимит: новый чат нужен сейчас"));
+        assert!(prompt.contains("Только rotate: Этот чат уже жжёт внешний лимит клиента."));
     }
 
     #[test]

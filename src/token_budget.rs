@@ -7222,8 +7222,6 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
     let stage_started_at = Instant::now();
     let (rollout_observation_signature, rollout_observations) =
         dashboard_rollout_assistant_generation_observations_for_repo(&repo_root)?;
-    let client_live_meter_observation =
-        preferred_rollout_client_meter_observation(db, &repo_root, repo_root_str).await?;
     record_dashboard_precache_stage_ms(
         &mut pre_cache_timings,
         "rollout_observations",
@@ -7323,7 +7321,6 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         derive_dashboard_rollout_assistant_generation_scopes(db, &repo_root, &scope_events).await?;
     record_dashboard_precache_stage_ms(&mut pre_cache_timings, "assistant_scope", stage_started_at);
 
-    let stage_started_at = Instant::now();
     let mut scope_iter = scope_observations.into_iter();
     let current_session_assistant_scope = scope_iter.next().unwrap_or_default();
     let rolling_window_assistant_scope = if profile.rolling_window_hours.is_some() {
@@ -7332,6 +7329,16 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         None
     };
     let lifetime_assistant_scope = scope_iter.next().unwrap_or_default();
+    let stage_started_at = Instant::now();
+    let client_live_meter_observation =
+        preferred_rollout_client_meter_observation(db, &repo_root, repo_root_str).await?;
+    record_dashboard_precache_stage_ms(
+        &mut pre_cache_timings,
+        "client_live_meter_observation",
+        stage_started_at,
+    );
+
+    let stage_started_at = Instant::now();
     let report_components = dashboard_report_signature_components(
         &session_events,
         &rolling_window_events,
@@ -7342,11 +7349,7 @@ pub async fn collect_dashboard_report(db: &Client) -> Result<Value> {
         client_live_meter_observation.as_ref(),
     );
     let report_signature = dashboard_report_signature(&report_components);
-    record_dashboard_precache_stage_ms(
-        &mut pre_cache_timings,
-        "report_signature",
-        stage_started_at,
-    );
+    record_dashboard_precache_stage_ms(&mut pre_cache_timings, "report_signature", stage_started_at);
     pre_cache_timings.total_ms = collect_started_at.elapsed().as_millis() as u64;
     let cached_report_entry = cached_dashboard_report_entry(&repo_root);
     if let Some(entry) = cached_report_entry.as_ref() {
@@ -9893,8 +9896,6 @@ async fn collect_report(
         .to_str()
         .ok_or_else(|| anyhow!("repo_root must be valid UTF-8"))?;
     let rollout_observations = rollout_assistant_generation_observations_for_repo(repo_root)?;
-    let client_live_meter_observation =
-        preferred_rollout_client_meter_observation(db, repo_root, repo_root_str).await?;
     let mut events = load_events(db, include_verify_events, limit).await?;
     events.sort_by_key(|event| event.created_at_epoch_ms);
     let mut events =
@@ -9950,6 +9951,8 @@ async fn collect_report(
         None
     };
     let lifetime_assistant_scope = derive_rollout_assistant_generation_scope(db, &events).await?;
+    let client_live_meter_observation =
+        preferred_rollout_client_meter_observation(db, repo_root, repo_root_str).await?;
 
     let latest_event = events
         .last()
