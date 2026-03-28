@@ -2337,15 +2337,19 @@ async fn thread_bound_snapshot_with_meta(state: &ObserveState, thread_id: &str) 
 async fn collect_snapshot_preview_for_thread_hint(thread_id: &str) -> Result<Value> {
     let repo_root = discover_repo_root(None)?;
     let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let output = ProcessCommand::new(&current_exe)
+    let subprocess_binary = preferred_snapshot_preview_subprocess_binary(&repo_root, &current_exe);
+    let output = ProcessCommand::new(&subprocess_binary)
         .arg("observe")
         .arg("snapshot-preview")
         .env("CODEX_THREAD_ID", thread_id)
-        .current_dir(repo_root)
+        .current_dir(&repo_root)
         .output()
         .await
         .with_context(|| {
-            format!("failed to spawn snapshot-preview subprocess for thread_id={thread_id}")
+            format!(
+                "failed to spawn snapshot-preview subprocess for thread_id={thread_id} using {}",
+                subprocess_binary.display()
+            )
         })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2357,6 +2361,20 @@ async fn collect_snapshot_preview_for_thread_hint(thread_id: &str) -> Result<Val
     serde_json::from_slice(&output.stdout).with_context(|| {
         format!("snapshot-preview subprocess returned invalid JSON for thread_id={thread_id}")
     })
+}
+
+fn preferred_snapshot_preview_subprocess_binary(repo_root: &Path, current_exe: &Path) -> PathBuf {
+    let release_binary = repo_root.join("target/release/amai");
+    if release_binary.is_file() {
+        return release_binary;
+    }
+
+    let debug_binary = repo_root.join("target/debug/amai");
+    if debug_binary.is_file() {
+        return debug_binary;
+    }
+
+    current_exe.to_path_buf()
 }
 
 async fn refresh_client_live_meter_on_request(state: &ObserveState) {
@@ -4067,6 +4085,8 @@ mod tests {
     use crate::codex_threads::RolloutClientMeterObservation;
     use crate::postgres::ObservabilityRetentionCandidate;
     use serde_json::json;
+    use std::fs::{self, File};
+    use std::path::PathBuf;
     use uuid::Uuid;
 
     #[test]
@@ -4917,5 +4937,21 @@ mod tests {
         assert!(payload["reply_execution_gate"]["reply_budget_contract"].is_null());
         assert!(payload["reply_execution_gate"]["blocking_reply_contract"].is_null());
         assert!(payload["reply_execution_gate"]["action_bundle"].is_null());
+    }
+
+    #[test]
+    fn snapshot_preview_subprocess_prefers_release_binary_under_repo_root() {
+        let temp_root = std::env::temp_dir().join(format!("amai-observe-test-{}", Uuid::new_v4()));
+        let target_release = temp_root.join("target/release");
+        fs::create_dir_all(&target_release).expect("create target/release");
+        let release_binary = target_release.join("amai");
+        File::create(&release_binary).expect("create release binary");
+        let deleted_current_exe = PathBuf::from("/tmp/amai-deleted-binary");
+
+        let selected =
+            super::preferred_snapshot_preview_subprocess_binary(&temp_root, &deleted_current_exe);
+
+        assert_eq!(selected, release_binary);
+        fs::remove_dir_all(&temp_root).expect("remove temp root");
     }
 }
