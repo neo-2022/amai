@@ -2669,58 +2669,31 @@ fn render_startup_agent_contract_artifact(repo_root: &Path) -> Result<String> {
                 "namespace": namespace
             }
         },
-        "artifact_enforcement": contract["artifact_enforcement"].clone(),
-        "runtime_state_artifact": contract["runtime_state_artifact"].clone(),
+        "runtime_state_artifact": {
+            "workspace_runtime_state_relative_path": contract["runtime_state_artifact"]["workspace_runtime_state_relative_path"].clone(),
+            "workspace_runtime_state_artifact_version": contract["runtime_state_artifact"]["workspace_runtime_state_artifact_version"].clone(),
+            "source_summary_field": contract["runtime_state_artifact"]["source_summary_field"].clone(),
+            "startup_execution_gate_field": contract["runtime_state_artifact"]["startup_execution_gate_field"].clone(),
+            "gate_semantics_consistent_field": contract["runtime_state_artifact"]["gate_semantics_consistent_field"].clone(),
+            "written_by_tool": contract["runtime_state_artifact"]["written_by_tool"].clone(),
+            "inspection_fallback_cli_command": contract["runtime_state_artifact"]["inspection_fallback_cli"]["command"].clone()
+        },
         "required_summary_fields": contract["required_summary_fields"].clone(),
         "restored_obligations": contract["restored_obligations"].clone(),
-        "resume_enforcement": {
-            "contract_field": contract["resume_enforcement"]["contract_field"].clone(),
+        "compact_runtime_pointers": {
             "resume_state_field": contract["resume_enforcement"]["resume_state_field"].clone(),
-            "obligation_field": contract["resume_enforcement"]["obligation_field"].clone(),
+            "resume_contract_field": contract["resume_enforcement"]["contract_field"].clone(),
+            "resume_obligation_field": contract["resume_enforcement"]["obligation_field"].clone(),
             "startup_next_action_field": contract["resume_enforcement"]["startup_next_action_field"].clone(),
             "active_lease_field": contract["resume_enforcement"]["active_lease_field"].clone(),
-            "active_lease_owner_state_field": contract["resume_enforcement"]["active_lease_owner_state_field"].clone(),
             "previous_session_owner_value": contract["resume_enforcement"]["previous_session_owner_value"].clone(),
-            "must_resume_required_return_task_before_unrelated_work": contract["resume_enforcement"]["must_resume_required_return_task_before_unrelated_work"].clone(),
-            "previous_session_owner_must_follow_startup_next_action": contract["resume_enforcement"]["previous_session_owner_must_follow_startup_next_action"].clone(),
             "required_action_kind_when_resume_required": contract["resume_enforcement"]["required_action_kind_when_resume_required"].clone(),
-            "no_silent_drop": contract["resume_enforcement"]["no_silent_drop"].clone()
-        },
-        "startup_execution_gate_enforcement": {
-            "must_follow_field": contract["startup_execution_gate_enforcement"]["must_follow_field"].clone(),
-            "unrelated_work_allowed_field": contract["startup_execution_gate_enforcement"]["unrelated_work_allowed_field"].clone(),
-            "must_read_prompt_text_before_reply_field": contract["startup_execution_gate_enforcement"]["must_read_prompt_text_before_reply_field"].clone(),
-            "required_action_kind_field": contract["startup_execution_gate_enforcement"]["required_action_kind_field"].clone(),
-            "no_silent_drop_field": contract["startup_execution_gate_enforcement"]["no_silent_drop_field"].clone()
-        },
-        "live_client_budget_enforcement": {
             "guard_command": contract["live_client_budget_enforcement"]["guard_command"].clone(),
-            "guard_summary_field": contract["live_client_budget_enforcement"]["guard_summary_field"].clone(),
-            "reply_execution_gate_field": contract["live_client_budget_enforcement"]["reply_execution_gate_field"].clone(),
-            "reply_execution_gate_version": contract["live_client_budget_enforcement"]["reply_execution_gate_version"].clone(),
-            "reply_budget_mode_field": contract["live_client_budget_enforcement"]["reply_budget_mode_field"].clone(),
-            "reply_budget_contract_field": contract["live_client_budget_enforcement"]["reply_budget_contract_field"].clone(),
-            "compact_reply_mode_value": contract["live_client_budget_enforcement"]["compact_reply_mode_value"].clone(),
-            "compact_reply_contract_version": contract["live_client_budget_enforcement"]["compact_reply_contract_version"].clone(),
             "compact_diagnostics_command": contract["live_client_budget_enforcement"]["compact_diagnostics_command"].clone(),
-            "must_prefer_compact_diagnostics_over_full_snapshot": contract["live_client_budget_enforcement"]["must_prefer_compact_diagnostics_over_full_snapshot"].clone(),
             "guard_enforcement_flag": contract["live_client_budget_enforcement"]["guard_enforcement_flag"].clone(),
-            "guard_enforcement_exit_on_blocking": contract["live_client_budget_enforcement"]["guard_enforcement_exit_on_blocking"].clone(),
-            "must_check_before_each_substantive_reply": contract["live_client_budget_enforcement"]["must_check_before_each_substantive_reply"].clone(),
-            "max_guard_age_seconds": contract["live_client_budget_enforcement"]["max_guard_age_seconds"].clone(),
-            "stale_guard_requires_refresh": contract["live_client_budget_enforcement"]["stale_guard_requires_refresh"].clone(),
-            "rotate_now_field": contract["live_client_budget_enforcement"]["rotate_now_field"].clone(),
-            "status_label_field": contract["live_client_budget_enforcement"]["status_label_field"].clone(),
-            "rotate_status_labels": contract["live_client_budget_enforcement"]["rotate_status_labels"].clone(),
-            "save_handoff_before_rotate": contract["live_client_budget_enforcement"]["save_handoff_before_rotate"].clone(),
-            "fresh_chat_requires_continuity_startup": contract["live_client_budget_enforcement"]["fresh_chat_requires_continuity_startup"].clone(),
-            "full_scale_client_truth_required": contract["live_client_budget_enforcement"]["full_scale_client_truth_required"].clone(),
+            "reply_execution_gate_field": contract["live_client_budget_enforcement"]["reply_execution_gate_field"].clone(),
+            "compact_reply_mode_value": contract["live_client_budget_enforcement"]["compact_reply_mode_value"].clone(),
             "blocking_reply_contract_field": contract["live_client_budget_enforcement"]["blocking_reply_contract_field"].clone(),
-            "blocking_reply_contract_version": contract["live_client_budget_enforcement"]["blocking_reply_contract_version"].clone(),
-            "blocking_reply_response_kind": contract["live_client_budget_enforcement"]["blocking_reply_response_kind"].clone(),
-            "blocking_reply_max_sentences": contract["live_client_budget_enforcement"]["blocking_reply_max_sentences"].clone(),
-            "blocking_reply_must_avoid_substantive_work": contract["live_client_budget_enforcement"]["blocking_reply_must_avoid_substantive_work"].clone(),
-            "blocking_reply_must_use_action_bundle_operator_flow": contract["live_client_budget_enforcement"]["blocking_reply_must_use_action_bundle_operator_flow"].clone(),
             "blocking_reply_template": contract["live_client_budget_enforcement"]["blocking_reply_template"].clone()
         },
         "fail_closed_conditions": contract["fail_closed_conditions"].clone()
@@ -3248,8 +3221,12 @@ AMI_DEFAULT_RETRIEVAL_MODE=local_strict
             json!("workspace-startup-runtime-state-v4")
         );
         assert_eq!(
-            payload["live_client_budget_enforcement"]["compact_diagnostics_command"],
+            payload["compact_runtime_pointers"]["compact_diagnostics_command"],
             json!("observe client-budget-root-cause")
+        );
+        assert_eq!(
+            payload["compact_runtime_pointers"]["guard_command"],
+            json!("observe client-budget-gate")
         );
         assert!(
             text.len() < full_text.len(),
