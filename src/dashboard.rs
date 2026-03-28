@@ -3152,6 +3152,7 @@ fn build_client_budget_reply_execution_gate(
         fresh_chat_requires_continuity_startup,
         blocking_reply_mode,
         action_bundle,
+        preserves_return_obligation_field,
     ) = if requires_global_budget_recovery_before_reply {
         (
             "wait_for_global_client_budget_recovery",
@@ -3168,6 +3169,7 @@ fn build_client_budget_reply_execution_gate(
                 recommended_headline,
                 recommended_next_step,
             ),
+            preserves_return_obligation,
         )
     } else if rotate_blocking {
         (
@@ -3185,6 +3187,7 @@ fn build_client_budget_reply_execution_gate(
                 recommended_headline,
                 recommended_next_step,
             ),
+            preserves_return_obligation,
         )
     } else {
         (
@@ -3194,14 +3197,8 @@ fn build_client_budget_reply_execution_gate(
             false,
             false,
             working_state::ClientBudgetBlockingReplyMode::Inactive,
-            working_state::build_rotate_chat_action_bundle(
-                project_code,
-                namespace_code,
-                repo_root,
-                preserves_return_obligation,
-                recommended_headline,
-                recommended_next_step,
-            ),
+            Value::Null,
+            preserves_return_obligation,
         )
     };
     let gate_fresh_until_epoch_ms =
@@ -3231,6 +3228,7 @@ fn build_client_budget_reply_execution_gate(
         "guard_fresh_until_epoch_ms": gate_fresh_until_epoch_ms,
         "rotate_now": should_rotate_chat_now,
         "rotate_soon": should_rotate_chat_soon,
+        "preserves_return_obligation": preserves_return_obligation_field,
         "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(
             blocking_reply_mode,
         ),
@@ -14540,6 +14538,11 @@ mod tests {
             guard["reply_execution_gate"]["blocking_reply_contract"]["active"],
             json!(false)
         );
+        assert_eq!(
+            guard["reply_execution_gate"]["preserves_return_obligation"],
+            json!(true)
+        );
+        assert!(guard["reply_execution_gate"]["action_bundle"].is_null());
     }
 
     #[test]
@@ -14633,6 +14636,11 @@ mod tests {
             guard["reply_execution_gate"]["blocking_reply_contract"]["active"],
             json!(false)
         );
+        assert_eq!(
+            guard["reply_execution_gate"]["preserves_return_obligation"],
+            json!(true)
+        );
+        assert!(guard["reply_execution_gate"]["action_bundle"].is_null());
     }
 
     #[test]
@@ -14722,6 +14730,11 @@ mod tests {
             guard["reply_execution_gate"]["blocking_reply_contract"]["active"],
             json!(false)
         );
+        assert_eq!(
+            guard["reply_execution_gate"]["preserves_return_obligation"],
+            json!(true)
+        );
+        assert!(guard["reply_execution_gate"]["action_bundle"].is_null());
     }
 
     #[test]
@@ -14811,6 +14824,11 @@ mod tests {
             guard["reply_execution_gate"]["blocking_reply_contract"]["active"],
             json!(false)
         );
+        assert_eq!(
+            guard["reply_execution_gate"]["preserves_return_obligation"],
+            json!(true)
+        );
+        assert!(guard["reply_execution_gate"]["action_bundle"].is_null());
     }
 
     #[test]

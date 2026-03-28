@@ -322,6 +322,10 @@ fn compact_client_budget_gate_payload(guard: &Value) -> Value {
 }
 
 fn compact_reply_execution_gate(reply_execution_gate: &Value) -> Value {
+    let preserves_return_obligation = reply_execution_gate["preserves_return_obligation"]
+        .as_bool()
+        .map(Value::from)
+        .unwrap_or_else(|| reply_execution_gate["action_bundle"]["preserves_return_obligation"].clone());
     json!({
         "gate_version": reply_execution_gate["gate_version"].clone(),
         "action_kind": reply_execution_gate["action_kind"].clone(),
@@ -332,9 +336,7 @@ fn compact_reply_execution_gate(reply_execution_gate: &Value) -> Value {
         "reply_budget_mode": reply_execution_gate["reply_budget_mode"].clone(),
         "rotate_now": reply_execution_gate["rotate_now"].clone(),
         "rotate_soon": reply_execution_gate["rotate_soon"].clone(),
-        "preserves_return_obligation": reply_execution_gate["action_bundle"]
-            ["preserves_return_obligation"]
-            .clone(),
+        "preserves_return_obligation": preserves_return_obligation,
     })
 }
 
