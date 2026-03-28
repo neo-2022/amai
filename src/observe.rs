@@ -6,7 +6,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Router,
-    extract::State,
+    extract::{Query, State},
     http::{HeaderValue, StatusCode, header},
     response::{Html, IntoResponse},
     routing::get,
@@ -20,6 +20,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::process::Command as ProcessCommand;
 use tokio::sync::RwLock;
 use tokio_postgres::Client;
 use uuid::Uuid;
@@ -30,6 +31,11 @@ struct ObserveState {
     cfg: AppConfig,
     bind: String,
     cache: Arc<RwLock<ObserveCache>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ThreadBindingQuery {
+    thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -192,6 +198,13 @@ struct LoadThresholds {
 pub async fn print_snapshot(cfg: &AppConfig) -> Result<()> {
     maybe_cleanup_local_artifacts().await?;
     let snapshot = collect_snapshot(cfg).await?;
+    println!("{}", serde_json::to_string_pretty(&snapshot)?);
+    Ok(())
+}
+
+pub async fn print_snapshot_preview(cfg: &AppConfig) -> Result<()> {
+    maybe_cleanup_local_artifacts().await?;
+    let snapshot = collect_snapshot_preview(cfg).await?;
     println!("{}", serde_json::to_string_pretty(&snapshot)?);
     Ok(())
 }
@@ -1986,9 +1999,18 @@ async fn favicon_handler() -> impl IntoResponse {
     (StatusCode::OK, headers, dashboard::favicon_ico()).into_response()
 }
 
-async fn dashboard_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+async fn dashboard_api_handler(
+    State(state): State<ObserveState>,
+    Query(query): Query<ThreadBindingQuery>,
+) -> impl IntoResponse {
     refresh_client_live_meter_on_request(&state).await;
-    match cached_dashboard_payload(&state).await {
+    let response =
+        if let Some(thread_id_hint) = normalized_thread_id_hint(query.thread_id.as_deref()) {
+            thread_bound_dashboard_payload(&state, thread_id_hint).await
+        } else {
+            cached_dashboard_payload(&state).await
+        };
+    match response {
         Ok(payload) => (
             StatusCode::OK,
             no_store_headers("application/json; charset=utf-8"),
@@ -2003,9 +2025,18 @@ async fn dashboard_api_handler(State(state): State<ObserveState>) -> impl IntoRe
     }
 }
 
-async fn client_budget_live_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+async fn client_budget_live_api_handler(
+    State(state): State<ObserveState>,
+    Query(query): Query<ThreadBindingQuery>,
+) -> impl IntoResponse {
     refresh_client_live_meter_on_request(&state).await;
-    match cached_snapshot_with_meta(&state).await {
+    let response =
+        if let Some(thread_id_hint) = normalized_thread_id_hint(query.thread_id.as_deref()) {
+            thread_bound_snapshot_with_meta(&state, thread_id_hint).await
+        } else {
+            cached_snapshot_with_meta(&state).await
+        };
+    match response {
         Ok(snapshot) => (
             StatusCode::OK,
             no_store_headers("application/json; charset=utf-8"),
@@ -2021,9 +2052,18 @@ async fn client_budget_live_api_handler(State(state): State<ObserveState>) -> im
     }
 }
 
-async fn snapshot_api_handler(State(state): State<ObserveState>) -> impl IntoResponse {
+async fn snapshot_api_handler(
+    State(state): State<ObserveState>,
+    Query(query): Query<ThreadBindingQuery>,
+) -> impl IntoResponse {
     refresh_client_live_meter_on_request(&state).await;
-    match cached_snapshot_with_meta(&state).await {
+    let response =
+        if let Some(thread_id_hint) = normalized_thread_id_hint(query.thread_id.as_deref()) {
+            thread_bound_snapshot_with_meta(&state, thread_id_hint).await
+        } else {
+            cached_snapshot_with_meta(&state).await
+        };
+    match response {
         Ok(snapshot) => (
             StatusCode::OK,
             no_store_headers("application/json; charset=utf-8"),
@@ -2143,6 +2183,61 @@ async fn cached_snapshot_with_meta(state: &ObserveState) -> Result<Value> {
         &cache,
         state.dashboard_refresh_ms,
     ))
+}
+
+fn normalized_thread_id_hint(thread_id: Option<&str>) -> Option<&str> {
+    thread_id.map(str::trim).filter(|value| !value.is_empty())
+}
+
+async fn thread_bound_dashboard_payload(state: &ObserveState, thread_id: &str) -> Result<Value> {
+    let snapshot = thread_bound_snapshot_with_meta(state, thread_id).await?;
+    let payload = dashboard::build_payload(
+        &state.cfg,
+        &snapshot,
+        &state.bind,
+        state.dashboard_refresh_ms,
+    )?;
+    let cache = state.cache.read().await;
+    Ok(attach_observe_cache_to_dashboard_payload(
+        payload,
+        &cache,
+        state.dashboard_refresh_ms,
+    ))
+}
+
+async fn thread_bound_snapshot_with_meta(state: &ObserveState, thread_id: &str) -> Result<Value> {
+    let snapshot = collect_snapshot_preview_for_thread_hint(thread_id).await?;
+    let cache = state.cache.read().await;
+    Ok(attach_observe_cache_to_snapshot(
+        snapshot,
+        &cache,
+        state.dashboard_refresh_ms,
+    ))
+}
+
+async fn collect_snapshot_preview_for_thread_hint(thread_id: &str) -> Result<Value> {
+    let repo_root = discover_repo_root(None)?;
+    let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
+    let output = ProcessCommand::new(&current_exe)
+        .arg("observe")
+        .arg("snapshot-preview")
+        .env("CODEX_THREAD_ID", thread_id)
+        .current_dir(repo_root)
+        .output()
+        .await
+        .with_context(|| {
+            format!("failed to spawn snapshot-preview subprocess for thread_id={thread_id}")
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "snapshot-preview subprocess failed for thread_id={thread_id}: {}",
+            stderr.trim()
+        ));
+    }
+    serde_json::from_slice(&output.stdout).with_context(|| {
+        format!("snapshot-preview subprocess returned invalid JSON for thread_id={thread_id}")
+    })
 }
 
 async fn refresh_client_live_meter_on_request(state: &ObserveState) {
@@ -3847,8 +3942,8 @@ mod tests {
     use super::{
         benchmark_contamination_value, build_continuity_correctness_model, build_degradation_model,
         cached_client_live_meter_state, client_live_meter_refresh_needed, evaluate_sla,
-        expired_retention_candidates, load_profile, profile_thresholds_json,
-        render_prometheus_metrics, select_latest_clean_benchmark_snapshot,
+        expired_retention_candidates, load_profile, normalized_thread_id_hint,
+        profile_thresholds_json, render_prometheus_metrics, select_latest_clean_benchmark_snapshot,
     };
     use crate::codex_threads::RolloutClientMeterObservation;
     use crate::postgres::ObservabilityRetentionCandidate;
@@ -3940,6 +4035,21 @@ mod tests {
         assert!(output.contains("amai_continuity_verified_probes_total 9"));
         assert!(output.contains("amai_continuity_recovered_useful_total 7"));
         assert!(output.contains("amai_continuity_fail_closed_total 2"));
+    }
+
+    #[test]
+    fn normalized_thread_id_hint_rejects_empty_values() {
+        assert_eq!(normalized_thread_id_hint(None), None);
+        assert_eq!(normalized_thread_id_hint(Some("")), None);
+        assert_eq!(normalized_thread_id_hint(Some("   ")), None);
+    }
+
+    #[test]
+    fn normalized_thread_id_hint_trims_value() {
+        assert_eq!(
+            normalized_thread_id_hint(Some("  thread-123  ")),
+            Some("thread-123")
+        );
     }
 
     #[test]

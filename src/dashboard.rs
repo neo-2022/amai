@@ -1590,13 +1590,24 @@ pub fn render_html(refresh_ms: u64) -> String {
     }
 
     let clientBudgetLiveRefreshPromise = null;
+    const dashboardThreadId = new URLSearchParams(window.location.search).get("thread_id");
+
+    function apiPathWithThreadHint(path) {
+      if (!dashboardThreadId) {
+        return path;
+      }
+      const separator = path.includes("?") ? "&" : "?";
+      return `${path}${separator}thread_id=${encodeURIComponent(dashboardThreadId)}`;
+    }
 
     async function fetchClientBudgetLivePayload(force = false) {
       if (clientBudgetLiveRefreshPromise) {
         return clientBudgetLiveRefreshPromise;
       }
       clientBudgetLiveRefreshPromise = (async () => {
-        const response = await fetch("/api/client-budget-live", { cache: "no-store" });
+        const response = await fetch(apiPathWithThreadHint("/api/client-budget-live"), {
+          cache: "no-store",
+        });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
@@ -2718,7 +2729,9 @@ pub fn render_html(refresh_ms: u64) -> String {
       refreshInFlight = true;
       const clientBudgetLivePayloadPromise = fetchClientBudgetLivePayload(force).catch(() => null);
       try {
-        const response = await fetch("/api/dashboard", { cache: "no-store" });
+        const response = await fetch(apiPathWithThreadHint("/api/dashboard"), {
+          cache: "no-store",
+        });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
@@ -11433,7 +11446,9 @@ mod tests {
         assert!(html.contains("document.addEventListener(\"visibilitychange\""));
         assert!(html.contains("window.addEventListener(\"focus\", () => loadDashboard(true));"));
         assert!(html.contains("window.addEventListener(\"pageshow\", () => loadDashboard(true));"));
-        assert!(html.contains("fetch(\"/api/client-budget-live\""));
+        assert!(html.contains("const dashboardThreadId = new URLSearchParams(window.location.search).get(\"thread_id\");"));
+        assert!(html.contains("fetch(apiPathWithThreadHint(\"/api/client-budget-live\")"));
+        assert!(html.contains("fetch(apiPathWithThreadHint(\"/api/dashboard\")"));
         assert!(html.contains(
             "setInterval(() => syncClientBudgetLiveRows(false), CLIENT_BUDGET_LIVE_REFRESH_MS);"
         ));

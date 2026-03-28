@@ -380,6 +380,11 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 observe::print_snapshot(&cfg).await?;
             }
+            ObserveCommand::SnapshotPreview => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                observe::print_snapshot_preview(&cfg).await?;
+            }
             ObserveCommand::SlaCheck => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;

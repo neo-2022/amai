@@ -166,6 +166,7 @@ pub enum VerifyCommand {
 #[derive(Debug, Subcommand)]
 pub enum ObserveCommand {
     Snapshot,
+    SnapshotPreview,
     SlaCheck,
     Guardrails,
     ClientBudgetGuard(ObserveClientBudgetGuardArgs),
@@ -1143,5 +1144,14 @@ mod tests {
             panic!("expected client-budget-guard command");
         };
         assert!(args.enforce_reply_gate);
+    }
+
+    #[test]
+    fn observe_snapshot_preview_cli_parses() {
+        let cli = Cli::parse_from(["amai", "observe", "snapshot-preview"]);
+        let Command::Observe { command } = cli.command else {
+            panic!("expected observe command");
+        };
+        assert!(matches!(command, ObserveCommand::SnapshotPreview));
     }
 }
