@@ -10691,7 +10691,7 @@ async fn build_current_live_turn_surface(
     surface["counted_events"] = meter_summary["counted_events"].clone();
     surface["meter_counted_events"] = meter_summary["meter_counted_events"].clone();
     if let Some((without_amai_tokens, with_amai_tokens, saved_tokens, saved_pct)) =
-        scope_same_meter_exact_pair(&statement_preview)
+        current_live_turn_full_turn_exact_pair(&statement_preview, observation)
     {
         surface["status"] = Value::from("exact_pair_materialized");
         surface["exact_pair_available"] = Value::from(true);
@@ -10702,7 +10702,7 @@ async fn build_current_live_turn_surface(
             "saved_pct": saved_pct
         });
         surface["note"] = Value::from(
-            "Exact full-turn pair materialized from live token_budget events, matched to the current thread-bound turn and same-meter aligned with the VS Code status bar.",
+            "Exact full-turn pair materialized from the actual VS Code meter by substituting only the Amai-specific retrieval and orchestration parts with their truthful no-Amai baseline.",
         );
     } else {
         surface["status"] = Value::from("activity_observed_exact_pair_unavailable");
@@ -13732,6 +13732,7 @@ fn product_headline_same_meter_exact_pair(summary: &Value) -> Option<(i64, f64)>
     Some((saved_tokens, value_percent))
 }
 
+#[cfg(test)]
 fn scope_same_meter_exact_pair(scope_summary: &Value) -> Option<(u64, u64, i64, f64)> {
     let alignment = &scope_summary["client_limit_meter_alignment"];
     if alignment["same_meter_as_client_limit"].as_bool() != Some(true) {
@@ -13755,6 +13756,81 @@ fn scope_same_meter_exact_pair(scope_summary: &Value) -> Option<(u64, u64, i64, 
     let saved_tokens = without_amai as i64 - with_amai as i64;
     let saved_pct = saved_tokens as f64 * 100.0 / without_amai as f64;
     Some((without_amai, with_amai, saved_tokens, saved_pct))
+}
+
+fn current_live_turn_alignment_component<'a>(
+    scope_summary: &'a Value,
+    code: &str,
+) -> Option<&'a Value> {
+    scope_summary["client_limit_meter_alignment"]["baseline_equivalence"]["component_semantics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["code"].as_str() == Some(code))
+}
+
+fn current_live_turn_full_turn_exact_pair(
+    scope_summary: &Value,
+    observation: &codex_threads::RolloutClientMeterObservation,
+) -> Option<(u64, u64, i64, f64)> {
+    let with_amai_total_tokens = observation.client_turn_total_tokens;
+    if with_amai_total_tokens == 0 {
+        return None;
+    }
+
+    let retrieval_without_amai_tokens = scope_summary["without_amai_measured_tokens"].as_u64()?;
+    let retrieval_with_amai_tokens = scope_summary["with_amai_measured_tokens"].as_u64()?;
+    let observed_tool_overhead_tokens = scope_summary["observed_tool_overhead_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    let observed_continuity_restore_tokens = scope_summary["observed_continuity_restore_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+
+    if let Some(component) =
+        current_live_turn_alignment_component(scope_summary, "tool_overhead_outside_retrieval")
+    {
+        let target_live_events = component["target_live_events_count"].as_u64().unwrap_or(0);
+        if target_live_events > 0
+            && component["whole_cycle_observed_complete"].as_bool() != Some(true)
+        {
+            return None;
+        }
+    }
+
+    let continuity_without_amai_tokens = if observed_continuity_restore_tokens == 0 {
+        0
+    } else {
+        let component = current_live_turn_alignment_component(
+            scope_summary,
+            "continuity_restore_outside_retrieval",
+        )?;
+        if component["whole_cycle_observed_complete"].as_bool() != Some(true) {
+            return None;
+        }
+        component["baseline_measured_tokens"].as_u64()?
+    };
+
+    let saved_tokens = retrieval_without_amai_tokens as i64
+        - retrieval_with_amai_tokens as i64
+        - observed_tool_overhead_tokens as i64
+        + continuity_without_amai_tokens as i64
+        - observed_continuity_restore_tokens as i64;
+    let without_amai_total_tokens = if saved_tokens >= 0 {
+        with_amai_total_tokens.saturating_add(saved_tokens as u64)
+    } else {
+        with_amai_total_tokens.saturating_sub(saved_tokens.unsigned_abs())
+    };
+    if without_amai_total_tokens == 0 {
+        return None;
+    }
+    let saved_pct = saved_tokens as f64 * 100.0 / without_amai_total_tokens as f64;
+    Some((
+        without_amai_total_tokens,
+        with_amai_total_tokens,
+        saved_tokens,
+        saved_pct,
+    ))
 }
 
 fn client_limit_meter_alignment_counts(
@@ -18204,7 +18280,7 @@ fn render_naive_scope_prompt(payload: &Value, scope: &NaiveScope) -> String {
     prompt
 }
 
-fn render_context_pack_prompt(payload: &Value) -> String {
+pub(crate) fn render_context_pack_prompt(payload: &Value) -> String {
     let mut excerpt_paths = HashSet::new();
     let mut exact_lines = Vec::new();
     let mut symbol_lines = Vec::new();
@@ -23297,6 +23373,75 @@ effective_to_epoch_ms = 2000
         assert_eq!(with_amai, 94);
         assert_eq!(saved_tokens, -49);
         assert!((saved_pct - (-108.888_888_888_888_89)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn current_live_turn_full_turn_exact_pair_uses_retrieval_baseline_and_tool_overhead() {
+        let measurement = measurement_fixture();
+        let contract = contract_fixture();
+        let events = vec![token_event! {
+            event_id: "event-live-turn".to_string(),
+            context_pack_id: Some("cp-live".to_string()),
+            correlation_id: "cp-live".to_string(),
+            measurement_scope: "retrieval_lower_bound".to_string(),
+            traffic_class: "live".to_string(),
+            quality_ok: false,
+            context_tokens: 40,
+            naive_tokens: 200,
+            effective_saved_tokens: 160,
+            client_prompt_tokens: Some(12),
+            assistant_generation_tokens: None,
+            tool_overhead_tokens: Some(9),
+        }];
+        let matched_context_pack_ids =
+            ["cp-live".to_string()].into_iter().collect::<std::collections::BTreeSet<_>>();
+        let observation = crate::codex_threads::RolloutClientMeterObservation {
+            thread_id: "thread-1".to_string(),
+            rollout_path: "/tmp/current-live-turn.jsonl".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_epoch_ms: 100,
+            ended_at_epoch_ms: 200,
+            client_turn_total_tokens: 94,
+            client_turn_input_tokens: 12,
+            client_turn_cached_input_tokens: 0,
+            client_turn_output_tokens: 33,
+            client_turn_reasoning_output_tokens: 0,
+            latest_cumulative_total_tokens: 94,
+            latest_model_context_window: 258400,
+            latest_primary_limit_used_percent: 10,
+            latest_secondary_limit_used_percent: 20,
+            observation_source: "codex_rollout_client_meter_v2".to_string(),
+        };
+        let assistant_scope = super::current_live_turn_assistant_scope_from_client_meter(
+            &events,
+            &matched_context_pack_ids,
+            &observation,
+        )
+        .expect("scope");
+        let summary = super::current_live_turn_meter_summary(&super::summarize_events(
+            &events,
+            250,
+            &measurement,
+            &contract,
+        ));
+        let preview = super::build_dashboard_statement_preview(
+            "current_live_turn",
+            "текущий live-turn",
+            &summary,
+            &events,
+            &contract,
+            &[],
+            Some(&assistant_scope),
+        );
+
+        let (without_amai, with_amai, saved_tokens, saved_pct) =
+            super::current_live_turn_full_turn_exact_pair(&preview, &observation)
+                .expect("full turn exact pair");
+
+        assert_eq!(without_amai, 245);
+        assert_eq!(with_amai, 94);
+        assert_eq!(saved_tokens, 151);
+        assert!((saved_pct - 61.632_653_061_224_49).abs() < 1e-9);
     }
 
     #[test]

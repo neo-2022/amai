@@ -149,10 +149,12 @@ pub async fn build_context_pack(
     ensure_context_pack_persisted(cfg, db, args, &mut prepared).await?;
     cache_context_pack_entry(cfg, args, &prepared, true)?;
     record_context_pack_token_budget_event(db, prepared.payload.as_ref(), args).await?;
+    let compact_output = model_visible_context_pack_payload(prepared.payload.as_ref());
+    let compact_output_json = serde_json::to_string(&compact_output)?;
     let _ = token_budget::observe_cli_context_pack_tool_overhead(
         db,
         &prepared.context_pack_id.to_string(),
-        prepared.payload_json.as_ref(),
+        compact_output_json.as_str(),
     )
     .await?;
     if prepared.cache_hit {
@@ -170,7 +172,7 @@ pub async fn build_context_pack(
             prepared.context_pack_id
         );
     }
-    println!("{}", prepared.payload_json);
+    println!("{compact_output_json}");
     Ok(())
 }
 
@@ -294,6 +296,83 @@ fn with_whole_cycle_observed_overrides(payload: &Value, args: &ContextPackArgs) 
         whole_cycle_object.insert("continuity_restore_tokens".to_string(), Value::from(tokens));
     }
     augmented
+}
+
+pub(crate) fn model_visible_context_pack_payload(payload: &Value) -> Value {
+    json!({
+        "context_pack_id": payload["context_pack_id"].clone(),
+        "project": {
+            "code": payload["project"]["code"].clone(),
+            "display_name": payload["project"]["display_name"].clone(),
+        },
+        "namespace": {
+            "code": payload["namespace"]["code"].clone(),
+            "display_name": payload["namespace"]["display_name"].clone(),
+        },
+        "query": payload["query"].clone(),
+        "effective_retrieval_mode": payload["effective_retrieval_mode"].clone(),
+        "visible_projects": payload["visible_projects"].clone(),
+        "decision_trace": payload["decision_trace"].clone(),
+        "retrieval": {
+            "exact_documents": compact_exact_documents(&payload["retrieval"]["exact_documents"]),
+            "symbol_hits": compact_symbol_hits(&payload["retrieval"]["symbol_hits"]),
+            "lexical_chunks": compact_chunks(&payload["retrieval"]["lexical_chunks"]),
+            "semantic_chunks": compact_chunks(&payload["retrieval"]["semantic_chunks"]),
+        }
+    })
+}
+
+fn compact_exact_documents(value: &Value) -> Vec<Value> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| {
+            json!({
+                "project_code": item["project_code"].clone(),
+                "relative_path": item["relative_path"].clone(),
+                "snippet": item["snippet"].clone(),
+                "source_kind": item["source_kind"].clone(),
+            })
+        })
+        .collect()
+}
+
+fn compact_symbol_hits(value: &Value) -> Vec<Value> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| {
+            json!({
+                "project_code": item["project_code"].clone(),
+                "relative_path": item["relative_path"].clone(),
+                "name": item["name"].clone(),
+                "kind": item["kind"].clone(),
+                "provenance": {
+                    "source_project": item["provenance"]["source_project"].clone(),
+                }
+            })
+        })
+        .collect()
+}
+
+fn compact_chunks(value: &Value) -> Vec<Value> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| {
+            json!({
+                "project_code": item["project_code"].clone(),
+                "relative_path": item["relative_path"].clone(),
+                "content": item["content"].clone(),
+                "provenance": {
+                    "source_project": item["provenance"]["source_project"].clone(),
+                }
+            })
+        })
+        .collect()
 }
 
 pub fn try_execute_context_pack_fast_cached(
@@ -2247,10 +2326,11 @@ fn synthetic_chunk_hit(relative_path: &str, content: &str) -> ChunkHit {
 mod tests {
     use super::{
         SemanticTimings, apply_semantic_relevance_guard, build_context_pack_decision_trace,
-        degradation_probe_stale_fast_cache, degradation_proof_scenarios, query_terms,
-        semantic_fallback_result, semantic_hit_has_query_overlap,
-        should_use_minimal_document_workspace_graph, should_use_minimal_symbol_workspace_graph,
-        synthetic_chunk_hit, with_whole_cycle_observed_overrides,
+        degradation_probe_stale_fast_cache, degradation_proof_scenarios,
+        model_visible_context_pack_payload, query_terms, semantic_fallback_result,
+        semantic_hit_has_query_overlap, should_use_minimal_document_workspace_graph,
+        should_use_minimal_symbol_workspace_graph, synthetic_chunk_hit,
+        with_whole_cycle_observed_overrides,
     };
     use crate::cli::ContextPackArgs;
     use crate::postgres::{DocumentHit, SymbolHit};
@@ -2368,6 +2448,124 @@ mod tests {
         assert_eq!(
             updated["whole_cycle_observed"]["continuity_restore_tokens"],
             3
+        );
+    }
+
+    #[test]
+    fn model_visible_context_pack_payload_keeps_required_fields_and_drops_heavy_runtime_details() {
+        let payload = json!({
+            "context_pack_id": "ctx-1",
+            "project": {
+                "code": "art",
+                "display_name": "Art",
+                "repo_root": "/home/art/Art"
+            },
+            "namespace": {
+                "code": "continuity",
+                "display_name": "Continuity"
+            },
+            "query": "Continuity snapshot",
+            "effective_retrieval_mode": "local_strict",
+            "visible_projects": [{
+                "project_code": "art",
+                "repo_root": "/home/art/Art"
+            }],
+            "decision_trace": {
+                "scope": {"effective_retrieval_mode": "local_strict"},
+                "included": [{"strategy": "exact_documents", "count": 1}],
+                "not_included": []
+            },
+            "retrieval": {
+                "exact_documents": [{
+                    "project_code": "art",
+                    "relative_path": ".amai-continuity/live-handoff.md",
+                    "snippet": "handoff snippet",
+                    "source_kind": "docs",
+                    "score": 2000.0,
+                    "provenance": {
+                        "source_project": "art",
+                        "repo_root": "/home/art/Art",
+                        "commit_sha": "abc"
+                    }
+                }],
+                "symbol_hits": [{
+                    "project_code": "art",
+                    "relative_path": "src/lib.rs",
+                    "name": "build_context_pack",
+                    "kind": "function_item",
+                    "metadata": {"language": "rust"},
+                    "provenance": {
+                        "source_project": "art",
+                        "repo_root": "/home/art/Art"
+                    }
+                }],
+                "lexical_chunks": [{
+                    "project_code": "art",
+                    "relative_path": "docs/guide.md",
+                    "content": "lexical excerpt",
+                    "chunk": {"chunk_id": "c1"},
+                    "provenance": {
+                        "source_project": "art",
+                        "repo_root": "/home/art/Art"
+                    }
+                }],
+                "semantic_chunks": [{
+                    "project_code": "art",
+                    "relative_path": "docs/guide.md",
+                    "content": "semantic excerpt",
+                    "retrieval_strategy": "semantic",
+                    "provenance": {
+                        "source_project": "art",
+                        "repo_root": "/home/art/Art"
+                    }
+                }]
+            },
+            "workspace_graph": {"heavy": true},
+            "retrieval_runtime": {"total_ms": 88}
+        });
+
+        let compact = model_visible_context_pack_payload(&payload);
+
+        assert_eq!(compact["context_pack_id"].as_str(), Some("ctx-1"));
+        assert_eq!(compact["project"]["code"].as_str(), Some("art"));
+        assert_eq!(compact["namespace"]["code"].as_str(), Some("continuity"));
+        assert_eq!(
+            compact["retrieval"]["exact_documents"][0]["relative_path"].as_str(),
+            Some(".amai-continuity/live-handoff.md")
+        );
+        assert_eq!(
+            compact["retrieval"]["lexical_chunks"][0]["content"].as_str(),
+            Some("lexical excerpt")
+        );
+        assert_eq!(
+            compact["retrieval"]["semantic_chunks"][0]["content"].as_str(),
+            Some("semantic excerpt")
+        );
+        assert_eq!(
+            compact["retrieval"]["symbol_hits"][0]["name"].as_str(),
+            Some("build_context_pack")
+        );
+        assert!(compact.get("workspace_graph").is_none());
+        assert!(compact.get("retrieval_runtime").is_none());
+        assert!(compact["retrieval"]["exact_documents"][0].get("score").is_none());
+        assert!(compact["retrieval"]["lexical_chunks"][0].get("chunk").is_none());
+        assert!(
+            compact["retrieval"]["symbol_hits"][0]
+                .get("metadata")
+                .is_none()
+        );
+        assert_eq!(
+            compact["retrieval"]["lexical_chunks"][0]["provenance"]["source_project"].as_str(),
+            Some("art")
+        );
+        assert!(
+            compact["retrieval"]["lexical_chunks"][0]["provenance"]
+                .get("repo_root")
+                .is_none()
+        );
+        assert!(
+            serde_json::to_string(&compact).expect("compact json").len()
+                < serde_json::to_string(&payload).expect("full json").len()
         );
     }
 

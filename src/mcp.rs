@@ -1750,6 +1750,7 @@ async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result
     let context = args.to_context_args();
     let result =
         retrieval::execute_context_pack_capture(cfg, &mut db, &context, args.persist).await?;
+    let model_visible_payload = retrieval::model_visible_context_pack_payload(&result.payload);
     let context_summary = context_pack_summary(&result.payload);
     let summary_block = json!({
         "included_reasons_summary": context_summary.included_reasons_summary.clone(),
@@ -1777,7 +1778,7 @@ async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result
         }
     });
     let structured = json!({
-        "context_pack": result.payload,
+        "context_pack": model_visible_payload,
         "context_pack_summary": summary_block.clone(),
         "stats": stats_block.clone(),
     });
@@ -1798,15 +1799,11 @@ async fn tool_context_pack(cfg: &AppConfig, args: ContextPackToolArgs) -> Result
     if let Some(value) = &context_summary.excluded_reasons_summary {
         summary.push_str(&format!(" excluded={value}"));
     }
-    let tool_overhead_structured = json!({
-        "context_pack_summary": summary_block,
-        "stats": stats_block,
-    });
     token_budget::observe_context_pack_tool_overhead(
         &mut db,
         &result.stats.context_pack_id.to_string(),
         &summary,
-        &tool_overhead_structured,
+        &structured,
     )
     .await?;
     Ok(tool_result(summary, structured))
