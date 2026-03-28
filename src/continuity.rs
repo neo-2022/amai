@@ -324,7 +324,8 @@ fn compact_project_task_tree_for_startup(tree: &Value) -> Value {
 
 fn compact_pending_return_queue_for_startup(queue: &Value) -> Value {
     Value::Array(
-        queue.as_array()
+        queue
+            .as_array()
             .into_iter()
             .flatten()
             .take(STARTUP_LEDGER_QUEUE_PREVIEW_LIMIT)
@@ -6097,7 +6098,7 @@ mod tests {
                 "client_budget_guard": {
                     "reply_execution_gate": {
                         "blocking_reply_contract": {
-                            "template": "Этот чат уже жжёт внешний лимит клиента. Сохрани handoff, открой новый чат и запусти continuity startup."
+                            "template": "Этот чат жжёт внешний лимит клиента: сохрани handoff, открой новый чат и запусти continuity startup."
                         }
                     }
                 }
@@ -6111,7 +6112,7 @@ mod tests {
             .expect("prompt text");
 
         assert!(prompt.contains("Сначала: Клиентский лимит: новый чат нужен сейчас"));
-        assert!(prompt.contains("Только rotate: Этот чат уже жжёт внешний лимит клиента."));
+        assert!(prompt.contains("Только rotate: Этот чат жжёт внешний лимит клиента:"));
     }
 
     #[test]
