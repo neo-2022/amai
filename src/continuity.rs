@@ -1504,25 +1504,10 @@ fn compact_startup_runtime_startup_action_bundle(action_bundle: &Value) -> Value
             Value::Array(missing_inputs.clone()),
         );
     }
-    if action_bundle["recommended_handoff"].is_object() {
-        let mut recommended = serde_json::Map::new();
-        copy_if_present(
-            &mut recommended,
-            &action_bundle["recommended_handoff"],
-            &["available", "headline", "next_step"],
-        );
-        if !recommended.is_empty() {
-            compact.insert(
-                "recommended_handoff".to_string(),
-                Value::Object(recommended),
-            );
-        }
-    }
     if action_bundle["operator_flow"].is_object() {
         let mut operator_flow = serde_json::Map::new();
         for field in [
             "rotate_helper_command",
-            "handoff_command",
             "startup_command",
             "startup_after_recovery_command",
         ] {
@@ -6785,15 +6770,12 @@ mod tests {
                 .is_some_and(|value| value.contains("continuity rotate-chat"))
         );
         assert!(
-            bundle["operator_flow"]["handoff_command"]
-                .as_str()
-                .is_some_and(|value| value.contains("continuity handoff"))
-        );
-        assert!(
             bundle["operator_flow"]["startup_command"]
                 .as_str()
                 .is_some_and(|value| value.contains("continuity startup"))
         );
+        assert!(bundle["operator_flow"]["handoff_command"].is_null());
+        assert!(bundle["recommended_handoff"].is_null());
     }
 
     #[test]
