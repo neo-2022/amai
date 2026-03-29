@@ -3,8 +3,8 @@ use crate::cli::{
     VerifyMemoryMatrixArgs, VerifyTokenBenchmarkArgs,
 };
 use crate::{
-    benchmark_matrix, compatibility, config, continuity, memory_task_matrix, observe, postgres,
-    profiles, retrieval, token_budget, verify, working_state,
+    benchmark_matrix, compatibility, config, continuity, dashboard, memory_task_matrix, observe,
+    postgres, profiles, retrieval, token_budget, verify, working_state,
 };
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
@@ -1482,6 +1482,13 @@ async fn handle_request(cfg: &AppConfig, incoming: Value) -> Result<Value> {
 }
 
 async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> McpToolResult<Value> {
+    if let Some(blocked_result) =
+        maybe_live_client_budget_preflight_block(cfg, request.name.as_str())
+            .await
+            .map_err(McpError::tool_runtime)?
+    {
+        return Ok(blocked_result);
+    }
     match request.name.as_str() {
         "amai_list_projects" => tool_list_projects(cfg)
             .await
@@ -1554,6 +1561,91 @@ async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> McpToolR
         }
         other => Err(McpError::tool_not_found(other)),
     }
+}
+
+async fn maybe_live_client_budget_preflight_block(
+    cfg: &AppConfig,
+    tool_name: &str,
+) -> Result<Option<Value>> {
+    if !tool_requires_live_client_budget_preflight(tool_name) {
+        return Ok(None);
+    }
+    let snapshot = observe::collect_snapshot_preview(cfg).await?;
+    let guard = dashboard::current_session_budget_guard(&snapshot);
+    if !working_state::client_budget_guard_blocks_reply(&guard) {
+        return Ok(None);
+    }
+    Ok(Some(client_budget_blocked_tool_result(tool_name, &guard)))
+}
+
+fn tool_requires_live_client_budget_preflight(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "amai_context_pack"
+            | "amai_token_benchmark"
+            | "amai_token_report"
+            | "amai_memory_matrix"
+            | "amai_observe_snapshot"
+            | "amai_warm_cache"
+    )
+}
+
+fn compact_mcp_client_budget_reply_gate_payload(guard: &Value) -> Value {
+    let reply_execution_gate = &guard["reply_execution_gate"];
+    let preserves_return_obligation = reply_execution_gate["preserves_return_obligation"]
+        .as_bool()
+        .map(Value::from)
+        .unwrap_or_else(|| {
+            reply_execution_gate["action_bundle"]["preserves_return_obligation"].clone()
+        });
+    json!({
+        "status_label": guard["status_label"].clone(),
+        "observed_at_epoch_ms": guard["observed_at_epoch_ms"].clone(),
+        "max_guard_age_seconds": guard["max_guard_age_seconds"].clone(),
+        "last_request": guard["last_request"].clone(),
+        "client_limits": guard["client_limits"].clone(),
+        "reply_execution_gate": {
+            "action_kind": reply_execution_gate["action_kind"].clone(),
+            "blocking": reply_execution_gate["blocking"].clone(),
+            "must_rotate_before_reply": reply_execution_gate["must_rotate_before_reply"].clone(),
+            "must_wait_for_budget_recovery_before_reply":
+                reply_execution_gate["must_wait_for_budget_recovery_before_reply"].clone(),
+            "reply_budget_mode": reply_execution_gate["reply_budget_mode"].clone(),
+            "preserves_return_obligation": preserves_return_obligation,
+            "blocking_reply_contract": reply_execution_gate["blocking_reply_contract"].clone(),
+        }
+    })
+}
+
+fn client_budget_blocked_tool_result(tool_name: &str, guard: &Value) -> Value {
+    let action_kind = guard["reply_execution_gate"]["action_kind"]
+        .as_str()
+        .unwrap_or("continue_current_chat");
+    let blocked_hint = match action_kind {
+        "wait_for_global_client_budget_recovery" => {
+            "wait for global client budget recovery before retrying this tool"
+        }
+        "rotate_chat_for_client_budget" => "rotate into a fresh chat before retrying this tool",
+        _ => "refresh the live client budget gate before retrying this tool",
+    };
+    json!({
+        "content": [{
+            "type": "text",
+            "text": format!(
+                "tool blocked by live client budget gate: {blocked_hint}"
+            )
+        }],
+        "isError": true,
+        "structuredContent": {
+            "error_taxonomy": {
+                "amai_error_code": "tool_blocked_by_live_client_budget_gate",
+                "amai_error_class": "tool_budget_guard",
+                "retryable": true,
+            },
+            "blocked_tool": tool_name,
+            "client_budget_reply_gate": compact_mcp_client_budget_reply_gate_payload(guard),
+        }
+    })
 }
 
 async fn tool_list_projects(cfg: &AppConfig) -> Result<Value> {
@@ -4520,8 +4612,9 @@ mod tests {
         observe_whole_cycle_turn_input_schema, prompt_result, protocol_manifest,
         render_client_config, snapshot_has_only_ignored_critical_metrics, stack_preflight_summary,
         summarize_codes, summarize_namespace_modes, token_benchmark_summary, token_report_summary,
-        verify_mcp_scope_label, verify_mcp_scope_requires_memory_matrix,
-        verify_mcp_scope_requires_warm_cache, warm_cache_summary,
+        tool_requires_live_client_budget_preflight, verify_mcp_scope_label,
+        verify_mcp_scope_requires_memory_matrix, verify_mcp_scope_requires_warm_cache,
+        warm_cache_summary,
     };
     use crate::cli::VerifyMcpScope;
     use crate::retrieval::{ContextPackStats, ContextPackTimings};
@@ -5977,6 +6070,98 @@ mod tests {
         assert_eq!(
             result["structuredContent"]["error_taxonomy"]["amai_error_class"].as_str(),
             Some("tool_dispatch")
+        );
+    }
+
+    #[test]
+    fn live_client_budget_preflight_only_gates_expensive_tools() {
+        assert!(tool_requires_live_client_budget_preflight(
+            "amai_context_pack"
+        ));
+        assert!(tool_requires_live_client_budget_preflight(
+            "amai_token_benchmark"
+        ));
+        assert!(tool_requires_live_client_budget_preflight(
+            "amai_token_report"
+        ));
+        assert!(tool_requires_live_client_budget_preflight(
+            "amai_memory_matrix"
+        ));
+        assert!(tool_requires_live_client_budget_preflight(
+            "amai_observe_snapshot"
+        ));
+        assert!(tool_requires_live_client_budget_preflight(
+            "amai_warm_cache"
+        ));
+        assert!(!tool_requires_live_client_budget_preflight(
+            "amai_list_projects"
+        ));
+        assert!(!tool_requires_live_client_budget_preflight(
+            "amai_list_namespaces"
+        ));
+        assert!(!tool_requires_live_client_budget_preflight(
+            "amai_stack_preflight"
+        ));
+        assert!(!tool_requires_live_client_budget_preflight(
+            "amai_continuity_startup"
+        ));
+        assert!(!tool_requires_live_client_budget_preflight(
+            "amai_observe_whole_cycle"
+        ));
+        assert!(!tool_requires_live_client_budget_preflight(
+            "amai_observe_whole_cycle_turn"
+        ));
+    }
+
+    #[test]
+    fn client_budget_blocked_tool_result_keeps_compact_machine_readable_gate() {
+        let guard = json!({
+            "status_label": "новый чат нужен сейчас",
+            "observed_at_epoch_ms": 1774765483000_u64,
+            "max_guard_age_seconds": 10,
+            "last_request": "187520 из 258400",
+            "client_limits": "5ч остаётся 89.00%, 7д остаётся 3.00%",
+            "reply_execution_gate": {
+                "action_kind": "rotate_chat_for_client_budget",
+                "blocking": true,
+                "must_rotate_before_reply": true,
+                "must_wait_for_budget_recovery_before_reply": false,
+                "reply_budget_mode": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
+                "preserves_return_obligation": true,
+                "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(
+                    working_state::ClientBudgetBlockingReplyMode::RotateChatOnly,
+                ),
+                "action_bundle": {
+                    "preserves_return_obligation": true
+                }
+            }
+        });
+        let result = super::client_budget_blocked_tool_result("amai_context_pack", &guard);
+        assert_eq!(result["isError"].as_bool(), Some(true));
+        assert_eq!(
+            result["structuredContent"]["error_taxonomy"]["amai_error_code"].as_str(),
+            Some("tool_blocked_by_live_client_budget_gate")
+        );
+        assert_eq!(
+            result["structuredContent"]["blocked_tool"].as_str(),
+            Some("amai_context_pack")
+        );
+        assert_eq!(
+            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
+                ["action_kind"]
+                .as_str(),
+            Some("rotate_chat_for_client_budget")
+        );
+        assert_eq!(
+            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
+                ["blocking_reply_contract"]["response_kind"]
+                .as_str(),
+            Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND)
+        );
+        assert!(
+            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
+                .get("action_bundle")
+                .is_none()
         );
     }
 
