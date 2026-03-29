@@ -114,9 +114,9 @@ pub(crate) fn build_client_reply_budget_contract(mode: ClientReplyBudgetMode) ->
                 true,
                 CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
                 Some(1),
+                Some(2),
                 Some(3),
-                Some(4),
-                "Exact 5ч KPI ниже целевого >90% или advisory rotate уже materialized. Ответ остаётся содержательным, но должен быть коротким: один абзац или короткий список, сначала прямой результат, затем только изменившиеся факты без повторов.",
+                "Exact 5ч KPI ниже целевого >90% или rotate-pressure уже materialized. Ответ остаётся содержательным, но должен быть жёстко compact: один абзац или максимум два bullets, сначала прямой результат, затем только изменившиеся факты без повторов.",
             ),
         };
     json!({
@@ -1863,7 +1863,10 @@ fn summarize_project_task_tree(value: &Value) -> Option<String> {
         .filter(|item| item["task_role"].as_str() == Some("pending_return"))
         .collect::<Vec<_>>();
     if pending.is_empty() {
-        return Some(format!("active: {}", collapse_human_text(active_headline, 72)));
+        return Some(format!(
+            "active: {}",
+            collapse_human_text(active_headline, 72)
+        ));
     }
     let pending_headline = pending
         .iter()
