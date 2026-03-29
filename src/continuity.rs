@@ -1520,23 +1520,38 @@ fn compact_startup_runtime_startup_action_bundle(action_bundle: &Value) -> Value
     }
     if action_bundle["operator_flow"].is_object() {
         let mut operator_flow = serde_json::Map::new();
+        for field in [
+            "rotate_helper_command",
+            "handoff_command",
+            "startup_command",
+            "startup_after_recovery_command",
+        ] {
+            if let Some(command) = action_bundle["operator_flow"][field]
+                .as_str()
+                .map(normalize_compact_startup_runtime_command)
+                .filter(|value| !value.is_empty())
+            {
+                operator_flow.insert(field.to_string(), Value::from(command));
+            }
+        }
         copy_if_present(
             &mut operator_flow,
             &action_bundle["operator_flow"],
-            &[
-                "rotate_helper_command",
-                "handoff_command",
-                "startup_command",
-                "startup_after_recovery_command",
-                "wait_summary",
-                "resume_after_recovery_summary",
-            ],
+            &["wait_summary", "resume_after_recovery_summary"],
         );
         if !operator_flow.is_empty() {
             compact.insert("operator_flow".to_string(), Value::Object(operator_flow));
         }
     }
     Value::Object(compact)
+}
+
+fn normalize_compact_startup_runtime_command(command: &str) -> String {
+    command
+        .replace('\'', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn compact_startup_runtime_state_lineage(lineage: &Value) -> Value {
@@ -6767,17 +6782,17 @@ mod tests {
         assert!(
             bundle["operator_flow"]["rotate_helper_command"]
                 .as_str()
-                .is_some_and(|value| value.contains("continuity' 'rotate-chat"))
+                .is_some_and(|value| value.contains("continuity rotate-chat"))
         );
         assert!(
             bundle["operator_flow"]["handoff_command"]
                 .as_str()
-                .is_some_and(|value| value.contains("continuity' 'handoff"))
+                .is_some_and(|value| value.contains("continuity handoff"))
         );
         assert!(
             bundle["operator_flow"]["startup_command"]
                 .as_str()
-                .is_some_and(|value| value.contains("continuity' 'startup"))
+                .is_some_and(|value| value.contains("continuity startup"))
         );
     }
 
