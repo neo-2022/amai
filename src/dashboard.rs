@@ -2928,6 +2928,17 @@ fn current_session_budget_guard_with_restore_context(
     let current_session_summary = &report["current_session"];
     let current_session_statement = &report["statement_previews"]["current_session"];
     let current_session_alignment = &current_session_statement["client_limit_meter_alignment"];
+    let current_session_exact_pair =
+        exact_model_token_pair(current_session_statement, current_session_alignment);
+    let session_live_turn_exact_pair = live_turn_exact_pair(
+        current_session_summary,
+        client_live_meter,
+        current_session_exact_pair,
+    );
+    let session_live_turn_exact_pair =
+        current_live_turn_exact_pair(&report["current_live_turn"]).or(session_live_turn_exact_pair);
+    let session_full_turn_savings_pct =
+        full_turn_savings_pct_from_live_meter(client_live_meter, session_live_turn_exact_pair);
     let snapshot = json!({
         "token_budget_report": {
             "token_budget_report": report.clone()
@@ -3021,8 +3032,10 @@ fn current_session_budget_guard_with_restore_context(
     let hourly_burn_kpi_percent = hourly_burn["kpi_percent"].as_f64();
     let hourly_burn_below_target = hourly_burn["status"].as_str() == Some("observed")
         && hourly_burn_kpi_percent.unwrap_or(0.0) < 90.0;
-    let compact_reply_required =
-        !should_rotate_chat_now && (should_rotate_chat_soon || hourly_burn_below_target);
+    let live_turn_below_target =
+        session_full_turn_savings_pct.is_some_and(|value| value < 90.0);
+    let compact_reply_required = !should_rotate_chat_now
+        && (should_rotate_chat_soon || hourly_burn_below_target || live_turn_below_target);
     let requires_global_budget_recovery_before_reply =
         global_limit_guard.is_some_and(|guard| guard.severity == "critical");
     let status = global_limit_guard
@@ -8847,8 +8860,10 @@ fn client_turn_pressure_guard(
         None
     };
     let hourly_burn_overspend = hourly_burn_classification == Some("overspend");
-    let hourly_burn_known_good =
-        matches!(hourly_burn_classification, Some("saving") | Some("one_to_one"));
+    let hourly_burn_known_good = matches!(
+        hourly_burn_classification,
+        Some("saving") | Some("one_to_one")
+    );
     let no_amai_activity_in_current_live_turn =
         current_live_turn["status"].as_str() == Some("no_amai_activity_in_current_live_turn");
     let full_turn_savings_pct = exact_pair.and_then(|(_, _, saved_tokens, _)| {
@@ -8895,11 +8910,8 @@ fn client_turn_pressure_guard(
         return None;
     }
 
-    let (severity, status_label) = if (no_amai_activity_in_current_live_turn
-        && huge_live_thread)
-        || (no_amai_activity_in_current_live_turn
-        && hourly_burn_overspend
-        && moderate_kpi_thread)
+    let (severity, status_label) = if (no_amai_activity_in_current_live_turn && huge_live_thread)
+        || (no_amai_activity_in_current_live_turn && hourly_burn_overspend && moderate_kpi_thread)
         || (hourly_burn_overspend
             && early_large_live_thread
             && weak_amai_share
@@ -8916,8 +8928,7 @@ fn client_turn_pressure_guard(
         || (emergency_primary_limit && huge_live_thread && weak_amai_share)
     {
         ("critical", "новый чат нужен сейчас")
-    } else if (no_amai_activity_in_current_live_turn
-        && inflation_locking_in_burn)
+    } else if (no_amai_activity_in_current_live_turn && inflation_locking_in_burn)
         || (exact_pair_missing && early_live_thread)
         || (early_live_thread && negligible_amai_share && generous_primary_limit)
         || (((high_context_pressure && low_primary_limit) || extreme_context_pressure)
@@ -9520,8 +9531,14 @@ pub(crate) fn client_budget_root_cause_payload(snapshot: &Value) -> Value {
             alignment["exact_pair_status"]["primary_blocking_reason"].clone(),
         ),
         ("primary_blocker_code", primary_blocker["code"].clone()),
-        ("primary_blocker_kind", primary_blocker["blocker_kind"].clone()),
-        ("blocking_reason", primary_blocker["blocking_reason"].clone()),
+        (
+            "primary_blocker_kind",
+            primary_blocker["blocker_kind"].clone(),
+        ),
+        (
+            "blocking_reason",
+            primary_blocker["blocking_reason"].clone(),
+        ),
         (
             "note",
             exact_pair_primary_blocker_note_sentence(alignment)
@@ -9534,8 +9551,10 @@ pub(crate) fn client_budget_root_cause_payload(snapshot: &Value) -> Value {
         }
     }
     if missing_live_events > 0 {
-        exact_pair_status_payload
-            .insert("missing_live_events".to_string(), Value::from(missing_live_events));
+        exact_pair_status_payload.insert(
+            "missing_live_events".to_string(),
+            Value::from(missing_live_events),
+        );
     }
     if irrecoverable_missing_live_events > 0 {
         exact_pair_status_payload.insert(
@@ -9552,7 +9571,10 @@ pub(crate) fn client_budget_root_cause_payload(snapshot: &Value) -> Value {
 
     let mut payload = serde_json::Map::new();
     payload.insert("status".to_string(), json!(live_status));
-    payload.insert("reply_prefix".to_string(), hourly_burn["reply_prefix"].clone());
+    payload.insert(
+        "reply_prefix".to_string(),
+        hourly_burn["reply_prefix"].clone(),
+    );
     payload.insert(
         "thread_binding_state".to_string(),
         client_live_meter["thread_binding_state"].clone(),
@@ -9596,7 +9618,10 @@ pub(crate) fn client_budget_root_cause_payload(snapshot: &Value) -> Value {
         "partially_measured_components",
         "blocking_reasons",
     ] {
-        if alignment[field].as_array().is_some_and(|items| !items.is_empty()) {
+        if alignment[field]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+        {
             payload.insert(field.to_string(), alignment[field].clone());
         }
     }
@@ -14223,7 +14248,7 @@ mod tests {
 
     #[test]
     fn client_turn_pressure_guard_recommends_rotate_for_large_no_amai_thread_without_hourly_burn_surface()
-    {
+     {
         let hourly_burn = json!({});
         let current_live_turn = json!({
             "status": "no_amai_activity_in_current_live_turn",
@@ -14281,8 +14306,8 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_stays_off_for_huge_no_amai_thread_when_exact_5h_kpi_is_one_to_one(
-    ) {
+    fn client_turn_pressure_guard_stays_off_for_huge_no_amai_thread_when_exact_5h_kpi_is_one_to_one()
+     {
         let hourly_burn = json!({
             "status": "observed",
             "classification": "one_to_one",
@@ -14900,7 +14925,8 @@ mod tests {
     }
 
     #[test]
-    fn current_session_budget_guard_keeps_normal_mode_when_saving_above_target() {
+    fn current_session_budget_guard_uses_compact_mode_for_live_turn_below_target_even_when_hourly_kpi_is_healthy(
+    ) {
         let snapshot = json!({
         "token_budget_report": {
             "token_budget_report": {
@@ -14944,6 +14970,120 @@ mod tests {
                     "secondary_limit_remaining_percent": 95.0,
                     "started_at_epoch_ms": 1774622174000u64,
                     "ended_at_epoch_ms": 1774622949000u64
+                },
+                "current_live_turn": {
+                    "status": "exact_pair_materialized",
+                    "exact_pair_available": true,
+                    "exact_pair": {
+                        "without_amai_tokens": 30479,
+                        "with_amai_tokens": 30240,
+                        "saved_tokens": 239,
+                        "saved_pct": 0.7834896158010433
+                    }
+                },
+                "client_limit_hourly_burn": {
+                    "status": "observed",
+                    "classification": "saving",
+                    "kpi_percent": 95.0
+                },
+                    "profile": {"display_name": "Обычная рабочая машина"}
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "project": {
+                        "code": "amai",
+                        "display_name": "Amai",
+                        "repo_root": "/home/art/agent-memory-index"
+                    },
+                    "namespace": {
+                        "code": "continuity",
+                        "display_name": "Continuity"
+                    },
+                    "execctl_resume_state": "pending_return_queue_present",
+                    "current_goal": "Same-meter spend control",
+                    "next_step": "Materialize live assistant generation source."
+                }
+            }
+        });
+
+        let guard = super::current_session_budget_guard(&snapshot);
+        assert_eq!(guard["should_rotate_chat_now"], json!(false));
+        assert_eq!(guard["should_rotate_chat_soon"], json!(false));
+        assert_eq!(
+            guard["reply_execution_gate"]["action_kind"],
+            json!("continue_current_chat")
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["reply_budget_mode"],
+            json!(working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["blocking_reply_contract"]["active"],
+            json!(false)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["preserves_return_obligation"],
+            json!(true)
+        );
+        assert!(guard["reply_execution_gate"]["action_bundle"].is_null());
+    }
+
+    #[test]
+    fn current_session_budget_guard_keeps_normal_mode_when_saving_above_target() {
+        let snapshot = json!({
+        "token_budget_report": {
+            "token_budget_report": {
+                "current_session": {
+                    "events_total": 1,
+                    "counted_events": 1,
+                    "verified_effective_saved_tokens": 138,
+                    "verified_effective_savings_pct": 56.56,
+                    "started_at_epoch_ms": 1774622516860u64,
+                    "ended_at_epoch_ms": 1774622516860u64,
+                    "verified_baseline_tokens": 240,
+                    "verified_observed_whole_cycle_with_amai_tokens": 106
+                },
+                "rolling_window": {"events_total": 0, "counted_events": 0},
+                "lifetime": {"events_total": 0, "counted_events": 0},
+                "statement_previews": {
+                    "current_session": {
+                        "verified_observed_whole_cycle_with_amai_tokens": 106,
+                        "client_limit_meter_alignment": {
+                            "same_meter_as_client_limit": true,
+                            "exact_pair_status": {"exact_pair_available": true},
+                            "strict_client_meter_slice": {"lower_bound_tokens": 240},
+                            "explicit_boundary_surface": {
+                                "blocks_full_same_meter_equivalence": false
+                            }
+                        }
+                    },
+                    "rolling_window": {},
+                    "lifetime": {}
+                },
+                "statement_export_previews": {"lifetime": {}},
+                "client_live_meter": {
+                    "status": "observed",
+                    "thread_binding_state": "current_thread_bound",
+                    "current_thread_bound": true,
+                    "thread_id": "thread-current",
+                    "client_turn_total_tokens": 2000,
+                    "latest_model_context_window": 258400,
+                    "context_used_percent": 0.77,
+                    "primary_limit_remaining_percent": 90.0,
+                    "secondary_limit_remaining_percent": 95.0,
+                    "started_at_epoch_ms": 1774622174000u64,
+                    "ended_at_epoch_ms": 1774622949000u64
+                },
+                "current_live_turn": {
+                    "status": "exact_pair_materialized",
+                    "exact_pair_available": true,
+                    "exact_pair": {
+                        "without_amai_tokens": 30240,
+                        "with_amai_tokens": 2000,
+                        "saved_tokens": 28240,
+                        "saved_pct": 93.38624338624338
+                    }
                 },
                 "client_limit_hourly_burn": {
                     "status": "observed",
