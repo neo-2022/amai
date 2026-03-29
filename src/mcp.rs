@@ -3014,14 +3014,6 @@ fn protocol_manifest() -> Value {
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore plus live client-budget discipline before each substantive reply in a new, resumed, or ongoing chat",
                 "must_call_before_substantive_work": true,
-                "must_call_before_tools": [
-                    "amai_context_pack",
-                    "amai_token_benchmark",
-                    "amai_token_report",
-                    "amai_observe_snapshot",
-                    "amai_memory_matrix",
-                    "amai_warm_cache"
-                ],
                 "project_binding_rule": "registered_project_fail_closed",
                 "default_namespace": "continuity",
                 "artifact_enforcement": {
@@ -3116,9 +3108,6 @@ fn protocol_manifest() -> Value {
                         working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE
                     ]
                 },
-                "required_arguments": ["project"],
-                "optional_arguments": ["repo_root", "namespace", "token_source_kind"],
-                "summary_field": "continuity_startup_summary",
                 "required_summary_fields": [
                     "project_code",
                     "namespace_code",
