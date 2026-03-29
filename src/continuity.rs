@@ -1234,7 +1234,9 @@ fn build_startup_runtime_state_artifact(
         summary.insert(
             "startup_execution_gate".to_string(),
             compact_startup_runtime_summary_startup_execution_gate(
-                summary.get("startup_execution_gate").unwrap_or(&Value::Null),
+                summary
+                    .get("startup_execution_gate")
+                    .unwrap_or(&Value::Null),
             ),
         );
         summary.insert(
@@ -1252,7 +1254,9 @@ fn build_startup_runtime_state_artifact(
         summary.insert(
             "execctl_resume_obligation".to_string(),
             compact_startup_runtime_execctl_resume_obligation(
-                summary.get("execctl_resume_obligation").unwrap_or(&Value::Null),
+                summary
+                    .get("execctl_resume_obligation")
+                    .unwrap_or(&Value::Null),
             ),
         );
         summary.insert(
@@ -1280,8 +1284,7 @@ fn build_startup_runtime_state_artifact(
         prompt_text_present,
     );
     let raw_client_budget_guard = &payload["working_state_restore"]["client_budget_guard"];
-    let client_budget_guard =
-        compact_startup_runtime_client_budget_guard(raw_client_budget_guard);
+    let client_budget_guard = compact_startup_runtime_client_budget_guard(raw_client_budget_guard);
     let reply_execution_gate = if client_budget_guard["reply_execution_gate"].is_object() {
         client_budget_guard["reply_execution_gate"].clone()
     } else {
@@ -1508,7 +1511,10 @@ fn compact_startup_runtime_startup_action_bundle(action_bundle: &Value) -> Value
             &["available", "headline", "next_step"],
         );
         if !recommended.is_empty() {
-            compact.insert("recommended_handoff".to_string(), Value::Object(recommended));
+            compact.insert(
+                "recommended_handoff".to_string(),
+                Value::Object(recommended),
+            );
         }
     }
     if action_bundle["operator_flow"].is_object() {
@@ -1536,11 +1542,11 @@ fn compact_startup_runtime_reply_execution_gate(reply_execution_gate: &Value) ->
     if !reply_execution_gate.is_object() {
         return Value::Null;
     }
-    let preserves_return_obligation = reply_execution_gate["action_bundle"]
-        ["preserves_return_obligation"]
-        .as_bool()
-        .or_else(|| reply_execution_gate["preserves_return_obligation"].as_bool())
-        .unwrap_or(false);
+    let preserves_return_obligation =
+        reply_execution_gate["action_bundle"]["preserves_return_obligation"]
+            .as_bool()
+            .or_else(|| reply_execution_gate["preserves_return_obligation"].as_bool())
+            .unwrap_or(false);
     json!({
         "gate_version": reply_execution_gate["gate_version"].clone(),
         "action_kind": reply_execution_gate["action_kind"].clone(),
@@ -3800,14 +3806,14 @@ fn build_chat_start_restore(
         .map(ToOwned::to_owned);
     let project_task_tree = restore_node
         .filter(|value| value["project_task_tree"].is_object())
-        .map(|value| value["project_task_tree"].clone());
+        .map(|value| compact_project_task_tree_for_startup(&value["project_task_tree"]));
     let project_task_ledger_summary = restore_node
         .and_then(|value| value["project_task_ledger_summary"].as_str())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
     let project_task_ledger = restore_node
         .filter(|value| value["project_task_ledger"].is_object())
-        .map(|value| value["project_task_ledger"].clone());
+        .map(|value| compact_project_task_ledger_for_startup(&value["project_task_ledger"]));
     let required_return_task = restore_node
         .filter(|value| value["execctl_resume_contract"]["required_return_task"].is_object())
         .map(|value| value["execctl_resume_contract"]["required_return_task"].clone())
@@ -3830,38 +3836,9 @@ fn build_chat_start_restore(
     let excluded_reasons_summary = restore_node.and_then(|value| {
         continuity_decision_trace_summary(Some(&value["latest_decision_trace"]), "not_included")
     });
-    let active_files = restore_node
-        .and_then(|value| value["active_files"].as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .take(4)
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let open_questions = restore_node
-        .and_then(|value| value["open_questions"].as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .take(3)
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
     let thread_count = continuity["bootstrap_summary"]["details"]["thread_count"]
         .as_u64()
         .unwrap_or(0);
-    let latest_transcript =
-        continuity["bootstrap_summary"]["details"]["latest_rendered_transcript"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
     json!({
         "chat_start_restore": {
             "project": {
@@ -3875,10 +3852,8 @@ fn build_chat_start_restore(
             },
             "headline": headline,
             "next_step": next_step,
-            "current_goal": current_goal,
             "restore_confidence": restore_confidence,
             "thread_count": thread_count,
-            "latest_rendered_transcript": latest_transcript,
             "materialized_summary": materialized_summary,
             "recent_actions_summary": recent_actions_summary,
             "active_files_summary": active_files_summary,
@@ -3899,8 +3874,6 @@ fn build_chat_start_restore(
             "execctl_resume_state": execctl_resume_state,
             "included_reasons_summary": included_reasons_summary,
             "excluded_reasons_summary": excluded_reasons_summary,
-            "active_files": active_files,
-            "open_questions": open_questions,
             "prompt_text": render_chat_start_prompt(
                 project,
                 namespace,
@@ -6084,6 +6057,15 @@ mod tests {
         assert!(!prompt.contains("Контракт возврата ExecCtl"));
         assert!(!prompt.contains("Активный lease ExecCtl"));
         assert_eq!(node["thread_count"], json!(16));
+        assert!(node["current_goal"].is_null());
+        assert!(node["latest_rendered_transcript"].is_null());
+        assert!(node["active_files"].is_null());
+        assert!(node["open_questions"].is_null());
+        assert_eq!(node["project_task_tree"]["summary_only"], json!(true));
+        assert!(node["project_task_tree"]["nodes"].is_null());
+        assert!(node["project_task_tree"]["edges"].is_null());
+        assert_eq!(node["project_task_ledger"]["summary_only"], json!(true));
+        assert!(node["project_task_ledger"]["entries"].is_null());
         assert_eq!(
             node["execctl_resume_state"],
             json!("pending_return_queue_present")
@@ -6496,8 +6478,14 @@ mod tests {
             json!("Pending line")
         );
         assert!(artifact["continuity_startup_summary"]["required_return_task"]["authoritative_event_id"].is_null());
-        assert!(artifact["continuity_startup_summary"]["required_return_task"]["parent_task_id"].is_null());
-        assert!(artifact["continuity_startup_summary"]["required_return_task"]["queued_at_epoch_ms"].is_null());
+        assert!(
+            artifact["continuity_startup_summary"]["required_return_task"]["parent_task_id"]
+                .is_null()
+        );
+        assert!(
+            artifact["continuity_startup_summary"]["required_return_task"]["queued_at_epoch_ms"]
+                .is_null()
+        );
         assert_eq!(
             artifact["continuity_startup_summary"]["execctl_resume_obligation"]["resume_state"],
             json!("pending_return_queue_present")
@@ -6523,15 +6511,26 @@ mod tests {
             artifact["continuity_startup_summary"]["project_task_tree"]["edges_total"],
             json!(5)
         );
-        assert!(artifact["continuity_startup_summary"]["project_task_tree"]["tree_version"].is_null());
-        assert!(artifact["continuity_startup_summary"]["project_task_tree"]["project_code"].is_null());
-        assert!(artifact["continuity_startup_summary"]["project_task_tree"]["namespace_code"].is_null());
-        assert!(artifact["continuity_startup_summary"]["project_task_tree"]["root_task_id"].is_null());
-        assert!(artifact["continuity_startup_summary"]["project_task_tree"]["nodes_preview"].is_null());
-        assert!(artifact["continuity_startup_summary"]["project_task_tree"]["edges_preview"].is_null());
+        assert!(
+            artifact["continuity_startup_summary"]["project_task_tree"]["tree_version"].is_null()
+        );
+        assert!(
+            artifact["continuity_startup_summary"]["project_task_tree"]["project_code"].is_null()
+        );
+        assert!(
+            artifact["continuity_startup_summary"]["project_task_tree"]["namespace_code"].is_null()
+        );
+        assert!(
+            artifact["continuity_startup_summary"]["project_task_tree"]["root_task_id"].is_null()
+        );
+        assert!(
+            artifact["continuity_startup_summary"]["project_task_tree"]["nodes_preview"].is_null()
+        );
+        assert!(
+            artifact["continuity_startup_summary"]["project_task_tree"]["edges_preview"].is_null()
+        );
         assert_eq!(
-            artifact["continuity_startup_summary"]["project_task_tree"]
-                ["full_shape_preserved_in_working_state_restore"],
+            artifact["continuity_startup_summary"]["project_task_tree"]["full_shape_preserved_in_working_state_restore"],
             json!(true)
         );
         assert_eq!(
@@ -6558,15 +6557,30 @@ mod tests {
             artifact["continuity_startup_summary"]["project_task_ledger"]["pending_return_entries_count"],
             json!(1)
         );
-        assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["ledger_version"].is_null());
-        assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["project_code"].is_null());
-        assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["namespace_code"].is_null());
-        assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["persistence_state"].is_null());
-        assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["storage_lane"].is_null());
-        assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["entries_preview"].is_null());
+        assert!(
+            artifact["continuity_startup_summary"]["project_task_ledger"]["ledger_version"]
+                .is_null()
+        );
+        assert!(
+            artifact["continuity_startup_summary"]["project_task_ledger"]["project_code"].is_null()
+        );
+        assert!(
+            artifact["continuity_startup_summary"]["project_task_ledger"]["namespace_code"]
+                .is_null()
+        );
+        assert!(
+            artifact["continuity_startup_summary"]["project_task_ledger"]["persistence_state"]
+                .is_null()
+        );
+        assert!(
+            artifact["continuity_startup_summary"]["project_task_ledger"]["storage_lane"].is_null()
+        );
+        assert!(
+            artifact["continuity_startup_summary"]["project_task_ledger"]["entries_preview"]
+                .is_null()
+        );
         assert_eq!(
-            artifact["continuity_startup_summary"]["project_task_ledger"]
-                ["full_shape_preserved_in_working_state_restore"],
+            artifact["continuity_startup_summary"]["project_task_ledger"]["full_shape_preserved_in_working_state_restore"],
             json!(true)
         );
         assert_eq!(
@@ -6657,24 +6671,34 @@ mod tests {
         let artifact =
             build_startup_runtime_state_artifact(Path::new("/tmp/amai-art"), &payload, 42)
                 .expect("startup runtime state artifact");
-        let bundle = &artifact["continuity_startup_summary"]["startup_next_action"]["action_bundle"];
+        let bundle =
+            &artifact["continuity_startup_summary"]["startup_next_action"]["action_bundle"];
 
-        assert_eq!(bundle["bundle_version"], json!("rotate-chat-action-bundle-v1"));
+        assert_eq!(
+            bundle["bundle_version"],
+            json!("rotate-chat-action-bundle-v1")
+        );
         assert_eq!(bundle["ready_for_automation"], json!(true));
         assert_eq!(bundle["preserves_return_obligation"], json!(true));
         assert!(bundle["capture_continuity_handoff"].is_null());
         assert!(bundle["open_fresh_chat"].is_null());
         assert!(bundle["run_continuity_startup"].is_null());
         assert!(bundle["order"].is_null());
-        assert!(bundle["operator_flow"]["rotate_helper_command"]
-            .as_str()
-            .is_some_and(|value| value.contains("continuity' 'rotate-chat")));
-        assert!(bundle["operator_flow"]["handoff_command"]
-            .as_str()
-            .is_some_and(|value| value.contains("continuity' 'handoff")));
-        assert!(bundle["operator_flow"]["startup_command"]
-            .as_str()
-            .is_some_and(|value| value.contains("continuity' 'startup")));
+        assert!(
+            bundle["operator_flow"]["rotate_helper_command"]
+                .as_str()
+                .is_some_and(|value| value.contains("continuity' 'rotate-chat"))
+        );
+        assert!(
+            bundle["operator_flow"]["handoff_command"]
+                .as_str()
+                .is_some_and(|value| value.contains("continuity' 'handoff"))
+        );
+        assert!(
+            bundle["operator_flow"]["startup_command"]
+                .as_str()
+                .is_some_and(|value| value.contains("continuity' 'startup"))
+        );
     }
 
     #[test]
