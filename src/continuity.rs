@@ -275,10 +275,6 @@ fn compact_project_task_tree_for_startup(tree: &Value) -> Value {
     let nodes = tree["nodes"].as_array().cloned().unwrap_or_default();
     let edges = tree["edges"].as_array().cloned().unwrap_or_default();
     json!({
-        "tree_version": tree["tree_version"].clone(),
-        "project_code": tree["project_code"].clone(),
-        "namespace_code": tree["namespace_code"].clone(),
-        "root_task_id": tree["root_task_id"].clone(),
         "open_tasks_count": tree["open_tasks_count"].clone(),
         "pending_return_count": tree["pending_return_count"].clone(),
         "nodes_total": nodes.len(),
@@ -303,13 +299,8 @@ fn compact_project_task_ledger_for_startup(ledger: &Value) -> Value {
         .filter(|entry| entry["task_role"].as_str() == Some("pending_return"))
         .count();
     json!({
-        "ledger_version": ledger["ledger_version"].clone(),
-        "project_code": ledger["project_code"].clone(),
-        "namespace_code": ledger["namespace_code"].clone(),
         "open_tasks_count": ledger["open_tasks_count"].clone(),
         "historical_handoffs_count": ledger["historical_handoffs_count"].clone(),
-        "persistence_state": ledger["persistence_state"].clone(),
-        "storage_lane": ledger["storage_lane"].clone(),
         "entries_count": entries.len(),
         "active_entries_count": active_entries,
         "pending_return_entries_count": pending_return_entries,
@@ -6532,6 +6523,10 @@ mod tests {
             artifact["continuity_startup_summary"]["project_task_tree"]["edges_total"],
             json!(5)
         );
+        assert!(artifact["continuity_startup_summary"]["project_task_tree"]["tree_version"].is_null());
+        assert!(artifact["continuity_startup_summary"]["project_task_tree"]["project_code"].is_null());
+        assert!(artifact["continuity_startup_summary"]["project_task_tree"]["namespace_code"].is_null());
+        assert!(artifact["continuity_startup_summary"]["project_task_tree"]["root_task_id"].is_null());
         assert!(artifact["continuity_startup_summary"]["project_task_tree"]["nodes_preview"].is_null());
         assert!(artifact["continuity_startup_summary"]["project_task_tree"]["edges_preview"].is_null());
         assert_eq!(
@@ -6563,6 +6558,11 @@ mod tests {
             artifact["continuity_startup_summary"]["project_task_ledger"]["pending_return_entries_count"],
             json!(1)
         );
+        assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["ledger_version"].is_null());
+        assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["project_code"].is_null());
+        assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["namespace_code"].is_null());
+        assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["persistence_state"].is_null());
+        assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["storage_lane"].is_null());
         assert!(artifact["continuity_startup_summary"]["project_task_ledger"]["entries_preview"].is_null());
         assert_eq!(
             artifact["continuity_startup_summary"]["project_task_ledger"]
