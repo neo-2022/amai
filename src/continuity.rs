@@ -1271,6 +1271,7 @@ fn build_startup_runtime_state_artifact(
                 summary.get("project_task_ledger").unwrap_or(&Value::Null),
             ),
         );
+        prune_startup_runtime_summary(summary);
     }
     let startup_execution_gate = build_startup_execution_gate(payload);
     let prompt_text_present = Some(
@@ -1318,7 +1319,7 @@ fn build_startup_runtime_state_artifact(
             "prompt_text": payload["chat_start_restore"]["prompt_text"].clone(),
         },
         "working_state_restore_lineage": if payload["working_state_restore"]["state_lineage"].is_object() {
-            payload["working_state_restore"]["state_lineage"].clone()
+            compact_startup_runtime_state_lineage(&payload["working_state_restore"]["state_lineage"])
         } else {
             Value::Null
         }
@@ -1536,6 +1537,67 @@ fn compact_startup_runtime_startup_action_bundle(action_bundle: &Value) -> Value
         }
     }
     Value::Object(compact)
+}
+
+fn compact_startup_runtime_state_lineage(lineage: &Value) -> Value {
+    let Some(source) = lineage.as_object() else {
+        return Value::Null;
+    };
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        lineage,
+        &[
+            "authoritative_event_id",
+            "authoritative_event_kind",
+            "authoritative_source_kind",
+            "authoritative_local_path",
+            "lineage_model_version",
+        ],
+    );
+    if let Some(nodes) = source.get("nodes").and_then(Value::as_array) {
+        if !nodes.is_empty() {
+            compact.insert("nodes_total".to_string(), Value::from(nodes.len() as u64));
+            if let Some(authoritative_headline) = nodes.iter().find_map(|node| {
+                (node["authoritative"].as_bool() == Some(true))
+                    .then(|| node["headline"].as_str())
+                    .flatten()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            }) {
+                compact.insert(
+                    "authoritative_headline".to_string(),
+                    Value::from(authoritative_headline),
+                );
+            }
+        }
+    }
+    if let Some(edges) = source.get("edges").and_then(Value::as_array) {
+        if !edges.is_empty() {
+            compact.insert("edges_total".to_string(), Value::from(edges.len() as u64));
+        }
+    }
+    if let Some(supporting_event_ids) = source.get("supporting_event_ids").and_then(Value::as_array)
+    {
+        if !supporting_event_ids.is_empty() {
+            compact.insert(
+                "supporting_event_count".to_string(),
+                Value::from(supporting_event_ids.len() as u64),
+            );
+        }
+    }
+    Value::Object(compact)
+}
+
+fn prune_startup_runtime_summary(summary: &mut serde_json::Map<String, Value>) {
+    for field in ["excluded_reasons_summary", "included_reasons_summary"] {
+        if summary.get(field).is_some_and(Value::is_null) {
+            summary.remove(field);
+        }
+    }
+    if summary.get("thread_count").and_then(Value::as_u64) == Some(0) {
+        summary.remove("thread_count");
+    }
 }
 
 fn compact_startup_runtime_reply_execution_gate(reply_execution_gate: &Value) -> Value {
@@ -6586,6 +6648,24 @@ mod tests {
         assert_eq!(
             artifact["working_state_restore_lineage"]["authoritative_event_id"],
             json!("evt_123")
+        );
+        assert!(artifact["working_state_restore_lineage"]["session_id"].is_null());
+        assert!(artifact["working_state_restore_lineage"]["nodes_total"].is_null());
+        assert!(artifact["working_state_restore_lineage"]["edges_total"].is_null());
+        assert!(
+            artifact["working_state_restore_lineage"]["supporting_event_count"].is_null()
+        );
+        assert!(
+            artifact["working_state_restore_lineage"]["authoritative_headline"].is_null()
+        );
+        assert!(artifact["working_state_restore_lineage"]["nodes"].is_null());
+        assert!(artifact["working_state_restore_lineage"]["edges"].is_null());
+        assert!(artifact["working_state_restore_lineage"]["supporting_event_ids"].is_null());
+        assert!(
+            artifact["continuity_startup_summary"]["included_reasons_summary"].is_null()
+        );
+        assert!(
+            artifact["continuity_startup_summary"]["excluded_reasons_summary"].is_null()
         );
     }
 
