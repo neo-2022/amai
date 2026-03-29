@@ -8916,6 +8916,7 @@ fn client_turn_pressure_guard(
             && early_large_live_thread
             && weak_amai_share
             && softened_primary_limit)
+        || (hourly_burn_overspend && huge_live_thread && tiny_amai_share)
         || (hourly_burn_overspend && large_live_thread && tiny_amai_share && generous_primary_limit)
         || (exact_pair_missing && inflation_locking_in_burn && softened_primary_limit)
         || (exact_pair_missing && large_live_thread)
@@ -14207,6 +14208,45 @@ mod tests {
         let guard = super::client_turn_pressure_guard(
             &meter,
             Some((128709, 127509, 1200, 0.9323357284223408)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+        assert_eq!(guard.hourly_burn_classification, Some("overspend"));
+        assert!(!guard.no_amai_activity_in_current_live_turn);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_now_for_huge_overspend_thread_before_primary_limit_softens(
+    ) {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "overspend",
+            "kpi_percent": 47.59
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 150842,
+                "with_amai_tokens": 150104,
+                "saved_tokens": 738,
+                "saved_pct": 0.4892536561435144
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 150104,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 58.09,
+            "primary_limit_remaining_percent": 97.0,
+            "secondary_limit_remaining_percent": 29.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((150842, 150104, 738, 0.4892536561435144)),
             &hourly_burn,
             &current_live_turn,
         )
