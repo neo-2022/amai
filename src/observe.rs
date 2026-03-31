@@ -339,7 +339,11 @@ pub async fn print_snapshot_preview(cfg: &AppConfig) -> Result<()> {
 }
 
 pub async fn print_budget_snapshot_preview(cfg: &AppConfig) -> Result<()> {
-    let snapshot = collect_budget_snapshot_preview(cfg).await?;
+    let snapshot = if let Some(payload) = try_fetch_local_observe_budget_snapshot_preview_via_http().await {
+        payload
+    } else {
+        collect_budget_snapshot_preview(cfg).await?
+    };
     println!("{}", serde_json::to_string(&snapshot)?);
     Ok(())
 }
@@ -604,6 +608,37 @@ async fn try_fetch_local_observe_root_cause_payload_via_http() -> Option<Value> 
         .json::<Value>()
         .await
         .ok()
+}
+
+async fn try_fetch_local_observe_budget_snapshot_preview_via_http() -> Option<Value> {
+    let thread_id = local_observe_thread_id_from_env();
+    let repo_root = discover_repo_root(None).ok()?;
+    if let Some(snapshot) = load_shared_budget_snapshot_preview(&repo_root, thread_id.as_deref()) {
+        return Some(snapshot);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(if thread_id.is_some() {
+            Duration::from_millis(7000)
+        } else {
+            Duration::from_millis(1500)
+        })
+        .build()
+        .ok()?;
+    let base_url = local_observe_http_base_url();
+    let request = client.get(format!("{base_url}/api/client-budget-snapshot-preview"));
+    (if let Some(thread_id) = thread_id.as_deref() {
+        request.query(&[("thread_id", thread_id)])
+    } else {
+        request
+    })
+    .send()
+    .await
+    .ok()?
+    .error_for_status()
+    .ok()?
+    .json::<Value>()
+    .await
+    .ok()
 }
 
 fn observe_cache_thread_suffix(thread_id: &str) -> String {
@@ -2058,6 +2093,10 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
         .route(
             "/api/client-budget-live",
             get(client_budget_live_api_handler),
+        )
+        .route(
+            "/api/client-budget-snapshot-preview",
+            get(client_budget_snapshot_preview_api_handler),
         )
         .route(
             "/api/client-budget-root-cause",
@@ -3856,6 +3895,26 @@ async fn client_budget_live_api_handler(
             no_store_headers("application/json; charset=utf-8"),
             serde_json::to_string_pretty(&dashboard::client_budget_live_payload(&snapshot))
                 .unwrap_or_default(),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("{{\"status\":\"down\",\"error\":\"{error:#}\"}}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn client_budget_snapshot_preview_api_handler(
+    State(state): State<ObserveState>,
+    Query(query): Query<ThreadBindingQuery>,
+) -> impl IntoResponse {
+    let response = compact_client_budget_snapshot_for_request(&state, query.thread_id.as_deref()).await;
+    match response {
+        Ok(snapshot) => (
+            StatusCode::OK,
+            no_store_headers("application/json; charset=utf-8"),
+            serde_json::to_string(&snapshot).unwrap_or_default(),
         )
             .into_response(),
         Err(error) => (
