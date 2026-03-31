@@ -343,9 +343,8 @@ pub fn run_cleanup(
         ));
     }
 
-    operator_reclaim_hints_json.sort_by_key(|hint| {
-        Reverse(hint["reclaimable_bytes"].as_u64().unwrap_or(0))
-    });
+    operator_reclaim_hints_json
+        .sort_by_key(|hint| Reverse(hint["reclaimable_bytes"].as_u64().unwrap_or(0)));
     operator_reclaim_hints_json.truncate(3);
 
     Ok(json!({
@@ -548,11 +547,10 @@ fn collect_repo_inventory(
     let mut unreadable_paths_count = 0_u64;
     let mut roots = Vec::new();
 
-    for entry in
-        fs::read_dir(repo_root).with_context(|| format!("failed to read {}", repo_root.display()))?
+    for entry in fs::read_dir(repo_root)
+        .with_context(|| format!("failed to read {}", repo_root.display()))?
     {
-        let entry =
-            entry.with_context(|| format!("failed to iterate {}", repo_root.display()))?;
+        let entry = entry.with_context(|| format!("failed to iterate {}", repo_root.display()))?;
         let path = entry.path();
         let total_bytes = path_size_bytes_lossy(
             &path,
@@ -638,7 +636,12 @@ fn path_size_bytes_lossy(
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(_) => {
-            record_unreadable_path(path, unreadable_paths_count, unreadable_paths_sample, unreadable_sample_limit);
+            record_unreadable_path(
+                path,
+                unreadable_paths_count,
+                unreadable_paths_sample,
+                unreadable_sample_limit,
+            );
             return 0;
         }
     };
@@ -652,7 +655,12 @@ fn path_size_bytes_lossy(
         let entries = match fs::read_dir(path) {
             Ok(entries) => entries,
             Err(_) => {
-                record_unreadable_path(path, unreadable_paths_count, unreadable_paths_sample, unreadable_sample_limit);
+                record_unreadable_path(
+                    path,
+                    unreadable_paths_count,
+                    unreadable_paths_sample,
+                    unreadable_sample_limit,
+                );
                 return 0;
             }
         };
@@ -797,25 +805,30 @@ fn windows_vm_lab_prunable_paths(run_root: &Path) -> Result<Vec<PathBuf>> {
     for entry in fs::read_dir(run_root)
         .with_context(|| format!("failed to read Windows VM lab run {}", run_root.display()))?
     {
-        let entry =
-            entry.with_context(|| format!("failed to iterate Windows VM lab run {}", run_root.display()))?;
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to iterate Windows VM lab run {}",
+                run_root.display()
+            )
+        })?;
         let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)
-            .with_context(|| format!("failed to stat Windows VM lab artifact {}", path.display()))?;
+        let metadata = fs::symlink_metadata(&path).with_context(|| {
+            format!("failed to stat Windows VM lab artifact {}", path.display())
+        })?;
         if metadata.file_type().is_symlink() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
         let removable = if metadata.is_dir() {
-            matches!(
-                name.as_str(),
-                "winiso_noprompt" | "payload_probe" | "swtpm"
-            )
+            matches!(name.as_str(), "winiso_noprompt" | "payload_probe" | "swtpm")
         } else if metadata.is_file() {
             name == "system.qcow2"
                 || name == "OVMF_VARS.fd"
                 || name.ends_with(".iso")
-                || matches!(name.as_str(), "qemu.pid" | "qemu-monitor.sock" | "swtpm.pid" | "swtpm.sock")
+                || matches!(
+                    name.as_str(),
+                    "qemu.pid" | "qemu-monitor.sock" | "swtpm.pid" | "swtpm.sock"
+                )
         } else {
             false
         };
@@ -891,9 +904,8 @@ fn summary_path(repo_root: &Path) -> PathBuf {
 mod tests {
     use super::{
         CleanupEntry, CleanupMode, apply_windows_vm_lab_preserve_evidence, collect_repo_inventory,
-        current_protected_paths, default_max_unmanaged_roots,
-        default_unmanaged_root_alert_bytes, immediate_entries, plan_target_cleanup,
-        windows_vm_lab_reclaimable_bytes,
+        current_protected_paths, default_max_unmanaged_roots, default_unmanaged_root_alert_bytes,
+        immediate_entries, plan_target_cleanup, windows_vm_lab_reclaimable_bytes,
     };
     use filetime::{FileTime, set_file_mtime};
     use std::fs;
@@ -1021,10 +1033,8 @@ mod tests {
 
     #[test]
     fn repo_inventory_surfaces_large_unmanaged_roots() {
-        let repo_root = std::env::temp_dir().join(format!(
-            "amai-artifact-cleanup-test-{}",
-            std::process::id()
-        ));
+        let repo_root =
+            std::env::temp_dir().join(format!("amai-artifact-cleanup-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&repo_root);
         fs::create_dir_all(repo_root.join("target/debug")).expect("target/debug");
         fs::create_dir_all(repo_root.join("output/windows-vm-lab")).expect("windows-vm-lab");
@@ -1073,11 +1083,8 @@ mod tests {
         fs::create_dir_all(repo_root.join("20260325-proof")).expect("proof dir");
         fs::write(repo_root.join("20260325-proof/serial.log"), b"log").expect("log file");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(
-            repo_root.join("20260325-proof"),
-            repo_root.join("latest"),
-        )
-        .expect("latest symlink");
+        std::os::unix::fs::symlink(repo_root.join("20260325-proof"), repo_root.join("latest"))
+            .expect("latest symlink");
 
         let entries = immediate_entries(&repo_root).expect("entries");
         assert_eq!(entries.len(), 1);
@@ -1098,11 +1105,8 @@ mod tests {
         fs::write(run_root.join("system.qcow2"), vec![0_u8; 64]).expect("system.qcow2");
         fs::write(run_root.join("ru_windows_11_noprompt.iso"), vec![0_u8; 32]).expect("iso");
         fs::write(run_root.join("OVMF_VARS.fd"), vec![0_u8; 16]).expect("ovmf vars");
-        fs::write(
-            run_root.join("winiso_noprompt/install.esd"),
-            vec![0_u8; 24],
-        )
-        .expect("install.esd");
+        fs::write(run_root.join("winiso_noprompt/install.esd"), vec![0_u8; 24])
+            .expect("install.esd");
         fs::write(
             run_root.join("payload_extract/evidence/result.txt"),
             b"result=PASS",
@@ -1120,9 +1124,17 @@ mod tests {
         assert!(!run_root.join("ru_windows_11_noprompt.iso").exists());
         assert!(!run_root.join("OVMF_VARS.fd").exists());
         assert!(!run_root.join("winiso_noprompt").exists());
-        assert!(run_root.join("payload_extract/evidence/result.txt").exists());
+        assert!(
+            run_root
+                .join("payload_extract/evidence/result.txt")
+                .exists()
+        );
         assert!(run_root.join("serial.log").exists());
-        assert!(run_root.join("windows_vm_lab_cleanup_manifest.json").exists());
+        assert!(
+            run_root
+                .join("windows_vm_lab_cleanup_manifest.json")
+                .exists()
+        );
 
         let _ = fs::remove_dir_all(&run_root);
     }
@@ -1136,11 +1148,8 @@ mod tests {
         let _ = fs::remove_dir_all(&run_root);
         fs::create_dir_all(run_root.join("winiso_noprompt")).expect("winiso_noprompt");
         fs::write(run_root.join("system.qcow2"), vec![0_u8; 8]).expect("system.qcow2");
-        fs::write(
-            run_root.join("winiso_noprompt/install.esd"),
-            vec![0_u8; 4],
-        )
-        .expect("install.esd");
+        fs::write(run_root.join("winiso_noprompt/install.esd"), vec![0_u8; 4])
+            .expect("install.esd");
         let original_time = SystemTime::now()
             .checked_sub(Duration::from_secs(86_400))
             .expect("checked_sub");

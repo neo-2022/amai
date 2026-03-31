@@ -9,4 +9,4 @@ if [[ -d "./state/tooling/cmake-venv/bin" ]]; then
 fi
 
 bind="${AMI_OBSERVE_BIND:-0.0.0.0:9464}"
-exec cargo run --release --quiet -- observe serve --bind "${bind}"
+exec ./scripts/amai_exec.sh observe serve --bind "${bind}"

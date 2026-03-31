@@ -311,6 +311,23 @@ UPDATE ami.observability_snapshots
 SET source_kind = snapshot_kind
 WHERE source_kind IS NULL;
 
+UPDATE ami.observability_snapshots
+SET captured_at_epoch_ms = COALESCE(
+    NULLIF(payload #>> '{_observability,captured_at_epoch_ms}', '')::bigint,
+    NULLIF(payload #>> '{captured_at_epoch_ms}', '')::bigint,
+    NULLIF(payload #>> '{working_state_event,recorded_at_epoch_ms}', '')::bigint,
+    NULLIF(payload #>> '{token_budget_event,created_at_epoch_ms}', '')::bigint,
+    NULLIF(payload #>> '{continuity_import,imported_at_epoch_ms}', '')::bigint,
+    NULLIF(payload #>> '{continuity_thread_index,captured_at_epoch_ms}', '')::bigint,
+    NULLIF(payload #>> '{continuity_handoff,captured_at_epoch_ms}', '')::bigint,
+    NULLIF(payload #>> '{benchmark,captured_at_epoch_ms}', '')::bigint,
+    NULLIF(payload #>> '{accuracy_verification,captured_at_epoch_ms}', '')::bigint,
+    NULLIF(payload #>> '{load_verification,captured_at_epoch_ms}', '')::bigint,
+    NULLIF(payload #>> '{cold_benchmark,captured_at_epoch_ms}', '')::bigint,
+    (EXTRACT(EPOCH FROM created_at) * 1000)::bigint
+)
+WHERE captured_at_epoch_ms IS NULL;
+
 UPDATE ami.observability_snapshots AS snapshots
 SET
     source_event_id = snapshots.payload #>> '{working_state_event,event_id}',
@@ -628,3 +645,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ami_observability_snapshots_kind_event_key
     ON ami.observability_snapshots(snapshot_kind, event_key);
 CREATE INDEX IF NOT EXISTS idx_ami_observability_snapshots_kind_source_class
     ON ami.observability_snapshots(snapshot_kind, source_class, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ami_observability_working_state_retrieval_thread_captured
+    ON ami.observability_snapshots(
+        (payload #>> '{working_state_event,thread_id}'),
+        captured_at_epoch_ms DESC
+    )
+    WHERE snapshot_kind = 'working_state_event'
+      AND payload #>> '{working_state_event,event_kind}' = 'retrieval_context_pack'
+      AND captured_at_epoch_ms IS NOT NULL;

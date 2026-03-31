@@ -32,12 +32,20 @@ assert settlement_report["scope_code"] == "lifetime", settlement_report
 assert statement_export["scope_code"] == "lifetime", statement_export
 assert evidence_pack["scope_code"] == "lifetime", evidence_pack
 assert contractual_sources["scope_code"] == "lifetime", contractual_sources
-assert statement_export["model_version"] == "contractual-statement-export-v18", statement_export
-assert settlement_report["model_version"] == "settlement-report-preview-v9", settlement_report
-assert evidence_pack["pack_version"] == "contractual-evidence-pack-v18", evidence_pack
+assert statement_export["model_version"] == "contractual-statement-export-v21", statement_export
+assert settlement_report["model_version"] == "settlement-report-preview-v12", settlement_report
+assert evidence_pack["pack_version"] == "contractual-evidence-pack-v21", evidence_pack
 assert statement_export["contractual_readiness_model_version"] == "contractual-readiness-v1", statement_export
 assert settlement_report["contractual_readiness_model_version"] == "contractual-readiness-v1", settlement_report
 assert evidence_pack["contractual_readiness_model_version"] == "contractual-readiness-v1", evidence_pack
+assert statement_export["reviewed_frozen_debt_export_surface"]["state"] == "reviewed_frozen_debt_export_ready_report_only", statement_export
+assert settlement_report["reviewed_frozen_debt_export_surface"]["state"] == "reviewed_frozen_debt_export_ready_report_only", settlement_report
+assert evidence_pack["reviewed_frozen_debt_export_surface"]["state"] == "reviewed_frozen_debt_export_ready_report_only", evidence_pack
+assert statement_export["reviewed_frozen_debt_export_surface"]["surface_kind"] == "reviewed_frozen_debt_report_only", statement_export
+assert settlement_report["reviewed_frozen_debt_export_surface"]["surface_kind"] == "reviewed_frozen_debt_report_only", settlement_report
+assert evidence_pack["reviewed_frozen_debt_export_surface"]["surface_kind"] == "reviewed_frozen_debt_report_only", evidence_pack
+assert statement_export["reviewed_frozen_debt_export_surface"]["review_bundle_command"] == "./scripts/amai_exec.sh observe token-statement-export --scope lifetime", statement_export
+assert evidence_pack["reviewed_frozen_debt_export_surface"]["evidence_pack_command"] == "./scripts/amai_exec.sh observe token-evidence-pack --scope lifetime", evidence_pack
 assert statement_export["customer_contractual_boundary"]["model_version"] == "customer-contractual-boundary-v1", statement_export
 assert settlement_report["customer_contractual_boundary"]["model_version"] == "customer-contractual-boundary-v1", settlement_report
 assert evidence_pack["customer_contractual_boundary"]["model_version"] == "customer-contractual-boundary-v1", evidence_pack

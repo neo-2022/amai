@@ -9,6 +9,14 @@ if [[ -d "./state/tooling/cmake-venv/bin" ]]; then
 fi
 
 bind="${AMI_OBSERVE_BIND:-0.0.0.0:9464}"
+host="${bind%:*}"
+port="${bind##*:}"
+health_host="$host"
+if [[ "$health_host" == "0.0.0.0" || "$health_host" == "::" ]]; then
+  health_host="127.0.0.1"
+fi
+health_url="http://${health_host}:${port}/healthz"
+ready_url="http://${health_host}:${port}/api/client-budget-root-cause"
 binary="./target/release/amai"
 nats_http_url="${AMI_NATS_HTTP_URL:-http://127.0.0.1:58222}"
 compose_file="./compose.yaml"
@@ -55,5 +63,43 @@ ensure_local_nats_varz() {
 }
 
 ensure_local_nats_varz
+
+if [[ -n "${NOTIFY_SOCKET:-}" ]] && command -v systemd-notify >/dev/null 2>&1; then
+  child_pid=""
+  cleanup_child() {
+    [[ -n "$child_pid" ]] || return 0
+    if kill -0 "$child_pid" >/dev/null 2>&1; then
+      kill "$child_pid" >/dev/null 2>&1 || true
+      wait "$child_pid" >/dev/null 2>&1 || true
+    fi
+  }
+  trap cleanup_child EXIT INT TERM
+
+  "$binary" observe serve --bind "${bind}" &
+  child_pid="$!"
+
+  systemd-notify --status="Amai human dashboard starting: waiting for ${ready_url}" || true
+  ready=0
+  for _ in $(seq 1 240); do
+    if curl -fsS "$ready_url" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    if ! kill -0 "$child_pid" >/dev/null 2>&1; then
+      wait "$child_pid"
+      exit $?
+    fi
+    sleep 0.25
+  done
+
+  if [[ "$ready" != "1" ]]; then
+    echo "dashboard launcher did not observe ready ${ready_url} before notify timeout" >&2
+    exit 1
+  fi
+
+  systemd-notify --ready --status="Amai human dashboard ready at ${ready_url}" || true
+  wait "$child_pid"
+  exit $?
+fi
 
 exec "$binary" observe serve --bind "${bind}"

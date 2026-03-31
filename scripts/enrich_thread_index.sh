@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-exec cargo run --quiet -- continuity enrich-thread-index "$@"
+exec ./scripts/amai_exec.sh continuity enrich-thread-index "$@"

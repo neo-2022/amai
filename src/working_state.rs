@@ -1,3 +1,5 @@
+use crate::codex_threads;
+use crate::config::discover_repo_root;
 use crate::postgres::{
     self, ExecCtlTaskLeaseRecord, ExecCtlTaskLedgerEntryRecord, NamespaceRecord,
     ObservabilitySnapshotRecord, ProjectRecord,
@@ -9,6 +11,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::env;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_postgres::Client;
 use uuid::Uuid;
@@ -25,6 +28,7 @@ const MAX_MATERIALIZED_NOTES: usize = 6;
 const MAX_RECENT_DECISION_TRACES: usize = 3;
 const MAX_PENDING_RETURN_QUEUE: usize = 6;
 const MAX_EXECCTL_LEDGER_ENTRIES: i64 = 256;
+const WORKING_STATE_RESTORE_REFRESH_MIN_INTERVAL_MS: u64 = 30_000;
 const EXECCTL_LEASE_TTL_MS: u64 = SESSION_GAP_MS;
 const PROJECT_TASK_TREE_VERSION: &str = "project-task-tree-v1";
 const PROJECT_TASK_LEDGER_VERSION: &str = "project-task-ledger-v2";
@@ -34,21 +38,46 @@ pub(crate) const CLIENT_REPLY_BUDGET_CONTRACT_VERSION: &str = "client-reply-budg
 pub(crate) const CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND: &str = "rotate_chat_only";
 pub(crate) const CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND: &str = "wait_for_budget_only";
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND: &str =
-    CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND;
+    CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND;
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES: u64 = 1;
 pub(crate) const CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE: &str = "Этот чат жжёт внешний лимит клиента: сохрани handoff, открой новый чат и запусти continuity startup.";
 pub(crate) const CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE: &str = "Внешний лимит клиента почти исчерпан во всём клиенте. Не продолжай содержательный ответ, дождись восстановления окна лимита.";
 pub(crate) const CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE: &str =
-    CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE;
+    CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE;
 pub(crate) const GLOBAL_CLIENT_LIMIT_SOURCE_KIND: &str =
     "latest_observed_client_limits_without_current_thread_binding";
 pub(crate) const GLOBAL_CLIENT_LIMIT_SOURCE_SUMMARY: &str = "При отсутствии current-thread binding Amai использует только последнее observed значение client limits. Этого достаточно для global warning hint и hard wait при критическом исчерпании, но недостаточно для thread-local rotate pressure.";
 pub(crate) const CLIENT_REPLY_BUDGET_MODE_NORMAL: &str = "normal";
 pub(crate) const CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL: &str = "compact_high_signal";
+pub(crate) const DEFAULT_CLIENT_BUDGET_TARGET_PERCENT: u64 = 90;
+pub(crate) const MAX_CLIENT_BUDGET_TARGET_PERCENT: u64 = 90;
+pub(crate) const CLIENT_BUDGET_TARGET_STEP_PERCENT: u64 = 10;
+pub(crate) const HOST_CURRENT_THREAD_CONTROL_KIND: &str = "thread_overlay_open_current";
+pub(crate) const HOST_CURRENT_THREAD_CONTROL_HOST_SURFACE_KIND: &str =
+    "codex_webview_internal_command";
+pub(crate) const HOST_CURRENT_THREAD_CONTROL_COMMAND_ID: &str = "thread-overlay-open-current";
+pub(crate) const HOST_CURRENT_THREAD_COMPACT_WINDOW_KIND: &str = "hotkey_window_open_current";
+pub(crate) const HOST_CURRENT_THREAD_COMPACT_WINDOW_HOST_SURFACE_KIND: &str =
+    "codex_webview_compact_window_route";
+pub(crate) const HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID: &str = "hotkey-window-open-current";
+pub(crate) const HOST_CURRENT_THREAD_CONTROL_EXTERNAL_LAUNCH_KIND: &str =
+    "vscode_extension_uri_route";
+pub(crate) const HOST_CURRENT_THREAD_CONTROL_URI_SCHEME: &str = "vscode";
+pub(crate) const HOST_CURRENT_THREAD_CONTROL_URI_AUTHORITY: &str = "openai.chatgpt";
+pub(crate) const HOST_CURRENT_THREAD_CONTROL_ROUTE_PREFIX: &str = "/thread-overlay";
+pub(crate) const HOST_CURRENT_THREAD_COMPACT_WINDOW_ROUTE_PREFIX: &str = "/hotkey-window/thread";
+pub(crate) const HOST_CURRENT_THREAD_CONTROL_OBSERVE_API_LAUNCH_PATH: &str =
+    "/api/client-budget-host-control-launch";
+pub(crate) const HOST_CURRENT_THREAD_CONTROL_FEEDBACK_SOURCE_KIND: &str =
+    "host_current_thread_control_feedback";
+pub(crate) const HOST_CURRENT_THREAD_CONTROL_FEEDBACK_REQUESTED: &str = "requested";
+pub(crate) const HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED: &str = "opened";
+pub(crate) const HOST_CURRENT_THREAD_CONTROL_FEEDBACK_FAILED: &str = "failed";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClientBudgetBlockingReplyMode {
     Inactive,
+    #[allow(dead_code)]
     RotateChatOnly,
     WaitForGlobalBudgetRecovery,
 }
@@ -57,6 +86,31 @@ pub(crate) enum ClientBudgetBlockingReplyMode {
 pub(crate) enum ClientReplyBudgetMode {
     Normal,
     CompactHighSignal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostContextCompactionStage {
+    Inactive,
+    Preserve,
+    CriticalRegrowth,
+}
+
+impl HostContextCompactionStage {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Inactive => "inactive",
+            Self::Preserve => "preserve",
+            Self::CriticalRegrowth => "critical_regrowth",
+        }
+    }
+
+    pub(crate) fn preserve_active(self) -> bool {
+        !matches!(self, Self::Inactive)
+    }
+
+    pub(crate) fn critical_regrowth_active(self) -> bool {
+        matches!(self, Self::CriticalRegrowth)
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -68,6 +122,731 @@ fn shell_join_command(args: &[&str]) -> String {
         .map(|value| shell_quote(value))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn current_workspace_repo_root_string() -> Option<String> {
+    discover_repo_root(None).ok().and_then(|path| {
+        path.canonicalize()
+            .ok()
+            .map(|resolved| resolved.to_string_lossy().to_string())
+    })
+}
+
+fn can_use_workspace_continuity_defaults(
+    namespace_code: Option<&str>,
+    repo_root: Option<&str>,
+) -> bool {
+    let Some(repo_root) = repo_root.filter(|value| !value.trim().is_empty()) else {
+        return false;
+    };
+    let Some(current_workspace_repo_root) = current_workspace_repo_root_string() else {
+        return false;
+    };
+    current_workspace_repo_root == repo_root
+        && namespace_code
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("continuity")
+            == "continuity"
+}
+
+fn build_workspace_aware_rotate_helper_command(
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
+    repo_root: Option<&str>,
+) -> Option<String> {
+    if can_use_workspace_continuity_defaults(namespace_code, repo_root) {
+        return Some(shell_join_command(&["amai", "continuity", "rotate-chat"]));
+    }
+    let project_code = project_code.filter(|value| !value.is_empty())?;
+    let namespace_code = namespace_code.filter(|value| !value.is_empty())?;
+    let repo_root = repo_root.filter(|value| !value.is_empty())?;
+    Some(shell_join_command(&[
+        "amai",
+        "continuity",
+        "rotate-chat",
+        "--project",
+        project_code,
+        "--namespace",
+        namespace_code,
+        "--repo-root",
+        repo_root,
+    ]))
+}
+
+fn build_workspace_aware_startup_command(
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
+    repo_root: Option<&str>,
+    token_source_kind: &str,
+    runtime_state_json: bool,
+) -> Option<String> {
+    let namespace_code = namespace_code.filter(|value| !value.is_empty());
+    if can_use_workspace_continuity_defaults(namespace_code, repo_root) {
+        let mut args = vec!["amai", "continuity", "startup"];
+        if runtime_state_json {
+            args.push("--runtime-state-json");
+        }
+        if !token_source_kind.trim().is_empty()
+            && token_source_kind != "operator_continuity_startup"
+        {
+            args.push("--token-source-kind");
+            args.push(token_source_kind);
+        }
+        return Some(shell_join_command(&args));
+    }
+    let project_code = project_code.filter(|value| !value.is_empty())?;
+    let namespace_code = namespace_code?;
+    let repo_root = repo_root.filter(|value| !value.is_empty())?;
+    let mut args = vec![
+        "amai",
+        "continuity",
+        "startup",
+        "--project",
+        project_code,
+        "--namespace",
+        namespace_code,
+        "--repo-root",
+        repo_root,
+    ];
+    if !token_source_kind.trim().is_empty() {
+        args.push("--token-source-kind");
+        args.push(token_source_kind);
+    }
+    if runtime_state_json {
+        args.push("--runtime-state-json");
+    }
+    Some(shell_join_command(&args))
+}
+
+fn build_workspace_aware_handoff_command(
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
+    repo_root: Option<&str>,
+    headline: Option<&str>,
+    next_step: Option<&str>,
+) -> Option<String> {
+    let headline = headline.filter(|value| !value.is_empty())?;
+    let next_step = next_step.filter(|value| !value.is_empty())?;
+    let namespace_code = namespace_code.filter(|value| !value.is_empty());
+    if can_use_workspace_continuity_defaults(namespace_code, repo_root) {
+        return Some(shell_join_command(&[
+            "./scripts/continuity_handoff.sh",
+            "--project",
+            "amai",
+            "--namespace",
+            "continuity",
+            "--headline",
+            headline,
+            "--next-step",
+            next_step,
+        ]));
+    }
+    let project_code = project_code.filter(|value| !value.is_empty())?;
+    let namespace_code = namespace_code?;
+    Some(shell_join_command(&[
+        "amai",
+        "continuity",
+        "handoff",
+        "--project",
+        project_code,
+        "--namespace",
+        namespace_code,
+        "--headline",
+        headline,
+        "--next-step",
+        next_step,
+    ]))
+}
+
+pub(crate) fn normalize_host_current_thread_control_command_id(
+    value: Option<&str>,
+) -> &'static str {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID) => {
+            HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID
+        }
+        _ => HOST_CURRENT_THREAD_CONTROL_COMMAND_ID,
+    }
+}
+
+fn host_current_thread_control_kind_for_command_id(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => HOST_CURRENT_THREAD_COMPACT_WINDOW_KIND,
+        _ => HOST_CURRENT_THREAD_CONTROL_KIND,
+    }
+}
+
+fn host_current_thread_control_host_surface_kind_for_command_id(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => {
+            HOST_CURRENT_THREAD_COMPACT_WINDOW_HOST_SURFACE_KIND
+        }
+        _ => HOST_CURRENT_THREAD_CONTROL_HOST_SURFACE_KIND,
+    }
+}
+
+fn host_current_thread_control_route_prefix_for_command_id(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => {
+            HOST_CURRENT_THREAD_COMPACT_WINDOW_ROUTE_PREFIX
+        }
+        _ => HOST_CURRENT_THREAD_CONTROL_ROUTE_PREFIX,
+    }
+}
+
+fn host_current_thread_control_button_label(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => "Open compact window",
+        _ => "Open thread overlay",
+    }
+}
+
+fn host_current_thread_control_summary(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => {
+            "Открыть current thread на compact-window route внутри Codex host-клиента."
+        }
+        _ => "Открыть overlay текущего thread внутри Codex host-клиента.",
+    }
+}
+
+fn host_current_thread_control_note(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => {
+            "Это same-thread compact-window surface внутри Codex host-клиента. В electron этот route относится к popout/compact-window contour; в VS Code onUri path может открыть тот же compact-window renderer route внутри клиента, а не гарантированный отдельный window. Surface полезен для проверки, режет ли compact-window host overhead лучше overlay, но он всё ещё не равен clean-surface rebase."
+        }
+        _ => {
+            "Это current-thread control surface внутри Codex host-клиента. Он полезен для same-thread operator control, но не равен clean-surface rebase. Public VS Code command palette path пока не доказан, однако при наличии thread_id materialized URI launch и server-side xdg-open path через Amai observe host."
+        }
+    }
+}
+
+fn host_current_thread_control_intro_message(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => {
+            "Открыть same-thread compact-window route текущего giant thread и проверить, снижает ли он host-side overhead лучше overlay."
+        }
+        _ => "Открыть same-thread overlay текущего giant thread через host surface.",
+    }
+}
+
+fn host_current_thread_control_requested_message(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => {
+            "Запрошено открытие same-thread compact window текущего giant thread."
+        }
+        _ => "Запрошено открытие same-thread overlay текущего giant thread.",
+    }
+}
+
+fn host_current_thread_control_feedback_ack_intro(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => {
+            "После попытки запуска подтверди, открылся ли compact window. Это попадёт в Amai continuity."
+        }
+        _ => "После попытки запуска подтверди, открылся ли overlay. Это попадёт в Amai continuity.",
+    }
+}
+
+fn host_current_thread_control_external_summary(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => {
+            "Попробовать открыть current thread на compact-window route через VS Code URI handler."
+        }
+        _ => "Попробовать открыть current thread overlay через VS Code URI handler.",
+    }
+}
+
+fn host_current_thread_control_external_note(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => {
+            "Этот path опирается на openai.chatgpt onUri -> navigateToRoute(path) и webview route /hotkey-window/thread/:conversationId. В electron это compact-window/popout contour; в VS Code расширении route может открыться как compact-window renderer category без гарантии отдельного окна. Локальный Amai observe host умеет запускать xdg-open для этого URI, но end-to-end эффект всё ещё подтверждается отдельным feedback."
+        }
+        _ => {
+            "Этот path опирается на openai.chatgpt onUri -> navigateToRoute(path) и webview route /thread-overlay/:conversationId. Он truthfully best-effort: route и handler materialized; локальный Amai observe host теперь умеет запускать xdg-open для этого URI, но end-to-end open всё ещё подтверждается отдельным feedback."
+        }
+    }
+}
+
+fn host_current_thread_control_observe_api_launch_summary(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => {
+            "Запустить current thread compact-window route через локальный Amai observe host."
+        }
+        _ => "Запустить current thread overlay через локальный Amai observe host.",
+    }
+}
+
+fn host_current_thread_control_subject(command_id: &str) -> &'static str {
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => "same-thread compact window",
+        _ => "same-thread overlay",
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn build_host_current_thread_control_surface() -> Value {
+    build_host_current_thread_control_surface_for_stage(HostContextCompactionStage::Inactive)
+}
+
+fn preferred_host_current_thread_control_command_id_for_stage(
+    stage: HostContextCompactionStage,
+) -> &'static str {
+    if stage.preserve_active() {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID
+    } else {
+        HOST_CURRENT_THREAD_CONTROL_COMMAND_ID
+    }
+}
+
+fn alternate_host_current_thread_control_command_id_for_stage(
+    stage: HostContextCompactionStage,
+) -> &'static str {
+    if preferred_host_current_thread_control_command_id_for_stage(stage)
+        == HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID
+    {
+        HOST_CURRENT_THREAD_CONTROL_COMMAND_ID
+    } else {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID
+    }
+}
+
+fn host_current_thread_control_selection_reason(
+    stage: HostContextCompactionStage,
+    primary_command_id: &str,
+) -> &'static str {
+    if stage.preserve_active() {
+        if normalize_host_current_thread_control_command_id(Some(primary_command_id))
+            == HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID
+        {
+            "protect_recent_host_compaction_gain"
+        } else if stage.critical_regrowth_active() {
+            "critical_regrowth_try_overlay"
+        } else {
+            "compact_window_failed_try_overlay"
+        }
+    } else {
+        "default_overlay_first"
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn build_host_current_thread_control_surface_for_stage(
+    stage: HostContextCompactionStage,
+) -> Value {
+    let current_thread = current_thread_id();
+    build_host_current_thread_control_surface_for_thread_and_stage_with_primary_command(
+        current_thread.as_deref(),
+        stage,
+        None,
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn build_host_current_thread_control_surface_for_stage_and_primary_command(
+    stage: HostContextCompactionStage,
+    primary_command_id: Option<&str>,
+) -> Value {
+    let current_thread = current_thread_id();
+    build_host_current_thread_control_surface_for_thread_and_stage_with_primary_command(
+        current_thread.as_deref(),
+        stage,
+        primary_command_id,
+    )
+}
+
+fn build_host_current_thread_control_route_path_for_command(
+    thread_id: &str,
+    command_id: &str,
+) -> String {
+    format!(
+        "{}/{}",
+        host_current_thread_control_route_prefix_for_command_id(command_id),
+        thread_id
+    )
+}
+
+fn build_host_current_thread_control_uri(route_path: &str) -> String {
+    format!(
+        "{HOST_CURRENT_THREAD_CONTROL_URI_SCHEME}://{HOST_CURRENT_THREAD_CONTROL_URI_AUTHORITY}{route_path}"
+    )
+}
+
+fn build_host_current_thread_control_launch_command(uri: &str) -> Option<String> {
+    if cfg!(target_os = "linux") {
+        Some(shell_join_command(&["xdg-open", uri]))
+    } else {
+        None
+    }
+}
+
+fn build_host_current_thread_control_observe_launch_command(
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
+    repo_root: Option<&str>,
+    surface: &Value,
+) -> Option<String> {
+    let thread_id = surface["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let command_id = surface["command_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let mut base_args = vec!["amai", "observe", "ctl-launch", "--thread-id", thread_id];
+    match normalize_host_current_thread_control_command_id(Some(command_id)) {
+        HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID => {
+            base_args.push("--compact-window");
+        }
+        HOST_CURRENT_THREAD_CONTROL_COMMAND_ID => {}
+        _ => {
+            base_args.push("--command-id");
+            base_args.push(command_id);
+        }
+    }
+    if can_use_workspace_continuity_defaults(namespace_code, repo_root) {
+        return Some(shell_join_command(&base_args));
+    }
+    let project_code = project_code.filter(|value| !value.is_empty())?;
+    let namespace_code = namespace_code.filter(|value| !value.is_empty())?;
+    let repo_root = repo_root.filter(|value| !value.is_empty())?;
+    base_args.extend_from_slice(&[
+        "--project",
+        project_code,
+        "--namespace",
+        namespace_code,
+        "--repo-root",
+        repo_root,
+    ]);
+    Some(shell_join_command(&base_args))
+}
+
+pub(crate) fn build_host_current_thread_control_surface_for_thread(
+    thread_id: Option<&str>,
+) -> Value {
+    build_host_current_thread_control_surface_for_thread_and_stage_with_primary_command(
+        thread_id,
+        HostContextCompactionStage::Inactive,
+        None,
+    )
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn build_host_current_thread_control_surface_for_thread_and_stage(
+    thread_id: Option<&str>,
+    stage: HostContextCompactionStage,
+) -> Value {
+    build_host_current_thread_control_surface_for_thread_and_stage_with_primary_command(
+        thread_id, stage, None,
+    )
+}
+
+pub(crate) fn build_host_current_thread_control_surface_for_thread_and_stage_with_primary_command(
+    thread_id: Option<&str>,
+    stage: HostContextCompactionStage,
+    primary_command_id: Option<&str>,
+) -> Value {
+    let primary_command_id = primary_command_id
+        .map(|value| normalize_host_current_thread_control_command_id(Some(value)))
+        .unwrap_or_else(|| preferred_host_current_thread_control_command_id_for_stage(stage));
+    let alternate_command_id = alternate_host_current_thread_control_command_id_for_stage(stage);
+    let mut primary = build_host_current_thread_control_surface_for_thread_and_command(
+        thread_id,
+        Some(primary_command_id),
+    );
+    if let Some(root) = primary.as_object_mut() {
+        root.insert(
+            "host_context_compaction_stage".to_string(),
+            json!(stage.as_str()),
+        );
+        root.insert(
+            "selection_reason".to_string(),
+            json!(host_current_thread_control_selection_reason(
+                stage,
+                primary_command_id,
+            )),
+        );
+        root.insert(
+            "alternate_controls".to_string(),
+            Value::Array(vec![
+                build_host_current_thread_control_surface_for_thread_and_command(
+                    thread_id,
+                    Some(if alternate_command_id == primary_command_id {
+                        alternate_host_current_thread_control_command_id_for_stage(
+                            HostContextCompactionStage::Inactive,
+                        )
+                    } else {
+                        alternate_command_id
+                    }),
+                ),
+            ]),
+        );
+    }
+    primary
+}
+
+pub(crate) fn build_host_current_thread_control_surface_for_thread_and_command(
+    thread_id: Option<&str>,
+    command_id: Option<&str>,
+) -> Value {
+    let command_id = normalize_host_current_thread_control_command_id(command_id);
+    let thread_id = thread_id.map(str::trim).filter(|value| !value.is_empty());
+    let route_path = thread_id.map(|thread_id| {
+        build_host_current_thread_control_route_path_for_command(thread_id, command_id)
+    });
+    let uri = route_path
+        .as_deref()
+        .map(build_host_current_thread_control_uri);
+    let launch_command = uri
+        .as_deref()
+        .and_then(build_host_current_thread_control_launch_command);
+    let observe_api_launch_available = launch_command.is_some();
+    json!({
+        "available": true,
+        "control_kind": host_current_thread_control_kind_for_command_id(command_id),
+        "host_surface_kind": host_current_thread_control_host_surface_kind_for_command_id(command_id),
+        "command_id": command_id,
+        "button_label": host_current_thread_control_button_label(command_id),
+        "intro_message": host_current_thread_control_intro_message(command_id),
+        "requested_message_text": host_current_thread_control_requested_message(command_id),
+        "feedback_ack_intro": host_current_thread_control_feedback_ack_intro(command_id),
+        "thread_id": thread_id,
+        "same_thread_surface": true,
+        "automation_ready": observe_api_launch_available,
+        "requires_host_bridge": true,
+        "snapshot_seeded_before_open": true,
+        "resume_if_needed_before_snapshot": true,
+        "external_uri_launch": {
+            "available": uri.is_some(),
+            "launch_surface_kind": HOST_CURRENT_THREAD_CONTROL_EXTERNAL_LAUNCH_KIND,
+            "best_effort": true,
+            "observe_api_launch_available": observe_api_launch_available,
+            "observe_api_launch_path": if observe_api_launch_available {
+                Some(HOST_CURRENT_THREAD_CONTROL_OBSERVE_API_LAUNCH_PATH)
+            } else {
+                None::<&str>
+            },
+            "observe_api_launch_summary": if observe_api_launch_available {
+                Some(host_current_thread_control_observe_api_launch_summary(command_id))
+            } else {
+                None::<&str>
+            },
+            "verification_state": if uri.is_some() && observe_api_launch_available {
+                "route_resolved_launch_command_available"
+            } else if uri.is_some() {
+                "route_resolved_not_executed"
+            } else {
+                "missing_thread_id"
+            },
+            "uri_scheme": HOST_CURRENT_THREAD_CONTROL_URI_SCHEME,
+            "uri_authority": HOST_CURRENT_THREAD_CONTROL_URI_AUTHORITY,
+            "route_path": route_path,
+            "uri": uri,
+            "platform_launch_command": launch_command,
+            "summary": host_current_thread_control_external_summary(command_id),
+            "note": host_current_thread_control_external_note(command_id)
+        },
+        "summary": host_current_thread_control_summary(command_id),
+        "note": host_current_thread_control_note(command_id)
+    })
+}
+
+pub(crate) fn compact_host_current_thread_control_surface_for_runtime(surface: &Value) -> Value {
+    let Some(node) = surface.as_object() else {
+        return Value::Null;
+    };
+    let surface_exhausted_after_verified_failure = node
+        .get("surface_exhausted_after_verified_failure")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut compact = serde_json::Map::new();
+    for field in [
+        "available",
+        "automation_ready",
+        "button_label",
+        "command_id",
+        "control_kind",
+        "thread_id",
+        "host_context_compaction_stage",
+        "feedback_pending",
+        "measurement_pending",
+        "retry_allowed",
+        "retry_blocked_reason",
+        "effect_verdict",
+        "selection_reason",
+        "availability_state",
+        "surface_exhausted_after_verified_failure",
+    ] {
+        if let Some(value) = node.get(field).filter(|value| !value.is_null()) {
+            compact.insert(field.to_string(), value.clone());
+        }
+    }
+    if !surface_exhausted_after_verified_failure {
+        if let Some(value) = node.get("effect_summary").filter(|value| !value.is_null()) {
+            compact.insert("effect_summary".to_string(), value.clone());
+        }
+        if let Some(alternates) = node.get("alternate_controls").and_then(Value::as_array) {
+            let alternate_controls = alternates
+                .iter()
+                .map(|alternate| {
+                    json!({
+                        "button_label": alternate["button_label"].clone(),
+                        "command_id": alternate["command_id"].clone(),
+                        "control_kind": alternate["control_kind"].clone(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            compact.insert(
+                "alternate_controls".to_string(),
+                Value::Array(alternate_controls),
+            );
+        }
+    }
+    Value::Object(compact)
+}
+
+pub(crate) fn normalize_host_current_thread_control_feedback_kind(
+    value: &str,
+) -> Option<&'static str> {
+    match value.trim() {
+        HOST_CURRENT_THREAD_CONTROL_FEEDBACK_REQUESTED => {
+            Some(HOST_CURRENT_THREAD_CONTROL_FEEDBACK_REQUESTED)
+        }
+        HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED => {
+            Some(HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED)
+        }
+        HOST_CURRENT_THREAD_CONTROL_FEEDBACK_FAILED => {
+            Some(HOST_CURRENT_THREAD_CONTROL_FEEDBACK_FAILED)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn host_current_thread_control_feedback_notice_text_for_command(
+    feedback_kind: &str,
+    command_id: Option<&str>,
+) -> String {
+    let subject = host_current_thread_control_subject(
+        normalize_host_current_thread_control_command_id(command_id),
+    );
+    match feedback_kind {
+        HOST_CURRENT_THREAD_CONTROL_FEEDBACK_REQUESTED => {
+            format!("Попытка открыть {subject} зафиксирована. После запуска отметь результат.")
+        }
+        HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED => {
+            format!("Подтверждено: {subject} открылся.")
+        }
+        HOST_CURRENT_THREAD_CONTROL_FEEDBACK_FAILED => {
+            format!("Зафиксировано: {subject} не открылся.")
+        }
+        _ => format!("Feedback по {subject} зафиксирован."),
+    }
+}
+
+fn host_current_thread_control_feedback_summary(
+    feedback_kind: &str,
+    command_id: Option<&str>,
+) -> String {
+    let subject = host_current_thread_control_subject(
+        normalize_host_current_thread_control_command_id(command_id),
+    );
+    match feedback_kind {
+        HOST_CURRENT_THREAD_CONTROL_FEEDBACK_REQUESTED => {
+            format!("Requested {subject} launch via host current-thread control.")
+        }
+        HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED => {
+            format!("Operator confirmed {subject} opened.")
+        }
+        HOST_CURRENT_THREAD_CONTROL_FEEDBACK_FAILED => {
+            format!("Operator reported {subject} did not open.")
+        }
+        _ => "Recorded host current-thread control feedback.".to_string(),
+    }
+}
+
+fn build_host_current_thread_control_feedback_snapshot_for_thread(
+    thread_id: Option<&str>,
+) -> Value {
+    let thread_id = thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    if thread_id.is_empty() {
+        return Value::Null;
+    }
+    let client_live_meter =
+        codex_threads::latest_rollout_client_meter_observation_for_thread(thread_id)
+            .ok()
+            .flatten();
+    let host_context_compaction =
+        codex_threads::latest_rollout_context_compaction_observation_for_thread(thread_id)
+            .ok()
+            .flatten();
+    let host_context_compaction = if let Some(observation) = host_context_compaction {
+        let current_turn_total_tokens = client_live_meter
+            .as_ref()
+            .map(|value| value.client_turn_total_tokens)
+            .unwrap_or_default();
+        let growth_since_compaction_tokens =
+            current_turn_total_tokens.saturating_sub(observation.post_compaction_turn_total_tokens);
+        let recovered_surface_tokens = observation
+            .pre_compaction_turn_total_tokens
+            .saturating_sub(observation.post_compaction_turn_total_tokens);
+        let regrowth_of_recovered_surface_ratio = if recovered_surface_tokens > 0 {
+            growth_since_compaction_tokens as f64 / recovered_surface_tokens as f64
+        } else {
+            0.0
+        };
+        json!({
+            "compacted_at_epoch_ms": observation.compacted_at_epoch_ms,
+            "pre_compaction_turn_total_tokens": observation.pre_compaction_turn_total_tokens,
+            "post_compaction_turn_total_tokens": observation.post_compaction_turn_total_tokens,
+            "post_compaction_turn_id": observation.post_compaction_turn_id,
+            "compaction_count": observation.compaction_count,
+            "growth_since_compaction_tokens": growth_since_compaction_tokens,
+            "recovered_surface_tokens": recovered_surface_tokens,
+            "regrowth_of_recovered_surface_ratio": regrowth_of_recovered_surface_ratio,
+            "observation_source": observation.observation_source,
+        })
+    } else {
+        Value::Null
+    };
+    let client_live_meter = if let Some(observation) = client_live_meter {
+        let context_used_percent = if observation.latest_model_context_window == 0 {
+            None
+        } else {
+            Some(
+                observation.client_turn_total_tokens as f64 * 100.0
+                    / observation.latest_model_context_window as f64,
+            )
+        };
+        json!({
+            "thread_id": observation.thread_id,
+            "turn_id": observation.turn_id,
+            "started_at_epoch_ms": observation.started_at_epoch_ms,
+            "ended_at_epoch_ms": observation.ended_at_epoch_ms,
+            "client_turn_total_tokens": observation.client_turn_total_tokens,
+            "latest_model_context_window": observation.latest_model_context_window,
+            "context_used_percent": context_used_percent,
+            "primary_limit_used_percent": observation.latest_primary_limit_used_percent,
+            "primary_limit_remaining_percent":
+                100_u64.saturating_sub(observation.latest_primary_limit_used_percent),
+            "secondary_limit_used_percent": observation.latest_secondary_limit_used_percent,
+            "secondary_limit_remaining_percent":
+                100_u64.saturating_sub(observation.latest_secondary_limit_used_percent),
+            "observation_source": observation.observation_source,
+        })
+    } else {
+        Value::Null
+    };
+    json!({
+        "snapshot_version": "host-current-thread-control-effect-snapshot-v1",
+        "thread_id": thread_id,
+        "client_live_meter": client_live_meter,
+        "host_context_compaction": host_context_compaction,
+    })
 }
 
 pub(crate) fn build_client_budget_blocking_reply_contract(
@@ -99,8 +878,67 @@ pub(crate) fn build_client_budget_blocking_reply_contract(
     })
 }
 
-pub(crate) fn build_client_reply_budget_contract(mode: ClientReplyBudgetMode) -> Value {
-    let (active, mode_label, max_paragraphs_soft, max_bullets_soft, max_sentences_soft, summary) =
+pub(crate) fn default_client_budget_target_percent() -> u64 {
+    DEFAULT_CLIENT_BUDGET_TARGET_PERCENT
+}
+
+pub(crate) fn normalize_client_budget_target_percent(value: u64) -> Option<u64> {
+    if value <= MAX_CLIENT_BUDGET_TARGET_PERCENT && value % CLIENT_BUDGET_TARGET_STEP_PERCENT == 0 {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn client_budget_target_percent_from_restore_context(restore_context: &Value) -> u64 {
+    restore_context["client_budget_target_percent"]
+        .as_u64()
+        .and_then(normalize_client_budget_target_percent)
+        .unwrap_or(DEFAULT_CLIENT_BUDGET_TARGET_PERCENT)
+}
+
+fn compact_reply_budget_summary(target_percent: u64) -> String {
+    if target_percent == 0 {
+        "Target economy is set to 0%, so compact mode only activates from rotate-pressure, overspend, or other hard client-budget signals. Ответ остаётся содержательным, но должен быть жёстко compact: один абзац или максимум два bullets, сначала прямой результат, затем только изменившиеся факты без повторов.".to_string()
+    } else {
+        format!(
+            "Exact 5ч KPI ниже целевой планки {target_percent}% или rotate-pressure уже materialized. Ответ остаётся содержательным, но должен быть жёстко compact: один абзац или максимум два bullets, сначала прямой результат, затем только изменившиеся факты без повторов."
+        )
+    }
+}
+
+pub(crate) fn build_client_reply_budget_contract_with_target(
+    mode: ClientReplyBudgetMode,
+    target_percent: u64,
+    host_context_compaction_stage: HostContextCompactionStage,
+    target_pressure_active: bool,
+    current_live_turn_no_amai_activity: bool,
+) -> Value {
+    let host_context_compaction_preserve_active = host_context_compaction_stage.preserve_active();
+    let host_context_compaction_critical_regrowth_active =
+        host_context_compaction_stage.critical_regrowth_active();
+    let inactive_target_pressure_active = target_pressure_active
+        && !host_context_compaction_preserve_active
+        && !host_context_compaction_critical_regrowth_active;
+    let preserve_stage_strict_active =
+        host_context_compaction_preserve_active && target_pressure_active;
+    let critical_regrowth_strict_active =
+        host_context_compaction_critical_regrowth_active && target_pressure_active;
+    let pure_burn_turn_active = target_pressure_active && current_live_turn_no_amai_activity;
+    let (
+        active,
+        mode_label,
+        max_paragraphs_soft,
+        max_bullets_soft,
+        max_sentences_soft,
+        max_tool_roundtrips_soft,
+        summary,
+    ) = {
+        let preserve_summary = "Host уже compacted этот thread. Защити новую компактную поверхность: минимум промежуточных апдейтов, никаких широких разведочных проходов без прямого запроса, один плотный batched read вместо серии мелких exploratory tool turns.";
+        let inactive_target_pressure_summary = "Даже без host compaction exact 5ч KPI уже ниже целевой планки, поэтому режь расход заранее: короткий ответ без commentary-only апдейтов и без нового tool turn, пока не появится точная material delta-goal.";
+        let preserve_target_pressure_summary = "Целевая планка уже не держится даже в preserve-stage, поэтому экономию нужно защищать сразу: не отправляй commentary-only апдейты, не дроби tool-чтение на серию мелких запросов и жди meaningful result перед следующим progress reply.";
+        let critical_regrowth_summary = "После host compaction thread уже снова отъел заметную долю восстановленной поверхности. С этого момента каждый лишний tool turn дорог: не отправляй commentary-only апдейты, не дроби чтение на мелкие запросы, отвечай только после meaningful patch/result delta и не гоняй повторные live-diagnostic reread/retry loops без новой дельты.";
+        let pure_burn_turn_summary = "Текущий live-turn уже показывает no_amai_activity_in_current_live_turn, значит этот turn пока только сжигает окно клиента. Не отправляй новый progress reply без material patch/result/decision delta и не начинай новый tool turn без точной гипотезы, что именно изменится.";
         match mode {
             ClientReplyBudgetMode::Normal => (
                 false,
@@ -108,17 +946,91 @@ pub(crate) fn build_client_reply_budget_contract(mode: ClientReplyBudgetMode) ->
                 None,
                 None,
                 None,
-                "Обычный режим ответа без дополнительного client-budget сжатия.",
+                None,
+                "Обычный режим ответа без дополнительного client-budget сжатия.".to_string(),
             ),
-            ClientReplyBudgetMode::CompactHighSignal => (
-                true,
-                CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
-                Some(1),
-                Some(2),
-                Some(3),
-                "Exact 5ч KPI ниже целевого >90% или rotate-pressure уже materialized. Ответ остаётся содержательным, но должен быть жёстко compact: один абзац или максимум два bullets, сначала прямой результат, затем только изменившиеся факты без повторов.",
-            ),
-        };
+            ClientReplyBudgetMode::CompactHighSignal => {
+                let max_bullets_soft = if pure_burn_turn_active
+                    || host_context_compaction_critical_regrowth_active
+                    || preserve_stage_strict_active
+                {
+                    Some(0)
+                } else if inactive_target_pressure_active {
+                    Some(1)
+                } else if host_context_compaction_preserve_active {
+                    Some(1)
+                } else {
+                    Some(2)
+                };
+                let max_sentences_soft = if pure_burn_turn_active
+                    || host_context_compaction_critical_regrowth_active
+                    || preserve_stage_strict_active
+                {
+                    Some(1)
+                } else if inactive_target_pressure_active {
+                    Some(2)
+                } else if host_context_compaction_preserve_active {
+                    Some(2)
+                } else {
+                    Some(3)
+                };
+                let mut summary = compact_reply_budget_summary(target_percent);
+                if host_context_compaction_critical_regrowth_active {
+                    summary.push(' ');
+                    summary.push_str(preserve_summary);
+                    summary.push(' ');
+                    summary.push_str(critical_regrowth_summary);
+                    if pure_burn_turn_active {
+                        summary.push(' ');
+                        summary.push_str(pure_burn_turn_summary);
+                    }
+                } else if preserve_stage_strict_active {
+                    summary.push(' ');
+                    summary.push_str(preserve_summary);
+                    summary.push(' ');
+                    summary.push_str(preserve_target_pressure_summary);
+                    if pure_burn_turn_active {
+                        summary.push(' ');
+                        summary.push_str(pure_burn_turn_summary);
+                    }
+                } else if inactive_target_pressure_active {
+                    summary.push(' ');
+                    summary.push_str(inactive_target_pressure_summary);
+                    if pure_burn_turn_active {
+                        summary.push(' ');
+                        summary.push_str(pure_burn_turn_summary);
+                    }
+                } else if host_context_compaction_preserve_active {
+                    summary.push(' ');
+                    summary.push_str(preserve_summary);
+                }
+                (
+                    true,
+                    CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
+                    Some(1),
+                    max_bullets_soft,
+                    max_sentences_soft,
+                    Some(
+                        if pure_burn_turn_active
+                            || critical_regrowth_strict_active
+                            || inactive_target_pressure_active
+                        {
+                            0
+                        } else if host_context_compaction_critical_regrowth_active
+                            || preserve_stage_strict_active
+                        {
+                            1
+                        } else if host_context_compaction_preserve_active {
+                            2
+                        } else {
+                            3
+                        },
+                    ),
+                    summary,
+                )
+            }
+        }
+    };
     json!({
         "contract_version": CLIENT_REPLY_BUDGET_CONTRACT_VERSION,
         "active": active,
@@ -132,9 +1044,78 @@ pub(crate) fn build_client_reply_budget_contract(mode: ClientReplyBudgetMode) ->
         "must_keep_only_changed_facts_when_possible": active,
         "must_prefer_patch_or_result_over_narration_when_coding": active,
         "must_prefer_short_paragraphs": active,
+        "host_context_compaction_stage":
+            if active { Some(host_context_compaction_stage.as_str()) } else { None },
+        "host_context_compaction_target_pressure_active":
+            active && target_pressure_active,
+        "host_context_compaction_inactive_target_pressure_active":
+            active && inactive_target_pressure_active,
+        "current_live_turn_no_amai_activity":
+            active && current_live_turn_no_amai_activity,
+        "same_meter_pure_burn_turn_active":
+            active && pure_burn_turn_active,
+        "host_context_compaction_preserve_active":
+            active && host_context_compaction_preserve_active,
+        "host_context_compaction_preserve_strict_active":
+            active && preserve_stage_strict_active,
+        "host_context_compaction_critical_regrowth_active":
+            active && host_context_compaction_critical_regrowth_active,
+        "must_protect_recent_host_compaction_gain":
+            active && host_context_compaction_preserve_active,
+        "must_minimize_nonessential_progress_updates":
+            active && host_context_compaction_preserve_active,
+        "must_avoid_broad_exploration_without_user_request":
+            active && host_context_compaction_preserve_active,
+        "must_prefer_single_batched_tool_read_when_exploring":
+            active && host_context_compaction_preserve_active,
+        "must_avoid_commentary_only_updates":
+            active && (
+                host_context_compaction_critical_regrowth_active
+                    || preserve_stage_strict_active
+                    || inactive_target_pressure_active
+            ),
+        "must_batch_all_tool_reads_before_reply":
+            active && (
+                host_context_compaction_critical_regrowth_active
+                    || preserve_stage_strict_active
+                    || inactive_target_pressure_active
+            ),
+        "must_wait_for_meaningful_result_before_progress_reply":
+            active && (
+                host_context_compaction_critical_regrowth_active
+                    || preserve_stage_strict_active
+                    || inactive_target_pressure_active
+            ),
+        "must_reuse_latest_live_diagnostics_before_reread":
+            active && host_context_compaction_critical_regrowth_active,
+        "must_avoid_repeated_live_guard_polls_without_new_delta":
+            active && host_context_compaction_critical_regrowth_active,
+        "must_avoid_serial_same_thread_host_control_retries_without_effect_delta":
+            active && host_context_compaction_critical_regrowth_active,
+        "must_prefer_single_same_thread_control_then_measure":
+            active && host_context_compaction_critical_regrowth_active,
+        "must_require_material_delta_before_next_reply":
+            active && (
+                pure_burn_turn_active
+                    || critical_regrowth_strict_active
+                    || inactive_target_pressure_active
+            ),
+        "must_avoid_progress_reply_when_only_guard_changed":
+            active && (
+                pure_burn_turn_active
+                    || critical_regrowth_strict_active
+                    || inactive_target_pressure_active
+            ),
+        "must_avoid_new_tool_turn_without_specific_delta_goal":
+            active && (
+                pure_burn_turn_active
+                    || critical_regrowth_strict_active
+                    || inactive_target_pressure_active
+            ),
         "max_paragraphs_soft": max_paragraphs_soft,
         "max_bullets_soft": max_bullets_soft,
         "max_sentences_soft": max_sentences_soft,
+        "max_tool_roundtrips_soft": max_tool_roundtrips_soft,
         "summary": summary,
     })
 }
@@ -157,11 +1138,7 @@ pub(crate) fn build_global_client_limit_source_contract() -> Value {
 }
 
 pub(crate) fn client_budget_guard_requires_rotate_before_reply(guard: &Value) -> bool {
-    let reply_execution_gate = &guard["reply_execution_gate"];
-    reply_execution_gate["must_rotate_before_reply"].as_bool() == Some(true)
-        || (reply_execution_gate["action_kind"].as_str() == Some("rotate_chat_for_client_budget")
-            && reply_execution_gate["blocking"].as_bool() != Some(false))
-        || guard["should_rotate_chat_now"].as_bool() == Some(true)
+    guard["reply_execution_gate"]["must_rotate_before_reply"].as_bool() == Some(true)
 }
 
 pub(crate) fn client_budget_guard_blocks_reply(guard: &Value) -> bool {
@@ -171,6 +1148,16 @@ pub(crate) fn client_budget_guard_blocks_reply(guard: &Value) -> bool {
             == Some(true)
         || guard["requires_global_budget_recovery_before_reply"].as_bool() == Some(true)
         || client_budget_guard_requires_rotate_before_reply(guard)
+}
+
+pub(crate) fn client_budget_guard_blocks_expensive_tool_turn(guard: &Value) -> bool {
+    if client_budget_guard_blocks_reply(guard) {
+        return true;
+    }
+    let reply_execution_gate = &guard["reply_execution_gate"];
+    reply_execution_gate["must_avoid_new_tool_turn_without_specific_delta_goal"].as_bool()
+        == Some(true)
+        && reply_execution_gate["max_tool_roundtrips_soft"].as_i64() == Some(0)
 }
 
 pub async fn record_handoff_event(
@@ -187,7 +1174,13 @@ pub async fn record_handoff_event(
     let recorded_at_epoch_ms = now_epoch_ms()?;
     let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
     let next_step = normalize_next_step_hint(next_step);
-    let previous_restore = build_restore_bundle(db, project, namespace).await?;
+    let previous_restore =
+        load_recent_restore_bundle_without_live_guard(db, project, namespace).await?;
+    let client_budget_target_percent = previous_restore.as_ref().and_then(|value| {
+        value["working_state_restore"]["client_budget_target_percent"]
+            .as_u64()
+            .and_then(normalize_client_budget_target_percent)
+    });
     let pending_return_queue = derive_pending_return_queue(
         previous_restore
             .as_ref()
@@ -238,6 +1231,7 @@ pub async fn record_handoff_event(
             "open_questions": open_questions,
             "materialized_notes": materialized_notes,
             "pending_return_queue": pending_return_queue,
+            "client_budget_target_percent": client_budget_target_percent,
             "resolve_current_goal": resolve_current_goal,
             "resolved_pending_return_headlines": resolved_headlines,
             "last_command": "continuity handoff".to_string(),
@@ -298,7 +1292,208 @@ pub async fn record_handoff_event(
     Ok(())
 }
 
-pub async fn record_context_pack_event(db: &Client, payload: &Value) -> Result<()> {
+pub async fn record_client_budget_target_event(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    target_percent: u64,
+) -> Result<()> {
+    record_client_budget_target_event_with_thread_hint(db, project, namespace, target_percent, None)
+        .await
+}
+
+pub async fn record_client_budget_target_event_with_thread_hint(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    target_percent: u64,
+    thread_id_hint: Option<&str>,
+) -> Result<()> {
+    let target_percent =
+        normalize_client_budget_target_percent(target_percent).ok_or_else(|| {
+            anyhow::anyhow!(
+                "client budget target must be one of 0, 10, 20, 30, 40, 50, 60, 70, 80, 90"
+            )
+        })?;
+    let previous_restore =
+        load_recent_restore_bundle_without_live_guard(db, project, namespace).await?;
+    let current_goal = previous_restore
+        .as_ref()
+        .and_then(|value| value["working_state_restore"]["current_goal"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Продолжить активную рабочую линию");
+    let next_step = previous_restore
+        .as_ref()
+        .and_then(|value| value["working_state_restore"]["next_step"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(normalize_next_step_hint)
+        .unwrap_or_else(|| "Продолжить работу с новым target для клиентской экономии.".to_string());
+    let recorded_at_epoch_ms = now_epoch_ms()?;
+    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let thread_id = thread_id_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(current_thread_id);
+    let session_id = resolve_session_id(
+        db,
+        &project.code,
+        &namespace.code,
+        &agent_scope,
+        recorded_at_epoch_ms,
+    )
+    .await?;
+    let event_id = Uuid::new_v4().to_string();
+    let summary = format!("Client budget target set to {target_percent}%.");
+    let payload = json!({
+        "working_state_event": {
+            "event_id": event_id,
+            "project": project_json(project),
+            "namespace": namespace_json(namespace),
+            "recorded_at_epoch_ms": recorded_at_epoch_ms,
+            "event_kind": "client_budget_target_update",
+            "session_id": session_id,
+            "agent_scope": agent_scope,
+            "thread_id": thread_id,
+            "source_kind": "client_budget_target_update",
+            "headline": current_goal,
+            "next_step_hint": next_step,
+            "summary": summary,
+            "active_files": Vec::<String>::new(),
+            "recent_paths": Vec::<String>::new(),
+            "visible_projects": vec![project.code.clone()],
+            "query": Value::Null,
+            "query_type": Value::Null,
+            "target_kind": "client_budget_target",
+            "current_hypothesis": Value::Null,
+            "rejected_hypotheses": Vec::<String>::new(),
+            "open_questions": Vec::<String>::new(),
+            "materialized_notes": vec![format!("Client budget target = {target_percent}%")],
+            "pending_return_queue": Value::Null,
+            "client_budget_target_percent": target_percent,
+            "resolve_current_goal": false,
+            "resolved_pending_return_headlines": Vec::<String>::new(),
+            "last_command": "continuity client-budget-target".to_string(),
+            "last_results_summary": summary,
+            "local_path": "Amai client budget target".to_string(),
+        }
+    });
+    let _ = postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
+    refresh_restore_snapshot(db, project, namespace).await?;
+    Ok(())
+}
+
+pub async fn record_host_current_thread_control_feedback_with_thread_hint(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    feedback_kind: &str,
+    command_id_hint: Option<&str>,
+    thread_id_hint: Option<&str>,
+) -> Result<()> {
+    let feedback_kind = normalize_host_current_thread_control_feedback_kind(feedback_kind)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "host current-thread control feedback must be one of requested, opened, failed"
+            )
+        })?;
+    let previous_restore =
+        load_recent_restore_bundle_without_live_guard(db, project, namespace).await?;
+    let current_goal = previous_restore
+        .as_ref()
+        .and_then(|value| value["working_state_restore"]["current_goal"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Продолжить активную рабочую линию");
+    let next_step = previous_restore
+        .as_ref()
+        .and_then(|value| value["working_state_restore"]["next_step"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(normalize_next_step_hint)
+        .unwrap_or_else(|| {
+            "Продолжить работу по same-thread control для клиентской экономии.".to_string()
+        });
+    let client_budget_target_percent = previous_restore.as_ref().and_then(|value| {
+        value["working_state_restore"]["client_budget_target_percent"]
+            .as_u64()
+            .and_then(normalize_client_budget_target_percent)
+    });
+    let command_id = command_id_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| normalize_host_current_thread_control_command_id(Some(value)))
+        .unwrap_or(HOST_CURRENT_THREAD_CONTROL_COMMAND_ID);
+    let recorded_at_epoch_ms = now_epoch_ms()?;
+    let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
+    let thread_id = thread_id_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(current_thread_id);
+    let session_id = resolve_session_id(
+        db,
+        &project.code,
+        &namespace.code,
+        &agent_scope,
+        recorded_at_epoch_ms,
+    )
+    .await?;
+    let event_id = Uuid::new_v4().to_string();
+    let summary = host_current_thread_control_feedback_summary(feedback_kind, Some(command_id));
+    let feedback_snapshot =
+        build_host_current_thread_control_feedback_snapshot_for_thread(thread_id.as_deref());
+    let payload = json!({
+        "working_state_event": {
+            "event_id": event_id,
+            "project": project_json(project),
+            "namespace": namespace_json(namespace),
+            "recorded_at_epoch_ms": recorded_at_epoch_ms,
+            "event_kind": HOST_CURRENT_THREAD_CONTROL_FEEDBACK_SOURCE_KIND,
+            "session_id": session_id,
+            "agent_scope": agent_scope,
+            "thread_id": thread_id,
+            "source_kind": HOST_CURRENT_THREAD_CONTROL_FEEDBACK_SOURCE_KIND,
+            "headline": current_goal,
+            "next_step_hint": next_step,
+            "summary": summary,
+            "active_files": Vec::<String>::new(),
+            "recent_paths": Vec::<String>::new(),
+            "visible_projects": vec![project.code.clone()],
+            "query": Value::Null,
+            "query_type": Value::Null,
+            "target_kind": "host_current_thread_control",
+            "current_hypothesis": Value::Null,
+            "rejected_hypotheses": Vec::<String>::new(),
+            "open_questions": Vec::<String>::new(),
+            "materialized_notes": vec![
+                format!("Host current-thread control feedback = {feedback_kind}"),
+                format!("Host current-thread control command = {command_id}")
+            ],
+            "pending_return_queue": Value::Null,
+            "client_budget_target_percent": client_budget_target_percent,
+            "resolve_current_goal": false,
+            "resolved_pending_return_headlines": Vec::<String>::new(),
+            "last_command": "dashboard client-budget-host-control-feedback".to_string(),
+            "last_results_summary": summary,
+            "local_path": "Amai host current-thread control feedback".to_string(),
+            "host_current_thread_control_feedback": {
+                "feedback_version": "host-current-thread-control-feedback-v2",
+                "feedback_kind": feedback_kind,
+                "command_id": command_id,
+                "control_kind": host_current_thread_control_kind_for_command_id(command_id),
+                "feedback_snapshot": feedback_snapshot,
+            }
+        }
+    });
+    let _ = postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
+    refresh_restore_snapshot(db, project, namespace).await?;
+    Ok(())
+}
+
+pub async fn record_context_pack_event(
+    db: &Client,
+    payload: &Value,
+    token_source_kind: &str,
+) -> Result<()> {
     let node = payload
         .as_object()
         .context("context pack payload must be a JSON object")?;
@@ -369,6 +1564,7 @@ pub async fn record_context_pack_event(db: &Client, payload: &Value) -> Result<(
         "Найдено: документов {}, символов {}, lexical chunks {}, semantic chunks {}.",
         exact_documents, symbol_hits, lexical_chunks, semantic_chunks
     );
+    let traffic_class = token_budget::derive_traffic_class(token_source_kind);
     let payload = json!({
         "working_state_event": {
             "event_id": Uuid::new_v4().to_string(),
@@ -380,6 +1576,8 @@ pub async fn record_context_pack_event(db: &Client, payload: &Value) -> Result<(
             "agent_scope": agent_scope,
             "thread_id": thread_id,
             "source_kind": "context_pack",
+            "token_source_kind": token_source_kind,
+            "traffic_class": traffic_class,
             "headline": format!("Рабочий запрос: {}", query),
             "next_step_hint": derive_retrieval_next_step(&active_files, target_kind),
             "summary": format!("{} {}", query, query_summary),
@@ -409,6 +1607,14 @@ pub async fn record_context_pack_event(db: &Client, payload: &Value) -> Result<(
         }
     });
     postgres::insert_observability_snapshot(db, WORKING_STATE_EVENT_KIND, &payload).await?;
+    if traffic_class == "live" && !project.repo_root.is_empty() {
+        if let Ok(recorded_at_epoch_ms) = i64::try_from(recorded_at_epoch_ms) {
+            let _ = token_budget::bump_dashboard_live_turn_retrieval_invalidation(
+                Path::new(&project.repo_root),
+                recorded_at_epoch_ms,
+            );
+        }
+    }
     let project_record = ProjectRecord {
         project_id: postgres::get_project_by_code(db, &project.code)
             .await?
@@ -434,15 +1640,18 @@ pub async fn record_context_pack_event(db: &Client, payload: &Value) -> Result<(
     Ok(())
 }
 
-pub async fn build_restore_bundle(
+async fn build_restore_bundle_without_live_guard(
     db: &Client,
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
 ) -> Result<Option<Value>> {
     let agent_scope = current_agent_scope_for(&project.code, &namespace.code);
-    let snapshots = postgres::list_observability_snapshots_by_kinds(
+    let snapshots = postgres::list_observability_snapshots_by_kind_for_scope(
         db,
-        &[WORKING_STATE_EVENT_KIND],
+        WORKING_STATE_EVENT_KIND,
+        "working_state_event",
+        &project.code,
+        &namespace.code,
         Some(MAX_RESTORE_EVENTS),
     )
     .await?;
@@ -475,6 +1684,45 @@ pub async fn build_restore_bundle(
     )
     .await?;
     overlay_execctl_active_lease(&mut bundle, active_lease.as_ref());
+    Ok(Some(bundle))
+}
+
+pub async fn load_recent_restore_bundle_without_live_guard(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+) -> Result<Option<Value>> {
+    let latest_snapshot = postgres::list_observability_snapshots_by_kind_for_scope(
+        db,
+        WORKING_STATE_RESTORE_KIND,
+        "working_state_restore",
+        &project.code,
+        &namespace.code,
+        Some(1),
+    )
+    .await?;
+    if let Some(snapshot) = latest_snapshot.first() {
+        let captured_at_epoch_ms = snapshot.payload["working_state_restore"]["captured_at_epoch_ms"]
+            .as_u64()
+            .unwrap_or(snapshot.created_at_epoch_ms.max(0) as u64);
+        if now_epoch_ms()?.saturating_sub(captured_at_epoch_ms)
+            <= WORKING_STATE_RESTORE_REFRESH_MIN_INTERVAL_MS
+        {
+            return Ok(Some(snapshot.payload.clone()));
+        }
+    }
+    build_restore_bundle_without_live_guard(db, project, namespace).await
+}
+
+pub async fn build_restore_bundle(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+) -> Result<Option<Value>> {
+    let Some(mut bundle) = build_restore_bundle_without_live_guard(db, project, namespace).await?
+    else {
+        return Ok(None);
+    };
     let client_budget_guard =
         token_budget::collect_live_current_session_budget_guard(db, Some(&bundle))
             .await
@@ -503,6 +1751,10 @@ pub fn print_restore_bundle_human(restore: &Value) {
         node["current_goal"].as_str().unwrap_or("ещё нет данных")
     );
     println!("- Ближайший следующий шаг: {}", next_step);
+    println!(
+        "- Целевой client-budget target: {}%",
+        client_budget_target_percent_from_restore_context(node)
+    );
     if let Some(value) = node["execctl_active_lease_summary"]
         .as_str()
         .filter(|value| !value.is_empty())
@@ -567,7 +1819,27 @@ async fn refresh_restore_snapshot(
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
 ) -> Result<()> {
-    let Some(bundle) = build_restore_bundle(db, project, namespace).await? else {
+    let now_epoch_ms = now_epoch_ms()?;
+    let latest_snapshot = postgres::list_observability_snapshots_by_kind_for_scope(
+        db,
+        WORKING_STATE_RESTORE_KIND,
+        "working_state_restore",
+        &project.code,
+        &namespace.code,
+        Some(1),
+    )
+    .await?;
+    if let Some(snapshot) = latest_snapshot.first() {
+        let captured_at_epoch_ms = snapshot.payload["working_state_restore"]["captured_at_epoch_ms"]
+            .as_u64()
+            .unwrap_or(snapshot.created_at_epoch_ms.max(0) as u64);
+        if now_epoch_ms.saturating_sub(captured_at_epoch_ms)
+            <= WORKING_STATE_RESTORE_REFRESH_MIN_INTERVAL_MS
+        {
+            return Ok(());
+        }
+    }
+    let Some(bundle) = build_restore_bundle_without_live_guard(db, project, namespace).await? else {
         return Ok(());
     };
     let payload = json!({
@@ -692,6 +1964,11 @@ fn compose_restore_bundle(
             "summary": event["summary"],
             "recorded_at_epoch_ms": event["recorded_at_epoch_ms"],
             "local_path": event["local_path"],
+            "host_current_thread_control_feedback": if event["host_current_thread_control_feedback"].is_object() {
+                event["host_current_thread_control_feedback"].clone()
+            } else {
+                Value::Null
+            },
             "execution_state": action_state,
             "authoritative": event["event_id"].as_str() == Some(authoritative_event_id.as_str()),
         }));
@@ -757,6 +2034,14 @@ fn compose_restore_bundle(
         &current_goal,
         &next_step,
     );
+    let client_budget_target_percent = events
+        .iter()
+        .find_map(|snapshot| {
+            snapshot.payload["working_state_event"]["client_budget_target_percent"]
+                .as_u64()
+                .and_then(normalize_client_budget_target_percent)
+        })
+        .unwrap_or(DEFAULT_CLIENT_BUDGET_TARGET_PERCENT);
     let pending_return_summary = summarize_pending_return_queue(&pending_return_queue);
     let has_pending_return_queue = pending_return_queue
         .as_array()
@@ -836,6 +2121,7 @@ fn compose_restore_bundle(
             "recent_actions": recent_actions,
             "pending_return_queue": pending_return_queue,
             "pending_return_summary": pending_return_summary,
+            "client_budget_target_percent": client_budget_target_percent,
             "execctl_resume_state": execctl_resume_state,
             "execctl_resume_contract": execctl_resume_contract,
             "execctl_resume_contract_summary": execctl_resume_contract_summary,
@@ -1411,9 +2697,15 @@ async fn resolve_session_id(
     agent_scope: &str,
     recorded_at_epoch_ms: u64,
 ) -> Result<String> {
-    let snapshots =
-        postgres::list_observability_snapshots_by_kinds(db, &[WORKING_STATE_EVENT_KIND], Some(60))
-            .await?;
+    let snapshots = postgres::list_observability_snapshots_by_kind_for_scope(
+        db,
+        WORKING_STATE_EVENT_KIND,
+        "working_state_event",
+        project_code,
+        namespace_code,
+        Some(60),
+    )
+    .await?;
     let events = select_relevant_events(snapshots, project_code, namespace_code, agent_scope);
     if let Some(latest) = events.first() {
         let node = &latest.payload["working_state_event"];
@@ -2385,6 +3677,74 @@ pub(crate) fn build_rotate_chat_action_bundle(
     recommended_headline: Option<&str>,
     recommended_next_step: Option<&str>,
 ) -> Value {
+    build_rotate_chat_action_bundle_for_stage(
+        project_code,
+        namespace_code,
+        repo_root,
+        preserves_return_obligation,
+        recommended_headline,
+        recommended_next_step,
+        HostContextCompactionStage::Inactive,
+    )
+}
+
+pub(crate) fn build_rotate_chat_action_bundle_for_stage(
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
+    repo_root: Option<&str>,
+    preserves_return_obligation: bool,
+    recommended_headline: Option<&str>,
+    recommended_next_step: Option<&str>,
+    host_context_compaction_stage: HostContextCompactionStage,
+) -> Value {
+    build_rotate_chat_action_bundle_for_stage_with_preference(
+        project_code,
+        namespace_code,
+        repo_root,
+        preserves_return_obligation,
+        recommended_headline,
+        recommended_next_step,
+        host_context_compaction_stage,
+        host_context_compaction_stage.preserve_active(),
+    )
+}
+
+pub(crate) fn build_rotate_chat_action_bundle_for_stage_with_preference(
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
+    repo_root: Option<&str>,
+    preserves_return_obligation: bool,
+    recommended_headline: Option<&str>,
+    recommended_next_step: Option<&str>,
+    host_context_compaction_stage: HostContextCompactionStage,
+    prefer_same_thread_host_control_primary: bool,
+) -> Value {
+    build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
+        project_code,
+        namespace_code,
+        repo_root,
+        preserves_return_obligation,
+        recommended_headline,
+        recommended_next_step,
+        host_context_compaction_stage,
+        prefer_same_thread_host_control_primary,
+        current_thread_id().as_deref(),
+        None,
+    )
+}
+
+pub(crate) fn build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
+    project_code: Option<&str>,
+    namespace_code: Option<&str>,
+    repo_root: Option<&str>,
+    preserves_return_obligation: bool,
+    recommended_headline: Option<&str>,
+    recommended_next_step: Option<&str>,
+    host_context_compaction_stage: HostContextCompactionStage,
+    prefer_same_thread_host_control_primary: bool,
+    thread_id: Option<&str>,
+    primary_command_id: Option<&str>,
+) -> Value {
     let project_code = project_code.filter(|value| !value.is_empty());
     let namespace_code = namespace_code.filter(|value| !value.is_empty());
     let repo_root = repo_root.filter(|value| !value.is_empty());
@@ -2407,82 +3767,160 @@ pub(crate) fn build_rotate_chat_action_bundle(
     let project_arg = project_code.unwrap_or("<project_code_required>");
     let namespace_arg = namespace_code.unwrap_or("<namespace_code_required>");
     let repo_root_arg = repo_root.unwrap_or("<repo_root_required>");
-    let handoff_command = match (
+    let handoff_command = build_workspace_aware_handoff_command(
         project_code,
         namespace_code,
+        repo_root,
         recommended_headline,
         recommended_next_step,
-    ) {
-        (Some(project), Some(namespace), Some(headline), Some(next_step)) => {
-            Some(shell_join_command(&[
-                "amai",
-                "continuity",
-                "handoff",
-                "--project",
-                project,
-                "--namespace",
-                namespace,
-                "--headline",
-                headline,
-                "--next-step",
-                next_step,
-            ]))
-        }
-        _ => None,
+    );
+    let startup_command = build_workspace_aware_startup_command(
+        project_code,
+        namespace_code,
+        repo_root,
+        "live_continuity_startup",
+        true,
+    );
+    let rotate_helper_command =
+        build_workspace_aware_rotate_helper_command(project_code, namespace_code, repo_root);
+    let host_current_thread_control =
+        build_host_current_thread_control_surface_for_thread_and_stage_with_primary_command(
+            thread_id,
+            if host_context_compaction_stage == HostContextCompactionStage::Inactive {
+                HostContextCompactionStage::Inactive
+            } else {
+                host_context_compaction_stage
+            },
+            primary_command_id,
+        );
+    let host_current_thread_control_launch_command = if prefer_same_thread_host_control_primary {
+        build_host_current_thread_control_observe_launch_command(
+            project_code,
+            namespace_code,
+            repo_root,
+            &host_current_thread_control,
+        )
+    } else {
+        None
     };
-    let startup_command = match (project_code, namespace_code, repo_root) {
-        (Some(project), Some(namespace), Some(root)) => Some(shell_join_command(&[
-            "amai",
-            "continuity",
-            "startup",
-            "--project",
-            project,
-            "--namespace",
-            namespace,
-            "--repo-root",
-            root,
-            "--token-source-kind",
-            "live_continuity_startup",
-            "--json",
-        ])),
-        _ => None,
-    };
-    let rotate_helper_command = match (project_code, namespace_code, repo_root) {
-        (Some(project), Some(namespace), Some(root)) => Some(shell_join_command(&[
-            "amai",
-            "continuity",
-            "rotate-chat",
-            "--project",
-            project,
-            "--namespace",
-            namespace,
-            "--repo-root",
-            root,
-        ])),
-        _ => None,
+    let same_thread_host_control_primary = host_current_thread_control_launch_command.is_some();
+    let (primary_command_kind, primary_command) =
+        if let Some(command) = host_current_thread_control_launch_command.clone() {
+            (
+                Some("same_thread_host_control_launch_command"),
+                Some(command),
+            )
+        } else if let Some(command) = rotate_helper_command.clone() {
+            (Some("rotate_helper_command"), Some(command))
+        } else {
+            (None, None)
+        };
+    let copy_paste_ready =
+        primary_command.is_some() || (rotate_helper_command.is_some() && startup_command.is_some());
+    let order = if same_thread_host_control_primary {
+        json!([
+            "run_same_thread_host_control",
+            "confirm_surface_effect",
+            "fallback_rotate_chat"
+        ])
+    } else {
+        json!([
+            "run_rotate_helper",
+            "open_fresh_chat",
+            "run_continuity_startup"
+        ])
     };
     json!({
         "bundle_version": "rotate-chat-action-bundle-v1",
         "ready_for_automation": missing_inputs.is_empty(),
         "missing_inputs": missing_inputs,
         "preserves_return_obligation": preserves_return_obligation,
+        "host_current_thread_control": host_current_thread_control,
         "recommended_handoff": {
             "available": recommended_headline.is_some() && recommended_next_step.is_some(),
             "headline": recommended_headline,
             "next_step": recommended_next_step,
         },
         "operator_flow": {
-            "copy_paste_ready": handoff_command.is_some() && startup_command.is_some(),
+            "copy_paste_ready": copy_paste_ready,
+            "primary_command_kind": primary_command_kind,
+            "primary_command": primary_command,
+            "host_current_thread_control_launch_command":
+                host_current_thread_control_launch_command,
             "rotate_helper_command": rotate_helper_command,
             "handoff_command": handoff_command,
-            "open_fresh_chat_summary": "открой свежий чат клиента вручную",
+            "open_fresh_chat_summary": if same_thread_host_control_primary {
+                "если same-thread compact control не снизил burn, открой свежий чат клиента вручную"
+            } else {
+                "после rotate helper открой свежий чат клиента вручную"
+            },
             "startup_command": startup_command,
         },
-        "order": [
-            "capture_continuity_handoff",
-            "open_fresh_chat",
-            "run_continuity_startup"
-        ],
+        "order": order,
+        "run_same_thread_host_control": {
+            "subcommand": "observe client-budget-host-control-launch",
+            "argv_template": if let Some(thread_id) =
+                host_current_thread_control["thread_id"].as_str()
+            {
+                json!([
+                    "amai",
+                    "observe",
+                    "client-budget-host-control-launch",
+                    "--thread-id",
+                    thread_id,
+                    "--command-id",
+                    host_current_thread_control["command_id"].as_str().unwrap_or("<command_id_required>"),
+                    "--project",
+                    project_arg,
+                    "--namespace",
+                    namespace_arg,
+                    "--repo-root",
+                    repo_root_arg
+                ])
+            } else {
+                Value::Null
+            },
+            "project": project_code,
+            "namespace": namespace_code,
+            "repo_root": repo_root,
+            "thread_id": host_current_thread_control["thread_id"].as_str(),
+            "command_id": host_current_thread_control["command_id"].as_str(),
+            "preferred_before_rotate": same_thread_host_control_primary
+        },
+        "confirm_surface_effect": {
+            "action_kind": "confirm_host_current_thread_control_feedback",
+            "required": same_thread_host_control_primary,
+            "summary": if same_thread_host_control_primary {
+                "после запуска compact surface отметь, открылся ли он и помог ли уменьшить regrowth/burn"
+            } else {
+                "same-thread compact confirmation не требуется"
+            }
+        },
+        "run_rotate_helper": {
+            "subcommand": "continuity rotate-chat",
+            "argv_template": [
+                "amai",
+                "continuity",
+                "rotate-chat",
+                "--project",
+                project_arg,
+                "--namespace",
+                namespace_arg,
+                "--repo-root",
+                repo_root_arg
+            ],
+            "project": project_code,
+            "namespace": namespace_code,
+            "repo_root": repo_root,
+            "captures_handoff": true,
+            "prints_startup_command": true
+        },
+        "fallback_rotate_chat": {
+            "available": rotate_helper_command.is_some(),
+            "summary": "если same-thread compact window не помог, fallback — continuity rotate-chat и fresh continuity startup",
+            "rotate_helper_command": rotate_helper_command,
+            "startup_command": startup_command
+        },
         "capture_continuity_handoff": {
             "subcommand": "continuity handoff",
             "argv_template": [
@@ -2561,29 +3999,13 @@ pub(crate) fn build_wait_for_global_client_budget_action_bundle(
     let project_arg = project_code.unwrap_or("<project_code_required>");
     let namespace_arg = namespace_code.unwrap_or("<namespace_code_required>");
     let repo_root_arg = repo_root.unwrap_or("<repo_root_required>");
-    let handoff_command = match (
+    let handoff_command = build_workspace_aware_handoff_command(
         project_code,
         namespace_code,
+        repo_root,
         recommended_headline,
         recommended_next_step,
-    ) {
-        (Some(project), Some(namespace), Some(headline), Some(next_step)) => {
-            Some(shell_join_command(&[
-                "amai",
-                "continuity",
-                "handoff",
-                "--project",
-                project,
-                "--namespace",
-                namespace,
-                "--headline",
-                headline,
-                "--next-step",
-                next_step,
-            ]))
-        }
-        _ => None,
-    };
+    );
     let startup_command = match (project_code, namespace_code, repo_root) {
         (Some(project), Some(namespace), Some(root)) => Some(shell_join_command(&[
             "amai",
@@ -3177,6 +4599,267 @@ mod tests {
         assert_eq!(
             active_files,
             vec!["docs/continuity.md".to_string(), "src/lib.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn compact_reply_budget_contract_tightens_after_host_compaction() {
+        let contract = build_client_reply_budget_contract_with_target(
+            ClientReplyBudgetMode::CompactHighSignal,
+            60,
+            HostContextCompactionStage::Preserve,
+            false,
+            false,
+        );
+        assert_eq!(
+            contract["host_context_compaction_preserve_active"],
+            json!(true)
+        );
+        assert_eq!(contract["host_context_compaction_stage"], json!("preserve"));
+        assert_eq!(
+            contract["must_protect_recent_host_compaction_gain"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_minimize_nonessential_progress_updates"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_avoid_broad_exploration_without_user_request"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_prefer_single_batched_tool_read_when_exploring"],
+            json!(true)
+        );
+        assert_eq!(contract["max_tool_roundtrips_soft"], json!(2));
+        assert_eq!(contract["max_bullets_soft"], json!(1));
+        assert_eq!(contract["max_sentences_soft"], json!(2));
+        assert_eq!(
+            contract["host_context_compaction_preserve_strict_active"],
+            json!(false)
+        );
+        assert_eq!(contract["must_avoid_commentary_only_updates"], json!(false));
+    }
+
+    #[test]
+    fn compact_reply_budget_contract_tightens_before_host_compaction_under_target_pressure() {
+        let contract = build_client_reply_budget_contract_with_target(
+            ClientReplyBudgetMode::CompactHighSignal,
+            60,
+            HostContextCompactionStage::Inactive,
+            true,
+            false,
+        );
+        assert_eq!(
+            contract["host_context_compaction_target_pressure_active"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["host_context_compaction_inactive_target_pressure_active"],
+            json!(true)
+        );
+        assert_eq!(contract["must_avoid_commentary_only_updates"], json!(true));
+        assert_eq!(
+            contract["must_batch_all_tool_reads_before_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_wait_for_meaningful_result_before_progress_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_require_material_delta_before_next_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_avoid_progress_reply_when_only_guard_changed"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_avoid_new_tool_turn_without_specific_delta_goal"],
+            json!(true)
+        );
+        assert_eq!(contract["max_tool_roundtrips_soft"], json!(0));
+        assert_eq!(contract["max_bullets_soft"], json!(1));
+        assert_eq!(contract["max_sentences_soft"], json!(2));
+    }
+
+    #[test]
+    fn compact_reply_budget_contract_marks_pure_burn_before_host_compaction_under_target_pressure()
+    {
+        let contract = build_client_reply_budget_contract_with_target(
+            ClientReplyBudgetMode::CompactHighSignal,
+            60,
+            HostContextCompactionStage::Inactive,
+            true,
+            true,
+        );
+        assert_eq!(contract["current_live_turn_no_amai_activity"], json!(true));
+        assert_eq!(contract["same_meter_pure_burn_turn_active"], json!(true));
+        assert_eq!(
+            contract["must_require_material_delta_before_next_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_avoid_progress_reply_when_only_guard_changed"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_avoid_new_tool_turn_without_specific_delta_goal"],
+            json!(true)
+        );
+        assert_eq!(contract["max_tool_roundtrips_soft"], json!(0));
+        assert_eq!(contract["max_bullets_soft"], json!(0));
+        assert_eq!(contract["max_sentences_soft"], json!(1));
+        assert!(
+            contract["summary"]
+                .as_str()
+                .expect("summary")
+                .contains("no_amai_activity_in_current_live_turn")
+        );
+    }
+
+    #[test]
+    fn compact_reply_budget_contract_tightens_preserve_stage_under_target_pressure() {
+        let contract = build_client_reply_budget_contract_with_target(
+            ClientReplyBudgetMode::CompactHighSignal,
+            60,
+            HostContextCompactionStage::Preserve,
+            true,
+            false,
+        );
+        assert_eq!(
+            contract["host_context_compaction_target_pressure_active"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["host_context_compaction_preserve_strict_active"],
+            json!(true)
+        );
+        assert_eq!(contract["must_avoid_commentary_only_updates"], json!(true));
+        assert_eq!(
+            contract["must_batch_all_tool_reads_before_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_wait_for_meaningful_result_before_progress_reply"],
+            json!(true)
+        );
+        assert_eq!(contract["max_tool_roundtrips_soft"], json!(1));
+        assert_eq!(contract["max_bullets_soft"], json!(0));
+        assert_eq!(contract["max_sentences_soft"], json!(1));
+    }
+
+    #[test]
+    fn compact_reply_budget_contract_enters_critical_regrowth_stage_after_host_rebound() {
+        let contract = build_client_reply_budget_contract_with_target(
+            ClientReplyBudgetMode::CompactHighSignal,
+            60,
+            HostContextCompactionStage::CriticalRegrowth,
+            true,
+            false,
+        );
+        assert_eq!(
+            contract["host_context_compaction_stage"],
+            json!("critical_regrowth")
+        );
+        assert_eq!(
+            contract["host_context_compaction_critical_regrowth_active"],
+            json!(true)
+        );
+        assert_eq!(contract["must_avoid_commentary_only_updates"], json!(true));
+        assert_eq!(
+            contract["must_batch_all_tool_reads_before_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_reuse_latest_live_diagnostics_before_reread"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_avoid_repeated_live_guard_polls_without_new_delta"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_avoid_serial_same_thread_host_control_retries_without_effect_delta"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_prefer_single_same_thread_control_then_measure"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_require_material_delta_before_next_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_avoid_progress_reply_when_only_guard_changed"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_avoid_new_tool_turn_without_specific_delta_goal"],
+            json!(true)
+        );
+        assert_eq!(contract["max_tool_roundtrips_soft"], json!(0));
+        assert_eq!(contract["max_bullets_soft"], json!(0));
+        assert_eq!(contract["max_sentences_soft"], json!(1));
+    }
+
+    #[test]
+    fn compact_reply_budget_contract_keeps_one_roundtrip_for_critical_regrowth_without_target_pressure()
+     {
+        let contract = build_client_reply_budget_contract_with_target(
+            ClientReplyBudgetMode::CompactHighSignal,
+            60,
+            HostContextCompactionStage::CriticalRegrowth,
+            false,
+            false,
+        );
+        assert_eq!(
+            contract["must_require_material_delta_before_next_reply"],
+            json!(false)
+        );
+        assert_eq!(
+            contract["must_avoid_progress_reply_when_only_guard_changed"],
+            json!(false)
+        );
+        assert_eq!(
+            contract["must_avoid_new_tool_turn_without_specific_delta_goal"],
+            json!(false)
+        );
+        assert_eq!(contract["max_tool_roundtrips_soft"], json!(1));
+    }
+
+    #[test]
+    fn compact_reply_budget_contract_marks_pure_burn_turn_in_critical_regrowth() {
+        let contract = build_client_reply_budget_contract_with_target(
+            ClientReplyBudgetMode::CompactHighSignal,
+            60,
+            HostContextCompactionStage::CriticalRegrowth,
+            true,
+            true,
+        );
+        assert_eq!(contract["current_live_turn_no_amai_activity"], json!(true));
+        assert_eq!(contract["same_meter_pure_burn_turn_active"], json!(true));
+        assert_eq!(
+            contract["must_require_material_delta_before_next_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_avoid_progress_reply_when_only_guard_changed"],
+            json!(true)
+        );
+        assert_eq!(
+            contract["must_avoid_new_tool_turn_without_specific_delta_goal"],
+            json!(true)
+        );
+        assert_eq!(contract["max_tool_roundtrips_soft"], json!(0));
+        assert!(
+            contract["summary"]
+                .as_str()
+                .expect("summary")
+                .contains("no_amai_activity_in_current_live_turn")
         );
     }
 
@@ -4149,8 +5832,24 @@ mod tests {
         assert_eq!(bundle["ready_for_automation"], json!(true));
         assert_eq!(bundle["preserves_return_obligation"], json!(true));
         assert_eq!(
+            bundle["host_current_thread_control"]["control_kind"],
+            json!("thread_overlay_open_current")
+        );
+        assert_eq!(
+            bundle["host_current_thread_control"]["command_id"],
+            json!("thread-overlay-open-current")
+        );
+        assert_eq!(
+            bundle["host_current_thread_control"]["automation_ready"],
+            json!(cfg!(target_os = "linux"))
+        );
+        assert_eq!(
             bundle["capture_continuity_handoff"]["argv_template"][0],
             json!("amai")
+        );
+        assert_eq!(
+            bundle["run_rotate_helper"]["argv_template"][2],
+            json!("rotate-chat")
         );
         assert_eq!(
             bundle["capture_continuity_handoff"]["argv_template"][2],
@@ -4164,6 +5863,12 @@ mod tests {
             bundle["run_continuity_startup"]["token_source_kind"],
             json!("live_continuity_startup")
         );
+        assert!(
+            bundle["operator_flow"]["startup_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("--runtime-state-json")
+        );
         assert_eq!(
             bundle["recommended_handoff"]["headline"],
             json!("Same-meter spend control")
@@ -4173,6 +5878,16 @@ mod tests {
             json!("Materialize live assistant generation source.")
         );
         assert_eq!(bundle["operator_flow"]["copy_paste_ready"], json!(true));
+        assert_eq!(
+            bundle["operator_flow"]["primary_command_kind"],
+            json!("rotate_helper_command")
+        );
+        assert!(
+            bundle["operator_flow"]["primary_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("rotate-chat")
+        );
         assert!(
             bundle["operator_flow"]["rotate_helper_command"]
                 .as_str()
@@ -4184,6 +5899,234 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("--headline")
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_surface_for_thread_exposes_vscode_uri_launch() {
+        let surface =
+            super::build_host_current_thread_control_surface_for_thread(Some("thread-current"));
+        assert_eq!(surface["command_id"], json!("thread-overlay-open-current"));
+        assert_eq!(surface["thread_id"], json!("thread-current"));
+        assert_eq!(surface["button_label"], json!("Open thread overlay"));
+        assert_eq!(
+            surface["external_uri_launch"]["launch_surface_kind"],
+            json!("vscode_extension_uri_route")
+        );
+        assert_eq!(
+            surface["external_uri_launch"]["uri"],
+            json!("vscode://openai.chatgpt/thread-overlay/thread-current")
+        );
+        if cfg!(target_os = "linux") {
+            assert_eq!(surface["automation_ready"], json!(true));
+            assert_eq!(
+                surface["external_uri_launch"]["observe_api_launch_available"],
+                json!(true)
+            );
+            assert_eq!(
+                surface["external_uri_launch"]["observe_api_launch_path"],
+                json!("/api/client-budget-host-control-launch")
+            );
+            assert_eq!(
+                surface["external_uri_launch"]["verification_state"],
+                json!("route_resolved_launch_command_available")
+            );
+            assert!(
+                surface["external_uri_launch"]["platform_launch_command"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("xdg-open")
+            );
+        }
+        let alternates = surface["alternate_controls"]
+            .as_array()
+            .expect("alternate controls");
+        assert_eq!(alternates.len(), 1);
+        assert_eq!(
+            alternates[0]["command_id"],
+            json!("hotkey-window-open-current")
+        );
+        assert_eq!(alternates[0]["button_label"], json!("Open compact window"));
+        assert_eq!(
+            alternates[0]["external_uri_launch"]["uri"],
+            json!("vscode://openai.chatgpt/hotkey-window/thread/thread-current")
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_surface_for_preserve_stage_prefers_compact_window() {
+        let surface = super::build_host_current_thread_control_surface_for_thread_and_stage(
+            Some("thread-current"),
+            super::HostContextCompactionStage::Preserve,
+        );
+        assert_eq!(surface["command_id"], json!("hotkey-window-open-current"));
+        assert_eq!(surface["button_label"], json!("Open compact window"));
+        assert_eq!(surface["host_context_compaction_stage"], json!("preserve"));
+        assert_eq!(
+            surface["selection_reason"],
+            json!("protect_recent_host_compaction_gain")
+        );
+        let alternates = surface["alternate_controls"]
+            .as_array()
+            .expect("alternate controls");
+        assert_eq!(alternates.len(), 1);
+        assert_eq!(
+            alternates[0]["command_id"],
+            json!("thread-overlay-open-current")
+        );
+        assert_eq!(alternates[0]["button_label"], json!("Open thread overlay"));
+    }
+
+    #[test]
+    fn host_current_thread_control_surface_for_critical_regrowth_can_try_overlay_first() {
+        let surface =
+            super::build_host_current_thread_control_surface_for_thread_and_stage_with_primary_command(
+                Some("thread-current"),
+                super::HostContextCompactionStage::CriticalRegrowth,
+                Some("thread-overlay-open-current"),
+            );
+        assert_eq!(surface["command_id"], json!("thread-overlay-open-current"));
+        assert_eq!(surface["button_label"], json!("Open thread overlay"));
+        assert_eq!(
+            surface["selection_reason"],
+            json!("critical_regrowth_try_overlay")
+        );
+        let alternates = surface["alternate_controls"]
+            .as_array()
+            .expect("alternate controls");
+        assert_eq!(alternates.len(), 1);
+        assert_eq!(
+            alternates[0]["command_id"],
+            json!("hotkey-window-open-current")
+        );
+    }
+
+    #[test]
+    fn rotate_chat_action_bundle_for_preserve_stage_prefers_compact_window_host_control() {
+        let bundle = super::build_rotate_chat_action_bundle_for_stage(
+            Some("amai"),
+            Some("continuity"),
+            Some("/tmp/amai"),
+            true,
+            Some("Same-meter spend control"),
+            Some("Protect compacted host surface first."),
+            super::HostContextCompactionStage::Preserve,
+        );
+        assert_eq!(
+            bundle["host_current_thread_control"]["command_id"],
+            json!("hotkey-window-open-current")
+        );
+        assert_eq!(
+            bundle["host_current_thread_control"]["button_label"],
+            json!("Open compact window")
+        );
+        let alternates = bundle["host_current_thread_control"]["alternate_controls"]
+            .as_array()
+            .expect("alternate controls");
+        assert_eq!(alternates.len(), 1);
+        assert_eq!(
+            alternates[0]["command_id"],
+            json!("thread-overlay-open-current")
+        );
+    }
+
+    #[test]
+    fn rotate_chat_action_bundle_with_explicit_thread_prefers_same_thread_primary_command() {
+        let bundle =
+            super::build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
+                Some("amai"),
+                Some("continuity"),
+                Some("/tmp/amai"),
+                true,
+                Some("Same-meter spend control"),
+                Some("Protect compacted host surface first."),
+                super::HostContextCompactionStage::Preserve,
+                true,
+                Some("thread-current"),
+                Some(super::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID),
+            );
+        assert_eq!(
+            bundle["host_current_thread_control"]["thread_id"],
+            json!("thread-current")
+        );
+        assert_eq!(
+            bundle["operator_flow"]["primary_command_kind"],
+            json!("same_thread_host_control_launch_command")
+        );
+        assert!(
+            bundle["operator_flow"]["host_current_thread_control_launch_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("--thread-id")
+        );
+        assert!(
+            bundle["operator_flow"]["host_current_thread_control_launch_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("thread-current")
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_observe_launch_command_is_copy_pasteable() {
+        let surface = super::build_host_current_thread_control_surface_for_thread_and_stage(
+            Some("thread-current"),
+            super::HostContextCompactionStage::Preserve,
+        );
+        let command = super::build_host_current_thread_control_observe_launch_command(
+            Some("amai"),
+            Some("continuity"),
+            Some("/tmp/amai"),
+            &surface,
+        )
+        .expect("observe launch command");
+        assert!(command.contains("observe"));
+        assert!(command.contains("ctl-launch"));
+        assert!(command.contains("--thread-id"));
+        assert!(command.contains("thread-current"));
+        assert!(command.contains("--compact-window"));
+    }
+
+    #[test]
+    fn host_current_thread_control_feedback_kind_normalization_is_strict() {
+        assert_eq!(
+            super::normalize_host_current_thread_control_feedback_kind("requested"),
+            Some("requested")
+        );
+        assert_eq!(
+            super::normalize_host_current_thread_control_feedback_kind("opened"),
+            Some("opened")
+        );
+        assert_eq!(
+            super::normalize_host_current_thread_control_feedback_kind("failed"),
+            Some("failed")
+        );
+        assert_eq!(
+            super::normalize_host_current_thread_control_feedback_kind("launched"),
+            None
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_feedback_notice_text_is_human_readable() {
+        assert!(
+            super::host_current_thread_control_feedback_notice_text_for_command("requested", None)
+                .contains("отметь")
+        );
+        assert!(
+            super::host_current_thread_control_feedback_notice_text_for_command("opened", None)
+                .contains("открылся")
+        );
+        assert!(
+            super::host_current_thread_control_feedback_notice_text_for_command("failed", None)
+                .contains("не открылся")
+        );
+        assert!(
+            super::host_current_thread_control_feedback_notice_text_for_command(
+                "opened",
+                Some("hotkey-window-open-current"),
+            )
+            .contains("compact window")
         );
     }
 
@@ -4254,7 +6197,7 @@ mod tests {
     fn client_budget_guard_blocks_reply_ignores_rotate_soon_advisory() {
         let guard = json!({
             "reply_execution_gate": {
-                "action_kind": "continue_current_chat",
+                "action_kind": "rotate_chat_for_client_budget",
                 "blocking": false,
                 "must_rotate_before_reply": false
             },
@@ -4265,6 +6208,73 @@ mod tests {
             &guard
         ));
         assert!(!super::client_budget_guard_blocks_reply(&guard));
+    }
+
+    #[test]
+    fn client_budget_guard_blocks_reply_ignores_rotate_now_advisory() {
+        let guard = json!({
+            "reply_execution_gate": {
+                "action_kind": "rotate_chat_for_client_budget",
+                "blocking": false,
+                "must_rotate_before_reply": false
+            },
+            "should_rotate_chat_now": true,
+            "should_rotate_chat_soon": true
+        });
+        assert!(!super::client_budget_guard_requires_rotate_before_reply(
+            &guard
+        ));
+        assert!(!super::client_budget_guard_blocks_reply(&guard));
+    }
+
+    #[test]
+    fn client_budget_guard_blocks_expensive_tool_turn_on_same_meter_pure_burn() {
+        let guard = json!({
+            "reply_execution_gate": {
+                "action_kind": "compact_current_thread_for_client_budget",
+                "blocking": false,
+                "must_rotate_before_reply": false,
+                "must_wait_for_budget_recovery_before_reply": false,
+                "same_meter_pure_burn_turn_active": true,
+                "must_avoid_new_tool_turn_without_specific_delta_goal": true,
+                "max_tool_roundtrips_soft": 0
+            }
+        });
+        assert!(super::client_budget_guard_blocks_expensive_tool_turn(&guard));
+        assert!(!super::client_budget_guard_blocks_reply(&guard));
+    }
+
+    #[test]
+    fn client_budget_guard_blocks_expensive_tool_turn_on_zero_roundtrip_stop_loss_without_pure_burn(
+    ) {
+        let guard = json!({
+            "reply_execution_gate": {
+                "action_kind": "compact_current_thread_for_client_budget",
+                "blocking": false,
+                "must_rotate_before_reply": false,
+                "must_wait_for_budget_recovery_before_reply": false,
+                "same_meter_pure_burn_turn_active": false,
+                "must_avoid_new_tool_turn_without_specific_delta_goal": true,
+                "max_tool_roundtrips_soft": 0
+            }
+        });
+        assert!(super::client_budget_guard_blocks_expensive_tool_turn(&guard));
+    }
+
+    #[test]
+    fn client_budget_guard_blocks_expensive_tool_turn_ignores_non_zero_roundtrip_advisory() {
+        let guard = json!({
+            "reply_execution_gate": {
+                "action_kind": "compact_current_thread_for_client_budget",
+                "blocking": false,
+                "must_rotate_before_reply": false,
+                "must_wait_for_budget_recovery_before_reply": false,
+                "same_meter_pure_burn_turn_active": false,
+                "must_avoid_new_tool_turn_without_specific_delta_goal": true,
+                "max_tool_roundtrips_soft": 1
+            }
+        });
+        assert!(!super::client_budget_guard_blocks_expensive_tool_turn(&guard));
     }
 
     #[test]
@@ -4358,7 +6368,7 @@ mod tests {
             "status_label": "новый чат рекомендован",
             "note": "soft rotate recommendation only",
             "reply_execution_gate": {
-                "action_kind": "continue_current_chat",
+                "action_kind": "rotate_chat_for_client_budget",
                 "blocking": false,
                 "must_rotate_before_reply": false
             },

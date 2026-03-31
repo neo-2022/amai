@@ -101,6 +101,8 @@ pub enum ContinuityCommand {
     Restore(ContinuityStartupArgs),
     Answer(ContinuityAnswerArgs),
     Handoff(ContinuityHandoffArgs),
+    ClientBudgetTarget(ContinuityClientBudgetTargetArgs),
+    CompactChat(ContinuityCompactChatArgs),
     RotateChat(ContinuityRotateChatArgs),
 }
 
@@ -110,6 +112,7 @@ pub enum BootstrapCommand {
     Preflight(BootstrapPreflightArgs),
     Install(BootstrapOnboardingArgs),
     Onboarding(BootstrapOnboardingArgs),
+    Reconnect(BootstrapReconnectArgs),
     Remove(BootstrapDisconnectArgs),
     Disconnect(BootstrapDisconnectArgs),
 }
@@ -167,11 +170,15 @@ pub enum VerifyCommand {
 pub enum ObserveCommand {
     Snapshot,
     SnapshotPreview,
+    #[command(hide = true)]
+    BudgetSnapshotPreview,
     SlaCheck,
     Guardrails,
     ClientBudgetGate(ObserveClientBudgetGuardArgs),
     ClientBudgetGuard(ObserveClientBudgetGuardArgs),
-    ClientBudgetRootCause,
+    ClientBudgetRootCause(ObserveClientBudgetRootCauseArgs),
+    #[command(visible_alias = "ctl-launch")]
+    ClientBudgetHostControlLaunch(ObserveClientBudgetHostControlLaunchArgs),
     ClientLimitHourlyBurn(ObserveClientLimitHourlyBurnArgs),
     ClientLimitTrendAnalysis(ObserveClientLimitTrendAnalysisArgs),
     TokenReport(ObserveTokenReportArgs),
@@ -194,6 +201,28 @@ pub enum ObserveCommand {
 pub struct ObserveClientBudgetGuardArgs {
     #[arg(long, default_value_t = false)]
     pub enforce_reply_gate: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveClientBudgetRootCauseArgs {
+    #[arg(long, default_value_t = false)]
+    pub enforce_reply_gate: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ObserveClientBudgetHostControlLaunchArgs {
+    #[arg(long)]
+    pub thread_id: String,
+    #[arg(long, default_value_t = false, conflicts_with = "command_id")]
+    pub compact_window: bool,
+    #[arg(long)]
+    pub command_id: Option<String>,
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub repo_root: Option<PathBuf>,
+    #[arg(long, default_value = "continuity")]
+    pub namespace: String,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -316,6 +345,12 @@ pub struct ContinuityStartupArgs {
     pub json: bool,
     #[arg(
         long,
+        default_value_t = false,
+        help = "Emit compact startup runtime-state JSON after materializing startup instead of the full startup payload."
+    )]
+    pub runtime_state_json: bool,
+    #[arg(
+        long,
         default_value = DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND,
         help = "Token ledger source kind for continuity-startup observed whole-cycle events. Plain CLI startup is operator-safe by default; pass live_continuity_startup only for real chat-start flows."
     )]
@@ -380,6 +415,40 @@ pub struct ContinuityRotateChatArgs {
     pub json: bool,
     #[arg(long, default_value_t = false)]
     pub force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ContinuityClientBudgetTargetArgs {
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub repo_root: Option<PathBuf>,
+    #[arg(long, default_value = "continuity")]
+    pub namespace: String,
+    #[arg(long)]
+    pub percent: u64,
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ContinuityCompactChatArgs {
+    #[arg(long)]
+    pub project: Option<String>,
+    #[arg(long)]
+    pub repo_root: Option<PathBuf>,
+    #[arg(long, default_value = "continuity")]
+    pub namespace: String,
+    #[arg(long)]
+    pub headline: Option<String>,
+    #[arg(long = "next-step")]
+    pub next_step: Option<String>,
+    #[arg(long)]
+    pub details_file: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    pub launch_host: bool,
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1021,6 +1090,24 @@ pub struct BootstrapDisconnectArgs {
     pub purge_empty_file: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct BootstrapReconnectArgs {
+    #[arg(long, default_value = "auto")]
+    pub client: String,
+    #[arg(long, default_value_t = false)]
+    pub yes: bool,
+    #[arg(long, default_value = "auto")]
+    pub launcher_platform: String,
+    #[arg(long)]
+    pub ssh_destination: Option<String>,
+    #[arg(long)]
+    pub remote_repo_root: Option<PathBuf>,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    #[arg(long)]
+    pub cwd: Option<PathBuf>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1034,10 +1121,30 @@ mod tests {
         let ContinuityCommand::Startup(args) = command else {
             panic!("expected continuity startup command");
         };
+        assert!(!args.runtime_state_json);
         assert_eq!(
             args.token_source_kind,
             DEFAULT_CLI_CONTINUITY_STARTUP_TOKEN_SOURCE_KIND
         );
+    }
+
+    #[test]
+    fn continuity_startup_cli_accepts_runtime_state_json_flag() {
+        let cli = Cli::parse_from([
+            "amai",
+            "continuity",
+            "startup",
+            "--project",
+            "art",
+            "--runtime-state-json",
+        ]);
+        let Command::Continuity { command } = cli.command else {
+            panic!("expected continuity command");
+        };
+        let ContinuityCommand::Startup(args) = command else {
+            panic!("expected continuity startup command");
+        };
+        assert!(args.runtime_state_json);
     }
 
     #[test]
@@ -1119,6 +1226,26 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_reconnect_cli_parses() {
+        let cli = Cli::parse_from([
+            "amai",
+            "bootstrap",
+            "reconnect",
+            "--client",
+            "codex",
+            "--yes",
+        ]);
+        let Command::Bootstrap { command } = cli.command else {
+            panic!("expected bootstrap command");
+        };
+        let BootstrapCommand::Reconnect(args) = command else {
+            panic!("expected bootstrap reconnect command");
+        };
+        assert_eq!(args.client, "codex");
+        assert!(args.yes);
+    }
+
+    #[test]
     fn observe_client_budget_guard_cli_parses() {
         let cli = Cli::parse_from(["amai", "observe", "client-budget-guard"]);
         let Command::Observe { command } = cli.command else {
@@ -1160,11 +1287,70 @@ mod tests {
     }
 
     #[test]
+    fn observe_client_budget_root_cause_cli_parses() {
+        let cli = Cli::parse_from(["amai", "observe", "client-budget-root-cause"]);
+        let Command::Observe { command } = cli.command else {
+            panic!("expected observe command");
+        };
+        let ObserveCommand::ClientBudgetRootCause(args) = command else {
+            panic!("expected client-budget-root-cause command");
+        };
+        assert!(!args.enforce_reply_gate);
+    }
+
+    #[test]
+    fn observe_client_budget_root_cause_enforce_flag_cli_parses() {
+        let cli = Cli::parse_from([
+            "amai",
+            "observe",
+            "client-budget-root-cause",
+            "--enforce-reply-gate",
+        ]);
+        let Command::Observe { command } = cli.command else {
+            panic!("expected observe command");
+        };
+        let ObserveCommand::ClientBudgetRootCause(args) = command else {
+            panic!("expected client-budget-root-cause command");
+        };
+        assert!(args.enforce_reply_gate);
+    }
+
+    #[test]
+    fn observe_client_budget_host_control_launch_alias_and_compact_window_cli_parse() {
+        let cli = Cli::parse_from([
+            "amai",
+            "observe",
+            "ctl-launch",
+            "--thread-id",
+            "thread-current",
+            "--compact-window",
+        ]);
+        let Command::Observe { command } = cli.command else {
+            panic!("expected observe command");
+        };
+        let ObserveCommand::ClientBudgetHostControlLaunch(args) = command else {
+            panic!("expected client-budget-host-control-launch command");
+        };
+        assert_eq!(args.thread_id, "thread-current");
+        assert!(args.compact_window);
+        assert!(args.command_id.is_none());
+    }
+
+    #[test]
     fn observe_snapshot_preview_cli_parses() {
         let cli = Cli::parse_from(["amai", "observe", "snapshot-preview"]);
         let Command::Observe { command } = cli.command else {
             panic!("expected observe command");
         };
         assert!(matches!(command, ObserveCommand::SnapshotPreview));
+    }
+
+    #[test]
+    fn observe_budget_snapshot_preview_cli_parses() {
+        let cli = Cli::parse_from(["amai", "observe", "budget-snapshot-preview"]);
+        let Command::Observe { command } = cli.command else {
+            panic!("expected observe command");
+        };
+        assert!(matches!(command, ObserveCommand::BudgetSnapshotPreview));
     }
 }

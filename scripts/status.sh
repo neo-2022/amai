@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-cargo run -- status
+exec ./scripts/amai_exec.sh status

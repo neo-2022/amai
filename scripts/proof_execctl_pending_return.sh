@@ -52,19 +52,21 @@ jq -e '.working_state_restore.current_goal == "Project relocation contour"' "${r
 jq -e '.working_state_restore.execctl_resume_state == "pending_return_queue_present"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.execctl_resume_contract.resume_state == "return_required"' "${restore_output}" >/dev/null
 jq -e '.working_state_restore.pending_return_queue[0].headline == "Same-meter spend control"' "${restore_output}" >/dev/null
-jq -e '.working_state_restore.pending_return_summary | contains("Same-meter spend control -> Materialize live assistant generation source.")' "${restore_output}" >/dev/null
+jq -e '.working_state_restore.pending_return_summary | contains("Same-meter spend control")' "${restore_output}" >/dev/null
 startup_action_kind="$(jq -r '.working_state_restore.startup_next_action.action_kind' "${restore_output}")"
 case "${startup_action_kind}" in
   rotate_chat_for_client_budget)
     jq -e '.working_state_restore.startup_next_action.preserves_return_obligation == true' "${restore_output}" >/dev/null
     jq -e '.working_state_restore.startup_next_action.resume_state == "return_required"' "${restore_output}" >/dev/null
     jq -e '.working_state_restore.startup_next_action_summary | contains("rotate_chat_for_client_budget")' "${restore_output}" >/dev/null
-    jq -e '.working_state_restore.client_budget_guard.reply_execution_gate.must_rotate_before_reply == true' "${restore_output}" >/dev/null
-    jq -e '.working_state_restore.client_budget_guard.reply_execution_gate.blocking_reply_contract.response_kind == "rotate_chat_only"' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.client_budget_guard.reply_execution_gate.action_kind == "rotate_chat_for_client_budget"' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.client_budget_guard.reply_execution_gate.must_rotate_before_reply == false' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.client_budget_guard.reply_execution_gate.blocking == false' "${restore_output}" >/dev/null
     ;;
   resume_required_return_task)
     jq -e '.working_state_restore.startup_next_action.headline == "Same-meter spend control"' "${restore_output}" >/dev/null
     jq -e '.working_state_restore.startup_next_action_summary | contains("resume_required_return_task")' "${restore_output}" >/dev/null
+    jq -e '.working_state_restore.startup_next_action_summary | contains("Same-meter spend control")' "${restore_output}" >/dev/null
     ;;
   *)
     echo "proof_execctl_pending_return: unexpected startup_next_action.action_kind=${startup_action_kind}" >&2

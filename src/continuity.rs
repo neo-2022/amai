@@ -1,8 +1,8 @@
 use crate::chat_question;
 use crate::cli::{
-    ContinuityAnswerArgs, ContinuityHandoffArgs, ContinuityImportArgs, ContinuityRotateChatArgs,
-    ContinuityStartupArgs, ContinuityStartupStateArgs, ContinuityThreadIndexEnrichArgs,
-    VerifyContinuityArgs,
+    ContinuityAnswerArgs, ContinuityClientBudgetTargetArgs, ContinuityCompactChatArgs,
+    ContinuityHandoffArgs, ContinuityImportArgs, ContinuityRotateChatArgs, ContinuityStartupArgs,
+    ContinuityStartupStateArgs, ContinuityThreadIndexEnrichArgs, VerifyContinuityArgs,
 };
 use crate::codex_threads;
 use crate::config::AppConfig;
@@ -21,7 +21,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::process::Command as ProcessCommand;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
@@ -80,6 +82,12 @@ struct ContinuityThreadIndexEntry {
 
 const MAX_SEARCHABLE_CONTINUITY_BYTES: usize = 12_000;
 const STARTUP_RUNTIME_STATE_ARTIFACT_VERSION: &str = "workspace-startup-runtime-state-v4";
+const COMPACT_CHAT_PROMPT_ARTIFACT_RELATIVE_PATH: &str = ".amai/continuity/compact-chat-prompt.txt";
+const CONTINUITY_HANDOFF_DOCUMENT_INDEX_REFRESH_KIND: &str =
+    "continuity_handoff_document_index_refresh";
+// Handoff truth is captured immediately in observability/restore state, so the
+// searchable document index can refresh on a slower cadence.
+const CONTINUITY_HANDOFF_DOCUMENT_INDEX_REFRESH_MIN_INTERVAL_MS: u64 = 300_000;
 
 struct ContinuityStartupContext {
     project: ProjectRecord,
@@ -131,6 +139,141 @@ async fn connect_bootstrapped_admin(cfg: &AppConfig) -> Result<Client> {
     let db = postgres::connect_admin(cfg).await?;
     postgres::bootstrap_schema(&db, cfg).await?;
     Ok(db)
+}
+
+pub(crate) async fn handoff_payload_from_parts_with_db(
+    db: &mut Client,
+    cfg: &AppConfig,
+    project_code: &str,
+    namespace_code: &str,
+    headline: &str,
+    next_step: &str,
+    details: &str,
+    resolve_current_goal: bool,
+    resolved_headlines: &[String],
+) -> Result<Value> {
+    let project = postgres::get_project_by_code(db, project_code).await?;
+    let namespace = postgres::find_namespace_by_code(db, project.project_id, namespace_code)
+        .await?
+        .ok_or_else(|| anyhow!("continuity namespace not found: {}", namespace_code))?;
+    capture_handoff_payload(
+        cfg,
+        db,
+        &project,
+        &namespace,
+        headline,
+        next_step,
+        details,
+        resolve_current_goal,
+        resolved_headlines,
+    )
+    .await
+}
+
+pub(crate) fn allowed_client_budget_target_values() -> Vec<u64> {
+    (0..=working_state::MAX_CLIENT_BUDGET_TARGET_PERCENT)
+        .step_by(working_state::CLIENT_BUDGET_TARGET_STEP_PERCENT as usize)
+        .collect()
+}
+
+pub(crate) const CLIENT_BUDGET_TARGET_CHAT_COMMAND_PREFIX: &str = "экономия_";
+pub(crate) const CLIENT_BUDGET_COMPACT_CHAT_COMMAND: &str = "компакт_чат";
+
+pub(crate) fn client_budget_target_chat_command(target_percent: u64) -> String {
+    format!("{CLIENT_BUDGET_TARGET_CHAT_COMMAND_PREFIX}{target_percent}%")
+}
+
+pub(crate) fn client_budget_target_chat_command_pattern() -> String {
+    let values = allowed_client_budget_target_values()
+        .into_iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("^{}({values})%$", CLIENT_BUDGET_TARGET_CHAT_COMMAND_PREFIX)
+}
+
+fn client_budget_compact_chat_notice_message() -> String {
+    format!(
+        "Подготовлен compact restore для huge-chat rebase. Exact chat-команда: `{}`.",
+        CLIENT_BUDGET_COMPACT_CHAT_COMMAND
+    )
+}
+
+fn compact_chat_prompt_artifact_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(COMPACT_CHAT_PROMPT_ARTIFACT_RELATIVE_PATH)
+}
+
+fn write_compact_chat_prompt_artifact(repo_root: &Path, prompt_text: &str) -> Result<PathBuf> {
+    let artifact_path = compact_chat_prompt_artifact_path(repo_root);
+    if let Some(parent) = artifact_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&artifact_path, prompt_text)
+        .with_context(|| format!("failed to write {}", artifact_path.display()))?;
+    Ok(artifact_path)
+}
+
+fn resolve_vscode_code_cli_command() -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    let candidates: &[&str] = if cfg!(windows) {
+        &["code.cmd", "code.exe", "code"]
+    } else {
+        &["code"]
+    };
+    for dir in std::env::split_paths(&path) {
+        for candidate in candidates {
+            let candidate_path = dir.join(candidate);
+            if candidate_path.is_file() {
+                return Some((*candidate).to_string());
+            }
+        }
+    }
+    None
+}
+
+fn build_vscode_code_chat_launch_command_with_binary(
+    code_binary: &str,
+    repo_root: &Path,
+    prompt_path: &Path,
+) -> String {
+    format!(
+        "cd {} && {} chat --mode agent --reuse-window - < {}",
+        shell_quote(&repo_root.display().to_string()),
+        shell_quote(code_binary),
+        shell_quote(&prompt_path.display().to_string())
+    )
+}
+
+fn build_vscode_code_chat_launch_command(repo_root: &Path, prompt_path: &Path) -> Option<String> {
+    let code_binary = resolve_vscode_code_cli_command()?;
+    Some(build_vscode_code_chat_launch_command_with_binary(
+        &code_binary,
+        repo_root,
+        prompt_path,
+    ))
+}
+
+async fn launch_compact_chat_via_code_chat_cli(repo_root: &Path, prompt_path: &Path) -> Result<()> {
+    let code_binary = resolve_vscode_code_cli_command()
+        .ok_or_else(|| anyhow!("VS Code `code` CLI not found in PATH"))?;
+    let prompt_file = fs::File::open(prompt_path)
+        .with_context(|| format!("failed to open {}", prompt_path.display()))?;
+    let status = ProcessCommand::new(&code_binary)
+        .arg("chat")
+        .arg("--mode")
+        .arg("agent")
+        .arg("--reuse-window")
+        .arg("-")
+        .current_dir(repo_root)
+        .stdin(Stdio::from(prompt_file))
+        .status()
+        .await
+        .with_context(|| format!("failed to launch `{code_binary} chat`"))?;
+    if !status.success() {
+        bail!("VS Code `code chat` exited with status {status}");
+    }
+    Ok(())
 }
 
 pub(crate) fn startup_runtime_state_artifact_path(repo_root: &Path) -> PathBuf {
@@ -610,7 +753,7 @@ pub fn print_startup_runtime_state(args: &ContinuityStartupStateArgs) -> Result<
     }
     if audit.status != "ok" {
         println!(
-            "Repair: rerun cargo run -- continuity startup --repo-root {} --namespace continuity --json >/dev/null",
+            "Repair: rerun ./scripts/continuity_startup.sh --repo-root {} --namespace continuity --json >/dev/null",
             repo_root.display()
         );
     }
@@ -647,13 +790,55 @@ fn startup_runtime_state_audit_json(
         "artifact_gate_semantics_consistent_present": audit.artifact_gate_semantics_consistent_present,
         "artifact_gate_semantics_consistent_matches_recomputed": audit.artifact_gate_semantics_consistent_matches_recomputed,
         "gate_semantics_consistent": audit.gate_semantics_consistent,
-        "client_budget_guard": artifact_payload.map(|payload| payload["client_budget_guard"].clone()).unwrap_or(Value::Null),
-        "reply_execution_gate": artifact_payload.map(|payload| payload["reply_execution_gate"].clone()).unwrap_or(Value::Null),
-        "blocking_reply_contract": artifact_payload.map(|payload| payload["blocking_reply_contract"].clone()).unwrap_or(Value::Null),
-        "startup_execution_gate": artifact_payload.map(|payload| payload["startup_execution_gate"].clone()).unwrap_or(Value::Null),
-        "startup_next_action": artifact_payload.map(|payload| payload["continuity_startup_summary"]["startup_next_action"].clone()).unwrap_or(Value::Null),
-        "required_return_task": artifact_payload.map(|payload| payload["continuity_startup_summary"]["required_return_task"].clone()).unwrap_or(Value::Null),
-        "execctl_active_lease": artifact_payload.map(|payload| payload["continuity_startup_summary"]["execctl_active_lease"].clone()).unwrap_or(Value::Null),
+        "client_budget_guard": artifact_payload
+            .map(|payload| {
+                compact_startup_state_cli_client_budget_guard(
+                    &payload["client_budget_guard"],
+                )
+            })
+            .unwrap_or(Value::Null),
+        "reply_execution_gate": artifact_payload
+            .map(|payload| {
+                compact_startup_state_cli_reply_execution_gate(
+                    &payload["reply_execution_gate"],
+                )
+            })
+            .unwrap_or(Value::Null),
+        "blocking_reply_contract": artifact_payload
+            .map(|payload| {
+                compact_startup_state_cli_blocking_reply_contract(
+                    &payload["blocking_reply_contract"],
+                )
+            })
+            .unwrap_or(Value::Null),
+        "startup_execution_gate": artifact_payload
+            .map(|payload| {
+                compact_startup_state_cli_startup_execution_gate(
+                    &payload["startup_execution_gate"],
+                )
+            })
+            .unwrap_or(Value::Null),
+        "startup_next_action": artifact_payload
+            .map(|payload| {
+                compact_startup_state_cli_startup_next_action(
+                    &payload["continuity_startup_summary"]["startup_next_action"],
+                )
+            })
+            .unwrap_or(Value::Null),
+        "required_return_task": artifact_payload
+            .map(|payload| {
+                compact_startup_state_cli_required_return_task(
+                    &payload["continuity_startup_summary"]["required_return_task"],
+                )
+            })
+            .unwrap_or(Value::Null),
+        "execctl_active_lease": artifact_payload
+            .map(|payload| {
+                compact_startup_runtime_execctl_active_lease(
+                    &payload["continuity_startup_summary"]["execctl_active_lease"],
+                )
+            })
+            .unwrap_or(Value::Null),
         "project_task_tree": artifact_payload.map(|payload| payload["continuity_startup_summary"]["project_task_tree"].clone()).unwrap_or(Value::Null),
         "project_task_ledger": artifact_payload.map(|payload| payload["continuity_startup_summary"]["project_task_ledger"].clone()).unwrap_or(Value::Null),
     })
@@ -663,17 +848,207 @@ fn build_startup_runtime_state_cli_json(
     audit: &StartupRuntimeStateAudit,
     artifact_payload: Option<&Value>,
 ) -> Value {
-    let audit_json = startup_runtime_state_audit_json(audit, artifact_payload);
-    let mut root = artifact_payload
-        .cloned()
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}));
-    let root_object = root
-        .as_object_mut()
-        .expect("startup runtime cli root object");
-    root_object.insert("startup_runtime_state".to_string(), audit_json.clone());
-    root_object.insert("startup_runtime_state_audit".to_string(), audit_json);
-    root
+    let runtime_state = startup_runtime_state_audit_json(audit, artifact_payload);
+    let startup_runtime_state_audit = json!({
+        "status": runtime_state["status"].clone(),
+        "action_kind": runtime_state["action_kind"].clone(),
+        "lease_owner_state": runtime_state["lease_owner_state"].clone(),
+        "gate_semantics_consistent": runtime_state["gate_semantics_consistent"].clone(),
+    });
+    json!({
+        "startup_runtime_state": runtime_state,
+        "startup_runtime_state_audit": startup_runtime_state_audit,
+    })
+}
+
+fn compact_execctl_resume_contract_for_startup_output(contract: &Value) -> Value {
+    if !contract.is_object() {
+        return Value::Null;
+    }
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        contract,
+        &[
+            "contract_version",
+            "resume_state",
+            "no_silent_drop",
+            "pending_return_count",
+        ],
+    );
+    if contract["required_return_task"].is_object() {
+        compact.insert(
+            "required_return_task".to_string(),
+            compact_startup_runtime_required_return_task(&contract["required_return_task"]),
+        );
+    }
+    if contract["active_task"].is_object() {
+        compact.insert(
+            "active_task".to_string(),
+            compact_startup_runtime_required_return_task(&contract["active_task"]),
+        );
+    }
+    Value::Object(compact)
+}
+
+fn compact_project_task_tree_for_startup_output(tree: &Value) -> Value {
+    let mut compact = compact_project_task_tree_for_startup(tree);
+    if let Some(object) = compact.as_object_mut()
+        && let Some(preserved) = object.remove("full_shape_preserved_in_working_state_restore")
+    {
+        object.insert(
+            "full_shape_preserved_in_source_working_state_restore".to_string(),
+            preserved,
+        );
+    }
+    compact
+}
+
+fn compact_project_task_ledger_for_startup_output(ledger: &Value) -> Value {
+    let mut compact = compact_project_task_ledger_for_startup(ledger);
+    if let Some(object) = compact.as_object_mut()
+        && let Some(preserved) = object.remove("full_shape_preserved_in_working_state_restore")
+    {
+        object.insert(
+            "full_shape_preserved_in_source_working_state_restore".to_string(),
+            preserved,
+        );
+    }
+    compact
+}
+
+fn compact_pending_return_queue_for_startup_output(queue: &Value) -> Value {
+    let Some(items) = queue.as_array() else {
+        return Value::Null;
+    };
+    let preview = items
+        .iter()
+        .take(3)
+        .map(|item| {
+            let mut compact = serde_json::Map::new();
+            copy_if_present(
+                &mut compact,
+                item,
+                &[
+                    "headline",
+                    "next_step",
+                    "resume_state",
+                    "queued_reason",
+                    "authoritative_event_id",
+                ],
+            );
+            Value::Object(compact)
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "entries_count": items.len(),
+        "preview": preview,
+        "summary_only": true,
+        "full_shape_preserved_in_source_working_state_restore": true,
+    })
+}
+
+pub(crate) fn compact_working_state_restore_for_startup_output(restore: &Value) -> Value {
+    if !restore.is_object() {
+        return Value::Null;
+    }
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        restore,
+        &[
+            "project",
+            "namespace",
+            "thread_id",
+            "session_id",
+            "agent_scope",
+            "captured_at_epoch_ms",
+            "restore_confidence",
+            "restore_freshness_state",
+            "is_preliminary",
+            "current_goal",
+            "next_step",
+            "next_step_state",
+            "current_hypothesis",
+            "last_results_summary",
+            "pending_return_summary",
+            "execctl_resume_state",
+            "execctl_resume_contract_summary",
+            "execctl_active_lease_summary",
+            "startup_next_action_summary",
+            "project_task_tree_summary",
+            "project_task_ledger_summary",
+            "included_reasons_summary",
+            "excluded_reasons_summary",
+            "client_budget_target_percent",
+        ],
+    );
+    if restore["state_lineage"].is_object() {
+        compact.insert(
+            "state_lineage".to_string(),
+            compact_startup_runtime_state_lineage(&restore["state_lineage"]),
+        );
+    }
+    if restore["client_budget_guard"].is_object() {
+        compact.insert(
+            "client_budget_guard".to_string(),
+            compact_startup_runtime_client_budget_guard(&restore["client_budget_guard"]),
+        );
+    }
+    if restore["startup_next_action"].is_object() {
+        compact.insert(
+            "startup_next_action".to_string(),
+            compact_startup_runtime_startup_next_action(&restore["startup_next_action"]),
+        );
+    }
+    if restore["execctl_active_lease"].is_object() {
+        compact.insert(
+            "execctl_active_lease".to_string(),
+            compact_startup_runtime_execctl_active_lease(&restore["execctl_active_lease"]),
+        );
+    }
+    if restore["execctl_resume_contract"].is_object() {
+        compact.insert(
+            "execctl_resume_contract".to_string(),
+            compact_execctl_resume_contract_for_startup_output(&restore["execctl_resume_contract"]),
+        );
+    }
+    if restore["project_task_tree"].is_object() {
+        compact.insert(
+            "project_task_tree".to_string(),
+            compact_project_task_tree_for_startup_output(&restore["project_task_tree"]),
+        );
+    }
+    if restore["project_task_ledger"].is_object() {
+        compact.insert(
+            "project_task_ledger".to_string(),
+            compact_project_task_ledger_for_startup_output(&restore["project_task_ledger"]),
+        );
+    }
+    if restore["pending_return_queue"].is_array() {
+        compact.insert(
+            "pending_return_queue".to_string(),
+            compact_pending_return_queue_for_startup_output(&restore["pending_return_queue"]),
+        );
+    }
+    Value::Object(compact)
+}
+
+pub(crate) fn compact_continuity_startup_public_payload(payload: &Value) -> Value {
+    let mut compact = payload.clone();
+    let Some(root) = compact.as_object_mut() else {
+        return compact;
+    };
+    if root
+        .get("working_state_restore")
+        .is_some_and(|value| value.is_object())
+    {
+        root.insert(
+            "working_state_restore".to_string(),
+            compact_working_state_restore_for_startup_output(&payload["working_state_restore"]),
+        );
+    }
+    compact
 }
 
 pub async fn import_sources(cfg: &AppConfig, args: &ContinuityImportArgs) -> Result<()> {
@@ -1064,9 +1439,26 @@ async fn import_thread_index_snapshots(
 pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Result<()> {
     let db = connect_bootstrapped_admin(cfg).await?;
     let context = load_startup_context(&db, args).await?;
+    if args.runtime_state_json {
+        let _ = startup_payload_with_context(&db, &context, args).await?;
+        let repo_root = canonical_path(Path::new(&context.project.repo_root))?;
+        let audit = inspect_startup_runtime_state(&repo_root)?;
+        let artifact_payload = load_startup_runtime_state_artifact(&repo_root)?;
+        println!(
+            "{}",
+            serde_json::to_string(&startup_runtime_state_audit_json(
+                &audit,
+                artifact_payload.as_ref(),
+            ))?
+        );
+        return Ok(());
+    }
     if args.json {
         let payload = startup_payload_with_context(&db, &context, args).await?;
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&compact_continuity_startup_public_payload(&payload))?
+        );
         return Ok(());
     }
     let chat_start_restore = build_chat_start_restore(
@@ -1099,6 +1491,24 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
     );
     println!("Корень проекта: {}", context.project.repo_root);
     println!("Namespace continuity: {}", context.namespace.code);
+    let continuity_source_mode = context.continuity["continuity_source_mode"]
+        .as_str()
+        .unwrap_or("scoped_import");
+    let continuity_source_namespace_code = context.continuity["continuity_source_namespace_code"]
+        .as_str()
+        .unwrap_or(context.namespace.code.as_str());
+    let continuity_source_summary = match continuity_source_mode {
+        "continuity_namespace_fallback_import" => format!(
+            "fallback import из namespace {}",
+            continuity_source_namespace_code
+        ),
+        "working_state_fallback" => "runtime fallback из working_state + handoff".to_string(),
+        _ => format!(
+            "scoped import из namespace {}",
+            continuity_source_namespace_code
+        ),
+    };
+    println!("Continuity source: {continuity_source_summary}");
     println!(
         "Последний импорт continuity: {}",
         human_epoch_ms(context.continuity["imported_at_epoch_ms"].as_u64())
@@ -1109,12 +1519,11 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
             .as_u64()
             .unwrap_or(0)
     );
-    println!(
-        "Continuity snapshot: {}",
-        context.continuity["bootstrap_summary"]["bootstrap_file"]
-            .as_str()
-            .unwrap_or("ещё нет данных")
-    );
+    let continuity_snapshot_path = context.continuity["bootstrap_summary"]["bootstrap_file"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("ещё нет данных");
+    println!("Continuity snapshot: {continuity_snapshot_path}");
     let bridge_files = context.continuity["session_memory_files"]
         .as_u64()
         .unwrap_or(0);
@@ -1161,31 +1570,37 @@ pub async fn print_startup(cfg: &AppConfig, args: &ContinuityStartupArgs) -> Res
             .unwrap_or("ещё нет данных")
     );
     println!();
-    let mut import_command = format!(
-        "cargo run -- continuity import --project {} --display-name '{}' --repo-root {} --namespace {} --bootstrap-file {}",
-        context.project.code,
-        context.project.display_name.replace('\'', "\\'"),
-        shell_quote(&context.project.repo_root),
-        context.namespace.code,
-        shell_quote(
-            context.continuity["bootstrap_summary"]["bootstrap_file"]
-                .as_str()
-                .unwrap_or_default()
-        ),
-    );
-    let active_workline_arg = context.continuity["active_workline_summary"]["active_workline_file"]
-        .as_str()
-        .unwrap_or_default();
-    if !active_workline_arg.is_empty() {
-        import_command.push_str(" --active-workline-file ");
-        import_command.push_str(&shell_quote(active_workline_arg));
-    }
     println!("Как использовать дальше:");
     println!(
-        "- Для project-scoped retrieval: cargo run -- context pack --project {} --namespace {} --query 'ваш вопрос'",
+        "- Для project-scoped retrieval: ./scripts/amai_exec.sh context pack --project {} --namespace {} --query 'ваш вопрос'",
         context.project.code, context.namespace.code
     );
-    println!("- Для обновления continuity после новых изменений: {import_command}");
+    if let Some(bootstrap_file) = context.continuity["bootstrap_summary"]["bootstrap_file"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let mut import_command = format!(
+            "./scripts/amai_exec.sh continuity import --project {} --display-name '{}' --repo-root {} --namespace {} --bootstrap-file {}",
+            context.project.code,
+            context.project.display_name.replace('\'', "\\'"),
+            shell_quote(&context.project.repo_root),
+            context.namespace.code,
+            shell_quote(bootstrap_file),
+        );
+        let active_workline_arg =
+            context.continuity["active_workline_summary"]["active_workline_file"]
+                .as_str()
+                .unwrap_or_default();
+        if !active_workline_arg.is_empty() {
+            import_command.push_str(" --active-workline-file ");
+            import_command.push_str(&shell_quote(active_workline_arg));
+        }
+        println!("- Для обновления continuity после новых изменений: {import_command}");
+    } else {
+        println!(
+            "- Для materialize continuity import сначала дай bootstrap/active workline source; текущий startup уже восстановлен из runtime fallback."
+        );
+    }
     Ok(())
 }
 
@@ -1229,15 +1644,12 @@ fn build_startup_runtime_state_artifact(
 ) -> Result<Value> {
     let startup_contract_sha256 =
         hex_sha256(&serde_json::to_vec(&mcp::project_chat_startup_contract())?);
+    let startup_execution_gate = build_startup_execution_gate(payload);
     let mut continuity_startup_summary = mcp::continuity_startup_summary_json(payload);
     if let Some(summary) = continuity_startup_summary.as_object_mut() {
         summary.insert(
             "startup_execution_gate".to_string(),
-            compact_startup_runtime_summary_startup_execution_gate(
-                summary
-                    .get("startup_execution_gate")
-                    .unwrap_or(&Value::Null),
-            ),
+            compact_startup_runtime_summary_startup_execution_gate(&startup_execution_gate),
         );
         summary.insert(
             "startup_next_action".to_string(),
@@ -1259,6 +1671,15 @@ fn build_startup_runtime_state_artifact(
                     .unwrap_or(&Value::Null),
             ),
         );
+        let execctl_active_lease_source = summary
+            .get("execctl_active_lease")
+            .filter(|value| value.as_object().is_some_and(|object| !object.is_empty()))
+            .cloned()
+            .unwrap_or_else(|| payload["chat_start_restore"]["execctl_active_lease"].clone());
+        summary.insert(
+            "execctl_active_lease".to_string(),
+            compact_startup_runtime_execctl_active_lease(&execctl_active_lease_source),
+        );
         summary.insert(
             "project_task_tree".to_string(),
             compact_project_task_tree_for_startup(
@@ -1273,7 +1694,6 @@ fn build_startup_runtime_state_artifact(
         );
         prune_startup_runtime_summary(summary);
     }
-    let startup_execution_gate = build_startup_execution_gate(payload);
     let prompt_text_present = Some(
         payload["chat_start_restore"]["prompt_text"]
             .as_str()
@@ -1299,6 +1719,13 @@ fn build_startup_runtime_state_artifact(
         } else {
             Value::Null
         };
+    let execctl_resume_state = continuity_startup_summary["execctl_resume_state"].clone();
+    let execctl_resume_contract_summary =
+        continuity_startup_summary["execctl_resume_contract_summary"].clone();
+    let execctl_resume_obligation = continuity_startup_summary["execctl_resume_obligation"].clone();
+    let startup_next_action = continuity_startup_summary["startup_next_action"].clone();
+    let execctl_active_lease = continuity_startup_summary["execctl_active_lease"].clone();
+    let required_return_task = continuity_startup_summary["required_return_task"].clone();
     Ok(json!({
         "artifact_version": STARTUP_RUNTIME_STATE_ARTIFACT_VERSION,
         "repo_root": repo_root.display().to_string(),
@@ -1308,6 +1735,12 @@ fn build_startup_runtime_state_artifact(
         "startup_contract_sha256": startup_contract_sha256,
         "continuity_startup_summary": continuity_startup_summary,
         "startup_execution_gate": startup_execution_gate,
+        "execctl_resume_state": execctl_resume_state,
+        "execctl_resume_contract_summary": execctl_resume_contract_summary,
+        "execctl_resume_obligation": execctl_resume_obligation,
+        "startup_next_action": startup_next_action,
+        "execctl_active_lease": execctl_active_lease,
+        "required_return_task": required_return_task,
         "gate_semantics_consistent": gate_semantics_consistent,
         "client_budget_guard": client_budget_guard,
         "reply_execution_gate": reply_execution_gate,
@@ -1389,15 +1822,48 @@ fn compact_startup_runtime_client_budget_guard(guard: &Value) -> Value {
     if !guard.is_object() {
         return Value::Null;
     }
-    json!({
-        "status": guard["status"].clone(),
-        "status_label": guard["status_label"].clone(),
-        "observed_at_epoch_ms": guard["observed_at_epoch_ms"].clone(),
-        "max_guard_age_seconds": guard["max_guard_age_seconds"].clone(),
-        "should_rotate_chat_now": guard["should_rotate_chat_now"].clone(),
-        "should_rotate_chat_soon": guard["should_rotate_chat_soon"].clone(),
-        "reply_execution_gate": compact_startup_runtime_reply_execution_gate(&guard["reply_execution_gate"]),
-    })
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        guard,
+        &["status_label", "client_budget_target_percent"],
+    );
+    let reply_execution_gate =
+        compact_startup_runtime_reply_execution_gate(&guard["reply_execution_gate"]);
+    if !reply_execution_gate.is_null() {
+        compact.insert("reply_execution_gate".to_string(), reply_execution_gate);
+    }
+    Value::Object(compact)
+}
+
+fn compact_startup_state_cli_client_budget_guard(guard: &Value) -> Value {
+    if !guard.is_object() {
+        return Value::Null;
+    }
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        guard,
+        &["status_label", "client_budget_target_percent"],
+    );
+    Value::Object(compact)
+}
+
+fn compact_startup_state_cli_reply_execution_gate(reply_execution_gate: &Value) -> Value {
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        reply_execution_gate,
+        &[
+            "action_kind",
+            "blocking",
+            "must_rotate_before_reply",
+            "must_wait_for_budget_recovery_before_reply",
+            "reply_budget_mode",
+            "reply_prefix",
+        ],
+    );
+    Value::Object(compact)
 }
 
 fn compact_startup_runtime_startup_next_action(action: &Value) -> Value {
@@ -1447,6 +1913,24 @@ fn compact_startup_runtime_summary_startup_execution_gate(gate: &Value) -> Value
     Value::Object(compact)
 }
 
+fn compact_startup_state_cli_startup_execution_gate(gate: &Value) -> Value {
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        gate,
+        &[
+            "action_kind",
+            "blocking",
+            "must_follow_startup_next_action",
+            "unrelated_work_allowed",
+            "must_read_prompt_text_before_reply",
+            "required_action_kind_when_resume_required",
+            "no_silent_drop",
+        ],
+    );
+    Value::Object(compact)
+}
+
 fn compact_startup_runtime_required_return_task(task: &Value) -> Value {
     let mut compact = serde_json::Map::new();
     copy_if_present(
@@ -1464,6 +1948,23 @@ fn compact_startup_runtime_required_return_task(task: &Value) -> Value {
     Value::Object(compact)
 }
 
+fn compact_startup_runtime_execctl_active_lease(lease: &Value) -> Value {
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        lease,
+        &[
+            "lease_version",
+            "lease_owner_state",
+            "lease_state",
+            "headline",
+            "next_step",
+            "storage_lane",
+        ],
+    );
+    Value::Object(compact)
+}
+
 fn compact_startup_runtime_execctl_resume_obligation(obligation: &Value) -> Value {
     let mut compact = serde_json::Map::new();
     copy_if_present(
@@ -1476,6 +1977,56 @@ fn compact_startup_runtime_execctl_resume_obligation(obligation: &Value) -> Valu
             "required_return_headline",
             "required_return_next_step",
         ],
+    );
+    Value::Object(compact)
+}
+
+fn compact_compact_chat_chat_start_restore(node: &Value) -> Value {
+    if !node.is_object() {
+        return Value::Null;
+    }
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        node,
+        &["headline", "next_step", "restore_confidence", "prompt_text"],
+    );
+    Value::Object(compact)
+}
+
+fn compact_compact_chat_host_current_thread_control(surface: &Value) -> Value {
+    if !surface.is_object() {
+        return Value::Null;
+    }
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        surface,
+        &["command_id", "button_label", "control_kind", "summary"],
+    );
+    if surface["external_uri_launch"].is_object() {
+        let mut external = serde_json::Map::new();
+        copy_if_present(
+            &mut external,
+            &surface["external_uri_launch"],
+            &["uri", "platform_launch_command"],
+        );
+        if !external.is_empty() {
+            compact.insert("external_uri_launch".to_string(), Value::Object(external));
+        }
+    }
+    Value::Object(compact)
+}
+
+fn compact_compact_chat_handoff(handoff: &Value) -> Value {
+    if !handoff.is_object() {
+        return Value::Null;
+    }
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        handoff,
+        &["headline", "next_step", "local_path", "relative_path"],
     );
     Value::Object(compact)
 }
@@ -1504,9 +2055,18 @@ fn compact_startup_runtime_startup_action_bundle(action_bundle: &Value) -> Value
             Value::Array(missing_inputs.clone()),
         );
     }
+    if action_bundle["host_current_thread_control"].is_object() {
+        compact.insert(
+            "host_current_thread_control".to_string(),
+            working_state::compact_host_current_thread_control_surface_for_runtime(
+                &action_bundle["host_current_thread_control"],
+            ),
+        );
+    }
     if action_bundle["operator_flow"].is_object() {
         let mut operator_flow = serde_json::Map::new();
         for field in [
+            "primary_command",
             "rotate_helper_command",
             "startup_command",
             "startup_after_recovery_command",
@@ -1522,12 +2082,65 @@ fn compact_startup_runtime_startup_action_bundle(action_bundle: &Value) -> Value
         copy_if_present(
             &mut operator_flow,
             &action_bundle["operator_flow"],
-            &["wait_summary", "resume_after_recovery_summary"],
+            &[
+                "primary_command_kind",
+                "wait_summary",
+                "resume_after_recovery_summary",
+            ],
         );
         if !operator_flow.is_empty() {
             compact.insert("operator_flow".to_string(), Value::Object(operator_flow));
         }
     }
+    Value::Object(compact)
+}
+
+fn compact_startup_state_cli_blocking_reply_contract(contract: &Value) -> Value {
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        contract,
+        &[
+            "active",
+            "contract_version",
+            "response_kind",
+            "max_sentences",
+            "must_avoid_substantive_work",
+            "must_use_action_bundle_operator_flow",
+        ],
+    );
+    Value::Object(compact)
+}
+
+fn compact_startup_state_cli_startup_next_action(action: &Value) -> Value {
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        action,
+        &[
+            "action_kind",
+            "blocking",
+            "reason",
+            "resume_state",
+            "no_silent_drop",
+            "client_budget_status_label",
+            "preserves_return_obligation",
+        ],
+    );
+    let action_bundle = compact_startup_runtime_startup_action_bundle(&action["action_bundle"]);
+    if !action_bundle.is_null() {
+        compact.insert("action_bundle".to_string(), action_bundle);
+    }
+    Value::Object(compact)
+}
+
+fn compact_startup_state_cli_required_return_task(task: &Value) -> Value {
+    let mut compact = serde_json::Map::new();
+    copy_if_present(
+        &mut compact,
+        task,
+        &["headline", "next_step", "resume_state"],
+    );
     Value::Object(compact)
 }
 
@@ -1617,6 +2230,7 @@ fn compact_startup_runtime_reply_execution_gate(reply_execution_gate: &Value) ->
         "must_wait_for_budget_recovery_before_reply":
             reply_execution_gate["must_wait_for_budget_recovery_before_reply"].clone(),
         "reply_budget_mode": reply_execution_gate["reply_budget_mode"].clone(),
+        "reply_prefix": reply_execution_gate["reply_prefix"].clone(),
         "rotate_now": reply_execution_gate["rotate_now"].clone(),
         "rotate_soon": reply_execution_gate["rotate_soon"].clone(),
         "preserves_return_obligation": preserves_return_obligation,
@@ -1687,6 +2301,14 @@ fn build_continuity_startup_payload(
         .as_str()
         .and_then(normalize_next_step_value)
         .unwrap_or_else(|| "ещё нет данных".to_string());
+    let compact_start_headline = compact_prompt_fragment(start_headline, 64);
+    let compact_start_next_step = compact_prompt_fragment(&start_next_step, 80);
+    let continuity_source_mode = context.continuity["continuity_source_mode"]
+        .as_str()
+        .unwrap_or("scoped_import");
+    let continuity_source_namespace_code = context.continuity["continuity_source_namespace_code"]
+        .as_str()
+        .unwrap_or(context.namespace.code.as_str());
     let working_state_expected = working_state_node.is_some_and(|node| {
         node["current_goal"]
             .as_str()
@@ -1705,13 +2327,20 @@ fn build_continuity_startup_payload(
             EvalPattern::RecoveryTarget,
             true,
             json!({
-                "expected_present": context.continuity["imported_at_epoch_ms"].as_u64().unwrap_or(0) > 0
-                    && context.continuity["documents_imported"].as_u64().unwrap_or(0) > 0
-                    && context.handoff_summary["headline"].as_str().is_some_and(|value| !value.is_empty())
-                    && !startup_next_step.is_empty(),
+                "expected_present": (
+                    context.continuity["imported_at_epoch_ms"].as_u64().unwrap_or(0) > 0
+                        && context.continuity["documents_imported"].as_u64().unwrap_or(0) > 0
+                ) || (
+                    continuity_source_mode == "working_state_fallback"
+                        && context.handoff_summary["headline"].as_str().is_some_and(|value| !value.is_empty())
+                        && !startup_next_step.is_empty()
+                        && working_state_expected
+                ),
                 "unexpected_present": false,
                 "imported_at_epoch_ms": context.continuity["imported_at_epoch_ms"],
                 "documents_imported": context.continuity["documents_imported"],
+                "continuity_source_mode": continuity_source_mode,
+                "continuity_source_namespace_code": continuity_source_namespace_code,
                 "headline": context.handoff_summary["headline"],
                 "next_step": startup_next_step,
             }),
@@ -1724,8 +2353,8 @@ fn build_continuity_startup_payload(
             json!({
                 "expected_present": !prompt_text.is_empty()
                     && prompt_text.contains("CHAT_START_RESTORE")
-                    && prompt_text.contains(start_headline)
-                    && prompt_text.contains(&start_next_step),
+                    && prompt_text.contains(&compact_start_headline)
+                    && prompt_text.contains(&compact_start_next_step),
                 "unexpected_present": false,
                 "headline": start_headline,
                 "next_step": start_next_step,
@@ -1768,6 +2397,10 @@ fn build_continuity_startup_payload(
             "imported_at_epoch_ms": context.continuity["imported_at_epoch_ms"],
             "documents_imported": context.continuity["documents_imported"],
             "rendered_transcript_files": context.continuity["rendered_transcript_files"],
+            "continuity_source": {
+                "mode": continuity_source_mode,
+                "source_namespace_code": continuity_source_namespace_code,
+            },
             "handoff_summary": {
                 "headline": context.handoff_summary["headline"],
                 "next_step": context.handoff_summary["next_step"],
@@ -1797,6 +2430,7 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
         repo_root: args.repo_root.clone(),
         namespace: args.namespace.clone(),
         json: false,
+        runtime_state_json: false,
         token_source_kind: "verify_continuity_startup".to_string(),
     };
     let context = load_startup_context(&db, &startup_args).await?;
@@ -1949,34 +2583,11 @@ pub async fn verify_continuity(cfg: &AppConfig, args: &VerifyContinuityArgs) -> 
 
 pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Result<()> {
     let db = connect_bootstrapped_admin(cfg).await?;
-    let project = resolve_project(&db, &args.startup).await?;
-    let namespace =
-        postgres::find_namespace_by_code(&db, project.project_id, &args.startup.namespace)
-            .await?
-            .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.startup.namespace))?;
-    let snapshots =
-        postgres::list_observability_snapshots_by_kinds(&db, &["continuity_import"], Some(50))
-            .await?;
-    let latest = snapshots
-        .into_iter()
-        .find(|snapshot| {
-            snapshot.payload["continuity_import"]["project"]["code"].as_str()
-                == Some(project.code.as_str())
-                && snapshot.payload["continuity_import"]["namespace"]["code"].as_str()
-                    == Some(namespace.code.as_str())
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "no continuity import found for {}::{}",
-                project.code,
-                namespace.code
-            )
-        })?;
-    let continuity = &latest.payload["continuity_import"];
-    let handoff_summary = latest_handoff_summary(&db, &project, &namespace)
-        .await?
-        .unwrap_or_else(|| continuity["active_workline_summary"]["details"].clone());
-    let restore = working_state::build_restore_bundle(&db, &project, &namespace).await?;
+    let context = load_startup_context(&db, &args.startup).await?;
+    let project = context.project.clone();
+    let namespace = context.namespace.clone();
+    let handoff_summary = context.handoff_summary.clone();
+    let restore = context.restore.clone();
     let current_thread_id = codex_threads::current_thread_id();
     let parsed_question = args.question.as_deref().and_then(|question| {
         chat_question::interpret(question, chat_question::current_local_now())
@@ -2023,9 +2634,12 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
         || intent == "previous_chat"
         || intent == "chat_at_time";
     let chat_tail = if wants_chat_lookup {
-        let thread_index_snapshots = postgres::list_observability_snapshots_by_kinds(
+        let thread_index_snapshots = postgres::list_observability_snapshots_by_kind_for_scope(
             &db,
-            &["continuity_thread_index"],
+            "continuity_thread_index",
+            "continuity_thread_index",
+            &project.code,
+            &namespace.code,
             Some(200),
         )
         .await?;
@@ -2146,25 +2760,457 @@ pub async fn print_answer(cfg: &AppConfig, args: &ContinuityAnswerArgs) -> Resul
 }
 
 pub async fn capture_handoff(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> Result<()> {
-    let mut db = connect_bootstrapped_admin(cfg).await?;
-    let project = postgres::get_project_by_code(&db, &args.project).await?;
-    let namespace = postgres::find_namespace_by_code(&db, project.project_id, &args.namespace)
-        .await?
-        .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.namespace))?;
+    let payload = handoff_payload(cfg, args).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+pub async fn handoff_payload(cfg: &AppConfig, args: &ContinuityHandoffArgs) -> Result<Value> {
     let details = read_optional_details_file(args.details_file.as_ref())?;
-    let payload = capture_handoff_payload(
+    handoff_payload_from_parts(
         cfg,
-        &mut db,
-        &project,
-        &namespace,
+        &args.project,
+        &args.namespace,
         &args.headline,
         &args.next_step,
         &details,
         args.resolve_current_goal,
         &args.resolved_headlines,
     )
+    .await
+}
+
+pub async fn handoff_payload_from_parts(
+    cfg: &AppConfig,
+    project_code: &str,
+    namespace_code: &str,
+    headline: &str,
+    next_step: &str,
+    details: &str,
+    resolve_current_goal: bool,
+    resolved_headlines: &[String],
+) -> Result<Value> {
+    let mut db = connect_bootstrapped_admin(cfg).await?;
+    handoff_payload_from_parts_with_db(
+        &mut db,
+        cfg,
+        project_code,
+        namespace_code,
+        headline,
+        next_step,
+        details,
+        resolve_current_goal,
+        resolved_headlines,
+    )
+    .await
+}
+
+pub async fn client_budget_target_payload(
+    cfg: &AppConfig,
+    args: &ContinuityClientBudgetTargetArgs,
+    thread_id_hint: Option<&str>,
+) -> Result<Value> {
+    let db = connect_bootstrapped_admin(cfg).await?;
+    let startup_args = ContinuityStartupArgs {
+        project: args.project.clone(),
+        repo_root: args.repo_root.clone(),
+        namespace: args.namespace.clone(),
+        json: false,
+        runtime_state_json: false,
+        token_source_kind: "operator_client_budget_target".to_string(),
+    };
+    let project = resolve_project(&db, &startup_args).await?;
+    let namespace = postgres::ensure_namespace(
+        &db,
+        project.project_id,
+        &args.namespace,
+        Some("Continuity"),
+        "local_strict",
+    )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&payload)?);
+    let target_percent = working_state::normalize_client_budget_target_percent(args.percent)
+        .ok_or_else(|| {
+            anyhow!(
+                "client budget target must be one of {}",
+                allowed_client_budget_target_values()
+                    .into_iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    if thread_id_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        working_state::record_client_budget_target_event_with_thread_hint(
+            &db,
+            &project,
+            &namespace,
+            target_percent,
+            thread_id_hint,
+        )
+        .await?;
+    } else {
+        working_state::record_client_budget_target_event(&db, &project, &namespace, target_percent)
+            .await?;
+    }
+    let restore = working_state::build_restore_bundle(&db, &project, &namespace).await?;
+    let client_budget_guard =
+        token_budget::collect_live_current_session_budget_guard(&db, restore.as_ref()).await?;
+    let exact_chat_command = client_budget_target_chat_command(target_percent);
+    Ok(json!({
+        "client_budget_target_update": {
+            "project": {
+                "code": project.code.clone(),
+                "display_name": project.display_name.clone(),
+                "repo_root": project.repo_root.clone(),
+            },
+            "namespace": {
+                "code": namespace.code.clone(),
+                "display_name": namespace.display_name.clone(),
+            },
+            "target_percent": target_percent,
+            "allowed_target_percents": allowed_client_budget_target_values(),
+            "working_state_restore": restore
+                .as_ref()
+                .and_then(|value| value.get("working_state_restore"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            "client_budget_guard": client_budget_guard,
+            "operator_notice": {
+                "kind": "client_budget_target_changed",
+                "message_text": format!("Режим целевой экономии переключён на {target_percent}%."),
+                "exact_chat_command": exact_chat_command,
+                "chat_command_pattern": client_budget_target_chat_command_pattern(),
+                "allowed_target_percents": allowed_client_budget_target_values(),
+            }
+        }
+    }))
+}
+
+pub async fn client_budget_target(
+    cfg: &AppConfig,
+    args: &ContinuityClientBudgetTargetArgs,
+) -> Result<()> {
+    let payload = client_budget_target_payload(cfg, args, None).await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+    let target_percent = payload["client_budget_target_update"]["target_percent"]
+        .as_u64()
+        .unwrap_or(args.percent);
+    let project = &payload["client_budget_target_update"]["project"];
+    let namespace = &payload["client_budget_target_update"]["namespace"];
+    let status_label =
+        payload["client_budget_target_update"]["client_budget_guard"]["status_label"]
+            .as_str()
+            .unwrap_or("нет данных");
+    println!("Amai continuity client-budget-target");
+    println!();
+    println!(
+        "Проект: {} ({})",
+        project["display_name"].as_str().unwrap_or("Amai"),
+        project["code"].as_str().unwrap_or("amai")
+    );
+    println!(
+        "Корень проекта: {}",
+        project["repo_root"].as_str().unwrap_or_default()
+    );
+    println!(
+        "Namespace continuity: {}",
+        namespace["code"].as_str().unwrap_or("continuity")
+    );
+    println!("Целевой target клиентской экономии: {}%", target_percent);
+    println!(
+        "Разрешённые значения: {}",
+        allowed_client_budget_target_values()
+            .into_iter()
+            .map(|value| format!("{value}%"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!("Live client-budget guard: {status_label}");
+    if let Some(reply_prefix) =
+        payload["client_budget_target_update"]["client_budget_guard"]["reply_prefix"].as_str()
+    {
+        if !reply_prefix.trim().is_empty() {
+            println!("Текущий reply prefix: {reply_prefix}");
+        }
+    }
+    if let Some(exact_chat_command) =
+        payload["client_budget_target_update"]["operator_notice"]["exact_chat_command"].as_str()
+    {
+        println!("Exact chat-команда: {exact_chat_command}");
+    }
+    if let Some(restore_node) =
+        payload["client_budget_target_update"]["working_state_restore"].as_object()
+    {
+        if let Some(current_goal) = restore_node
+            .get("current_goal")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            println!("Активная линия: {current_goal}");
+        }
+        if let Some(next_step) = restore_node
+            .get("next_step")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            println!("Следующий шаг: {next_step}");
+        }
+    }
+    Ok(())
+}
+
+pub async fn compact_chat_payload(
+    cfg: &AppConfig,
+    args: &ContinuityCompactChatArgs,
+    thread_id_hint: Option<&str>,
+) -> Result<Value> {
+    let mut db = connect_bootstrapped_admin(cfg).await?;
+    let startup_args = ContinuityStartupArgs {
+        project: args.project.clone(),
+        repo_root: args.repo_root.clone(),
+        namespace: args.namespace.clone(),
+        json: false,
+        runtime_state_json: false,
+        token_source_kind: "operator_continuity_compact_chat".to_string(),
+    };
+    let context = load_startup_context(&db, &startup_args).await?;
+    let restore_node = context
+        .restore
+        .as_ref()
+        .and_then(|value| value.get("working_state_restore"));
+    let client_budget_guard =
+        token_budget::collect_live_current_session_budget_guard(&db, context.restore.as_ref())
+            .await?;
+    let recommended_headline = restore_node
+        .and_then(|value| value["current_goal"].as_str())
+        .filter(|value| is_meaningful_restore_value(value))
+        .or_else(|| {
+            context.handoff_summary["headline"]
+                .as_str()
+                .filter(|value| is_meaningful_restore_value(value))
+        })
+        .unwrap_or("Продолжить активную рабочую линию");
+    let recommended_next_step = restore_node
+        .and_then(|value| value["next_step"].as_str())
+        .and_then(normalize_next_step_value)
+        .filter(|value| is_meaningful_restore_value(value))
+        .or_else(|| {
+            context.handoff_summary["next_step"]
+                .as_str()
+                .and_then(normalize_next_step_value)
+                .filter(|value| is_meaningful_restore_value(value))
+        })
+        .unwrap_or_else(|| "продолжить работу через compact restore".to_string());
+    let headline = args
+        .headline
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(recommended_headline);
+    let next_step = args
+        .next_step
+        .as_deref()
+        .and_then(normalize_next_step_value)
+        .unwrap_or(recommended_next_step);
+    let details = if let Some(details_file) = args.details_file.as_ref() {
+        read_optional_details_file(Some(details_file))?
+    } else {
+        build_compact_chat_details(&client_budget_guard, headline, &next_step)
+    };
+    let handoff_payload = capture_handoff_payload(
+        cfg,
+        &mut db,
+        &context.project,
+        &context.namespace,
+        headline,
+        &next_step,
+        &details,
+        false,
+        &[],
+    )
+    .await?;
+    let refreshed_context = load_startup_context(&db, &startup_args).await?;
+    let startup_payload =
+        startup_payload_with_context(&db, &refreshed_context, &startup_args).await?;
+    let repo_root = Path::new(refreshed_context.project.repo_root.as_str());
+    let prompt_text = startup_payload["chat_start_restore"]["prompt_text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let prompt_artifact_path = if prompt_text.trim().is_empty() {
+        None
+    } else {
+        Some(write_compact_chat_prompt_artifact(repo_root, &prompt_text)?)
+    };
+    let prompt_artifact_path_string = prompt_artifact_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let launch_clean_chat_command = prompt_artifact_path
+        .as_ref()
+        .and_then(|path| build_vscode_code_chat_launch_command(repo_root, path));
+    let has_launch_clean_chat_command = launch_clean_chat_command.is_some();
+    let current_thread_id = codex_threads::current_thread_id();
+    let host_current_thread_control =
+        working_state::build_host_current_thread_control_surface_for_thread(
+            thread_id_hint.or(current_thread_id.as_deref()),
+        );
+    let compact_client_budget_guard =
+        compact_startup_runtime_client_budget_guard(&client_budget_guard);
+    let compact_chat_start_restore =
+        compact_compact_chat_chat_start_restore(&startup_payload["chat_start_restore"]);
+    let compact_host_current_thread_control =
+        compact_compact_chat_host_current_thread_control(&host_current_thread_control);
+    let compact_handoff = compact_compact_chat_handoff(&handoff_payload["continuity_handoff"]);
+    let startup_command = shell_join_command(&[
+        "amai",
+        "continuity",
+        "startup",
+        "--project",
+        refreshed_context.project.code.as_str(),
+        "--namespace",
+        refreshed_context.namespace.code.as_str(),
+        "--repo-root",
+        refreshed_context.project.repo_root.as_str(),
+        "--token-source-kind",
+        "live_continuity_startup",
+        "--json",
+    ]);
+    Ok(json!({
+        "continuity_compact_chat": {
+            "project": {
+                "code": refreshed_context.project.code,
+                "display_name": refreshed_context.project.display_name,
+                "repo_root": refreshed_context.project.repo_root,
+            },
+            "namespace": {
+                "code": refreshed_context.namespace.code,
+                "display_name": refreshed_context.namespace.display_name,
+            },
+            "client_budget_guard": compact_client_budget_guard,
+            "handoff": compact_handoff,
+            "chat_start_restore": compact_chat_start_restore,
+            "startup_execution_gate": startup_payload["startup_execution_gate"].clone(),
+            "startup_next_action": startup_payload["startup_next_action"].clone(),
+            "required_return_task": startup_payload["required_return_task"].clone(),
+            "reply_execution_gate": startup_payload["reply_execution_gate"].clone(),
+            "host_current_thread_control": compact_host_current_thread_control.clone(),
+            "operator_notice": {
+                "kind": "client_budget_compact_chat_requested",
+                "message_text": client_budget_compact_chat_notice_message(),
+                "exact_chat_command": CLIENT_BUDGET_COMPACT_CHAT_COMMAND,
+                "reply_prefix": startup_payload["reply_execution_gate"]["reply_prefix"].clone(),
+                "prompt_text": startup_payload["chat_start_restore"]["prompt_text"].clone(),
+                "prompt_file": prompt_artifact_path_string.clone(),
+                "launch_clean_chat_command": launch_clean_chat_command.clone(),
+                "launch_clean_chat_command_kind": if has_launch_clean_chat_command { json!("vscode_code_chat_cli") } else { Value::Null },
+                "host_current_thread_control": compact_host_current_thread_control.clone(),
+                "required_host_action": "open_clean_chat_surface_and_inject_prompt_text",
+                "note": "Чтобы реально уменьшить burn giant thread/context, host/client должен продолжить работу на чистом context surface и использовать prompt_text как единственный startup prompt. Closest same-thread host control surface тоже известен, но он не равен clean-surface rebase.",
+            },
+            "operator_flow": {
+                "startup_command": startup_command,
+                "fresh_surface_summary": "host/client должен открыть чистый context surface и использовать prompt_text как единственный startup prompt",
+                "prompt_file": prompt_artifact_path_string,
+                "launch_clean_chat_command": launch_clean_chat_command,
+                "launch_clean_chat_command_kind": if has_launch_clean_chat_command { json!("vscode_code_chat_cli") } else { Value::Null }
+            }
+        }
+    }))
+}
+
+pub async fn compact_chat(cfg: &AppConfig, args: &ContinuityCompactChatArgs) -> Result<()> {
+    let mut payload = compact_chat_payload(cfg, args, None).await?;
+    if args.launch_host {
+        let repo_root = payload["continuity_compact_chat"]["project"]["repo_root"]
+            .as_str()
+            .ok_or_else(|| anyhow!("compact-chat payload lost project.repo_root"))?;
+        let prompt_file = payload["continuity_compact_chat"]["operator_notice"]["prompt_file"]
+            .as_str()
+            .ok_or_else(|| anyhow!("compact-chat payload lost prompt_file"))?;
+        launch_compact_chat_via_code_chat_cli(Path::new(repo_root), Path::new(prompt_file)).await?;
+        payload["continuity_compact_chat"]["host_launch"] = json!({
+            "attempted": true,
+            "status": "requested",
+            "launch_clean_chat_command": payload["continuity_compact_chat"]["operator_notice"]["launch_clean_chat_command"].clone(),
+        });
+    }
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+    let project = &payload["continuity_compact_chat"]["project"];
+    let namespace = &payload["continuity_compact_chat"]["namespace"];
+    let notice = &payload["continuity_compact_chat"]["operator_notice"];
+    println!("Amai continuity compact-chat");
+    println!();
+    println!(
+        "Проект: {} ({})",
+        project["display_name"].as_str().unwrap_or("Amai"),
+        project["code"].as_str().unwrap_or("amai")
+    );
+    println!(
+        "Корень проекта: {}",
+        project["repo_root"].as_str().unwrap_or_default()
+    );
+    println!(
+        "Namespace continuity: {}",
+        namespace["code"].as_str().unwrap_or("continuity")
+    );
+    println!(
+        "Текущий reply prefix: {}",
+        notice["reply_prefix"].as_str().unwrap_or("5ч KPI: н/д")
+    );
+    println!("Exact chat-команда: {}", CLIENT_BUDGET_COMPACT_CHAT_COMMAND);
+    println!(
+        "Что должен сделать host/client: {}",
+        notice["required_host_action"]
+            .as_str()
+            .unwrap_or("open_clean_chat_surface_and_inject_prompt_text")
+    );
+    if let Some(summary) = notice["host_current_thread_control"]["summary"].as_str() {
+        println!("Closest same-thread host surface: {summary}");
+    }
+    if let Some(command_id) = notice["host_current_thread_control"]["command_id"].as_str() {
+        println!("Host internal command id: {command_id}");
+    }
+    if let Some(uri) = notice["host_current_thread_control"]["external_uri_launch"]["uri"].as_str()
+    {
+        println!("VS Code URI launch: {uri}");
+    }
+    if let Some(command) =
+        notice["host_current_thread_control"]["external_uri_launch"]["platform_launch_command"]
+            .as_str()
+    {
+        println!("Same-thread shell launch: {command}");
+    }
+    if let Some(prompt_file) = notice["prompt_file"].as_str() {
+        println!("Prompt artifact: {prompt_file}");
+    }
+    if let Some(command) = notice["launch_clean_chat_command"].as_str() {
+        println!("Host launch command: {command}");
+    }
+    if let Some(command) =
+        payload["continuity_compact_chat"]["operator_flow"]["startup_command"].as_str()
+    {
+        println!("Канонический startup command: {command}");
+    }
+    if args.launch_host {
+        println!("Host launch: requested via VS Code `code chat`.");
+    }
+    println!();
+    println!("Prompt-text для compact restore:");
+    println!(
+        "{}",
+        payload["continuity_compact_chat"]["chat_start_restore"]["prompt_text"]
+            .as_str()
+            .unwrap_or("CHAT_START_RESTORE ещё не materialized")
+    );
     Ok(())
 }
 
@@ -2175,6 +3221,7 @@ pub async fn rotate_chat(cfg: &AppConfig, args: &ContinuityRotateChatArgs) -> Re
         repo_root: args.repo_root.clone(),
         namespace: args.namespace.clone(),
         json: false,
+        runtime_state_json: false,
         token_source_kind: "operator_continuity_rotate_chat".to_string(),
     };
     let (context, continuity_import_missing) = match load_startup_context(&db, &startup_args).await
@@ -2468,11 +3515,46 @@ fn build_rotate_chat_details(
         .as_str()
         .filter(|value| !value.is_empty())
     {
-        lines.push(format!("Почему rotate обязателен: {note}."));
+        lines.push(format!("Почему rotate рекомендован: {note}."));
     }
     lines.push(format!("Продолжить ту же рабочую линию: {headline}."));
     lines.push(format!(
         "Ближайший обязательный следующий шаг в свежем чате: {next_step}."
+    ));
+    lines.join("\n")
+}
+
+fn build_compact_chat_details(
+    client_budget_guard: &Value,
+    headline: &str,
+    next_step: &str,
+) -> String {
+    let mut lines = Vec::new();
+    if let Some(status_label) = client_budget_guard["status_label"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("Client-budget guard: {status_label}."));
+    }
+    if let Some(last_request) = client_budget_guard["last_request"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("Последний запрос в модель: {last_request}."));
+    }
+    if let Some(client_limits) = client_budget_guard["client_limits"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!(
+            "{}: {client_limits}.",
+            client_limits_surface_label(client_budget_guard)
+        ));
+    }
+    lines.push("Запрошен compact-chat control для huge-thread rebase.".to_string());
+    lines.push(format!("Сохраняем текущую рабочую линию: {headline}."));
+    lines.push(format!(
+        "После clean-surface restore обязательный следующий шаг: {next_step}."
     ));
     lines.join("\n")
 }
@@ -2607,6 +3689,7 @@ async fn capture_handoff_payload(
 ) -> Result<Value> {
     let captured_at_epoch_ms = now_epoch_ms()?;
     let body = render_handoff_markdown(headline, next_step, details);
+    let body_sha256 = hex_sha256(body.as_bytes());
     let amai_repo_root = crate::config::discover_repo_root(None)?;
     let local_handoff_path = amai_repo_root
         .join("state")
@@ -2619,25 +3702,56 @@ async fn capture_handoff_payload(
     }
     fs::write(&local_handoff_path, &body)
         .with_context(|| format!("failed to write {}", local_handoff_path.display()))?;
-    let document = build_document_record(
-        &project,
-        &namespace,
-        &ContinuitySource {
-            original_path: PathBuf::from("Amai continuity handoff"),
-            relative_path: ".amai-continuity/live-handoff/HANDOFF.md".to_string(),
-            source_kind: "continuity_handoff".to_string(),
-            artifact_bucket: cfg.s3_bucket_artifacts.clone(),
-            artifact_kind: "continuity_handoff".to_string(),
-        },
-        &body,
-        &body,
-        json!({
-            "continuity_kind": "continuity_handoff",
-            "captured_at_epoch_ms": captured_at_epoch_ms,
-        }),
-    )?;
-    let chunks = build_chunks(cfg, &body);
-    postgres::replace_document_index(db, &document, &[], &chunks).await?;
+    let document_index_refresh_performed = continuity_handoff_document_index_refresh_due(
+        db,
+        project,
+        namespace,
+        captured_at_epoch_ms,
+    )
+    .await?;
+    if document_index_refresh_performed {
+        let document = build_document_record(
+            &project,
+            &namespace,
+            &ContinuitySource {
+                original_path: PathBuf::from("Amai continuity handoff"),
+                relative_path: ".amai-continuity/live-handoff/HANDOFF.md".to_string(),
+                source_kind: "continuity_handoff".to_string(),
+                artifact_bucket: cfg.s3_bucket_artifacts.clone(),
+                artifact_kind: "continuity_handoff".to_string(),
+            },
+            &body,
+            &body,
+            json!({
+                "continuity_kind": "continuity_handoff",
+                "captured_at_epoch_ms": captured_at_epoch_ms,
+            }),
+        )?;
+        let chunks = build_chunks(cfg, &body);
+        postgres::replace_document_index(db, &document, &[], &chunks).await?;
+        let refresh_payload = json!({
+            "continuity_handoff_document_index_refresh": {
+                "project": {
+                    "code": project.code,
+                    "display_name": project.display_name,
+                    "repo_root": project.repo_root,
+                },
+                "namespace": {
+                    "code": namespace.code,
+                    "display_name": namespace.display_name,
+                },
+                "captured_at_epoch_ms": captured_at_epoch_ms,
+                "relative_path": ".amai-continuity/live-handoff/HANDOFF.md",
+                "file_sha256": body_sha256,
+            }
+        });
+        let _ = postgres::insert_observability_snapshot(
+            db,
+            CONTINUITY_HANDOFF_DOCUMENT_INDEX_REFRESH_KIND,
+            &refresh_payload,
+        )
+        .await?;
+    }
     let payload = json!({
         "continuity_handoff": {
             "project": {
@@ -2657,6 +3771,7 @@ async fn capture_handoff_payload(
             "resolved_pending_return_headlines": resolved_headlines,
             "relative_path": ".amai-continuity/live-handoff/HANDOFF.md",
             "local_path": local_handoff_path.display().to_string(),
+            "document_index_refresh_performed": document_index_refresh_performed,
         }
     });
     let _ = postgres::insert_observability_snapshot(&db, "continuity_handoff", &payload).await?;
@@ -2673,6 +3788,46 @@ async fn capture_handoff_payload(
     )
     .await?;
     Ok(payload)
+}
+
+fn continuity_handoff_document_index_refresh_due_from_previous(
+    previous_refresh_epoch_ms: Option<u64>,
+    captured_at_epoch_ms: u64,
+) -> bool {
+    previous_refresh_epoch_ms
+        .map(|value| {
+            captured_at_epoch_ms.saturating_sub(value)
+                > CONTINUITY_HANDOFF_DOCUMENT_INDEX_REFRESH_MIN_INTERVAL_MS
+        })
+        .unwrap_or(true)
+}
+
+async fn continuity_handoff_document_index_refresh_due(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+    captured_at_epoch_ms: u64,
+) -> Result<bool> {
+    let snapshots = postgres::list_observability_snapshots_by_kind_for_scope(
+        db,
+        CONTINUITY_HANDOFF_DOCUMENT_INDEX_REFRESH_KIND,
+        CONTINUITY_HANDOFF_DOCUMENT_INDEX_REFRESH_KIND,
+        &project.code,
+        &namespace.code,
+        Some(1),
+    )
+    .await?;
+    let previous_refresh_epoch_ms = snapshots.first().map(|snapshot| {
+        continuity_snapshot_semantic_epoch_ms(
+            snapshot,
+            CONTINUITY_HANDOFF_DOCUMENT_INDEX_REFRESH_KIND,
+        )
+        .max(0) as u64
+    });
+    Ok(continuity_handoff_document_index_refresh_due_from_previous(
+        previous_refresh_epoch_ms,
+        captured_at_epoch_ms,
+    ))
 }
 
 fn build_continuity_answer_payload(
@@ -2877,6 +4032,8 @@ fn build_continuity_restore_payload(
         .as_str()
         .and_then(normalize_next_step_value)
         .unwrap_or_else(|| "ещё нет данных".to_string());
+    let compact_start_headline = compact_prompt_fragment(start_headline, 64);
+    let compact_start_next_step = compact_prompt_fragment(&start_next_step, 80);
     let current_goal = working_state_node["current_goal"]
         .as_str()
         .unwrap_or_default();
@@ -2893,8 +4050,8 @@ fn build_continuity_restore_payload(
             json!({
                 "expected_present": !prompt_text.is_empty()
                     && prompt_text.contains("CHAT_START_RESTORE")
-                    && prompt_text.contains(start_headline)
-                    && prompt_text.contains(&start_next_step),
+                    && prompt_text.contains(&compact_start_headline)
+                    && prompt_text.contains(&compact_start_next_step),
                 "unexpected_present": false,
                 "headline": start_headline,
                 "next_step": start_next_step,
@@ -3753,6 +4910,86 @@ fn resolve_answer_intent(
     intent
 }
 
+async fn continuity_namespace_fallback(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+) -> Result<Option<NamespaceRecord>> {
+    if namespace.code == "continuity" {
+        return Ok(None);
+    }
+    postgres::find_namespace_by_code(db, project.project_id, "continuity").await
+}
+
+fn continuity_with_source_metadata(
+    continuity: Value,
+    mode: &str,
+    source_namespace_code: &str,
+) -> Value {
+    let mut continuity = continuity;
+    if let Some(node) = continuity.as_object_mut() {
+        node.insert(
+            "continuity_source_mode".to_string(),
+            Value::String(mode.to_string()),
+        );
+        node.insert(
+            "continuity_source_namespace_code".to_string(),
+            Value::String(source_namespace_code.to_string()),
+        );
+    }
+    continuity
+}
+
+fn synthetic_continuity_from_runtime(
+    namespace: &NamespaceRecord,
+    handoff_summary: Option<&Value>,
+    restore: Option<&Value>,
+) -> Value {
+    let restore_node = restore.and_then(|value| value.get("working_state_restore"));
+    let headline = handoff_summary
+        .and_then(|value| value["headline"].as_str())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            restore_node
+                .and_then(|value| value["current_goal"].as_str())
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or("ещё нет данных");
+    let next_step = handoff_summary
+        .and_then(|value| value["next_step"].as_str())
+        .and_then(normalize_next_step_value)
+        .or_else(|| {
+            restore_node
+                .and_then(|value| value["next_step"].as_str())
+                .and_then(normalize_next_step_value)
+        })
+        .unwrap_or_else(|| "ещё нет данных".to_string());
+    continuity_with_source_metadata(
+        json!({
+            "imported_at_epoch_ms": Value::Null,
+            "documents_imported": 0,
+            "rendered_transcript_files": 0,
+            "session_memory_files": 0,
+            "bootstrap_summary": {
+                "bootstrap_file": Value::Null,
+                "details": {
+                    "thread_count": 0,
+                    "latest_rendered_transcript": Value::Null
+                }
+            },
+            "active_workline_summary": {
+                "active_workline_file": Value::Null,
+                "details": {
+                    "headline": headline,
+                    "next_step": next_step
+                }
+            }
+        }),
+        "working_state_fallback",
+        &namespace.code,
+    )
+}
+
 async fn load_startup_context(
     db: &Client,
     args: &ContinuityStartupArgs,
@@ -3761,28 +4998,75 @@ async fn load_startup_context(
     let namespace = postgres::find_namespace_by_code(db, project.project_id, &args.namespace)
         .await?
         .ok_or_else(|| anyhow!("continuity namespace not found: {}", args.namespace))?;
-    let snapshots =
-        postgres::list_observability_snapshots_by_kinds(db, &["continuity_import"], Some(50))
-            .await?;
-    let latest = latest_scoped_snapshot(
-        &snapshots,
-        "continuity_import",
-        &project.code,
-        &namespace.code,
-        |_| true,
-    )
-    .ok_or_else(|| {
-        anyhow!(
-            "no continuity import found for {}::{}",
+    let requested_restore = working_state::build_restore_bundle(db, &project, &namespace).await?;
+    let requested_handoff = latest_handoff_summary(db, &project, &namespace).await?;
+    let fallback_namespace = continuity_namespace_fallback(db, &project, &namespace).await?;
+    let fallback_restore = if requested_restore.is_none() {
+        if let Some(fallback_namespace) = fallback_namespace.as_ref() {
+            working_state::build_restore_bundle(db, &project, fallback_namespace).await?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let fallback_handoff = if requested_handoff.is_none() {
+        if let Some(fallback_namespace) = fallback_namespace.as_ref() {
+            latest_handoff_summary(db, &project, fallback_namespace).await?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let continuity = if let Some(snapshot) =
+        latest_continuity_import_snapshot(db, &project, &namespace).await?
+    {
+        continuity_with_source_metadata(
+            snapshot.payload["continuity_import"].clone(),
+            "scoped_import",
+            &namespace.code,
+        )
+    } else if let Some(fallback_namespace) = fallback_namespace.as_ref() {
+        if let Some(snapshot) =
+            latest_continuity_import_snapshot(db, &project, fallback_namespace).await?
+        {
+            continuity_with_source_metadata(
+                snapshot.payload["continuity_import"].clone(),
+                "continuity_namespace_fallback_import",
+                &fallback_namespace.code,
+            )
+        } else {
+            synthetic_continuity_from_runtime(
+                &namespace,
+                requested_handoff.as_ref().or(fallback_handoff.as_ref()),
+                requested_restore.as_ref().or(fallback_restore.as_ref()),
+            )
+        }
+    } else {
+        synthetic_continuity_from_runtime(
+            &namespace,
+            requested_handoff.as_ref(),
+            requested_restore.as_ref(),
+        )
+    };
+    let handoff_summary = requested_handoff
+        .or(fallback_handoff)
+        .unwrap_or_else(|| continuity["active_workline_summary"]["details"].clone());
+    let restore = requested_restore.or(fallback_restore);
+    if continuity["continuity_source_mode"].as_str() == Some("working_state_fallback")
+        && handoff_summary["headline"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .is_none()
+        && restore.is_none()
+    {
+        return Err(anyhow!(
+            "no continuity import found for {}::{} and no working-state/handoff fallback available",
             project.code,
             namespace.code
-        )
-    })?;
-    let continuity = latest.payload["continuity_import"].clone();
-    let handoff_summary = latest_handoff_summary(db, &project, &namespace)
-        .await?
-        .unwrap_or_else(|| continuity["active_workline_summary"]["details"].clone());
-    let restore = working_state::build_restore_bundle(db, &project, &namespace).await?;
+        ));
+    }
     Ok(ContinuityStartupContext {
         project,
         namespace,
@@ -4634,9 +5918,15 @@ async fn latest_handoff_summary(
     project: &ProjectRecord,
     namespace: &NamespaceRecord,
 ) -> Result<Option<Value>> {
-    let snapshots =
-        postgres::list_observability_snapshots_by_kinds(db, &["continuity_handoff"], Some(50))
-            .await?;
+    let snapshots = postgres::list_observability_snapshots_by_kind_for_scope(
+        db,
+        "continuity_handoff",
+        "continuity_handoff",
+        &project.code,
+        &namespace.code,
+        Some(200),
+    )
+    .await?;
     Ok(latest_scoped_snapshot(
         &snapshots,
         "continuity_handoff",
@@ -4663,6 +5953,30 @@ async fn latest_handoff_summary(
                 .unwrap_or_default(),
         })
     }))
+}
+
+async fn latest_continuity_import_snapshot(
+    db: &Client,
+    project: &ProjectRecord,
+    namespace: &NamespaceRecord,
+) -> Result<Option<postgres::ObservabilitySnapshotRecord>> {
+    let snapshots = postgres::list_observability_snapshots_by_kind_for_scope(
+        db,
+        "continuity_import",
+        "continuity_import",
+        &project.code,
+        &namespace.code,
+        Some(200),
+    )
+    .await?;
+    Ok(latest_scoped_snapshot(
+        &snapshots,
+        "continuity_import",
+        &project.code,
+        &namespace.code,
+        |_| true,
+    )
+    .cloned())
 }
 
 fn latest_scoped_snapshot<'a, F>(
@@ -4838,11 +6152,12 @@ async fn resolve_project(db: &Client, args: &ContinuityStartupArgs) -> Result<Pr
         }
         return Ok(record);
     }
-    let repo_root = args
-        .repo_root
-        .as_ref()
-        .ok_or_else(|| anyhow!("continuity startup requires --project or --repo-root"))?;
-    let repo_root = canonical_string(repo_root)?;
+    let repo_root = match args.repo_root.as_ref() {
+        Some(repo_root) => repo_root.clone(),
+        None => crate::config::discover_repo_root(None)
+            .map_err(|_| anyhow!("continuity startup requires --project or --repo-root"))?,
+    };
+    let repo_root = canonical_string(&repo_root)?;
     postgres::get_project_by_repo_root(db, &repo_root).await
 }
 
@@ -5076,6 +6391,13 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+fn shell_join_command(args: &[&str]) -> String {
+    args.iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -5084,13 +6406,15 @@ mod tests {
         build_continuity_answer_payload, build_continuity_canonical_eval,
         build_continuity_restore_payload, build_continuity_startup_payload,
         build_startup_runtime_state_artifact, build_startup_runtime_state_cli_json,
-        client_budget_guard_blocks_reply, continuity_answer_requires_live_reply_gate,
+        build_vscode_code_chat_launch_command_with_binary, client_budget_guard_blocks_reply,
+        compact_chat_prompt_artifact_path, continuity_answer_requires_live_reply_gate,
         continuity_replay_guard_probes, continuity_snapshot_semantic_epoch_ms,
         continuity_temporal_lookup_probes, degradation_proof_scenarios, enrich_thread_index_file,
         extract_next_step_from_text, fake_continuity_handoff_snapshot,
         fake_continuity_import_snapshot, inspect_startup_runtime_state, is_meta_continuity_handoff,
         latest_scoped_snapshot, parse_chat_reference_spec, render_direct_answer,
         resolve_answer_intent, startup_runtime_state_artifact_path,
+        write_compact_chat_prompt_artifact,
     };
     use crate::cli::ContinuityThreadIndexEnrichArgs;
     use crate::codex_threads::{ChatTail, ThreadTimeSliceSummary, TranscriptMessage};
@@ -5099,6 +6423,35 @@ mod tests {
     use serde_json::{Value, json};
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn compact_chat_launch_command_uses_code_chat_cli_and_prompt_artifact() {
+        let repo_root = Path::new("/home/art/agent-memory-index");
+        let prompt_path = compact_chat_prompt_artifact_path(repo_root);
+        let command =
+            build_vscode_code_chat_launch_command_with_binary("code", repo_root, &prompt_path);
+        assert!(command.contains("code chat --mode agent --reuse-window - <"));
+        assert!(command.contains("/home/art/agent-memory-index"));
+        assert!(command.contains(".amai/continuity/compact-chat-prompt.txt"));
+    }
+
+    #[test]
+    fn write_compact_chat_prompt_artifact_persists_prompt_text() {
+        let unique = format!(
+            "amai-compact-chat-prompt-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("epoch")
+                .as_nanos()
+        );
+        let repo_root = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&repo_root).expect("repo root");
+        let prompt_text = "CHAT_START_RESTORE\nЛиния: test";
+        let prompt_path =
+            write_compact_chat_prompt_artifact(repo_root.as_path(), prompt_text).expect("write");
+        assert_eq!(fs::read_to_string(&prompt_path).expect("read"), prompt_text);
+        fs::remove_dir_all(&repo_root).expect("cleanup temp repo");
+    }
 
     #[test]
     fn render_direct_answer_prefers_concise_restore_bundle() {
@@ -5360,6 +6713,37 @@ mod tests {
     }
 
     #[test]
+    fn continuity_handoff_document_index_refresh_due_without_previous_refresh() {
+        assert!(super::continuity_handoff_document_index_refresh_due_from_previous(
+            None, 10_000
+        ));
+    }
+
+    #[test]
+    fn continuity_handoff_document_index_refresh_due_blocks_recent_refresh() {
+        let previous_refresh_epoch_ms = 10_000;
+        let still_recent_epoch_ms = previous_refresh_epoch_ms
+            + super::CONTINUITY_HANDOFF_DOCUMENT_INDEX_REFRESH_MIN_INTERVAL_MS
+            - 1;
+        assert!(!super::continuity_handoff_document_index_refresh_due_from_previous(
+            Some(previous_refresh_epoch_ms),
+            still_recent_epoch_ms
+        ));
+    }
+
+    #[test]
+    fn continuity_handoff_document_index_refresh_due_allows_refresh_after_interval() {
+        let previous_refresh_epoch_ms = 10_000;
+        let due_epoch_ms = previous_refresh_epoch_ms
+            + super::CONTINUITY_HANDOFF_DOCUMENT_INDEX_REFRESH_MIN_INTERVAL_MS
+            + 1;
+        assert!(super::continuity_handoff_document_index_refresh_due_from_previous(
+            Some(previous_refresh_epoch_ms),
+            due_epoch_ms
+        ));
+    }
+
+    #[test]
     fn continuity_replay_guard_probes_are_recovered_useful() {
         let probes = continuity_replay_guard_probes().expect("probes");
         assert_eq!(probes.len(), 2);
@@ -5577,7 +6961,7 @@ mod tests {
             "should_rotate_chat_now": false,
             "should_rotate_chat_soon": true,
             "reply_execution_gate": {
-                "action_kind": "continue_current_chat",
+                "action_kind": "rotate_chat_for_client_budget",
                 "must_rotate_before_reply": false,
                 "blocking": false
             }
@@ -5636,7 +7020,7 @@ mod tests {
                 "must_rotate_before_reply": true,
                 "blocking_reply_contract": {
                     "response_kind": "rotate_chat_only",
-                    "template": working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE
+                    "template": working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE
                 }
             }
         });
@@ -5655,7 +7039,7 @@ mod tests {
             2,
             false,
             1,
-            working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE,
+            working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE,
             &client_budget_guard,
             "live_continuity_startup",
         )
@@ -5701,13 +7085,13 @@ mod tests {
             }
         });
         let handoff = json!({
-            "headline": "Temporal lookup materialized",
-            "next_step": "Проверить lookup по точному времени на реальном новом чате."
+            "headline": "Temporal lookup materialized for the continuity restore compact prompt contour with enough detail to exceed the prompt headline limit",
+            "next_step": "Проверить lookup по точному времени на реальном новом чате и убедиться, что compact prompt сохраняет рабочую линию даже после обрезки длинного следующего шага."
         });
         let restore = json!({
             "working_state_restore": {
-                "current_goal": "Temporal lookup materialized",
-                "next_step": "Проверить lookup по точному времени на реальном новом чате.",
+                "current_goal": "Temporal lookup materialized for the continuity restore compact prompt contour with enough detail to exceed the prompt headline limit",
+                "next_step": "Проверить lookup по точному времени на реальном новом чате и убедиться, что compact prompt сохраняет рабочую линию даже после обрезки длинного следующего шага.",
                 "restore_confidence": "high",
                 "state_lineage": {
                     "authoritative_event_id": "event-1"
@@ -5790,13 +7174,13 @@ mod tests {
             }
         });
         let handoff = json!({
-            "headline": "Temporal lookup materialized",
-            "next_step": "Проверить lookup по точному времени на реальном новом чате."
+            "headline": "Temporal lookup materialized for the startup compact prompt contour with enough detail to exceed the prompt headline limit",
+            "next_step": "Проверить lookup по точному времени на реальном новом чате и убедиться, что compact prompt сохраняет рабочую линию даже после обрезки длинного следующего шага."
         });
         let restore = json!({
             "working_state_restore": {
-                "current_goal": "Temporal lookup materialized",
-                "next_step": "Проверить lookup по точному времени на реальном новом чате.",
+                "current_goal": "Temporal lookup materialized for the startup compact prompt contour with enough detail to exceed the prompt headline limit",
+                "next_step": "Проверить lookup по точному времени на реальном новом чате и убедиться, что compact prompt сохраняет рабочую линию даже после обрезки длинного следующего шага.",
                 "restore_confidence": "high",
                 "state_lineage": {
                     "authoritative_event_id": "event-1"
@@ -6281,6 +7665,140 @@ mod tests {
     }
 
     #[test]
+    fn compact_continuity_startup_public_payload_compacts_heavy_restore_surfaces() {
+        let payload = json!({
+            "continuity_startup": {
+                "project": {"code": "amai"},
+                "namespace": {"code": "continuity"}
+            },
+            "chat_start_restore": {
+                "prompt_text": "CHAT_START_RESTORE"
+            },
+            "working_state_restore": {
+                "project": {"code": "amai"},
+                "namespace": {"code": "continuity"},
+                "current_goal": "Lower client burn",
+                "next_step": "Compact recurring startup payloads",
+                "restore_confidence": "high",
+                "state_lineage": {
+                    "authoritative_event_id": "event-1",
+                    "authoritative_event_kind": "working_state_restore",
+                    "nodes": [{"id": "n1"}],
+                    "edges": [{"from": "n1", "to": "n2"}]
+                },
+                "client_budget_guard": {
+                    "status_label": "новый чат нужен сейчас",
+                    "client_budget_target_percent": 90,
+                    "reply_execution_gate": {
+                        "gate_version": "client-reply-budget-gate-v1",
+                        "action_kind": "rotate_chat_for_client_budget",
+                        "blocking": false,
+                        "must_rotate_before_reply": false,
+                        "must_wait_for_budget_recovery_before_reply": false,
+                        "reply_budget_mode": "compact_high_signal",
+                        "reply_prefix": "5ч KPI: переплата 12.34%"
+                    }
+                },
+                "execctl_resume_contract": {
+                    "contract_version": "execctl-resume-contract-v1",
+                    "resume_state": "return_required",
+                    "no_silent_drop": true,
+                    "pending_return_count": 2,
+                    "required_return_task": {
+                        "headline": "Pending task",
+                        "next_step": "Finish the compact startup path",
+                        "resume_state": "pending_return",
+                        "task_id": "task-1",
+                        "task_role": "pending_return",
+                        "task_state": "suspended"
+                    },
+                    "active_task": {
+                        "headline": "Current line",
+                        "next_step": "Keep lowering burn",
+                        "resume_state": "active",
+                        "task_id": "task-0",
+                        "task_role": "active",
+                        "task_state": "active"
+                    }
+                },
+                "execctl_active_lease": {
+                    "lease_version": "execctl-lease-v1",
+                    "lease_owner_state": "previous_session_owner",
+                    "lease_state": "active",
+                    "headline": "Current line",
+                    "next_step": "Keep lowering burn",
+                    "storage_lane": "ami.execctl_task_leases",
+                    "owner_thread_id": "thread-1"
+                },
+                "startup_next_action": {
+                    "action_version": "startup-next-action-v1",
+                    "action_kind": "resume_required_return_task",
+                    "blocking": true,
+                    "reason": "resume_required_return_task",
+                    "resume_state": "return_required",
+                    "no_silent_drop": true,
+                    "headline": "Pending task",
+                    "next_step": "Finish the compact startup path"
+                },
+                "project_task_tree": {
+                    "open_tasks_count": 2,
+                    "pending_return_count": 1,
+                    "nodes": [
+                        {"task_id": "task-0"},
+                        {"task_id": "task-1"}
+                    ],
+                    "edges": [
+                        {"from_task_id": "root", "to_task_id": "task-0"}
+                    ]
+                },
+                "project_task_ledger": {
+                    "open_tasks_count": 2,
+                    "historical_handoffs_count": 4,
+                    "entries": [
+                        {"task_role": "active", "headline": "Current line"},
+                        {"task_role": "pending_return", "headline": "Pending task"}
+                    ]
+                },
+                "pending_return_queue": [
+                    {
+                        "headline": "Pending task",
+                        "next_step": "Finish the compact startup path",
+                        "resume_state": "pending_return",
+                        "queued_reason": "interrupted_by_new_handoff",
+                        "authoritative_event_id": "event-1",
+                        "authoritative_local_path": "/tmp/handoff.md"
+                    }
+                ]
+            },
+            "retrieval_science": {"suite_key": "continuity_startup"},
+            "degradation_policy": {"status": "ok"}
+        });
+
+        let compact = super::compact_continuity_startup_public_payload(&payload);
+        let restore = &compact["working_state_restore"];
+
+        assert_eq!(
+            restore["state_lineage"]["authoritative_event_id"],
+            json!("event-1")
+        );
+        assert_eq!(restore["project_task_ledger"]["summary_only"], json!(true));
+        assert_eq!(restore["project_task_ledger"]["entries_count"], json!(2));
+        assert!(restore["project_task_ledger"]["entries"].is_null());
+        assert_eq!(
+            restore["project_task_ledger"]["full_shape_preserved_in_source_working_state_restore"],
+            json!(true)
+        );
+        assert_eq!(restore["pending_return_queue"]["entries_count"], json!(1));
+        assert_eq!(
+            restore["pending_return_queue"]["preview"][0]["headline"],
+            json!("Pending task")
+        );
+        assert!(
+            restore["pending_return_queue"]["preview"][0]["authoritative_local_path"].is_null()
+        );
+    }
+
+    #[test]
     fn compact_prompt_fragment_truncates_long_text() {
         let value = "Rolling-window token card now isolates historical startup drag from fresh profitable startup";
         let compact = super::compact_prompt_fragment(value, 36);
@@ -6431,9 +7949,11 @@ mod tests {
             "working_state_restore": {
                 "client_budget_guard": {
                     "status_label": "новый чат нужен сейчас",
+                    "reply_prefix": "5ч KPI: переплата 2.46%",
                     "reply_execution_gate": {
                         "gate_version": "client-reply-budget-gate-v1",
                         "must_rotate_before_reply": true,
+                        "reply_prefix": "5ч KPI: переплата 2.46%",
                         "blocking_reply_contract": {
                             "contract_version": "client-budget-blocked-reply-v1",
                             "response_kind": "rotate_chat_only",
@@ -6498,11 +8018,50 @@ mod tests {
             json!("Close same-meter live gap.")
         );
         assert_eq!(
+            artifact["execctl_resume_state"],
+            json!("pending_return_queue_present")
+        );
+        assert_eq!(
+            artifact["execctl_resume_contract_summary"],
+            artifact["continuity_startup_summary"]["execctl_resume_contract_summary"]
+        );
+        assert_eq!(
+            artifact["execctl_resume_obligation"]["resume_state"],
+            json!("pending_return_queue_present")
+        );
+        assert_eq!(
+            artifact["startup_next_action"]["action_kind"],
+            json!("resume_required_return_task")
+        );
+        assert_eq!(
+            artifact["execctl_active_lease"]["lease_owner_state"],
+            json!("previous_session_owner")
+        );
+        assert_eq!(
+            artifact["execctl_active_lease"]["headline"],
+            json!("Current active line")
+        );
+        assert!(artifact["execctl_active_lease"]["lease_id"].is_null());
+        assert!(artifact["execctl_active_lease"]["owner_session_id"].is_null());
+        assert_eq!(
+            artifact["execctl_active_lease"],
+            artifact["continuity_startup_summary"]["execctl_active_lease"]
+        );
+        assert_eq!(
+            artifact["required_return_task"]["headline"],
+            json!("Pending line")
+        );
+        assert_eq!(
             artifact["client_budget_guard"]["status_label"],
             json!("новый чат нужен сейчас")
         );
-        assert!(artifact["client_budget_guard"]["last_request"].is_null());
-        assert!(artifact["client_budget_guard"]["client_limits"].is_null());
+        assert!(artifact["client_budget_guard"]["reply_prefix"].is_null());
+        assert!(artifact["client_budget_guard"]["observed_at_epoch_ms"].is_null());
+        assert!(artifact["client_budget_guard"]["max_guard_age_seconds"].is_null());
+        assert_eq!(
+            artifact["client_budget_guard"]["reply_execution_gate"]["reply_prefix"],
+            json!("5ч KPI: переплата 2.46%")
+        );
         assert_eq!(
             artifact["reply_execution_gate"]["gate_version"],
             json!("client-reply-budget-gate-v1")
@@ -6510,6 +8069,10 @@ mod tests {
         assert_eq!(
             artifact["reply_execution_gate"]["must_rotate_before_reply"],
             json!(true)
+        );
+        assert_eq!(
+            artifact["reply_execution_gate"]["reply_prefix"],
+            json!("5ч KPI: переплата 2.46%")
         );
         assert!(artifact["reply_execution_gate"]["action_bundle"].is_null());
         assert_eq!(
@@ -6528,6 +8091,14 @@ mod tests {
         assert_eq!(
             artifact["continuity_startup_summary"]["startup_execution_gate"]["gate_version"],
             json!("startup-execution-gate-v1")
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["startup_execution_gate"]["must_follow_startup_next_action"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["startup_execution_gate"]["unrelated_work_allowed"],
+            json!(false)
         );
         assert_eq!(
             artifact["continuity_startup_summary"]["startup_execution_gate"]["required_return_task_present"],
@@ -6555,6 +8126,18 @@ mod tests {
         assert_eq!(
             artifact["continuity_startup_summary"]["execctl_resume_obligation"]["pending_return_count"],
             json!(0)
+        );
+        assert_eq!(
+            artifact["startup_next_action"],
+            artifact["continuity_startup_summary"]["startup_next_action"]
+        );
+        assert_eq!(
+            artifact["execctl_active_lease"],
+            artifact["continuity_startup_summary"]["execctl_active_lease"]
+        );
+        assert_eq!(
+            artifact["required_return_task"],
+            artifact["continuity_startup_summary"]["required_return_task"]
         );
         assert!(artifact["continuity_startup_summary"]["execctl_resume_obligation"]["active_task_headline"].is_null());
         assert_eq!(
@@ -6652,20 +8235,123 @@ mod tests {
         assert!(artifact["working_state_restore_lineage"]["session_id"].is_null());
         assert!(artifact["working_state_restore_lineage"]["nodes_total"].is_null());
         assert!(artifact["working_state_restore_lineage"]["edges_total"].is_null());
-        assert!(
-            artifact["working_state_restore_lineage"]["supporting_event_count"].is_null()
-        );
-        assert!(
-            artifact["working_state_restore_lineage"]["authoritative_headline"].is_null()
-        );
+        assert!(artifact["working_state_restore_lineage"]["supporting_event_count"].is_null());
+        assert!(artifact["working_state_restore_lineage"]["authoritative_headline"].is_null());
         assert!(artifact["working_state_restore_lineage"]["nodes"].is_null());
         assert!(artifact["working_state_restore_lineage"]["edges"].is_null());
         assert!(artifact["working_state_restore_lineage"]["supporting_event_ids"].is_null());
-        assert!(
-            artifact["continuity_startup_summary"]["included_reasons_summary"].is_null()
+        assert!(artifact["continuity_startup_summary"]["included_reasons_summary"].is_null());
+        assert!(artifact["continuity_startup_summary"]["excluded_reasons_summary"].is_null());
+    }
+
+    #[test]
+    fn startup_runtime_artifact_keeps_blocking_rotate_gate_consistent_in_summary_and_top_level() {
+        let payload = json!({
+            "chat_start_restore": {
+                "headline": "Rotate policy now blocks large weak exact-pair turns when 5h saving is below target",
+                "next_step": "Open a fresh chat via continuity startup.",
+                "restore_confidence": "high",
+                "thread_count": 1,
+                "prompt_text": "CHAT_START_RESTORE\nRotate now",
+                "execctl_resume_state": "pending_return_queue_present",
+                "execctl_resume_contract_summary": "return_required(1): keep the >90% 5h KPI line honest",
+                "execctl_resume_obligation": {
+                    "resume_state": "pending_return_queue_present",
+                    "no_silent_drop": true,
+                    "pending_return_count": 1
+                },
+                "startup_next_action": {
+                    "action_kind": "rotate_chat_for_client_budget",
+                    "blocking": true,
+                    "reason": "client_budget_guard_pressure",
+                    "resume_state": "return_required",
+                    "no_silent_drop": true,
+                    "headline": "Клиентский лимит: новый чат нужен сейчас",
+                    "next_step": "сохрани handoff и продолжай только в свежем чате через continuity startup"
+                },
+                "execctl_active_lease": {
+                    "lease_owner_state": "same_session_owner",
+                    "storage_lane": "ami.execctl_task_leases"
+                },
+                "required_return_task": {
+                    "headline": "MCP context pack now replaces verified legacy tool-overhead with truthful structured-content tokens",
+                    "next_step": "Continue the >90% 5h KPI line from a clean thread."
+                },
+                "project_task_tree": {
+                    "open_tasks_count": 1
+                },
+                "project_task_ledger": {
+                    "open_tasks_count": 1
+                }
+            },
+            "working_state_restore": {
+                "client_budget_guard": {
+                    "status_label": "новый чат нужен сейчас",
+                    "reply_prefix": "5ч KPI: экономия 19.20%",
+                    "reply_execution_gate": {
+                        "gate_version": "client-reply-budget-gate-v1",
+                        "must_rotate_before_reply": true,
+                        "reply_prefix": "5ч KPI: экономия 19.20%",
+                        "blocking_reply_contract": {
+                            "contract_version": "client-budget-blocked-reply-v1",
+                            "response_kind": "rotate_chat_only",
+                            "template": "Этот чат жжёт внешний лимит клиента: сохрани handoff, открой новый чат и запусти continuity startup."
+                        }
+                    }
+                },
+                "state_lineage": {
+                    "authoritative_event_id": "evt_rotate",
+                    "session_id": "sess_rotate"
+                }
+            }
+        });
+
+        let artifact =
+            build_startup_runtime_state_artifact(Path::new("/tmp/amai-art"), &payload, 77)
+                .expect("startup runtime state artifact");
+
+        assert_eq!(
+            artifact["startup_execution_gate"]["action_kind"],
+            json!("rotate_chat_for_client_budget")
         );
-        assert!(
-            artifact["continuity_startup_summary"]["excluded_reasons_summary"].is_null()
+        assert_eq!(artifact["startup_execution_gate"]["blocking"], json!(true));
+        assert_eq!(
+            artifact["startup_execution_gate"]["must_follow_startup_next_action"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["startup_execution_gate"]["unrelated_work_allowed"],
+            json!(false)
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["startup_execution_gate"]["action_kind"],
+            json!("rotate_chat_for_client_budget")
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["startup_execution_gate"]["blocking"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["startup_execution_gate"]["must_follow_startup_next_action"],
+            json!(true)
+        );
+        assert_eq!(
+            artifact["continuity_startup_summary"]["startup_execution_gate"]["unrelated_work_allowed"],
+            json!(false)
+        );
+        assert_eq!(
+            artifact["startup_next_action"]["action_kind"],
+            json!("rotate_chat_for_client_budget")
+        );
+        assert_eq!(
+            artifact["execctl_resume_state"],
+            json!("pending_return_queue_present")
+        );
+        assert_eq!(
+            artifact["required_return_task"]["headline"],
+            json!(
+                "MCP context pack now replaces verified legacy tool-overhead with truthful structured-content tokens"
+            )
         );
     }
 
@@ -6760,10 +8446,24 @@ mod tests {
         );
         assert_eq!(bundle["ready_for_automation"], json!(true));
         assert_eq!(bundle["preserves_return_obligation"], json!(true));
+        assert_eq!(
+            bundle["host_current_thread_control"]["command_id"],
+            json!("thread-overlay-open-current")
+        );
         assert!(bundle["capture_continuity_handoff"].is_null());
         assert!(bundle["open_fresh_chat"].is_null());
         assert!(bundle["run_continuity_startup"].is_null());
         assert!(bundle["order"].is_null());
+        assert!(
+            bundle["operator_flow"]["primary_command_kind"]
+                .as_str()
+                .is_some_and(|value| value == "rotate_helper_command")
+        );
+        assert!(
+            bundle["operator_flow"]["primary_command"]
+                .as_str()
+                .is_some_and(|value| value.contains("continuity rotate-chat"))
+        );
         assert!(
             bundle["operator_flow"]["rotate_helper_command"]
                 .as_str()
@@ -6861,7 +8561,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_state_cli_json_surfaces_raw_artifact_fields_at_top_level() {
+    fn startup_state_cli_json_embeds_runtime_state_without_top_level_artifact_duplication() {
         let audit = StartupRuntimeStateAudit {
             status: "ok".to_string(),
             output_path: PathBuf::from("/tmp/project-chat-startup-state.json"),
@@ -6897,13 +8597,15 @@ mod tests {
                 "status_label": "новый чат нужен сейчас"
             },
             "reply_execution_gate": {
-                "gate_version": "client-reply-budget-gate-v1"
+                "gate_version": "client-reply-budget-gate-v1",
+                "action_kind": "rotate_chat_for_client_budget"
             },
             "blocking_reply_contract": {
                 "response_kind": "rotate_chat_only"
             },
             "startup_execution_gate": {
-                "gate_version": "startup-execution-gate-v1"
+                "gate_version": "startup-execution-gate-v1",
+                "action_kind": "rotate_chat_for_client_budget"
             },
             "continuity_startup_summary": {
                 "startup_next_action": {
@@ -6924,34 +8626,35 @@ mod tests {
 
         let payload = build_startup_runtime_state_cli_json(&audit, Some(&artifact));
 
+        assert!(payload["client_budget_guard"].is_null());
         assert_eq!(
-            payload["client_budget_guard"]["status_label"],
+            payload["startup_runtime_state"]["client_budget_guard"]["status_label"],
             json!("новый чат нужен сейчас")
         );
         assert_eq!(
-            payload["reply_execution_gate"]["gate_version"],
-            json!("client-reply-budget-gate-v1")
+            payload["startup_runtime_state"]["reply_execution_gate"]["action_kind"],
+            json!("rotate_chat_for_client_budget")
         );
         assert_eq!(
-            payload["blocking_reply_contract"]["response_kind"],
+            payload["startup_runtime_state"]["blocking_reply_contract"]["response_kind"],
             json!("rotate_chat_only")
         );
         assert_eq!(
-            payload["startup_execution_gate"]["gate_version"],
-            json!("startup-execution-gate-v1")
-        );
-        assert_eq!(
-            payload["startup_runtime_state"]["startup_execution_gate"]["gate_version"],
-            json!("startup-execution-gate-v1")
+            payload["startup_runtime_state"]["startup_execution_gate"]["action_kind"],
+            json!("rotate_chat_for_client_budget")
         );
         assert_eq!(
             payload["startup_runtime_state_audit"]["action_kind"],
             json!("rotate_chat_for_client_budget")
         );
+        assert_eq!(
+            payload["startup_runtime_state_audit"]["status"],
+            json!("ok")
+        );
     }
 
     #[test]
-    fn default_startup_next_action_prioritizes_rotate_and_preserves_return_obligation() {
+    fn default_startup_next_action_keeps_rotate_now_warning_as_resume_obligation() {
         let project = ProjectRecord {
             project_id: uuid::Uuid::new_v4(),
             code: "art".to_string(),
@@ -6988,17 +8691,11 @@ mod tests {
             Some(&client_budget_guard),
         );
 
-        assert_eq!(
-            action["action_kind"],
-            json!("rotate_chat_for_client_budget")
-        );
+        assert_eq!(action["action_kind"], json!("resume_required_return_task"));
         assert_eq!(action["blocking"], json!(true));
         assert_eq!(action["resume_state"], json!("return_required"));
-        assert_eq!(action["preserves_return_obligation"], json!(true));
-        assert_eq!(
-            action["action_bundle"]["preserves_return_obligation"],
-            json!(true)
-        );
+        assert!(action["preserves_return_obligation"].is_null());
+        assert!(action["action_bundle"].is_null());
     }
 
     #[test]
@@ -7029,7 +8726,7 @@ mod tests {
             "status_label": "новый чат рекомендован",
             "note": "soft rotate recommendation only",
             "reply_execution_gate": {
-                "action_kind": "continue_current_chat",
+                "action_kind": "rotate_chat_for_client_budget",
                 "blocking": false,
                 "must_rotate_before_reply": false
             }
@@ -7097,6 +8794,71 @@ mod tests {
         assert_eq!(
             action["action_bundle"]["bundle_version"],
             json!("wait-client-budget-action-bundle-v1")
+        );
+    }
+
+    #[test]
+    fn compact_startup_runtime_action_bundle_trims_exhausted_same_thread_surface() {
+        let bundle = json!({
+            "bundle_version": "rotate-chat-action-bundle-v1",
+            "ready_for_automation": true,
+            "preserves_return_obligation": true,
+            "host_current_thread_control": {
+                "available": false,
+                "automation_ready": false,
+                "button_label": "Open compact window",
+                "command_id": "hotkey-window-open-current",
+                "control_kind": "hotkey_window_open_current",
+                "thread_id": "thread-current",
+                "host_context_compaction_stage": "preserve",
+                "feedback_pending": false,
+                "measurement_pending": false,
+                "retry_allowed": false,
+                "retry_blocked_reason": "rotate fallback already primary",
+                "effect_verdict": "full_scale_client_burn_worsened_rotate_fallback_recommended",
+                "effect_summary": "Long prose that should not survive compact startup runtime output.",
+                "selection_reason": "protect_recent_host_compaction_gain",
+                "availability_state": "exhausted_after_verified_failure",
+                "surface_exhausted_after_verified_failure": true,
+                "alternate_controls": [
+                    {
+                        "button_label": "Open thread overlay",
+                        "command_id": "thread-overlay-open-current",
+                        "control_kind": "thread_overlay_open_current"
+                    }
+                ]
+            },
+            "operator_flow": {
+                "primary_command_kind": "rotate_helper_command",
+                "primary_command": "'amai' 'continuity' 'rotate-chat'",
+                "rotate_helper_command": "'amai' 'continuity' 'rotate-chat'",
+                "startup_command": "'amai' 'continuity' 'startup'"
+            }
+        });
+
+        let compact = super::compact_startup_runtime_startup_action_bundle(&bundle);
+
+        assert_eq!(
+            compact["host_current_thread_control"]["command_id"],
+            json!("hotkey-window-open-current")
+        );
+        assert_eq!(
+            compact["host_current_thread_control"]["availability_state"],
+            json!("exhausted_after_verified_failure")
+        );
+        assert!(
+            compact["host_current_thread_control"]
+                .get("effect_summary")
+                .is_none()
+        );
+        assert!(
+            compact["host_current_thread_control"]
+                .get("alternate_controls")
+                .is_none()
+        );
+        assert_eq!(
+            compact["operator_flow"]["rotate_helper_command"],
+            json!("amai continuity rotate-chat")
         );
     }
 

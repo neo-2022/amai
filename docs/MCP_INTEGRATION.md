@@ -111,6 +111,9 @@ scripts\install_amai.cmd
 - human dashboard не заменяет MCP;
 - это просто самый понятный способ глазами увидеть пользу `Amai`;
 - MCP при этом остаётся каналом, через который IDE и ИИ-клиент реально обращаются к инструменту.
+- launcher `scripts/run_mcp_stdio.sh` и `scripts/run_mcp_stdio.ps1` теперь correctness-first:
+  если на машине есть `cargo`, MCP server поднимается через `cargo run --release -- mcp serve`,
+  чтобы новый чат не цеплял устаревший `target/release/amai` после свежих code changes.
 
 Для других клиентов логика теперь тоже стала проще:
 - `Cursor`

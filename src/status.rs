@@ -270,7 +270,7 @@ pub async fn print_status(cfg: &AppConfig) -> Result<()> {
             );
             if audit.status != "ok" {
                 println!(
-                    "startup_runtime_state_repair: rerun cargo run -- continuity startup --repo-root {} --namespace continuity --json >/dev/null",
+                    "startup_runtime_state_repair: rerun ./scripts/continuity_startup.sh --repo-root {} --namespace continuity --json >/dev/null",
                     repo_root.display()
                 );
             }

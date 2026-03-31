@@ -18,6 +18,7 @@ fi
 
 dashboard_url="http://${browser_host}:${port}/"
 health_url="http://${browser_host}:${port}/healthz"
+ready_url="http://${browser_host}:${port}/api/client-budget-root-cause"
 unit_name="amai-human-dashboard"
 unit_file="${unit_name}.service"
 launcher_script="$(pwd)/scripts/run_human_dashboard_service.sh"
@@ -56,7 +57,7 @@ stop_legacy_processes() {
   done < <(pgrep -f "amai observe serve --bind ${bind}" || true)
 }
 
-if systemd_user_available && systemctl --user is-active --quiet "$unit_file" && curl -fsS "$health_url" >/dev/null 2>&1; then
+if systemd_user_available && systemctl --user is-active --quiet "$unit_file" && curl -fsS "$ready_url" >/dev/null 2>&1; then
   echo "Amai human dashboard already running"
   echo "URL: $dashboard_url"
   echo "Service: $unit_file"
@@ -64,8 +65,8 @@ if systemd_user_available && systemctl --user is-active --quiet "$unit_file" && 
   exit 0
 fi
 
-if curl -fsS "$health_url" >/dev/null 2>&1; then
-  echo "Existing non-systemd dashboard detected on $health_url. Replacing it with the managed launcher." >&2
+if curl -fsS "$ready_url" >/dev/null 2>&1; then
+  echo "Existing non-systemd dashboard detected on $ready_url. Replacing it with the managed launcher." >&2
   stop_legacy_processes
 fi
 
@@ -79,6 +80,8 @@ if systemd_user_available; then
     --unit="$unit_name" \
     --collect \
     --description="Amai human dashboard" \
+    --property=Type=notify \
+    --property=NotifyAccess=all \
     --property=Restart=always \
     --property=RestartSec=2s \
     --property=WorkingDirectory="$(pwd)" \
@@ -89,7 +92,7 @@ else
 fi
 
 for _ in $(seq 1 120); do
-  if curl -fsS "$health_url" >/dev/null 2>&1; then
+  if curl -fsS "$ready_url" >/dev/null 2>&1; then
     echo "Amai human dashboard started"
     echo "URL: $dashboard_url"
     if systemd_user_available; then

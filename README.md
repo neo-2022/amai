@@ -1847,7 +1847,7 @@ Fail-closed правило для расхождений:
     continuity startup;
   - этот же закон теперь требует recheck не реже, чем раз в `10` секунд:
     если последняя machine-readable проверка старше `max_guard_age_seconds`, supported client
-    обязан сначала обновить `cargo run -- observe client-budget-gate`, а уже потом отвечать;
+    обязан сначала обновить `./scripts/client_budget_gate.sh`, а уже потом отвечать;
   - после такого recheck клиент больше не должен разбирать prose/status-label:
     `client_budget_reply_gate.reply_execution_gate` теперь даёт compact pinned object
     для следующего ответа с полями `blocking`, `must_rotate_before_reply`, `action_kind`,
@@ -1855,11 +1855,11 @@ Fail-closed правило для расхождений:
   - operator-flow, startup command и blocked-reply template больше не дублируются в этом
     per-reply JSON: их source-of-truth живёт в startup contract / runtime state;
   - для automation теперь есть и hard gate path:
-    `cargo run -- observe client-budget-gate --enforce-reply-gate` обязан печатать тот же
+    `./scripts/client_budget_gate.sh --enforce-reply-gate` обязан печатать тот же
     compact JSON, но выходить с non-zero exit code, если текущий reply уже должен быть
     остановлен и переведён в свежий чат через continuity startup;
   - для этого в observe-layer теперь есть отдельный machine-readable truth-source:
-    `cargo run -- observe client-budget-gate`;
+    `./scripts/client_budget_gate.sh`;
   - `cargo run -- observe client-budget-guard` остаётся legacy/debug surface и теперь тоже
     обязан быть compact: он показывает `status_label`, `full_turn_savings_*`, `next_action`,
     `last_request`, `client_limits`, `tracked_slice` и compact `reply_execution_gate`,

@@ -37,11 +37,13 @@ EOF
 ./target/release/amai continuity startup \
   --project "${project_code}" \
   --namespace continuity \
+  --token-source-kind live_continuity_startup \
   --json >/dev/null
 
 ./target/release/amai continuity startup \
   --project "${project_code}" \
   --namespace continuity \
+  --token-source-kind live_continuity_startup \
   --json >/dev/null
 
 ./target/release/amai context pack \

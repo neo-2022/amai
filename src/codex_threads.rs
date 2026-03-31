@@ -101,12 +101,31 @@ struct RolloutTurnObservation {
     latest_secondary_limit_used_percent: u64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PendingRolloutContextCompactionObservation {
+    compacted_at_epoch_ms: i64,
+    pre_compaction_turn_total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RolloutContextCompactionObservationData {
+    compacted_at_epoch_ms: i64,
+    pre_compaction_turn_total_tokens: u64,
+    post_compaction_turn_total_tokens: u64,
+    post_compaction_turn_id: String,
+    compaction_count: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 struct RolloutTurnParseState {
     finalized_turns: Vec<RolloutTurnObservation>,
     current_turn: Option<RolloutTurnObservation>,
     approved_context_pack_calls: HashMap<String, bool>,
     helper_only_context_pack_ids: BTreeSet<String>,
+    last_seen_turn_total_tokens: u64,
+    pending_context_compaction: Option<PendingRolloutContextCompactionObservation>,
+    latest_context_compaction: Option<RolloutContextCompactionObservationData>,
+    compaction_count: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -201,6 +220,18 @@ pub struct RolloutClientMeterObservation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RolloutContextCompactionObservation {
+    pub thread_id: String,
+    pub rollout_path: String,
+    pub compacted_at_epoch_ms: i64,
+    pub pre_compaction_turn_total_tokens: u64,
+    pub post_compaction_turn_total_tokens: u64,
+    pub post_compaction_turn_id: String,
+    pub compaction_count: usize,
+    pub observation_source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecentClientThreadRecord {
     pub thread_id: String,
     pub cwd: String,
@@ -248,6 +279,24 @@ const EXACT_TIME_MAX_SLICE_DRIFT_S: i64 = 3 * 60 * 60;
 static ROLLOUT_TURN_OBSERVATION_CACHE: OnceLock<
     Mutex<HashMap<PathBuf, CachedRolloutTurnObservations>>,
 > = OnceLock::new();
+static THREAD_RECORD_BY_ID_CACHE: OnceLock<Mutex<Option<CachedThreadRecordById>>> = OnceLock::new();
+const LATEST_CLIENT_METER_SHARED_CACHE_VERSION: &str = "latest-rollout-client-meter-cache-v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedLatestRolloutClientMeterCache {
+    cache_version: String,
+    file_signature: String,
+    observation: RolloutClientMeterObservation,
+}
+
+#[derive(Debug, Clone)]
+struct CachedThreadRecordById {
+    db_path: PathBuf,
+    size_bytes: u64,
+    modified_epoch_ms: u64,
+    thread_id: String,
+    record: Option<ThreadRecord>,
+}
 
 pub fn current_thread_id() -> Option<String> {
     env::var("CODEX_THREAD_ID")
@@ -992,6 +1041,9 @@ fn current_thread_record(
     repo_root: &str,
     current_thread_id: Option<&str>,
 ) -> Result<Option<ThreadRecord>> {
+    if let Some(current_thread_id) = current_thread_id {
+        return thread_record_by_id(current_thread_id);
+    }
     let Some(db_path) = codex_db_path() else {
         return Ok(None);
     };
@@ -1000,10 +1052,6 @@ fn current_thread_record(
     }
     let conn = Connection::open(&db_path)
         .with_context(|| format!("failed to open {}", db_path.display()))?;
-    if let Some(current_thread_id) = current_thread_id {
-        return load_thread_record(&conn, current_thread_id);
-    }
-
     let repo_prefix = format!("{repo_root}/%");
     let record = conn
         .query_row(
@@ -1028,9 +1076,14 @@ fn thread_record_by_id(thread_id: &str) -> Result<Option<ThreadRecord>> {
     if !db_path.exists() {
         return Ok(None);
     }
+    if let Some(record) = cached_thread_record_by_id(&db_path, thread_id) {
+        return Ok(record);
+    }
     let conn = Connection::open(&db_path)
         .with_context(|| format!("failed to open {}", db_path.display()))?;
-    load_thread_record(&conn, thread_id)
+    let record = load_thread_record(&conn, thread_id)?;
+    store_thread_record_by_id_cache(&db_path, thread_id, record.clone());
+    Ok(record)
 }
 
 fn latest_thread_record() -> Result<Option<ThreadRecord>> {
@@ -1196,6 +1249,22 @@ pub fn latest_rollout_client_meter_observation_for_thread(
     latest_rollout_client_meter_observation_from_path(thread_id, &rollout_path)
 }
 
+pub fn latest_rollout_context_compaction_observation_for_thread(
+    thread_id: &str,
+) -> Result<Option<RolloutContextCompactionObservation>> {
+    let Some(record) = thread_record_by_id(thread_id)? else {
+        return Ok(None);
+    };
+    if record.rollout_path.is_empty() {
+        return Ok(None);
+    }
+    let rollout_path = PathBuf::from(record.rollout_path);
+    if !rollout_path.exists() {
+        return Ok(None);
+    }
+    latest_rollout_context_compaction_observation_from_path(thread_id, &rollout_path)
+}
+
 pub fn current_rollout_source_signature(repo_root: &str) -> Result<Option<String>> {
     let Some(record) = current_thread_record(repo_root, current_thread_id().as_deref())? else {
         return Ok(None);
@@ -1270,6 +1339,46 @@ fn rollout_thread_id_from_path(path: &Path) -> Option<String> {
 
 fn rollout_source_signature(thread_id: &str, rollout_path: &Path) -> String {
     format!("{thread_id}:{}", rollout_file_signature(rollout_path))
+}
+
+fn latest_client_meter_shared_cache_path(rollout_path: &Path) -> PathBuf {
+    let file_name = rollout_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("rollout.jsonl");
+    rollout_path.with_file_name(format!("{file_name}.client-meter-cache.json"))
+}
+
+fn load_latest_client_meter_shared_cache(
+    rollout_path: &Path,
+    file_signature: &str,
+) -> Option<RolloutClientMeterObservation> {
+    let cache_path = latest_client_meter_shared_cache_path(rollout_path);
+    let payload = fs::read_to_string(cache_path).ok()?;
+    let cached: PersistedLatestRolloutClientMeterCache = serde_json::from_str(&payload).ok()?;
+    if cached.cache_version != LATEST_CLIENT_METER_SHARED_CACHE_VERSION {
+        return None;
+    }
+    if cached.file_signature != file_signature {
+        return None;
+    }
+    Some(cached.observation)
+}
+
+fn write_latest_client_meter_shared_cache(
+    rollout_path: &Path,
+    file_signature: &str,
+    observation: &RolloutClientMeterObservation,
+) -> Result<()> {
+    let cache_path = latest_client_meter_shared_cache_path(rollout_path);
+    let payload = PersistedLatestRolloutClientMeterCache {
+        cache_version: LATEST_CLIENT_METER_SHARED_CACHE_VERSION.to_string(),
+        file_signature: file_signature.to_string(),
+        observation: observation.clone(),
+    };
+    fs::write(&cache_path, serde_json::to_vec(&payload)?)
+        .with_context(|| format!("failed to write {}", cache_path.display()))?;
+    Ok(())
 }
 
 fn rollout_file_signature(rollout_path: &Path) -> String {
@@ -1945,11 +2054,16 @@ fn latest_rollout_client_meter_observation_from_path(
     thread_id: &str,
     rollout_path: &Path,
 ) -> Result<Option<RolloutClientMeterObservation>> {
+    let file_signature = rollout_source_signature(thread_id, rollout_path);
+    if let Some(observation) = load_latest_client_meter_shared_cache(rollout_path, &file_signature)
+    {
+        return Ok(Some(observation));
+    }
     let parsed = parse_rollout_client_meter_observations(thread_id, rollout_path)?
         .into_iter()
         .last();
     let latest_snapshot = latest_rollout_token_count_snapshot(rollout_path)?;
-    Ok(match (parsed, latest_snapshot) {
+    let observation = match (parsed, latest_snapshot) {
         (None, None) => None,
         (Some(observation), None) => Some(observation),
         (None, Some(snapshot)) => Some(client_meter_observation_from_latest_snapshot(
@@ -1965,7 +2079,11 @@ fn latest_rollout_client_meter_observation_from_path(
                 &snapshot,
             ))
         }
-    })
+    };
+    if let Some(observation) = observation.as_ref() {
+        let _ = write_latest_client_meter_shared_cache(rollout_path, &file_signature, observation);
+    }
+    Ok(observation)
 }
 
 fn latest_rollout_token_count_snapshot(
@@ -2057,6 +2175,26 @@ fn latest_rollout_token_count_snapshot_from_text(
             .as_f64()
             .map(|value| value.round() as u64)
             .unwrap_or_default(),
+    }))
+}
+
+fn latest_rollout_context_compaction_observation_from_path(
+    thread_id: &str,
+    rollout_path: &Path,
+) -> Result<Option<RolloutContextCompactionObservation>> {
+    let parse_state = load_rollout_turn_parse_state(rollout_path)?;
+    let Some(observation) = parse_state.latest_context_compaction else {
+        return Ok(None);
+    };
+    Ok(Some(RolloutContextCompactionObservation {
+        thread_id: thread_id.to_string(),
+        rollout_path: rollout_path.display().to_string(),
+        compacted_at_epoch_ms: observation.compacted_at_epoch_ms,
+        pre_compaction_turn_total_tokens: observation.pre_compaction_turn_total_tokens,
+        post_compaction_turn_total_tokens: observation.post_compaction_turn_total_tokens,
+        post_compaction_turn_id: observation.post_compaction_turn_id,
+        compaction_count: observation.compaction_count,
+        observation_source: "codex_rollout_context_compaction_v1".to_string(),
     }))
 }
 
@@ -2319,6 +2457,18 @@ fn process_rollout_turn_observation_line(
                     .unwrap_or_default();
                 if turn_total_tokens > 0 {
                     turn.client_turn_total_tokens = turn_total_tokens;
+                    state.last_seen_turn_total_tokens = turn_total_tokens;
+                    if let Some(pending_compaction) = state.pending_context_compaction.take() {
+                        state.latest_context_compaction =
+                            Some(RolloutContextCompactionObservationData {
+                                compacted_at_epoch_ms: pending_compaction.compacted_at_epoch_ms,
+                                pre_compaction_turn_total_tokens: pending_compaction
+                                    .pre_compaction_turn_total_tokens,
+                                post_compaction_turn_total_tokens: turn_total_tokens,
+                                post_compaction_turn_id: turn.turn_id.clone(),
+                                compaction_count: state.compaction_count,
+                            });
+                    }
                 }
                 let turn_input_tokens = last_token_usage["input_tokens"]
                     .as_u64()
@@ -2369,6 +2519,16 @@ fn process_rollout_turn_observation_line(
                 if secondary_limit_used_percent > 0 {
                     turn.latest_secondary_limit_used_percent = secondary_limit_used_percent;
                 }
+            }
+        }
+        ("compacted", _) => {
+            state.compaction_count += 1;
+            state.pending_context_compaction = Some(PendingRolloutContextCompactionObservation {
+                compacted_at_epoch_ms: timestamp_epoch_ms,
+                pre_compaction_turn_total_tokens: state.last_seen_turn_total_tokens,
+            });
+            if let Some(turn) = state.current_turn.as_mut() {
+                turn.ended_at_epoch_ms = timestamp_epoch_ms;
             }
         }
         ("response_item", "function_call") => {
@@ -2574,9 +2734,12 @@ fn shell_words_contain_context_pack_invocation(words: &[String]) -> bool {
 }
 
 fn shell_words_have_context_pack_subcommand(words: &[String]) -> bool {
-    words
-        .windows(2)
-        .any(|pair| pair[0] == "context" && pair[1] == "pack" || pair[0] == "context-pack")
+    words.windows(2).any(|pair| {
+        (pair[0] == "context" && pair[1] == "pack")
+            || pair[0] == "context-pack"
+            || (pair[0] == "continuity"
+                && matches!(pair[1].as_str(), "startup" | "restore" | "answer"))
+    })
 }
 
 fn shell_words_contain_memory_search_invocation(words: &[String]) -> bool {
@@ -3239,6 +3402,50 @@ fn codex_db_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".codex").join("state_5.sqlite"))
 }
 
+fn db_file_signature(path: &Path) -> Option<(u64, u64)> {
+    let metadata = fs::metadata(path).ok()?;
+    let size_bytes = metadata.len();
+    let modified_epoch_ms = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    Some((size_bytes, modified_epoch_ms))
+}
+
+fn cached_thread_record_by_id(db_path: &Path, thread_id: &str) -> Option<Option<ThreadRecord>> {
+    let (size_bytes, modified_epoch_ms) = db_file_signature(db_path)?;
+    let cache = THREAD_RECORD_BY_ID_CACHE.get_or_init(|| Mutex::new(None));
+    let guard = cache.lock().ok()?;
+    let entry = guard.as_ref()?;
+    if entry.db_path != canonical_rollout_path(db_path)
+        || entry.size_bytes != size_bytes
+        || entry.modified_epoch_ms != modified_epoch_ms
+        || entry.thread_id != thread_id
+    {
+        return None;
+    }
+    Some(entry.record.clone())
+}
+
+fn store_thread_record_by_id_cache(db_path: &Path, thread_id: &str, record: Option<ThreadRecord>) {
+    let Some((size_bytes, modified_epoch_ms)) = db_file_signature(db_path) else {
+        return;
+    };
+    let cache = THREAD_RECORD_BY_ID_CACHE.get_or_init(|| Mutex::new(None));
+    let Some(mut guard) = cache.lock().ok() else {
+        return;
+    };
+    *guard = Some(CachedThreadRecordById {
+        db_path: canonical_rollout_path(db_path),
+        size_bytes,
+        modified_epoch_ms,
+        thread_id: thread_id.to_string(),
+        record,
+    });
+}
+
 fn thread_index_path() -> Result<PathBuf> {
     let memory_home = env::var("MEMORY_HOME")
         .ok()
@@ -3828,6 +4035,82 @@ mod tests {
     }
 
     #[test]
+    fn latest_rollout_client_meter_observation_reuses_shared_sidecar_cache() {
+        let rollout_path = std::env::temp_dir().join(format!(
+            "amai-rollout-client-meter-cache-{}.jsonl",
+            Uuid::new_v4()
+        ));
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-03-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":62909,"cached_input_tokens":34176,"output_tokens":1415,"reasoning_output_tokens":870,"total_tokens":64324},"last_token_usage":{"input_tokens":34855,"cached_input_tokens":28672,"output_tokens":679,"reasoning_output_tokens":354,"total_tokens":35534},"model_context_window":258400},"rate_limits":{"primary":{"used_percent":69.0},"secondary":{"used_percent":21.0}}}}
+{"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+"#,
+        )
+        .expect("write rollout");
+
+        let first =
+            super::latest_rollout_client_meter_observation_from_path("thread-1", &rollout_path)
+                .expect("first observation")
+                .expect("first candidate");
+
+        let cache_path = super::latest_client_meter_shared_cache_path(&rollout_path);
+        assert!(cache_path.exists());
+
+        let second = super::load_latest_client_meter_shared_cache(
+            &rollout_path,
+            &super::rollout_source_signature("thread-1", &rollout_path),
+        );
+
+        let _ = fs::remove_file(&rollout_path);
+        let _ = fs::remove_file(&cache_path);
+
+        assert_eq!(second, Some(first));
+    }
+
+    #[test]
+    fn latest_rollout_context_compaction_observation_tracks_reset_boundary() {
+        let rollout_path = std::env::temp_dir().join(format!(
+            "amai-rollout-context-compaction-{}.jsonl",
+            Uuid::new_v4()
+        ));
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-03-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":220000,"cached_input_tokens":218000,"output_tokens":40,"reasoning_output_tokens":8,"total_tokens":220048},"model_context_window":258400},"rate_limits":{"primary":{"used_percent":91.0},"secondary":{"used_percent":40.0}}}}
+{"timestamp":"2026-03-25T10:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"ok"}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"compacted","payload":{"message":"","replacement_history":[]}}
+{"timestamp":"2026-03-25T10:00:04Z","type":"turn_context","payload":{"turn_id":"turn-2"}}
+{"timestamp":"2026-03-25T10:00:05Z","type":"event_msg","payload":{"type":"context_compacted"}}
+{"timestamp":"2026-03-25T10:00:06Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}
+{"timestamp":"2026-03-25T10:00:07Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":30000,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":30000},"model_context_window":258400},"rate_limits":{"primary":{"used_percent":92.0},"secondary":{"used_percent":40.0}}}}
+{"timestamp":"2026-03-25T10:00:08Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2"}}
+"#,
+        )
+        .expect("write rollout");
+
+        let observation = super::latest_rollout_context_compaction_observation_from_path(
+            "thread-1",
+            &rollout_path,
+        )
+        .expect("observation")
+        .expect("candidate");
+        let _ = fs::remove_file(&rollout_path);
+
+        assert_eq!(observation.thread_id, "thread-1");
+        assert_eq!(observation.rollout_path, rollout_path.display().to_string());
+        assert_eq!(observation.compacted_at_epoch_ms, 1_774_432_804_000);
+        assert_eq!(observation.pre_compaction_turn_total_tokens, 220_048);
+        assert_eq!(observation.post_compaction_turn_total_tokens, 30_000);
+        assert_eq!(observation.post_compaction_turn_id, "turn-2");
+        assert_eq!(observation.compaction_count, 1);
+        assert_eq!(
+            observation.observation_source,
+            "codex_rollout_context_compaction_v1"
+        );
+    }
+
+    #[test]
     fn rollout_assistant_generation_observations_collect_multiple_unambiguous_turns() {
         let rollout_path = std::env::temp_dir().join(format!(
             "amai-rollout-observed-many-{}.jsonl",
@@ -3879,6 +4162,37 @@ mod tests {
 {"timestamp":"2026-03-25T10:00:05Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-2","output":"{\"context_pack_id\":\"ctx-pack-noise\"}"}}
 {"timestamp":"2026-03-25T10:00:06Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":23}}}}
 {"timestamp":"2026-03-25T10:00:07Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-2"}}
+"#,
+        )
+        .expect("write rollout");
+
+        let direct = super::parse_rollout_assistant_generation_turn_observations(
+            rollout_thread_id_from_path(&rollout_path)
+                .as_deref()
+                .unwrap_or(""),
+            &rollout_path,
+        )
+        .expect("direct parse");
+        let _ = fs::remove_file(&rollout_path);
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].turn_id, "turn-1");
+        assert_eq!(direct[0].approved_context_pack_calls, 1);
+        assert_eq!(direct[0].assistant_generation_tokens, 17);
+    }
+
+    #[test]
+    fn rollout_assistant_generation_turn_observations_accept_continuity_startup_wrapper() {
+        let rollout_path = std::env::temp_dir().join(format!(
+            "amai-rollout-turns-startup-{}.jsonl",
+            Uuid::new_v4()
+        ));
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-25T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-03-25T10:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-1","arguments":"{\"cmd\":\"cargo run --quiet -- continuity startup --repo-root /home/art/agent-memory-index --namespace continuity --json\"}"}}
+{"timestamp":"2026-03-25T10:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"{\"chat_start_restore\":{\"headline\":\"ok\"}}"}}
+{"timestamp":"2026-03-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":17}}}}
+{"timestamp":"2026-03-25T10:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
 "#,
         )
         .expect("write rollout");
@@ -4613,5 +4927,54 @@ mod tests {
         assert_eq!(tail.thread_id, "thread-1");
         assert_eq!(tail.messages[0].text, "second previous user");
         assert_eq!(tail.messages[1].text, "second previous assistant");
+    }
+
+    #[test]
+    fn cached_thread_record_by_id_roundtrips_when_db_signature_matches() {
+        let db_path = std::env::temp_dir().join(format!(
+            "amai-thread-record-cache-{}.sqlite",
+            Uuid::new_v4()
+        ));
+        fs::write(&db_path, b"sqlite").expect("write sqlite temp file");
+        let record = super::ThreadRecord {
+            thread_id: "thread-current".to_string(),
+            title: "Current".to_string(),
+            cwd: "/home/art/agent-memory-index".to_string(),
+            first_user_message: "hi".to_string(),
+            rollout_path: "/tmp/rollout.jsonl".to_string(),
+            created_at_epoch_s: 1,
+            updated_at_epoch_s: 2,
+        };
+        super::store_thread_record_by_id_cache(&db_path, "thread-current", Some(record.clone()));
+        let loaded = super::cached_thread_record_by_id(&db_path, "thread-current")
+            .expect("cached thread record");
+        assert_eq!(loaded.as_ref().map(|item| item.thread_id.as_str()), Some("thread-current"));
+        assert_eq!(loaded.as_ref().map(|item| item.rollout_path.as_str()), Some("/tmp/rollout.jsonl"));
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn cached_thread_record_by_id_rejects_db_signature_drift() {
+        let db_path = std::env::temp_dir().join(format!(
+            "amai-thread-record-cache-drift-{}.sqlite",
+            Uuid::new_v4()
+        ));
+        fs::write(&db_path, b"sqlite").expect("write sqlite temp file");
+        super::store_thread_record_by_id_cache(
+            &db_path,
+            "thread-current",
+            Some(super::ThreadRecord {
+                thread_id: "thread-current".to_string(),
+                title: "Current".to_string(),
+                cwd: "/home/art/agent-memory-index".to_string(),
+                first_user_message: "hi".to_string(),
+                rollout_path: "/tmp/rollout.jsonl".to_string(),
+                created_at_epoch_s: 1,
+                updated_at_epoch_s: 2,
+            }),
+        );
+        fs::write(&db_path, b"sqlite-updated").expect("mutate sqlite temp file");
+        assert!(super::cached_thread_record_by_id(&db_path, "thread-current").is_none());
+        let _ = fs::remove_file(&db_path);
     }
 }

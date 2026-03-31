@@ -3,7 +3,7 @@ use crate::cli::{
     VerifyMemoryMatrixArgs, VerifyTokenBenchmarkArgs,
 };
 use crate::{
-    benchmark_matrix, compatibility, config, continuity, dashboard, memory_task_matrix, observe,
+    benchmark_matrix, compatibility, config, continuity, memory_task_matrix, observe,
     postgres, profiles, retrieval, token_budget, verify, working_state,
 };
 use anyhow::{Context, Result, anyhow};
@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand};
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
@@ -23,6 +23,7 @@ use crate::config::AppConfig;
 
 pub(crate) const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 pub(crate) const SERVER_NAME: &str = "Art-memory-agent-index";
+const MCP_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 type McpToolResult<T> = std::result::Result<T, McpError>;
 
@@ -171,14 +172,20 @@ fn mcp_tool_error_result(error: &McpError) -> Value {
 pub async fn serve(cfg: &AppConfig) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let mut lines = BufReader::new(stdin).lines();
+    let mut reader = BufReader::new(stdin);
     let mut writer = stdout;
 
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .context("failed to read MCP input line")?
-    {
+    loop {
+        let line = match read_jsonrpc_line(&mut reader).await {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(error) => {
+                let response =
+                    mcp_jsonrpc_error_response(Value::Null, &McpError::parse(error.to_string()));
+                write_message(&mut writer, &response).await?;
+                break;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -247,14 +254,14 @@ pub fn client_config_contains_server(args: &McpConfigArgs) -> Result<bool> {
 
     let existing = fs::read_to_string(output)
         .with_context(|| format!("failed to read {}", output.display()))?;
-    let server_name = args.server_name.trim();
+    let server_name = normalized_server_name(&args.server_name)?;
     let shape = config_shape_for_client(&args.client)?;
 
     match shape {
-        ConfigShape::GenericJson => Ok(!existing.trim().is_empty()),
-        ConfigShape::VscodeJson => json_server_exists(&existing, "servers", server_name),
-        ConfigShape::McpServersJson => json_server_exists(&existing, "mcpServers", server_name),
-        ConfigShape::CodexToml => toml_server_exists(&existing, server_name),
+        ConfigShape::GenericJson => generic_json_server_exists(&existing, &server_name),
+        ConfigShape::VscodeJson => json_server_exists(&existing, "servers", &server_name),
+        ConfigShape::McpServersJson => json_server_exists(&existing, "mcpServers", &server_name),
+        ConfigShape::CodexToml => toml_server_exists(&existing, &server_name),
     }
 }
 
@@ -281,15 +288,12 @@ pub fn remove_client_config(
     let existing = fs::read_to_string(output)
         .with_context(|| format!("failed to read {}", output.display()))?;
 
+    let server_name = normalized_server_name(&args.server_name)?;
     let (updated, removed, is_empty) = match shape {
-        ConfigShape::GenericJson => ("".to_string(), true, true),
-        ConfigShape::VscodeJson => {
-            remove_json_server(&existing, "servers", args.server_name.trim())?
-        }
-        ConfigShape::McpServersJson => {
-            remove_json_server(&existing, "mcpServers", args.server_name.trim())?
-        }
-        ConfigShape::CodexToml => remove_toml_server(&existing, args.server_name.trim())?,
+        ConfigShape::GenericJson => remove_generic_json_server(&existing, &server_name)?,
+        ConfigShape::VscodeJson => remove_json_server(&existing, "servers", &server_name)?,
+        ConfigShape::McpServersJson => remove_json_server(&existing, "mcpServers", &server_name)?,
+        ConfigShape::CodexToml => remove_toml_server(&existing, &server_name)?,
     };
 
     if !removed {
@@ -415,6 +419,14 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     {
         return Err(anyhow!(
             "MCP startup contract does not require gate_semantics_consistent = true"
+        ));
+    }
+    if startup_contract["runtime_state_artifact"]["inspection_fallback_cli"]["shell_command"]
+        .as_str()
+        != Some("./scripts/continuity_startup_state.sh")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost runtime_state_artifact.inspection_fallback_cli.shell_command"
         ));
     }
     let required_summary_fields = startup_contract["required_summary_fields"]
@@ -558,11 +570,103 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             "MCP startup contract lost startup_execution_gate_enforcement semantics"
         ));
     }
+    if startup_contract["tool_runtime_reconcile"]["error_class"].as_str()
+        != Some("tool_execution_failed")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost tool_runtime_reconcile.error_class"
+        ));
+    }
+    if startup_contract["tool_runtime_reconcile"]["error_detail_contains"].as_str()
+        != Some("no continuity import found for")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost tool_runtime_reconcile.error_detail_contains"
+        ));
+    }
+    if startup_contract["tool_runtime_reconcile"]["transport_error_detail_contains"].as_str()
+        != Some("Transport closed")
+        || startup_contract["tool_runtime_reconcile"]["transport_error_detail_case_insensitive"]
+            .as_bool()
+            != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost tool_runtime_reconcile transport semantics"
+        ));
+    }
+    if startup_contract["tool_runtime_reconcile"]["local_cli"]["command"].as_str()
+        != Some("continuity startup")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost tool_runtime_reconcile.local_cli.command"
+        ));
+    }
+    if startup_contract["tool_runtime_reconcile"]["local_cli"]["shell_command"].as_str()
+        != Some("./scripts/continuity_startup.sh")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost tool_runtime_reconcile.local_cli.shell_command"
+        ));
+    }
+    if startup_contract["tool_runtime_reconcile"]["local_cli"]["requires_repo_root_argument"]
+        .as_bool()
+        != Some(true)
+        || startup_contract["tool_runtime_reconcile"]["local_cli"]
+            ["requires_namespace_argument"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["tool_runtime_reconcile"]["local_cli"]["json_required"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["tool_runtime_reconcile"]["local_cli_success_classification"]
+            .as_str()
+            != Some("stale_embedded_mcp_session")
+        || startup_contract["tool_runtime_reconcile"]["local_cli_success_replaces_mcp_failure"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["tool_runtime_reconcile"]
+            ["local_cli_success_replaces_transport_failure"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["tool_runtime_reconcile"]
+            ["must_request_mcp_reconnect_after_local_success"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["tool_runtime_reconcile"]["must_continue_from_local_startup_payload"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["tool_runtime_reconcile"]["reconnect_helper"]
+            ["shell_helper_relative_path"]
+            .as_str()
+            != Some("./scripts/reconnect_local.sh")
+        || startup_contract["tool_runtime_reconcile"]["reconnect_helper"]["bootstrap_command"]
+            .as_str()
+            != Some("bootstrap reconnect")
+        || startup_contract["tool_runtime_reconcile"]["reconnect_helper"]
+            ["requires_client_argument"]
+            .as_bool()
+            != Some(true)
+        || startup_contract["tool_runtime_reconcile"]["reconnect_helper"]
+            ["requires_yes_argument"]
+            .as_bool()
+            != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost tool_runtime_reconcile semantics"
+        ));
+    }
     if startup_contract["live_client_budget_enforcement"]["guard_command"].as_str()
         != Some("observe client-budget-gate")
     {
         return Err(anyhow!(
             "MCP startup contract lost live_client_budget_enforcement.guard_command"
+        ));
+    }
+    if startup_contract["live_client_budget_enforcement"]["guard_shell_command"].as_str()
+        != Some("./scripts/client_budget_gate.sh")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement.guard_shell_command"
         ));
     }
     if startup_contract["live_client_budget_enforcement"]["guard_summary_field"].as_str()
@@ -609,6 +713,9 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
     }
     if startup_contract["live_client_budget_enforcement"]["compact_diagnostics_command"].as_str()
         != Some("observe client-budget-root-cause")
+        || startup_contract["live_client_budget_enforcement"]["compact_diagnostics_shell_command"]
+            .as_str()
+            != Some("./scripts/client_budget_root_cause.sh")
         || startup_contract["live_client_budget_enforcement"]
             ["must_prefer_compact_diagnostics_over_full_snapshot"]
             .as_bool()
@@ -666,7 +773,7 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             .any(|value| value.as_str() == Some("новый чат рекомендован"))
     {
         return Err(anyhow!(
-            "MCP startup contract lost hard rotate status labels or still treats advisory rotate labels as hard-stop"
+            "MCP startup contract lost advisory rotate status labels or still treats rotate-soon labels as hard-stop"
         ));
     }
     if startup_contract["live_client_budget_enforcement"]["save_handoff_before_rotate"]
@@ -723,13 +830,13 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             })?;
     if !blocking_action_kinds
         .iter()
-        .any(|value| value.as_str() == Some("rotate_chat_for_client_budget"))
-        || !blocking_action_kinds
+        .any(|value| value.as_str() == Some("wait_for_global_client_budget_recovery"))
+        || blocking_action_kinds
             .iter()
-            .any(|value| value.as_str() == Some("wait_for_global_client_budget_recovery"))
+            .any(|value| value.as_str() == Some("rotate_chat_for_client_budget"))
     {
         return Err(anyhow!(
-            "MCP startup contract lost live_client_budget_enforcement blocking action kinds"
+            "MCP startup contract lost live_client_budget_enforcement blocking action kinds or still treats rotate pressure as hard-blocking"
         ));
     }
     let allowed_response_kinds = startup_contract["live_client_budget_enforcement"]
@@ -741,12 +848,12 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             )
         })?;
     if !allowed_response_kinds.iter().any(|value| {
-        value.as_str() == Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND)
-    }) || !allowed_response_kinds.iter().any(|value| {
         value.as_str() == Some(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND)
+    }) || allowed_response_kinds.iter().any(|value| {
+        value.as_str() == Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND)
     }) {
         return Err(anyhow!(
-            "MCP startup contract lost live_client_budget_enforcement allowed blocked-reply kinds"
+            "MCP startup contract lost live_client_budget_enforcement allowed blocked-reply kinds or still treats rotate pressure as blocked-reply mode"
         ));
     }
     let allowed_templates = startup_contract["live_client_budget_enforcement"]
@@ -758,12 +865,60 @@ pub async fn run_smoke_proof(cfg: &AppConfig, args: &VerifyMcpArgs) -> Result<()
             )
         })?;
     if !allowed_templates.iter().any(|value| {
-        value.as_str() == Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE)
-    }) || !allowed_templates.iter().any(|value| {
         value.as_str() == Some(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE)
+    }) || allowed_templates.iter().any(|value| {
+        value.as_str() == Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE)
     }) {
         return Err(anyhow!(
-            "MCP startup contract lost live_client_budget_enforcement allowed blocked-reply templates"
+            "MCP startup contract lost live_client_budget_enforcement allowed blocked-reply templates or still advertises rotate pressure as blocked template"
+        ));
+    }
+    let target_control = &startup_contract["live_client_budget_enforcement"]["target_control"];
+    if target_control["exact_chat_command_pattern"].as_str()
+        != Some(continuity::client_budget_target_chat_command_pattern().as_str())
+        || target_control["chat_command_prefix"].as_str()
+            != Some(continuity::CLIENT_BUDGET_TARGET_CHAT_COMMAND_PREFIX)
+        || target_control["cli_command"].as_str() != Some("continuity client-budget-target")
+        || target_control["percent_argument"].as_str() != Some("--percent")
+        || target_control["namespace_argument"].as_str() != Some("--namespace")
+        || target_control["repo_root_argument_required"].as_bool() != Some(true)
+        || target_control["switch_immediately_on_exact_chat_command"].as_bool() != Some(true)
+        || target_control["reply_with_confirmation_after_switch"].as_bool() != Some(true)
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement target-control command semantics"
+        ));
+    }
+    let target_allowed = target_control["allowed_target_percents"]
+        .as_array()
+        .ok_or_else(|| {
+            anyhow!(
+                "MCP startup contract lost live_client_budget_enforcement.target_control.allowed_target_percents"
+            )
+        })?
+        .iter()
+        .filter_map(Value::as_u64)
+        .collect::<Vec<_>>();
+    if target_allowed != continuity::allowed_client_budget_target_values() {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement target-control allowed target values"
+        ));
+    }
+    let compact_chat_control =
+        &startup_contract["live_client_budget_enforcement"]["compact_chat_control"];
+    if compact_chat_control["exact_chat_command"].as_str()
+        != Some(continuity::CLIENT_BUDGET_COMPACT_CHAT_COMMAND)
+        || compact_chat_control["cli_command"].as_str() != Some("continuity compact-chat")
+        || compact_chat_control["namespace_argument"].as_str() != Some("--namespace")
+        || compact_chat_control["repo_root_argument_required"].as_bool() != Some(true)
+        || compact_chat_control["switch_immediately_on_exact_chat_command"].as_bool() != Some(true)
+        || compact_chat_control["reply_with_confirmation_after_prepare"].as_bool() != Some(true)
+        || compact_chat_control["prompt_text_required_for_rebase"].as_bool() != Some(true)
+        || compact_chat_control["required_host_action"].as_str()
+            != Some("open_clean_chat_surface_and_inject_prompt_text")
+    {
+        return Err(anyhow!(
+            "MCP startup contract lost live_client_budget_enforcement compact-chat control semantics"
         ));
     }
 
@@ -1261,10 +1416,25 @@ fn inject_proof_tool_arguments(name: &str, arguments: Value) -> Value {
     Value::Object(object)
 }
 
+fn proof_request_timeout(method: &str, params: &Value) -> Duration {
+    if method != "tools/call" {
+        return Duration::from_secs(30);
+    }
+    match params.get("name").and_then(Value::as_str) {
+        Some("amai_memory_matrix") => Duration::from_secs(180),
+        Some("amai_token_benchmark") | Some("amai_context_pack") | Some("amai_warm_cache") => {
+            Duration::from_secs(90)
+        }
+        Some(_) => Duration::from_secs(60),
+        None => Duration::from_secs(30),
+    }
+}
+
 impl McpProofSession {
     pub(crate) async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
+        let request_timeout = proof_request_timeout(method, &params);
         let request = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1272,9 +1442,14 @@ impl McpProofSession {
             "params": params,
         });
         write_message(&mut self.stdin, &request).await?;
-        let line = timeout(Duration::from_secs(30), self.stdout.next_line())
+        let line = timeout(request_timeout, self.stdout.next_line())
             .await
-            .context("timed out waiting for MCP response")?
+            .with_context(|| {
+                format!(
+                    "timed out waiting for MCP response after {}s",
+                    request_timeout.as_secs()
+                )
+            })?
             .context("failed to read MCP response line")?
             .ok_or_else(|| anyhow!("MCP server closed stdout unexpectedly"))?;
         let response: Value =
@@ -1409,24 +1584,29 @@ async fn handle_request(cfg: &AppConfig, incoming: Value) -> Result<Value> {
     };
     let params = incoming.get("params").cloned().unwrap_or_else(|| json!({}));
     let response = match method {
-        "initialize" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "serverInfo": {
-                    "name": SERVER_NAME,
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "title": "Art-memory-agent-index (Amai)",
-                },
-                "capabilities": {
-                    "tools": { "listChanged": false },
-                    "prompts": { "listChanged": false },
-                },
-                "instructions": server_instructions(),
-                "amai_protocol_manifest": protocol_manifest(),
+        "initialize" => {
+            if let Err(error) = validate_initialize_protocol_version(&params) {
+                return Ok(mcp_jsonrpc_error_response(id, &error));
             }
-        }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "serverInfo": {
+                        "name": SERVER_NAME,
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "title": "Art-memory-agent-index (Amai)",
+                    },
+                    "capabilities": {
+                        "tools": { "listChanged": false },
+                        "prompts": { "listChanged": false },
+                    },
+                    "instructions": server_instructions(),
+                    "amai_protocol_manifest": protocol_manifest(),
+                }
+            })
+        }
         "ping" => json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1489,6 +1669,7 @@ async fn handle_tool_call(cfg: &AppConfig, request: ToolCallRequest) -> McpToolR
     {
         return Ok(blocked_result);
     }
+    validate_tool_request_arguments(request.name.as_str(), request.arguments.as_ref())?;
     match request.name.as_str() {
         "amai_list_projects" => tool_list_projects(cfg)
             .await
@@ -1570,9 +1751,8 @@ async fn maybe_live_client_budget_preflight_block(
     if !tool_requires_live_client_budget_preflight(tool_name) {
         return Ok(None);
     }
-    let snapshot = observe::collect_snapshot_preview(cfg).await?;
-    let guard = dashboard::current_session_budget_guard(&snapshot);
-    if !working_state::client_budget_guard_blocks_reply(&guard) {
+    let guard = observe::collect_compact_client_budget_guard(cfg).await?;
+    if !working_state::client_budget_guard_blocks_expensive_tool_turn(&guard) {
         return Ok(None);
     }
     Ok(Some(client_budget_blocked_tool_result(tool_name, &guard)))
@@ -1600,6 +1780,7 @@ fn compact_mcp_client_budget_reply_gate_payload(guard: &Value) -> Value {
         });
     json!({
         "status_label": guard["status_label"].clone(),
+        "reply_prefix": guard["reply_prefix"].clone(),
         "observed_at_epoch_ms": guard["observed_at_epoch_ms"].clone(),
         "max_guard_age_seconds": guard["max_guard_age_seconds"].clone(),
         "last_request": guard["last_request"].clone(),
@@ -1611,6 +1792,13 @@ fn compact_mcp_client_budget_reply_gate_payload(guard: &Value) -> Value {
             "must_wait_for_budget_recovery_before_reply":
                 reply_execution_gate["must_wait_for_budget_recovery_before_reply"].clone(),
             "reply_budget_mode": reply_execution_gate["reply_budget_mode"].clone(),
+            "reply_prefix": reply_execution_gate["reply_prefix"].clone(),
+            "same_meter_pure_burn_turn_active":
+                reply_execution_gate["same_meter_pure_burn_turn_active"].clone(),
+            "must_avoid_new_tool_turn_without_specific_delta_goal":
+                reply_execution_gate["must_avoid_new_tool_turn_without_specific_delta_goal"].clone(),
+            "max_tool_roundtrips_soft":
+                reply_execution_gate["max_tool_roundtrips_soft"].clone(),
             "preserves_return_obligation": preserves_return_obligation,
             "blocking_reply_contract": reply_execution_gate["blocking_reply_contract"].clone(),
         }
@@ -1621,19 +1809,43 @@ fn client_budget_blocked_tool_result(tool_name: &str, guard: &Value) -> Value {
     let action_kind = guard["reply_execution_gate"]["action_kind"]
         .as_str()
         .unwrap_or("continue_current_chat");
-    let blocked_hint = match action_kind {
-        "wait_for_global_client_budget_recovery" => {
-            "wait for global client budget recovery before retrying this tool"
+    let same_meter_pure_burn_turn_active = guard["reply_execution_gate"]
+        ["same_meter_pure_burn_turn_active"]
+        .as_bool()
+        .unwrap_or(false);
+    let zero_roundtrip_stop_loss_active = guard["reply_execution_gate"]
+        ["must_avoid_new_tool_turn_without_specific_delta_goal"]
+        .as_bool()
+        .unwrap_or(false)
+        && guard["reply_execution_gate"]["max_tool_roundtrips_soft"].as_i64() == Some(0);
+    let reply_prefix = guard["reply_execution_gate"]["reply_prefix"]
+        .as_str()
+        .or_else(|| guard["reply_prefix"].as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let blocked_hint = if same_meter_pure_burn_turn_active {
+        "avoid a new expensive Amai tool turn until you have a specific material delta goal or after compaction/rotation changes the live budget gate"
+    } else {
+        match action_kind {
+            "wait_for_global_client_budget_recovery" => {
+                "wait for global client budget recovery before retrying this tool"
+            }
+            "rotate_chat_for_client_budget" => "rotate into a fresh chat before retrying this tool",
+            "compact_current_thread_for_client_budget" => {
+                "wait until current-thread compaction changes the live budget gate before retrying this tool"
+            }
+            _ => "refresh the live client budget gate before retrying this tool",
         }
-        "rotate_chat_for_client_budget" => "rotate into a fresh chat before retrying this tool",
-        _ => "refresh the live client budget gate before retrying this tool",
+    };
+    let text = if let Some(reply_prefix) = reply_prefix {
+        format!("{reply_prefix}\ntool blocked by live client budget gate: {blocked_hint}")
+    } else {
+        format!("tool blocked by live client budget gate: {blocked_hint}")
     };
     json!({
         "content": [{
             "type": "text",
-            "text": format!(
-                "tool blocked by live client budget gate: {blocked_hint}"
-            )
+            "text": text
         }],
         "isError": true,
         "structuredContent": {
@@ -1643,6 +1855,16 @@ fn client_budget_blocked_tool_result(tool_name: &str, guard: &Value) -> Value {
                 "retryable": true,
             },
             "blocked_tool": tool_name,
+            "same_meter_pure_burn_turn_active": same_meter_pure_burn_turn_active,
+            "expensive_tool_turn_stop_loss_active": zero_roundtrip_stop_loss_active,
+            "expensive_tool_turn_stop_loss_reason":
+                if same_meter_pure_burn_turn_active {
+                    json!("same_meter_pure_burn_turn")
+                } else if zero_roundtrip_stop_loss_active {
+                    json!("zero_tool_roundtrips_live_gate")
+                } else {
+                    Value::Null
+                },
             "client_budget_reply_gate": compact_mcp_client_budget_reply_gate_payload(guard),
         }
     })
@@ -1796,7 +2018,8 @@ async fn tool_continuity_startup(
     cfg: &AppConfig,
     args: ContinuityStartupToolArgs,
 ) -> Result<Value> {
-    let payload = continuity::startup_payload(cfg, &args.to_cli_args()).await?;
+    let payload = continuity_startup_payload_with_tool_runtime_reconcile(cfg, &args).await?;
+    let public_payload = continuity::compact_continuity_startup_public_payload(&payload);
     let summary = continuity_startup_summary(&payload);
     let summary_json = continuity_startup_summary_json(&payload);
     Ok(tool_result(
@@ -1813,14 +2036,266 @@ async fn tool_continuity_startup(
                 .unwrap_or_else(|| summary.pending_return_summary.as_deref().unwrap_or("none")),
         ),
         json!({
-            "continuity_startup": payload["continuity_startup"].clone(),
-            "chat_start_restore": payload["chat_start_restore"].clone(),
-            "working_state_restore": payload["working_state_restore"].clone(),
-            "retrieval_science": payload["retrieval_science"].clone(),
-            "degradation_policy": payload["degradation_policy"].clone(),
+            "continuity_startup": public_payload["continuity_startup"].clone(),
+            "chat_start_restore": public_payload["chat_start_restore"].clone(),
+            "working_state_restore": public_payload["working_state_restore"].clone(),
+            "retrieval_science": public_payload["retrieval_science"].clone(),
+            "degradation_policy": public_payload["degradation_policy"].clone(),
+            "tool_runtime_reconcile": public_payload["tool_runtime_reconcile"].clone(),
             "continuity_startup_summary": summary_json
         }),
     ))
+}
+
+const CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_DETAIL: &str = "no continuity import found for";
+const CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_FORCE_ENV: &str =
+    "AMAI_FORCE_CONTINUITY_STARTUP_STALE_IMPORT_MISS";
+const EMBEDDED_MCP_RECONNECT_HELPER_SHELL_PATH: &str = "./scripts/reconnect_local.sh";
+const EMBEDDED_MCP_RECONNECT_HELPER_BOOTSTRAP_COMMAND: &str = "bootstrap reconnect";
+
+async fn continuity_startup_payload_with_tool_runtime_reconcile(
+    cfg: &AppConfig,
+    args: &ContinuityStartupToolArgs,
+) -> Result<Value> {
+    let first_attempt = if force_continuity_startup_tool_runtime_reconcile_for_test() {
+        Err(anyhow!(
+            "{CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_DETAIL} forced_test_reconcile"
+        ))
+    } else {
+        continuity::startup_payload(cfg, &args.to_cli_args()).await
+    };
+    match first_attempt {
+        Ok(payload) => Ok(payload),
+        Err(error)
+            if error
+                .to_string()
+                .contains(CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_DETAIL) =>
+        {
+            let (payload, reconcile) =
+                continuity_startup_reconcile_via_local_subprocess(cfg, args).await?;
+            Ok(attach_continuity_startup_tool_runtime_reconcile(
+                payload, reconcile,
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn continuity_startup_reconcile_via_local_subprocess(
+    cfg: &AppConfig,
+    args: &ContinuityStartupToolArgs,
+) -> Result<(Value, Value)> {
+    let db = postgres::connect_admin(cfg).await?;
+    postgres::bootstrap_schema(&db, cfg).await?;
+    let project = continuity_startup_reconcile_project_record(&db, args).await?;
+    let amai_repo_root =
+        discover_repo_root().unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let current_exe =
+        std::env::current_exe().context("failed to resolve current amai executable")?;
+    let subprocess_binary =
+        preferred_continuity_startup_reconcile_binary(&amai_repo_root, &current_exe);
+    let output = ProcessCommand::new(&subprocess_binary)
+        .arg("continuity")
+        .arg("startup")
+        .arg("--project")
+        .arg(&project.code)
+        .arg("--repo-root")
+        .arg(&project.repo_root)
+        .arg("--namespace")
+        .arg(&args.namespace)
+        .arg("--token-source-kind")
+        .arg(&args.token_source_kind)
+        .arg("--json")
+        .env_remove(CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_FORCE_ENV)
+        .current_dir(&amai_repo_root)
+        .output()
+        .await
+        .with_context(|| {
+            format!(
+                "failed to spawn continuity startup reconcile subprocess for {}::{} using {}",
+                project.code,
+                args.namespace,
+                subprocess_binary.display()
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "continuity startup reconcile subprocess failed for {}::{}: {}",
+            project.code,
+            args.namespace,
+            stderr.trim()
+        ));
+    }
+    let payload: Value = serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "continuity startup reconcile subprocess returned invalid JSON for {}::{}",
+            project.code, args.namespace
+        )
+    })?;
+    let reconcile = json!({
+        "applied": true,
+        "classification": "stale_embedded_mcp_session",
+        "continue_from_local_startup_payload": true,
+        "mcp_reconnect_required": true,
+        "reconnect_helper": build_embedded_mcp_reconnect_helper_surface(&amai_repo_root),
+        "source": "local_cli_subprocess",
+        "project_code": project.code,
+        "namespace_code": args.namespace,
+        "repo_root": project.repo_root,
+        "subprocess_binary": subprocess_binary,
+    });
+    Ok((payload, reconcile))
+}
+
+async fn continuity_startup_reconcile_project_record(
+    db: &tokio_postgres::Client,
+    args: &ContinuityStartupToolArgs,
+) -> Result<postgres::ProjectRecord> {
+    if let Some(repo_root) = args
+        .repo_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return postgres::get_project_by_repo_root(db, repo_root).await;
+    }
+    if let Some(project) = args
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return postgres::get_project_by_code(db, project).await;
+    }
+    Err(anyhow!(
+        "continuity startup reconcile requires exact project binding by repo_root or project code"
+    ))
+}
+
+fn preferred_continuity_startup_reconcile_binary(repo_root: &Path, current_exe: &Path) -> PathBuf {
+    let release_binary = repo_root.join("target/release/amai");
+    if release_binary.is_file() {
+        return release_binary;
+    }
+    let debug_binary = repo_root.join("target/debug/amai");
+    if debug_binary.is_file() {
+        return debug_binary;
+    }
+    current_exe.to_path_buf()
+}
+
+fn attach_continuity_startup_tool_runtime_reconcile(mut payload: Value, reconcile: Value) -> Value {
+    if let Some(root) = payload.as_object_mut() {
+        root.insert("tool_runtime_reconcile".to_string(), reconcile);
+    }
+    payload
+}
+
+fn force_continuity_startup_tool_runtime_reconcile_for_test() -> bool {
+    std::env::var(CONTINUITY_STARTUP_TOOL_RUNTIME_RECONCILE_FORCE_ENV)
+        .ok()
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+#[derive(Deserialize)]
+struct EmbeddedMcpReconnectInstallState {
+    client_key: String,
+}
+
+fn embedded_mcp_reconnect_client_display_name(client_key: &str) -> &str {
+    match client_key {
+        "vscode" => "VS Code",
+        "cursor" => "Cursor",
+        "codex" => "Codex",
+        "claude-code" => "Claude Code",
+        "claude-desktop" => "Claude Desktop",
+        other => other,
+    }
+}
+
+fn resolve_embedded_mcp_reconnect_client_key(repo_root: &Path) -> (Option<String>, String) {
+    if let Some(value) = std::env::var("AMAI_CLIENT_KEY")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+    {
+        return (Some(value), "env:AMAI_CLIENT_KEY".to_string());
+    }
+    for (env_key, client_key) in [
+        ("CODEX_HOME", "codex"),
+        ("CURSOR_TRACE_ID", "cursor"),
+        ("VSCODE_IPC_HOOK_CLI", "vscode"),
+        ("CLAUDECODE", "claude-code"),
+    ] {
+        if std::env::var_os(env_key).is_some() {
+            return (Some(client_key.to_string()), format!("env:{env_key}"));
+        }
+    }
+    let install_state_path = repo_root.join("state/install_state.json");
+    if let Ok(content) = fs::read_to_string(&install_state_path)
+        && let Ok(state) = serde_json::from_str::<EmbeddedMcpReconnectInstallState>(&content)
+    {
+        let client_key = state.client_key.trim().to_ascii_lowercase();
+        if !client_key.is_empty() {
+            return (
+                Some(client_key),
+                format!("install_state:{}", install_state_path.display()),
+            );
+        }
+    }
+    (None, "unresolved".to_string())
+}
+
+fn build_embedded_mcp_reconnect_helper_surface(repo_root: &Path) -> Value {
+    let supported_clients = json!(["vscode", "cursor", "codex", "claude-code"]);
+    let (preferred_client_key, resolution_source) =
+        resolve_embedded_mcp_reconnect_client_key(repo_root);
+    match preferred_client_key {
+        Some(client_key) => json!({
+            "preferred_client_key": client_key,
+            "preferred_client_display_name": embedded_mcp_reconnect_client_display_name(&client_key),
+            "resolution_source": resolution_source,
+            "shell_helper_relative_path": EMBEDDED_MCP_RECONNECT_HELPER_SHELL_PATH,
+            "shell_helper_command": format!("{EMBEDDED_MCP_RECONNECT_HELPER_SHELL_PATH} --client {client_key}"),
+            "shell_helper_argv": [
+                EMBEDDED_MCP_RECONNECT_HELPER_SHELL_PATH,
+                "--client",
+                client_key
+            ],
+            "bootstrap_command": format!(
+                "./scripts/amai_exec.sh {EMBEDDED_MCP_RECONNECT_HELPER_BOOTSTRAP_COMMAND} --client {client_key} --yes"
+            ),
+            "bootstrap_argv": [
+                "./scripts/amai_exec.sh",
+                "bootstrap",
+                "reconnect",
+                "--client",
+                client_key,
+                "--yes"
+            ],
+            "peer_session_safety": "orphan_only_cleanup_no_disconnect",
+            "scope": "local_client_runtime",
+            "supported_clients": supported_clients,
+            "note": "Этот reconnect path не делает disconnect и чистит только orphaned MCP runtimes, но всё ещё operator-driven и не равен per-session graceful reconnect внутри host."
+        }),
+        None => json!({
+            "preferred_client_key": Value::Null,
+            "preferred_client_display_name": Value::Null,
+            "resolution_source": resolution_source,
+            "requires_client_choice": true,
+            "shell_helper_relative_path": EMBEDDED_MCP_RECONNECT_HELPER_SHELL_PATH,
+            "shell_helper_command_template": format!("{EMBEDDED_MCP_RECONNECT_HELPER_SHELL_PATH} --client <client>"),
+            "bootstrap_command_template": format!(
+                "./scripts/amai_exec.sh {EMBEDDED_MCP_RECONNECT_HELPER_BOOTSTRAP_COMMAND} --client <client> --yes"
+            ),
+            "peer_session_safety": "orphan_only_cleanup_no_disconnect",
+            "scope": "local_client_runtime",
+            "supported_clients": supported_clients,
+            "note": "Amai не смог честно определить текущий client_key для stale embedded MCP session. Выбери клиент явно и используй reconnect helper вместо blunt process reset."
+        }),
+    }
 }
 
 fn summarize_codes(codes: &[&str]) -> String {
@@ -2391,6 +2866,9 @@ fn fallback_startup_execution_gate(payload: &Value) -> Value {
     let action_kind = payload["chat_start_restore"]["startup_next_action"]["action_kind"]
         .as_str()
         .unwrap_or("continue_active_workline");
+    let blocking = payload["chat_start_restore"]["startup_next_action"]["blocking"]
+        .as_bool()
+        .unwrap_or(false);
     let lease_owner_state =
         payload["chat_start_restore"]["execctl_active_lease"]["lease_owner_state"].as_str();
     let previous_session_owner_value = resume_enforcement["previous_session_owner_value"]
@@ -2403,15 +2881,14 @@ fn fallback_startup_execution_gate(payload: &Value) -> Value {
     let required_action_kind = resume_enforcement["required_action_kind_when_resume_required"]
         .as_str()
         .unwrap_or("resume_required_return_task");
-    let must_follow = (must_resume_before_unrelated && action_kind == required_action_kind)
+    let must_follow = blocking
+        || (must_resume_before_unrelated && action_kind == required_action_kind)
         || lease_owner_state == Some(previous_session_owner_value);
 
     json!({
         "gate_version": "startup-execution-gate-v1",
         "action_kind": action_kind,
-        "blocking": payload["chat_start_restore"]["startup_next_action"]["blocking"]
-            .as_bool()
-            .unwrap_or(false),
+        "blocking": blocking,
         "resume_state": payload["chat_start_restore"]["execctl_resume_state"]
             .as_str()
             .unwrap_or("clear"),
@@ -3009,7 +3486,7 @@ fn protocol_manifest() -> Value {
         "default_retrieval_mode": "local_strict",
         "startup_contracts": {
             "project_chat_startup": {
-                "contract_version": "continuity-startup-contract-v13",
+                "contract_version": "continuity-startup-contract-v18",
                 "tool": "amai_continuity_startup",
                 "prompt": "amai-continuity-startup",
                 "purpose": "project-scoped continuity restore plus live client-budget discipline before each substantive reply in a new, resumed, or ongoing chat",
@@ -3024,6 +3501,30 @@ fn protocol_manifest() -> Value {
                     "missing_or_unreadable_fail_closed": true,
                     "sha256_mismatch_fail_closed": true
                 },
+                "tool_runtime_reconcile": {
+                    "error_class": "tool_execution_failed",
+                    "error_detail_contains": "no continuity import found for",
+                    "transport_error_detail_contains": "Transport closed",
+                    "transport_error_detail_case_insensitive": true,
+                    "local_cli": {
+                        "command": "continuity startup",
+                        "shell_command": "./scripts/continuity_startup.sh",
+                        "requires_repo_root_argument": true,
+                        "requires_namespace_argument": true,
+                        "json_required": true
+                    },
+                    "local_cli_success_classification": "stale_embedded_mcp_session",
+                    "local_cli_success_replaces_mcp_failure": true,
+                    "local_cli_success_replaces_transport_failure": true,
+                    "must_request_mcp_reconnect_after_local_success": true,
+                    "must_continue_from_local_startup_payload": true,
+                    "reconnect_helper": {
+                        "shell_helper_relative_path": "./scripts/reconnect_local.sh",
+                        "bootstrap_command": "bootstrap reconnect",
+                        "requires_client_argument": true,
+                        "requires_yes_argument": true
+                    }
+                },
                 "runtime_state_artifact": {
                     "workspace_runtime_state_relative_path": ".amai/continuity/project-chat-startup-state.json",
                     "workspace_runtime_state_artifact_version": "workspace-startup-runtime-state-v4",
@@ -3036,6 +3537,7 @@ fn protocol_manifest() -> Value {
                     "gate_semantics_consistent_true_required": true,
                     "inspection_fallback_cli": {
                         "command": "continuity startup-state",
+                        "shell_command": "./scripts/continuity_startup_state.sh",
                         "requires_repo_root_argument": true,
                         "json_required": true,
                         "returns_startup_execution_gate": true
@@ -3065,14 +3567,17 @@ fn protocol_manifest() -> Value {
                 },
                 "live_client_budget_enforcement": {
                     "guard_command": "observe client-budget-gate",
+                    "guard_shell_command": "./scripts/client_budget_gate.sh",
                     "guard_summary_field": "client_budget_reply_gate",
                     "reply_execution_gate_field": "reply_execution_gate",
                     "reply_execution_gate_version": "client-reply-budget-gate-v1",
+                    "reply_prefix_field": "reply_prefix",
                     "reply_budget_mode_field": "reply_budget_mode",
                     "reply_budget_contract_field": "reply_budget_contract",
                     "compact_reply_mode_value": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
                     "compact_reply_contract_version": working_state::CLIENT_REPLY_BUDGET_CONTRACT_VERSION,
                     "compact_diagnostics_command": "observe client-budget-root-cause",
+                    "compact_diagnostics_shell_command": "./scripts/client_budget_root_cause.sh",
                     "must_prefer_compact_diagnostics_over_full_snapshot": true,
                     "guard_enforcement_flag": "--enforce-reply-gate",
                     "guard_enforcement_exit_on_blocking": true,
@@ -3089,14 +3594,12 @@ fn protocol_manifest() -> Value {
                     "fresh_chat_requires_continuity_startup": true,
                     "full_scale_client_truth_required": true,
                     "blocking_action_kinds": [
-                        "rotate_chat_for_client_budget",
                         "wait_for_global_client_budget_recovery"
                     ],
                     "blocking_reply_contract_field": "blocking_reply_contract",
                     "blocking_reply_contract_version": working_state::CLIENT_BUDGET_BLOCKING_REPLY_CONTRACT_VERSION,
                     "blocking_reply_response_kind": working_state::CLIENT_BUDGET_BLOCKING_REPLY_RESPONSE_KIND,
                     "blocking_reply_allowed_response_kinds": [
-                        working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND,
                         working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND
                     ],
                     "blocking_reply_max_sentences": working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES,
@@ -3104,9 +3607,31 @@ fn protocol_manifest() -> Value {
                     "blocking_reply_must_use_action_bundle_operator_flow": true,
                     "blocking_reply_template": working_state::CLIENT_BUDGET_BLOCKING_REPLY_TEMPLATE,
                     "blocking_reply_allowed_templates": [
-                        working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE,
                         working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE
-                    ]
+                    ],
+                    "target_control": {
+                        "exact_chat_command_pattern": continuity::client_budget_target_chat_command_pattern(),
+                        "chat_command_prefix": continuity::CLIENT_BUDGET_TARGET_CHAT_COMMAND_PREFIX,
+                        "allowed_target_percents": continuity::allowed_client_budget_target_values(),
+                        "cli_command": "continuity client-budget-target",
+                        "shell_command": "./scripts/continuity_client_budget_target.sh",
+                        "percent_argument": "--percent",
+                        "namespace_argument": "--namespace",
+                        "repo_root_argument_required": true,
+                        "switch_immediately_on_exact_chat_command": true,
+                        "reply_with_confirmation_after_switch": true
+                    },
+                    "compact_chat_control": {
+                        "exact_chat_command": continuity::CLIENT_BUDGET_COMPACT_CHAT_COMMAND,
+                        "cli_command": "continuity compact-chat",
+                        "shell_command": "./scripts/continuity_compact_chat.sh",
+                        "namespace_argument": "--namespace",
+                        "repo_root_argument_required": true,
+                        "switch_immediately_on_exact_chat_command": true,
+                        "reply_with_confirmation_after_prepare": true,
+                        "prompt_text_required_for_rebase": true,
+                        "required_host_action": "open_clean_chat_surface_and_inject_prompt_text"
+                    }
                 },
                 "required_summary_fields": [
                     "project_code",
@@ -3585,7 +4110,7 @@ fn prompt_result(params: Value) -> McpToolResult<Value> {
                     "content": {
                         "type": "text",
                         "text": format!(
-                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_execution_gate, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. Treat startup_execution_gate as the immediate return-enforcement object. Require gate_semantics_consistent = true before trusting that gate or executing startup_next_action. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
+                            "Before substantive work in a new or resumed chat, call amai_continuity_startup for project {project} in namespace {namespace}. Use it to recover the current active line, the next required step, the chat-start restore prompt_text, any pending_return_queue obligations, execctl_resume_contract_summary, execctl_resume_obligation, startup_execution_gate, startup_next_action, execctl_active_lease, and execctl_active_lease_summary. Treat startup_execution_gate as the immediate return-enforcement object. Require gate_semantics_consistent = true before trusting that gate or executing startup_next_action. If amai_continuity_startup fails with tool_execution_failed and detail containing 'no continuity import found for', or if the embedded MCP transport closes before the tool returns a payload, immediately reconcile once via local CLI continuity startup for the same repo_root and namespace before declaring continuity unavailable; if local CLI startup succeeds, treat the MCP failure as a stale embedded MCP session, continue from the local startup payload, and request reconnect for the embedded MCP session. If startup_next_action.action_kind is resume_required_return_task, execute that required return before unrelated work and do not silently switch away. If execctl_active_lease.lease_owner_state is previous_session_owner, do not silently seize the workline; follow startup_next_action first."
                         )
                     }
                 }]
@@ -3963,6 +4488,37 @@ async fn write_message<W: AsyncWriteExt + Unpin>(writer: &mut W, message: &Value
         .context("failed to flush JSON-RPC writer")
 }
 
+async fn read_jsonrpc_line<R>(reader: &mut R) -> Result<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut limited = reader.take((MCP_MAX_MESSAGE_BYTES + 1) as u64);
+    let mut buffer = Vec::new();
+    let bytes_read = limited
+        .read_until(b'\n', &mut buffer)
+        .await
+        .context("failed to read MCP input line")?;
+    if bytes_read == 0 {
+        return Ok(None);
+    }
+    let terminated_by_newline = matches!(buffer.last(), Some(b'\n'));
+    if bytes_read > MCP_MAX_MESSAGE_BYTES && !terminated_by_newline {
+        return Err(anyhow!(
+            "MCP input line exceeded {} bytes",
+            MCP_MAX_MESSAGE_BYTES
+        ));
+    }
+    if terminated_by_newline {
+        buffer.pop();
+        if matches!(buffer.last(), Some(b'\r')) {
+            buffer.pop();
+        }
+    }
+    String::from_utf8(buffer)
+        .map(Some)
+        .context("failed to decode MCP input line as UTF-8")
+}
+
 fn parse_arguments<T>(value: Option<Value>) -> McpToolResult<T>
 where
     T: DeserializeOwned + Default,
@@ -3973,6 +4529,19 @@ where
         }),
         None => Ok(T::default()),
     }
+}
+
+fn normalized_server_name(raw: &str) -> Result<String> {
+    let server_name = raw.trim();
+    if server_name.is_empty() {
+        return Err(anyhow!("MCP server name must not be empty"));
+    }
+    if server_name.chars().any(char::is_control) {
+        return Err(anyhow!(
+            "MCP server name must not contain control characters"
+        ));
+    }
+    Ok(server_name.to_string())
 }
 
 fn render_client_config(args: &McpConfigArgs) -> Result<String> {
@@ -3986,10 +4555,7 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
         args.ssh_destination.as_deref(),
         args.remote_repo_root.as_deref(),
     )?;
-    let server_name = args.server_name.trim();
-    if server_name.is_empty() {
-        return Err(anyhow!("MCP server name must not be empty"));
-    }
+    let server_name = normalized_server_name(&args.server_name)?;
 
     match config_shape_for_client(&client)? {
         ConfigShape::GenericJson => serde_json::to_string_pretty(&json!({
@@ -4021,11 +4587,23 @@ fn render_client_config(args: &McpConfigArgs) -> Result<String> {
             }
         }))
         .context("failed to render MCP config"),
-        ConfigShape::CodexToml => Ok(format!(
-            "[mcp_servers.{server_name}]\ncommand = {:?}\nargs = {}\n",
-            launcher.command,
-            format_toml_string_array(&launcher.args)
-        )),
+        ConfigShape::CodexToml => {
+            let mut server_table = toml::map::Map::new();
+            server_table.insert("command".to_string(), toml::Value::String(launcher.command));
+            server_table.insert(
+                "args".to_string(),
+                toml::Value::Array(launcher.args.into_iter().map(toml::Value::String).collect()),
+            );
+
+            let mut mcp_servers = toml::map::Map::new();
+            mcp_servers.insert(server_name, toml::Value::Table(server_table));
+
+            let mut root = toml::map::Map::new();
+            root.insert("mcp_servers".to_string(), toml::Value::Table(mcp_servers));
+
+            toml::to_string_pretty(&toml::Value::Table(root))
+                .context("failed to render Codex TOML config")
+        }
     }
 }
 
@@ -4133,15 +4711,6 @@ fn windows_path(path: &std::path::Path) -> String {
     path.display().to_string().replace('/', "\\")
 }
 
-fn format_toml_string_array(items: &[String]) -> String {
-    let rendered = items
-        .iter()
-        .map(|item| format!("{item:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{rendered}]")
-}
-
 fn shell_escape_single_quotes(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len() + 2);
     escaped.push('\'');
@@ -4169,15 +4738,73 @@ fn merge_existing_config(
     let existing = fs::read_to_string(output)
         .with_context(|| format!("failed to read {}", output.display()))?;
     match shape {
-        ConfigShape::GenericJson => Ok(rendered.to_string()),
-        ConfigShape::VscodeJson => {
-            merge_json_server(&existing, rendered, "servers", args.server_name.trim())
-        }
-        ConfigShape::McpServersJson => {
-            merge_json_server(&existing, rendered, "mcpServers", args.server_name.trim())
-        }
-        ConfigShape::CodexToml => merge_toml_server(&existing, rendered, args.server_name.trim()),
+        ConfigShape::GenericJson => merge_generic_json_config(&existing, rendered),
+        ConfigShape::VscodeJson => merge_json_server(
+            &existing,
+            rendered,
+            "servers",
+            &normalized_server_name(&args.server_name)?,
+        ),
+        ConfigShape::McpServersJson => merge_json_server(
+            &existing,
+            rendered,
+            "mcpServers",
+            &normalized_server_name(&args.server_name)?,
+        ),
+        ConfigShape::CodexToml => merge_toml_server(
+            &existing,
+            rendered,
+            &normalized_server_name(&args.server_name)?,
+        ),
     }
+}
+
+fn merge_generic_json_config(existing: &str, rendered: &str) -> Result<String> {
+    let mut existing_json: Value = serde_json::from_str(existing)
+        .context("failed to parse existing generic MCP JSON config")?;
+    let rendered_json: Value = serde_json::from_str(rendered)
+        .context("failed to parse rendered generic MCP JSON config")?;
+    let root = existing_json
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("existing generic MCP JSON config is not an object"))?;
+    let rendered_root = rendered_json
+        .as_object()
+        .ok_or_else(|| anyhow!("rendered generic MCP JSON config is not an object"))?;
+    for (key, value) in rendered_root {
+        root.insert(key.clone(), value.clone());
+    }
+    serde_json::to_string_pretty(&existing_json)
+        .context("failed to serialize merged generic MCP JSON config")
+}
+
+fn generic_json_server_exists(existing: &str, server_name: &str) -> Result<bool> {
+    let existing_json: Value = serde_json::from_str(existing)
+        .context("failed to parse existing generic MCP JSON config")?;
+    Ok(existing_json
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == server_name))
+}
+
+fn remove_generic_json_server(existing: &str, server_name: &str) -> Result<(String, bool, bool)> {
+    let mut existing_json: Value = serde_json::from_str(existing)
+        .context("failed to parse existing generic MCP JSON config")?;
+    let root = existing_json
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("existing generic MCP JSON config is not an object"))?;
+    if root.get("name").and_then(Value::as_str) != Some(server_name) {
+        return Ok((existing.to_string(), false, false));
+    }
+    for key in ["name", "transport", "command", "args", "cwd"] {
+        root.remove(key);
+    }
+    let is_empty = root.is_empty() || existing_json == json!({});
+    Ok((
+        serde_json::to_string_pretty(&existing_json)
+            .context("failed to serialize pruned generic MCP JSON config")?,
+        true,
+        is_empty,
+    ))
 }
 
 fn merge_json_server(
@@ -4327,10 +4954,13 @@ fn discover_repo_root() -> Result<PathBuf> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ToolCallRequest {
     name: String,
     #[serde(default)]
     arguments: Option<Value>,
+    #[serde(default, rename = "_meta")]
+    _meta: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4437,6 +5067,7 @@ impl ContinuityStartupToolArgs {
             repo_root: self.repo_root.as_ref().map(PathBuf::from),
             namespace: self.namespace.clone(),
             json: true,
+            runtime_state_json: false,
             token_source_kind: self.token_source_kind.clone(),
         }
     }
@@ -4589,6 +5220,69 @@ fn default_warm_limit() -> usize {
     4
 }
 
+fn validate_initialize_protocol_version(params: &Value) -> McpToolResult<()> {
+    let protocol_version = params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .ok_or_else(|| McpError::invalid_params("initialize.params.protocolVersion is required"))?;
+    if protocol_version != MCP_PROTOCOL_VERSION {
+        return Err(McpError::invalid_params(format!(
+            "unsupported protocolVersion {protocol_version}; expected {MCP_PROTOCOL_VERSION}"
+        )));
+    }
+    Ok(())
+}
+
+fn tool_input_schema(tool_name: &str) -> Option<Value> {
+    tool_definitions().into_iter().find_map(|tool| {
+        if tool.get("name").and_then(Value::as_str) == Some(tool_name) {
+            tool.get("inputSchema").cloned()
+        } else {
+            None
+        }
+    })
+}
+
+fn validate_tool_request_arguments(
+    tool_name: &str,
+    arguments: Option<&Value>,
+) -> McpToolResult<()> {
+    let Some(schema) = tool_input_schema(tool_name) else {
+        return Ok(());
+    };
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        return Ok(());
+    }
+    let Some(arguments) = arguments else {
+        return Ok(());
+    };
+    let object = arguments.as_object().ok_or_else(|| {
+        McpError::invalid_params(format!(
+            "tool arguments for {tool_name} must be a JSON object"
+        ))
+    })?;
+    if schema.get("additionalProperties").and_then(Value::as_bool) != Some(false) {
+        return Ok(());
+    }
+    let allowed = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().cloned().collect::<BTreeSet<_>>())
+        .unwrap_or_default();
+    let unknown = object
+        .keys()
+        .filter(|key| !allowed.contains(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(McpError::invalid_params(format!(
+        "unexpected tool arguments for {tool_name}: {}",
+        unknown.join(", ")
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -4597,19 +5291,22 @@ mod tests {
         context_pack_input_schema, context_pack_summary, context_pack_tool_stats_block,
         context_pack_tool_summary, continuity_startup_input_schema, continuity_startup_summary,
         inject_proof_tool_arguments, mcp_tool_error_result, memory_matrix_summary,
-        observe_snapshot_summary, observe_whole_cycle_input_schema,
+        normalized_server_name, observe_snapshot_summary, observe_whole_cycle_input_schema,
         observe_whole_cycle_turn_input_schema, prompt_result, protocol_manifest,
         render_client_config, snapshot_has_only_ignored_critical_metrics, stack_preflight_summary,
         summarize_codes, summarize_namespace_modes, token_benchmark_summary, token_report_summary,
-        tool_requires_live_client_budget_preflight, verify_mcp_scope_label,
+        tool_requires_live_client_budget_preflight, validate_initialize_protocol_version,
+        validate_tool_request_arguments, verify_mcp_scope_label,
         verify_mcp_scope_requires_memory_matrix, verify_mcp_scope_requires_warm_cache,
         warm_cache_summary,
     };
     use crate::cli::VerifyMcpScope;
+    use crate::continuity;
     use crate::retrieval::{ContextPackStats, ContextPackTimings};
     use crate::working_state;
-    use serde_json::json;
-    use std::path::PathBuf;
+    use serde_json::{Value, json};
+    use std::fs::{self, File};
+    use std::path::{Path, PathBuf};
     use uuid::Uuid;
 
     #[test]
@@ -4647,6 +5344,32 @@ mod tests {
         let value: toml::Value = toml::from_str(&config).expect("config must be valid TOML");
         assert_eq!(
             value["mcp_servers"]["amai"]["command"].as_str(),
+            Some("/tmp/run_mcp_stdio.sh")
+        );
+    }
+
+    #[test]
+    fn rejects_control_characters_in_server_name() {
+        let error = normalized_server_name("amai\nbroken").expect_err("must reject controls");
+        assert!(error.to_string().contains("control characters"));
+    }
+
+    #[test]
+    fn renders_codex_config_with_safe_quoted_server_key() {
+        let config = render_client_config(&McpConfigArgs {
+            client: "codex".to_string(),
+            server_name: "amai.prod".to_string(),
+            launcher_platform: "auto".to_string(),
+            ssh_destination: None,
+            remote_repo_root: None,
+            command: Some("/tmp/run_mcp_stdio.sh".to_string()),
+            cwd: Some(PathBuf::from("/tmp/amai")),
+            output: None,
+        })
+        .expect("render should succeed");
+        let value: toml::Value = toml::from_str(&config).expect("config must be valid TOML");
+        assert_eq!(
+            value["mcp_servers"]["amai.prod"]["command"].as_str(),
             Some("/tmp/run_mcp_stdio.sh")
         );
     }
@@ -4774,6 +5497,116 @@ mod tests {
         assert_eq!(cli.namespace, "continuity");
         assert!(cli.json);
         assert_eq!(cli.token_source_kind, "proof_mcp_continuity_startup");
+    }
+
+    #[test]
+    fn initialize_protocol_version_rejects_mismatch() {
+        let error = validate_initialize_protocol_version(&json!({
+            "protocolVersion": "1900-01-01"
+        }))
+        .expect_err("protocol mismatch must fail");
+        assert!(error.detail.contains("unsupported protocolVersion"));
+    }
+
+    #[test]
+    fn initialize_protocol_version_accepts_current_version() {
+        validate_initialize_protocol_version(&json!({
+            "protocolVersion": super::MCP_PROTOCOL_VERSION
+        }))
+        .expect("current protocol version must pass");
+    }
+
+    #[test]
+    fn tool_argument_validation_rejects_unknown_fields() {
+        let error = validate_tool_request_arguments(
+            "amai_list_namespaces",
+            Some(&json!({
+                "project": "amai",
+                "extra": "ignored"
+            })),
+        )
+        .expect_err("unknown fields must fail");
+        assert!(error.detail.contains("unexpected tool arguments"));
+    }
+
+    #[test]
+    fn tool_argument_validation_rejects_non_object_arguments() {
+        let error = validate_tool_request_arguments("amai_list_projects", Some(&json!("bad")))
+            .expect_err("non-object arguments must fail");
+        assert!(error.detail.contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn generic_client_config_contains_exact_server_name_only() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let output = temp_root.join("generic-mcp.json");
+        fs::write(
+            &output,
+            serde_json::to_string_pretty(&json!({
+                "name": "other",
+                "transport": "stdio",
+                "command": "/tmp/run_mcp_stdio.sh",
+                "args": []
+            }))
+            .expect("serialize generic config"),
+        )
+        .expect("write generic config");
+        let contains = super::client_config_contains_server(&McpConfigArgs {
+            client: "generic".to_string(),
+            server_name: "amai".to_string(),
+            launcher_platform: "auto".to_string(),
+            ssh_destination: None,
+            remote_repo_root: None,
+            command: None,
+            cwd: Some(temp_root.clone()),
+            output: Some(output.clone()),
+        })
+        .expect("inspect config");
+        assert!(!contains);
+        fs::remove_dir_all(&temp_root).expect("remove temp root");
+    }
+
+    #[test]
+    fn removing_generic_config_preserves_unrelated_keys() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let output = temp_root.join("generic-mcp.json");
+        fs::write(
+            &output,
+            serde_json::to_string_pretty(&json!({
+                "name": "amai",
+                "transport": "stdio",
+                "command": "/tmp/run_mcp_stdio.sh",
+                "args": [],
+                "cwd": "/tmp/amai",
+                "note": "keep-me"
+            }))
+            .expect("serialize generic config"),
+        )
+        .expect("write generic config");
+        let result = super::remove_client_config(
+            &McpConfigArgs {
+                client: "generic".to_string(),
+                server_name: "amai".to_string(),
+                launcher_platform: "auto".to_string(),
+                ssh_destination: None,
+                remote_repo_root: None,
+                command: None,
+                cwd: Some(temp_root.clone()),
+                output: Some(output.clone()),
+            },
+            false,
+        )
+        .expect("remove config");
+        assert!(result.removed);
+        assert!(!result.purged_file);
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(&output).expect("read updated config"))
+                .expect("parse updated config");
+        assert_eq!(value["note"], json!("keep-me"));
+        assert!(value.get("name").is_none());
+        fs::remove_dir_all(&temp_root).expect("remove temp root");
     }
 
     #[test]
@@ -5388,7 +6221,7 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v13")
+            Some("continuity-startup-contract-v18")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["must_call_before_substantive_work"].as_bool(),
@@ -5495,6 +6328,12 @@ mod tests {
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
+                ["inspection_fallback_cli"]["shell_command"]
+                .as_str(),
+            Some("./scripts/continuity_startup_state.sh")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
                 ["inspection_fallback_cli"]["returns_startup_execution_gate"]
                 .as_bool(),
             Some(true)
@@ -5522,6 +6361,60 @@ mod tests {
                 ["sha256_mismatch_fail_closed"]
                 .as_bool(),
             Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["error_class"]
+                .as_str(),
+            Some("tool_execution_failed")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["error_detail_contains"]
+                .as_str(),
+            Some("no continuity import found for")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["transport_error_detail_contains"]
+                .as_str(),
+            Some("Transport closed")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["local_cli"]["command"]
+                .as_str(),
+            Some("continuity startup")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["local_cli"]["shell_command"]
+                .as_str(),
+            Some("./scripts/continuity_startup.sh")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["local_cli_success_classification"]
+                .as_str(),
+            Some("stale_embedded_mcp_session")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["local_cli_success_replaces_transport_failure"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["must_request_mcp_reconnect_after_local_success"]
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["tool_runtime_reconcile"]
+                ["reconnect_helper"]["shell_helper_relative_path"]
+                .as_str(),
+            Some("./scripts/reconnect_local.sh")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["runtime_state_artifact"]
@@ -5722,15 +6615,22 @@ mod tests {
                 "project-scoped startup guidance for continuity restore and live client-budget discipline before each substantive reply"
             )
         );
+        let expected_target_pattern = continuity::client_budget_target_chat_command_pattern();
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["contract_version"].as_str(),
-            Some("continuity-startup-contract-v13")
+            Some("continuity-startup-contract-v18")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
                 ["guard_command"]
                 .as_str(),
             Some("observe client-budget-gate")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["guard_shell_command"]
+                .as_str(),
+            Some("./scripts/client_budget_gate.sh")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
@@ -5749,6 +6649,12 @@ mod tests {
                 ["reply_execution_gate_version"]
                 .as_str(),
             Some("client-reply-budget-gate-v1")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["reply_prefix_field"]
+                .as_str(),
+            Some("reply_prefix")
         );
         assert_eq!(
             manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
@@ -5835,6 +6741,49 @@ mod tests {
             Some(working_state::CLIENT_BUDGET_BLOCKING_REPLY_MAX_SENTENCES)
         );
         assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["target_control"]["exact_chat_command_pattern"]
+                .as_str(),
+            Some(expected_target_pattern.as_str())
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["target_control"]["chat_command_prefix"]
+                .as_str(),
+            Some(continuity::CLIENT_BUDGET_TARGET_CHAT_COMMAND_PREFIX)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["target_control"]["allowed_target_percents"]
+                .as_array()
+                .map(|values| values.iter().filter_map(Value::as_u64).collect::<Vec<_>>()),
+            Some(continuity::allowed_client_budget_target_values())
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["target_control"]["cli_command"]
+                .as_str(),
+            Some("continuity client-budget-target")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["compact_chat_control"]["exact_chat_command"]
+                .as_str(),
+            Some(continuity::CLIENT_BUDGET_COMPACT_CHAT_COMMAND)
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["compact_chat_control"]["cli_command"]
+                .as_str(),
+            Some("continuity compact-chat")
+        );
+        assert_eq!(
+            manifest["startup_contracts"]["project_chat_startup"]["live_client_budget_enforcement"]
+                ["compact_chat_control"]["required_host_action"]
+                .as_str(),
+            Some("open_clean_chat_surface_and_inject_prompt_text")
+        );
+        assert_eq!(
             manifest["error_contracts"]["tool_execution_failed"]["error_class"].as_str(),
             Some("tool_runtime")
         );
@@ -5873,6 +6822,11 @@ mod tests {
         assert!(text.contains("lease_owner_state"));
         assert!(text.contains("previous_session_owner"));
         assert!(text.contains("resume_required_return_task"));
+        assert!(text.contains("tool_execution_failed"));
+        assert!(text.contains("no continuity import found for"));
+        assert!(text.contains("embedded MCP transport closes"));
+        assert!(text.contains("local CLI continuity startup"));
+        assert!(text.contains("stale embedded MCP session"));
     }
 
     #[test]
@@ -6021,6 +6975,132 @@ mod tests {
     }
 
     #[test]
+    fn continuity_startup_reconcile_subprocess_prefers_release_binary_under_repo_root() {
+        let temp_root = std::env::temp_dir().join(format!("amai-mcp-test-{}", Uuid::new_v4()));
+        let target_release = temp_root.join("target/release");
+        fs::create_dir_all(&target_release).expect("create target/release");
+        let release_binary = target_release.join("amai");
+        File::create(&release_binary).expect("create release binary");
+        let deleted_current_exe = PathBuf::from("/tmp/amai-deleted-binary");
+
+        let selected =
+            super::preferred_continuity_startup_reconcile_binary(&temp_root, &deleted_current_exe);
+
+        assert_eq!(selected, release_binary);
+        fs::remove_dir_all(&temp_root).expect("remove temp root");
+    }
+
+    #[test]
+    fn attach_continuity_startup_tool_runtime_reconcile_inserts_metadata() {
+        let payload = json!({
+            "continuity_startup": {
+                "project": { "code": "bug_bounty" }
+            }
+        });
+        let attached = super::attach_continuity_startup_tool_runtime_reconcile(
+            payload,
+            json!({
+                "applied": true,
+                "classification": "stale_embedded_mcp_session"
+            }),
+        );
+        assert_eq!(
+            attached["tool_runtime_reconcile"]["classification"],
+            json!("stale_embedded_mcp_session")
+        );
+        assert_eq!(attached["tool_runtime_reconcile"]["applied"], json!(true));
+    }
+
+    #[test]
+    fn tool_call_request_accepts_meta_field_from_client() {
+        let request: super::ToolCallRequest = serde_json::from_value(json!({
+            "name": "amai_continuity_startup",
+            "arguments": {
+                "project": "bug_bounty"
+            },
+            "_meta": {
+                "client": "codex"
+            }
+        }))
+        .expect("decode tool call request with _meta");
+        assert_eq!(request.name, "amai_continuity_startup");
+        assert_eq!(request.arguments.unwrap()["project"], json!("bug_bounty"));
+        assert_eq!(request._meta.unwrap()["client"], json!("codex"));
+    }
+
+    #[test]
+    fn embedded_mcp_reconnect_helper_surface_uses_explicit_client_env() {
+        unsafe {
+            std::env::set_var("AMAI_CLIENT_KEY", "codex");
+        }
+        let surface = super::build_embedded_mcp_reconnect_helper_surface(Path::new("/tmp/amai"));
+        unsafe {
+            std::env::remove_var("AMAI_CLIENT_KEY");
+        }
+        assert_eq!(surface["preferred_client_key"], json!("codex"));
+        assert_eq!(surface["preferred_client_display_name"], json!("Codex"));
+        assert_eq!(
+            surface["shell_helper_command"],
+            json!("./scripts/reconnect_local.sh --client codex")
+        );
+        assert_eq!(
+            surface["bootstrap_command"],
+            json!("./scripts/amai_exec.sh bootstrap reconnect --client codex --yes")
+        );
+    }
+
+    #[test]
+    fn continuity_startup_summary_fallback_gate_follows_blocking_rotate_action() {
+        let payload = json!({
+            "continuity_startup": {
+                "project": { "code": "amai" },
+                "namespace": { "code": "continuity" }
+            },
+            "chat_start_restore": {
+                "headline": "Rotate into a fresh chat",
+                "next_step": "Open a clean thread.",
+                "restore_confidence": "high",
+                "thread_count": 1,
+                "prompt_text": "CHAT_START_RESTORE\nRotate now",
+                "execctl_resume_state": "pending_return_queue_present",
+                "execctl_resume_obligation": {
+                    "resume_state": "pending_return_queue_present",
+                    "no_silent_drop": true,
+                    "pending_return_count": 1
+                },
+                "startup_next_action": {
+                    "action_kind": "rotate_chat_for_client_budget",
+                    "blocking": true,
+                    "headline": "Клиентский лимит: новый чат нужен сейчас",
+                    "next_step": "сохрани handoff и продолжай только в свежем чате через continuity startup"
+                },
+                "execctl_active_lease": {
+                    "lease_owner_state": "same_session_owner"
+                },
+                "required_return_task": {
+                    "headline": "MCP context pack now replaces verified legacy tool-overhead with truthful structured-content tokens",
+                    "next_step": "Continue the >90% 5h KPI line from a clean thread."
+                }
+            }
+        });
+
+        let summary = continuity_startup_summary(&payload);
+        assert_eq!(
+            summary.startup_execution_gate["action_kind"],
+            json!("rotate_chat_for_client_budget")
+        );
+        assert_eq!(summary.startup_execution_gate["blocking"], json!(true));
+        assert_eq!(
+            summary.startup_execution_gate["must_follow_startup_next_action"],
+            json!(true)
+        );
+        assert_eq!(
+            summary.startup_execution_gate["unrelated_work_allowed"],
+            json!(false)
+        );
+    }
+
+    #[test]
     fn startup_contract_exposes_global_budget_wait_reply_contract() {
         let contract = super::project_chat_startup_contract();
         let enforcement = &contract["live_client_budget_enforcement"];
@@ -6032,6 +7112,11 @@ mod tests {
                 .iter()
                 .any(|value| value.as_str() == Some("wait_for_global_client_budget_recovery"))
         );
+        assert!(
+            !blocking_action_kinds
+                .iter()
+                .any(|value| { value.as_str() == Some("rotate_chat_for_client_budget") })
+        );
 
         let allowed_response_kinds = enforcement["blocking_reply_allowed_response_kinds"]
             .as_array()
@@ -6039,12 +7124,18 @@ mod tests {
         assert!(allowed_response_kinds.iter().any(|value| {
             value.as_str() == Some(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_RESPONSE_KIND)
         }));
+        assert!(!allowed_response_kinds.iter().any(|value| {
+            value.as_str() == Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND)
+        }));
 
         let allowed_templates = enforcement["blocking_reply_allowed_templates"]
             .as_array()
             .expect("allowed templates");
         assert!(allowed_templates.iter().any(|value| {
             value.as_str() == Some(working_state::CLIENT_BUDGET_WAIT_BLOCKING_REPLY_TEMPLATE)
+        }));
+        assert!(!allowed_templates.iter().any(|value| {
+            value.as_str() == Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_TEMPLATE)
         }));
     }
 
@@ -6106,6 +7197,7 @@ mod tests {
     fn client_budget_blocked_tool_result_keeps_compact_machine_readable_gate() {
         let guard = json!({
             "status_label": "новый чат нужен сейчас",
+            "reply_prefix": "5ч KPI: переплата 6.62%",
             "observed_at_epoch_ms": 1774765483000_u64,
             "max_guard_age_seconds": 10,
             "last_request": "187520 из 258400",
@@ -6116,6 +7208,7 @@ mod tests {
                 "must_rotate_before_reply": true,
                 "must_wait_for_budget_recovery_before_reply": false,
                 "reply_budget_mode": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
+                "reply_prefix": "5ч KPI: переплата 6.62%",
                 "preserves_return_obligation": true,
                 "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(
                     working_state::ClientBudgetBlockingReplyMode::RotateChatOnly,
@@ -6142,15 +7235,181 @@ mod tests {
             Some("rotate_chat_for_client_budget")
         );
         assert_eq!(
+            result["structuredContent"]["client_budget_reply_gate"]["reply_prefix"].as_str(),
+            Some("5ч KPI: переплата 6.62%")
+        );
+        assert_eq!(
+            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
+                ["reply_prefix"]
+                .as_str(),
+            Some("5ч KPI: переплата 6.62%")
+        );
+        assert_eq!(
             result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
                 ["blocking_reply_contract"]["response_kind"]
                 .as_str(),
             Some(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND)
         );
+        assert_eq!(
+            result["content"][0]["text"].as_str(),
+            Some(
+                "5ч KPI: переплата 6.62%\ntool blocked by live client budget gate: rotate into a fresh chat before retrying this tool"
+            )
+        );
         assert!(
             result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
                 .get("action_bundle")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn client_budget_blocked_tool_result_keeps_same_meter_stop_loss_reason() {
+        let guard = json!({
+            "status_label": "сожми текущий чат сейчас",
+            "reply_prefix": "5ч KPI: переплата 42.00%",
+            "observed_at_epoch_ms": 1774765483000_u64,
+            "max_guard_age_seconds": 10,
+            "last_request": "120531 из 258400",
+            "client_limits": "5ч остаётся 11.00%, 7д остаётся 77.00%",
+            "reply_execution_gate": {
+                "action_kind": "compact_current_thread_for_client_budget",
+                "blocking": false,
+                "must_rotate_before_reply": false,
+                "must_wait_for_budget_recovery_before_reply": false,
+                "reply_budget_mode": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
+                "reply_prefix": "5ч KPI: переплата 42.00%",
+                "same_meter_pure_burn_turn_active": true,
+                "must_avoid_new_tool_turn_without_specific_delta_goal": true,
+                "max_tool_roundtrips_soft": 0,
+                "preserves_return_obligation": true,
+                "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(
+                    working_state::ClientBudgetBlockingReplyMode::Inactive,
+                ),
+                "action_bundle": {
+                    "preserves_return_obligation": true
+                }
+            }
+        });
+        let result = super::client_budget_blocked_tool_result("amai_context_pack", &guard);
+        assert_eq!(
+            result["structuredContent"]["same_meter_pure_burn_turn_active"],
+            json!(true)
+        );
+        assert_eq!(
+            result["structuredContent"]["expensive_tool_turn_stop_loss_active"],
+            json!(true)
+        );
+        assert_eq!(
+            result["structuredContent"]["expensive_tool_turn_stop_loss_reason"],
+            json!("same_meter_pure_burn_turn")
+        );
+        assert_eq!(
+            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
+                ["same_meter_pure_burn_turn_active"],
+            json!(true)
+        );
+        assert_eq!(
+            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
+                ["must_avoid_new_tool_turn_without_specific_delta_goal"],
+            json!(true)
+        );
+        assert_eq!(
+            result["structuredContent"]["client_budget_reply_gate"]["reply_execution_gate"]
+                ["max_tool_roundtrips_soft"],
+            json!(0)
+        );
+        assert_eq!(
+            result["content"][0]["text"].as_str(),
+            Some(
+                "5ч KPI: переплата 42.00%\ntool blocked by live client budget gate: avoid a new expensive Amai tool turn until you have a specific material delta goal or after compaction/rotation changes the live budget gate"
+            )
+        );
+    }
+
+    #[test]
+    fn client_budget_blocked_tool_result_marks_zero_roundtrip_stop_loss_without_pure_burn() {
+        let guard = json!({
+            "status_label": "новый чат нужен сейчас",
+            "reply_prefix": "5ч KPI: переплата 8.00%",
+            "observed_at_epoch_ms": 1774765483000_u64,
+            "max_guard_age_seconds": 10,
+            "last_request": "88234 из 258400",
+            "client_limits": "5ч остаётся 65.85%, 7д остаётся 70.00%",
+            "reply_execution_gate": {
+                "action_kind": "rotate_chat_for_client_budget",
+                "blocking": false,
+                "must_rotate_before_reply": false,
+                "must_wait_for_budget_recovery_before_reply": false,
+                "reply_budget_mode": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
+                "reply_prefix": "5ч KPI: переплата 8.00%",
+                "same_meter_pure_burn_turn_active": false,
+                "must_avoid_new_tool_turn_without_specific_delta_goal": true,
+                "max_tool_roundtrips_soft": 0,
+                "preserves_return_obligation": true,
+                "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(
+                    working_state::ClientBudgetBlockingReplyMode::Inactive,
+                ),
+                "action_bundle": {
+                    "preserves_return_obligation": true
+                }
+            }
+        });
+        let result = super::client_budget_blocked_tool_result("amai_context_pack", &guard);
+        assert_eq!(
+            result["structuredContent"]["same_meter_pure_burn_turn_active"],
+            json!(false)
+        );
+        assert_eq!(
+            result["structuredContent"]["expensive_tool_turn_stop_loss_active"],
+            json!(true)
+        );
+        assert_eq!(
+            result["structuredContent"]["expensive_tool_turn_stop_loss_reason"],
+            json!("zero_tool_roundtrips_live_gate")
+        );
+        assert_eq!(
+            result["content"][0]["text"].as_str(),
+            Some(
+                "5ч KPI: переплата 8.00%\ntool blocked by live client budget gate: rotate into a fresh chat before retrying this tool"
+            )
+        );
+    }
+
+    #[test]
+    fn client_budget_blocked_tool_result_compact_current_thread_hint_is_actionable() {
+        let guard = json!({
+            "status_label": "сожми текущий чат сейчас",
+            "reply_prefix": "5ч KPI: экономия 4.33%",
+            "observed_at_epoch_ms": 1774765483000_u64,
+            "max_guard_age_seconds": 10,
+            "last_request": "130966 из 258400",
+            "client_limits": "5ч остаётся 83.00%, 7д остаётся 69.00%",
+            "reply_execution_gate": {
+                "action_kind": "compact_current_thread_for_client_budget",
+                "blocking": false,
+                "must_rotate_before_reply": false,
+                "must_wait_for_budget_recovery_before_reply": false,
+                "reply_budget_mode": working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
+                "reply_prefix": "5ч KPI: экономия 4.33%",
+                "same_meter_pure_burn_turn_active": false,
+                "must_avoid_new_tool_turn_without_specific_delta_goal": true,
+                "max_tool_roundtrips_soft": 0,
+                "preserves_return_obligation": true,
+                "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(
+                    working_state::ClientBudgetBlockingReplyMode::Inactive,
+                ),
+                "action_bundle": {
+                    "preserves_return_obligation": true
+                }
+            }
+        });
+        let result = super::client_budget_blocked_tool_result("amai_context_pack", &guard);
+        assert_eq!(
+            result["content"][0]["text"].as_str(),
+            Some(
+                "5ч KPI: экономия 4.33%\ntool blocked by live client budget gate: wait until current-thread compaction changes the live budget gate before retrying this tool"
+            )
         );
     }
 

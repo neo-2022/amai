@@ -14,5 +14,16 @@ else
   exit $status
 fi
 
+if blocked_tool_turn="$("$SCRIPT_DIR/client_budget_tool_turn_gate.sh" --tool-name continuity_answer "$@")"; then
+  :
+else
+  status=$?
+  if [[ $status -eq 10 ]]; then
+    printf '%s\n' "$blocked_tool_turn"
+    exit 0
+  fi
+  exit $status
+fi
+
 cd "$SCRIPT_DIR/.."
-exec cargo run --quiet -- continuity answer "$@"
+exec "$SCRIPT_DIR/amai_exec.sh" continuity answer "$@"

@@ -22,4 +22,4 @@ if [[ "$has_ssh_destination" -ne 1 || "$has_remote_repo_root" -ne 1 ]]; then
   exit 1
 fi
 
-exec cargo run --quiet -- bootstrap onboarding --skip-stack --skip-release-build "$@"
+exec ./scripts/amai_exec.sh bootstrap onboarding --skip-stack --skip-release-build "$@"

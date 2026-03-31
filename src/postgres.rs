@@ -5,9 +5,14 @@ use postgres_native_tls::MakeTlsConnector;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 use tokio_postgres::config::{Host, SslMode};
 use tokio_postgres::{Client, Config as PostgresConfig, NoTls, Row};
 use uuid::Uuid;
+
+const BOOTSTRAP_SCHEMA_ADVISORY_LOCK_KEY: i64 = 0x414d41495f736368;
+static BOOTSTRAP_SCHEMA_CACHE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct ProjectRecord {
@@ -389,12 +394,106 @@ fn postgres_host_label(host: &Host) -> String {
 }
 
 pub async fn bootstrap_schema(client: &Client, cfg: &AppConfig) -> Result<()> {
+    let cache_key = bootstrap_schema_cache_key(cfg);
+    if bootstrap_schema_cache_contains(&cache_key) {
+        return Ok(());
+    }
     client
-        .batch_execute(include_str!("../sql/000_bootstrap.sql"))
+        .query_one(
+            "SELECT pg_advisory_lock($1)",
+            &[&BOOTSTRAP_SCHEMA_ADVISORY_LOCK_KEY],
+        )
         .await
-        .context("failed to apply postgres schema")?;
-    ensure_app_role(client, cfg).await?;
-    Ok(())
+        .context("failed to acquire postgres schema bootstrap advisory lock")?;
+    let schema_result: Result<()> = async {
+        if !bootstrap_schema_is_current(client).await? {
+            client
+                .batch_execute(include_str!("../sql/000_bootstrap.sql"))
+                .await
+                .context("failed to apply postgres schema")?;
+        }
+        ensure_app_role(client, cfg).await?;
+        bootstrap_schema_cache_insert(cache_key.clone());
+        Ok(())
+    }
+    .await;
+    let unlock_result = client
+        .query_one(
+            "SELECT pg_advisory_unlock($1)",
+            &[&BOOTSTRAP_SCHEMA_ADVISORY_LOCK_KEY],
+        )
+        .await
+        .context("failed to release postgres schema bootstrap advisory lock");
+    match (schema_result, unlock_result) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(()), Err(unlock_error)) => Err(unlock_error),
+        (Err(error), Err(unlock_error)) => Err(anyhow!(
+            "{error:#}\nsecondary unlock failure: {unlock_error:#}"
+        )),
+    }
+}
+
+fn bootstrap_schema_cache_key(cfg: &AppConfig) -> String {
+    format!("{}::{}", cfg.postgres_dsn, cfg.app_db_user)
+}
+
+fn bootstrap_schema_cache_contains(cache_key: &str) -> bool {
+    BOOTSTRAP_SCHEMA_CACHE
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .ok()
+        .is_some_and(|guard| guard.contains(cache_key))
+}
+
+fn bootstrap_schema_cache_insert(cache_key: String) {
+    if let Ok(mut guard) = BOOTSTRAP_SCHEMA_CACHE
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+    {
+        guard.insert(cache_key);
+    }
+}
+
+async fn bootstrap_schema_is_current(client: &Client) -> Result<bool> {
+    let row = client
+        .query_one(
+            r#"
+            SELECT
+                to_regclass('ami.projects') IS NOT NULL
+                AND to_regclass('ami.project_repo_roots') IS NOT NULL
+                AND to_regclass('ami.namespaces') IS NOT NULL
+                AND to_regclass('ami.observability_snapshots') IS NOT NULL
+                AND to_regclass('ami.execctl_task_leases') IS NOT NULL
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'ami'
+                      AND table_name = 'observability_snapshots'
+                      AND column_name = 'captured_at_epoch_ms'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'ami'
+                      AND table_name = 'observability_snapshots'
+                      AND column_name = 'source_event_id'
+                )
+                AND EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'ami'
+                      AND table_name = 'observability_snapshots'
+                      AND column_name = 'event_key'
+                )
+                AND to_regclass('ami.idx_ami_observability_snapshots_kind_event_key') IS NOT NULL
+                AND to_regclass('ami.idx_ami_observability_working_state_retrieval_thread_captured') IS NOT NULL
+            "#,
+            &[],
+        )
+        .await
+        .context("failed to validate postgres schema bootstrap sentinel")?;
+    Ok(row.get::<_, bool>(0))
 }
 
 fn project_record_from_row(row: &Row) -> ProjectRecord {
@@ -2248,6 +2347,154 @@ pub async fn list_observability_snapshots_by_kinds(
         .collect())
 }
 
+pub async fn list_observability_snapshots_by_kind_for_scope(
+    client: &Client,
+    snapshot_kind: &str,
+    payload_root: &str,
+    project_code: &str,
+    namespace_code: &str,
+    limit: Option<i64>,
+) -> Result<Vec<ObservabilitySnapshotRecord>> {
+    let limit = limit.unwrap_or(i64::MAX);
+    let rows = client
+        .query(
+            r#"
+            SELECT
+                snapshot_id,
+                snapshot_kind,
+                payload,
+                (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = $1
+              AND (
+                    (scope_project_code = $2 AND scope_namespace_code = $3)
+                    OR (
+                        payload #>> ARRAY[$4, 'project', 'code'] = $2
+                        AND payload #>> ARRAY[$4, 'namespace', 'code'] = $3
+                    )
+                  )
+            ORDER BY COALESCE(
+                        captured_at_epoch_ms,
+                        NULLIF(payload #>> ARRAY[$4, 'captured_at_epoch_ms'], '')::bigint,
+                        NULLIF(payload #>> ARRAY[$4, 'imported_at_epoch_ms'], '')::bigint,
+                        CASE
+                            WHEN NULLIF(payload #>> ARRAY[$4, 'created_at_epoch_s'], '') IS NULL
+                                THEN NULL
+                            ELSE (NULLIF(payload #>> ARRAY[$4, 'created_at_epoch_s'], '')::bigint * 1000)
+                        END,
+                        (EXTRACT(EPOCH FROM created_at) * 1000)::bigint
+                     ) DESC,
+                     created_at DESC
+            LIMIT $5
+            "#,
+            &[
+                &snapshot_kind,
+                &project_code,
+                &namespace_code,
+                &payload_root,
+                &limit,
+            ],
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to list scoped observability snapshots for {}::{}::{}",
+                snapshot_kind, project_code, namespace_code
+            )
+        })?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ObservabilitySnapshotRecord {
+            snapshot_id: row.get(0),
+            snapshot_kind: row.get(1),
+            payload: row.get(2),
+            created_at_epoch_ms: row.get(3),
+        })
+        .collect())
+}
+
+pub async fn list_latest_observability_snapshots_by_payload_string_field(
+    client: &Client,
+    snapshot_kind: &str,
+    payload_root: &str,
+    field_name: &str,
+    values: &[String],
+) -> Result<Vec<ObservabilitySnapshotRecord>> {
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = client
+        .query(
+            r#"
+            SELECT DISTINCT ON (payload #>> ARRAY[$2, $3])
+                snapshot_id,
+                snapshot_kind,
+                payload,
+                (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = $1
+              AND payload #>> ARRAY[$2, $3] = ANY($4::text[])
+            ORDER BY payload #>> ARRAY[$2, $3] ASC, created_at DESC
+            "#,
+            &[&snapshot_kind, &payload_root, &field_name, &values],
+        )
+        .await
+        .context("failed to list latest observability snapshots by payload string field")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ObservabilitySnapshotRecord {
+            snapshot_id: row.get(0),
+            snapshot_kind: row.get(1),
+            payload: row.get(2),
+            created_at_epoch_ms: row.get(3),
+        })
+        .collect())
+}
+
+pub async fn list_observability_snapshots_by_payload_text_array_overlap(
+    client: &Client,
+    snapshot_kind: &str,
+    payload_root: &str,
+    field_name: &str,
+    values: &[String],
+) -> Result<Vec<ObservabilitySnapshotRecord>> {
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = client
+        .query(
+            r#"
+            SELECT
+                snapshot_id,
+                snapshot_kind,
+                payload,
+                (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_at_epoch_ms
+            FROM ami.observability_snapshots
+            WHERE snapshot_kind = $1
+              AND EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements_text(
+                        COALESCE(payload #> ARRAY[$2, $3], '[]'::jsonb)
+                    ) AS item(value)
+                    WHERE item.value = ANY($4::text[])
+                )
+            ORDER BY created_at DESC
+            "#,
+            &[&snapshot_kind, &payload_root, &field_name, &values],
+        )
+        .await
+        .context("failed to list observability snapshots by payload text array overlap")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ObservabilitySnapshotRecord {
+            snapshot_id: row.get(0),
+            snapshot_kind: row.get(1),
+            payload: row.get(2),
+            created_at_epoch_ms: row.get(3),
+        })
+        .collect())
+}
+
 pub async fn list_scoped_observability_snapshots_by_kinds(
     client: &Client,
     kinds: &[&str],
@@ -3076,5 +3323,13 @@ mod tests {
             "postgres://app:***@pg.internal:5433/amai?sslmode=prefer"
         );
         assert!(!masked.contains("very-secret"));
+    }
+
+    #[test]
+    fn bootstrap_schema_cache_roundtrips() {
+        let cache_key = format!("test-bootstrap-cache-{}", Uuid::new_v4());
+        assert!(!super::bootstrap_schema_cache_contains(&cache_key));
+        super::bootstrap_schema_cache_insert(cache_key.clone());
+        assert!(super::bootstrap_schema_cache_contains(&cache_key));
     }
 }

@@ -3,6 +3,11 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
+$cleanupScript = Join-Path $repoRoot "scripts\\cleanup_mcp_orphans.ps1"
+if (Test-Path $cleanupScript) {
+    & $cleanupScript -RepoRoot $repoRoot *> $null
+}
+
 $envPath = Join-Path $repoRoot ".env"
 $examplePath = Join-Path $repoRoot ".env.example"
 
@@ -46,10 +51,17 @@ Get-Content $envPath | ForEach-Object {
 }
 
 $releaseBinary = Join-Path $repoRoot "target\release\amai.exe"
+$manifestPath = Join-Path $repoRoot "Cargo.toml"
+$cargoCommand = Get-Command cargo -ErrorAction SilentlyContinue
+if ($null -ne $cargoCommand) {
+    cargo run --manifest-path $manifestPath --release --quiet -- mcp serve
+    exit $LASTEXITCODE
+}
+
 if (Test-Path $releaseBinary) {
     & $releaseBinary mcp serve
     exit $LASTEXITCODE
 }
 
-cargo run --release --quiet -- mcp serve
-exit $LASTEXITCODE
+Write-Error "Amai MCP runner requires cargo or target\release\amai.exe"
+exit 1

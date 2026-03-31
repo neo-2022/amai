@@ -72,6 +72,18 @@ proof/verify события.
 - product proof для этого контура теперь идёт не только через обычный `proof_execctl_pending_return`,
   но и через вариант, где `ami.execctl_task_leases` специально удаляется перед новым handoff.
 
+## Operational MCP launcher freshness
+
+`MCP` onboarding не имеет права quietly поднимать старый `target/release/amai`, если исходники уже
+изменились и continuity/runtime contract в repo успели обновиться.
+
+Практическое правило:
+- launcher `scripts/run_mcp_stdio.sh` и `scripts/run_mcp_stdio.ps1` должны идти через
+  `cargo run --release -- mcp serve`, если `cargo` доступен;
+- fallback на `target/release/amai` допустим только как degrade path на машинах без `cargo`;
+- product proof для этого слоя:
+  `./scripts/proof_mcp_launcher_freshness.sh`.
+
 ## Operational agent activity truth
 
 Dashboard больше не должен сводить multi-agent активность к одному последнему `working state`.
@@ -953,7 +965,7 @@ cargo run -- mcp serve
   - `rotate_status_labels = ["новый чат рекомендован", "новый чат нужен сейчас"]`;
   - `save_handoff_before_rotate = true`;
   - `fresh_chat_requires_continuity_startup = true`.
-- Это значит, что supported client обязан recheck-ить `cargo run -- observe client-budget-gate`
+- Это значит, что supported client обязан recheck-ить `./scripts/client_budget_gate.sh`
   не только при startup нового/resumed чата, но и перед каждым следующим содержательным ответом,
   если последняя проверка старше `10` секунд или её нет.
 - После такого recheck automation больше не должна читать только human rows или `status_label`:
@@ -962,7 +974,7 @@ cargo run -- mcp serve
   `must_rotate_before_reply`, `action_kind`, `reply_budget_mode`,
   `preserves_return_obligation`.
 - Если automation нужен hard stop без разбора JSON вручную, используйте
-  `cargo run -- observe client-budget-gate --enforce-reply-gate`:
+  `./scripts/client_budget_gate.sh --enforce-reply-gate`:
   он печатает тот же compact gate, но завершает команду non-zero exit code, когда reply уже
   должен быть остановлен и переведён в свежий чат.
 - `cargo run -- observe client-budget-guard` остаётся legacy/debug surface:
@@ -1133,6 +1145,38 @@ resume-obligation на client edge.
 - удаляется только запись `Amai`, а не весь чужой config целиком;
 - если файл после этого становится пустым и включён `purge_empty_file`, пустой файл удаляется;
 - для user-scope config перед изменением создаётся backup.
+
+## Reconnect
+
+Если нужно мягко переподключить локальный клиент к `Amai`, не делая blunt reset живых соседних
+сессий, используйте:
+
+```bash
+./scripts/reconnect_local.sh --client vscode
+./scripts/reconnect_local.sh --client cursor
+./scripts/reconnect_local.sh --client codex
+./scripts/reconnect_local.sh --client claude-code
+```
+
+CLI equivalent:
+
+```bash
+cargo run -- bootstrap reconnect --client codex --yes
+```
+
+Этот path специально не делает `disconnect`.
+Он:
+- чистит только orphaned `amai mcp serve` процессы для текущего repo root;
+- заново пересинхронизирует client config и managed startup artifacts;
+- идёт через fast onboarding contour (`--skip-stack --skip-release-build`);
+- это preferred operator path, если embedded MCP session ушла в stale state или agent видит `Transport closed` вместо normal startup payload;
+- не должен использоваться как blunt all-process reset при наличии живых параллельных клиентов.
+
+Proof для этого пути:
+
+```bash
+./scripts/proof_client_reconnect.sh
+```
 
 ## Platform launchers
 

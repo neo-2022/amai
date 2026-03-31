@@ -14,6 +14,17 @@ else
   exit $status
 fi
 
+if blocked_tool_turn="$("$SCRIPT_DIR/client_budget_tool_turn_gate.sh" --tool-name chat_lookup "$@")"; then
+  :
+else
+  status=$?
+  if [[ $status -eq 10 ]]; then
+    printf '%s\n' "$blocked_tool_turn"
+    exit 0
+  fi
+  exit $status
+fi
+
 cd "$SCRIPT_DIR/.."
 
 intent="last_chat"
@@ -109,7 +120,7 @@ if [[ ${#freeform_question[@]} -gt 0 && "$question_seen" == false ]]; then
   question_seen=true
 fi
 
-final_args=(cargo run --quiet -- continuity answer --intent "$intent")
+final_args=("$SCRIPT_DIR/amai_exec.sh" continuity answer --intent "$intent")
 if [[ "$include_chat_messages" == true && "$include_flag_seen" == false && "$question_seen" == false ]]; then
   final_args+=(--include-chat-messages)
 fi

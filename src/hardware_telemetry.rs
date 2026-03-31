@@ -187,8 +187,7 @@ fn collect_machine_summary_uncached(repo_root: &Path) -> Result<MachineSummary> 
     let (memory_type, memory_speed_label, memory_provider) =
         detect_memory_characteristics(platform);
 
-    let disks =
-        Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
+    let disks = Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_storage());
     let disk_space = disk_space_for_path(&disks, repo_root);
     let disk_total_gib = disk_space
         .map(|(total, _)| bytes_to_gib(total))
@@ -340,12 +339,7 @@ fn detect_memory_characteristics(platform: HostPlatform) -> (String, String, Str
             "неизвестная ОС".to_string(),
         ),
     };
-    store_memory_characteristics_cache(
-        platform,
-        &detected.0,
-        &detected.1,
-        &detected.2,
-    );
+    store_memory_characteristics_cache(platform, &detected.0, &detected.1, &detected.2);
     detected
 }
 
@@ -1604,8 +1598,12 @@ fn cached_memory_characteristics(platform: HostPlatform) -> Option<(String, Stri
     let guard = cache.lock().ok()?;
     let entry = guard.as_ref()?;
     let now_ms = now_epoch_ms();
-    if should_reuse_cached_memory_characteristics(platform, entry.platform, entry.captured_at_ms, now_ms)
-    {
+    if should_reuse_cached_memory_characteristics(
+        platform,
+        entry.platform,
+        entry.captured_at_ms,
+        now_ms,
+    ) {
         Some((
             entry.memory_type.clone(),
             entry.memory_speed_label.clone(),
@@ -1671,11 +1669,11 @@ fn bytes_to_gib_f64(bytes: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceleratorKind, classify_accelerator_kind, derive_gpu_backend_from_model,
-        extract_first_number, map_windows_smbios_memory_type, normalize_linux_block_device_name,
-        normalize_pci_bus_label, parse_capacity_to_gib, should_reuse_cached_machine_summary,
-        should_reuse_cached_memory_characteristics, HostPlatform, MACHINE_SUMMARY_CACHE_TTL_MS,
-        MEMORY_CHARACTERISTICS_CACHE_TTL_MS,
+        AcceleratorKind, HostPlatform, MACHINE_SUMMARY_CACHE_TTL_MS,
+        MEMORY_CHARACTERISTICS_CACHE_TTL_MS, classify_accelerator_kind,
+        derive_gpu_backend_from_model, extract_first_number, map_windows_smbios_memory_type,
+        normalize_linux_block_device_name, normalize_pci_bus_label, parse_capacity_to_gib,
+        should_reuse_cached_machine_summary, should_reuse_cached_memory_characteristics,
     };
     use std::path::Path;
 

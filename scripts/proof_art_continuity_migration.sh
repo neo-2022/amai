@@ -23,7 +23,7 @@ done
 
 ./scripts/bootstrap_stack.sh
 
-./scripts/import_continuity.sh \
+AMAI_ALLOW_EXPENSIVE_TOOL_TURN=1 ./scripts/import_continuity.sh \
   --project art \
   --display-name Art \
   --repo-root "$ART_REPO_ROOT" \
@@ -33,7 +33,7 @@ done
   > /tmp/amai-art-continuity-import.json
 
 if [[ "$ART_INCLUDE_MEMORY_BRIDGE" == "1" && -d "$ART_MEMORY_DIR" ]]; then
-  ./scripts/import_continuity.sh \
+  AMAI_ALLOW_EXPENSIVE_TOOL_TURN=1 ./scripts/import_continuity.sh \
     --project art \
     --display-name Art \
     --repo-root "$ART_REPO_ROOT" \

@@ -143,6 +143,16 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 continuity::capture_handoff(&cfg, &args).await?;
             }
+            ContinuityCommand::ClientBudgetTarget(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                continuity::client_budget_target(&cfg, &args).await?;
+            }
+            ContinuityCommand::CompactChat(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                continuity::compact_chat(&cfg, &args).await?;
+            }
             ContinuityCommand::RotateChat(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
@@ -172,6 +182,7 @@ async fn main() -> Result<()> {
             }
             BootstrapCommand::Install(args) => onboarding::run(&args).await?,
             BootstrapCommand::Onboarding(args) => onboarding::run(&args).await?,
+            BootstrapCommand::Reconnect(args) => onboarding::reconnect(&args).await?,
             BootstrapCommand::Remove(args) => onboarding::disconnect(&args).await?,
             BootstrapCommand::Disconnect(args) => onboarding::disconnect(&args).await?,
         },
@@ -385,6 +396,11 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 observe::print_snapshot_preview(&cfg).await?;
             }
+            ObserveCommand::BudgetSnapshotPreview => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                observe::print_budget_snapshot_preview(&cfg).await?;
+            }
             ObserveCommand::SlaCheck => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
@@ -405,10 +421,15 @@ async fn main() -> Result<()> {
                 compatibility::assert_supported(&cfg).await?;
                 observe::print_client_budget_guard(&cfg, args.enforce_reply_gate).await?;
             }
-            ObserveCommand::ClientBudgetRootCause => {
+            ObserveCommand::ClientBudgetRootCause(args) => {
                 let cfg = config::AppConfig::from_env()?;
                 compatibility::assert_supported(&cfg).await?;
-                observe::print_client_budget_root_cause(&cfg).await?;
+                observe::print_client_budget_root_cause(&cfg, args.enforce_reply_gate).await?;
+            }
+            ObserveCommand::ClientBudgetHostControlLaunch(args) => {
+                let cfg = config::AppConfig::from_env()?;
+                compatibility::assert_supported(&cfg).await?;
+                observe::print_client_budget_host_control_launch(&cfg, &args).await?;
             }
             ObserveCommand::ClientLimitHourlyBurn(args) => {
                 let cfg = config::AppConfig::from_env()?;

@@ -151,9 +151,13 @@ pub async fn build_context_pack(
     let mut prepared = prepare_context_pack(cfg, db, args).await?;
     ensure_context_pack_persisted(cfg, db, args, &mut prepared).await?;
     cache_context_pack_entry(cfg, args, &prepared, true)?;
-    let caller_payload =
-        materialize_context_pack_caller_payload(db, args, prepared.payload.as_ref(), &prepared.stats)
-            .await?;
+    let caller_payload = materialize_context_pack_caller_payload(
+        db,
+        args,
+        prepared.payload.as_ref(),
+        &prepared.stats,
+    )
+    .await?;
     record_context_pack_token_budget_event(db, &caller_payload, args).await?;
     let compact_output = model_visible_context_pack_payload(&caller_payload);
     let compact_output_json = serde_json::to_string(&compact_output)?;
@@ -248,9 +252,13 @@ pub async fn execute_context_pack_capture_with_options(
     }
     let durably_persisted = persist || prepared.durably_persisted;
     cache_context_pack_entry(cfg, args, &prepared, durably_persisted)?;
-    let payload =
-        materialize_context_pack_caller_payload(db, args, prepared.payload.as_ref(), &prepared.stats)
-            .await?;
+    let payload = materialize_context_pack_caller_payload(
+        db,
+        args,
+        prepared.payload.as_ref(),
+        &prepared.stats,
+    )
+    .await?;
     if track_token_usage {
         record_context_pack_token_budget_event(db, &payload, args).await?;
     }
@@ -271,7 +279,7 @@ async fn record_context_pack_token_budget_event(
     let token_budget_payload = with_whole_cycle_observed_overrides(payload, args);
     token_budget::record_context_pack_event(db, &token_budget_payload, &args.token_source_kind)
         .await?;
-    working_state::record_context_pack_event(db, payload).await?;
+    working_state::record_context_pack_event(db, payload, &args.token_source_kind).await?;
     remember_thread_context_pack_delivery(payload)?;
     Ok(())
 }
@@ -282,7 +290,9 @@ async fn materialize_context_pack_caller_payload(
     payload: &Value,
     stats: &ContextPackStats,
 ) -> Result<Value> {
-    let payload = if let Some(compact) = same_thread_cache_reuse_payload_if_needed(db, payload, stats).await? {
+    let payload = if let Some(compact) =
+        same_thread_cache_reuse_payload_if_needed(db, payload, stats).await?
+    {
         compact
     } else {
         payload.clone()
@@ -310,7 +320,9 @@ async fn same_thread_cache_reuse_payload_if_needed(
     if !same_thread_context_pack_previously_delivered(db, &thread_id, context_pack_id).await? {
         return Ok(None);
     }
-    Ok(Some(build_same_thread_cache_reuse_payload(payload, &thread_id)))
+    Ok(Some(build_same_thread_cache_reuse_payload(
+        payload, &thread_id,
+    )))
 }
 
 async fn same_thread_context_pack_previously_delivered(
@@ -343,28 +355,39 @@ async fn same_thread_context_pack_previously_delivered(
     Ok(delivered)
 }
 
-fn build_same_thread_cache_reuse_payload(payload: &Value, thread_id: &str) -> Value {
+fn build_same_thread_cache_reuse_payload(payload: &Value, _thread_id: &str) -> Value {
     let active_files = context_pack_active_files(payload, 6);
+    let default_project_code = payload["project"]["code"].as_str().unwrap_or_default();
     json!({
         "context_pack_id": payload["context_pack_id"].clone(),
-        "project": payload["project"].clone(),
-        "namespace": payload["namespace"].clone(),
+        "project": {
+            "code": payload["project"]["code"].clone(),
+        },
+        "namespace": {
+            "code": payload["namespace"]["code"].clone(),
+        },
         "query": payload["query"].clone(),
         "effective_retrieval_mode": payload["effective_retrieval_mode"].clone(),
-        "visible_projects": payload["visible_projects"].clone(),
-        "decision_trace": payload["decision_trace"].clone(),
-        "workspace_graph": payload["workspace_graph"].clone(),
-        "retrieval_runtime": payload["retrieval_runtime"].clone(),
-        "whole_cycle_observed": payload["whole_cycle_observed"].clone(),
+        "visible_projects": compact_visible_projects_for_token_budget(&payload["visible_projects"]),
+        "retrieval_runtime": compact_retrieval_runtime_for_token_budget(&payload["retrieval_runtime"]),
+        "whole_cycle_observed": compact_whole_cycle_observed_for_token_budget(&payload["whole_cycle_observed"]),
         "retrieval": {
-            "exact_documents": metadata_only_exact_documents(&payload["retrieval"]["exact_documents"]),
-            "symbol_hits": compact_symbol_hits(&payload["retrieval"]["symbol_hits"]),
-            "lexical_chunks": metadata_only_chunk_refs(&payload["retrieval"]["lexical_chunks"]),
-            "semantic_chunks": metadata_only_chunk_refs(&payload["retrieval"]["semantic_chunks"]),
+            "exact_documents": metadata_only_exact_documents(
+                &payload["retrieval"]["exact_documents"],
+                default_project_code,
+            ),
+            "symbol_hits": compact_symbol_hits(&payload["retrieval"]["symbol_hits"], default_project_code),
+            "lexical_chunks": metadata_only_chunk_refs(
+                &payload["retrieval"]["lexical_chunks"],
+                default_project_code,
+            ),
+            "semantic_chunks": metadata_only_chunk_refs(
+                &payload["retrieval"]["semantic_chunks"],
+                default_project_code,
+            ),
         },
         "cache_reuse_reference": {
             "state": "same_thread_context_pack_replay",
-            "thread_id": thread_id,
             "source_context_pack_id": payload["context_pack_id"].clone(),
             "active_files": active_files,
             "retrieval_counts": {
@@ -372,39 +395,48 @@ fn build_same_thread_cache_reuse_payload(payload: &Value, thread_id: &str) -> Va
                 "symbol_hits": payload["retrieval"]["symbol_hits"].as_array().map_or(0, Vec::len),
                 "lexical_chunks": payload["retrieval"]["lexical_chunks"].as_array().map_or(0, Vec::len),
                 "semantic_chunks": payload["retrieval"]["semantic_chunks"].as_array().map_or(0, Vec::len),
-            },
-            "note": "Полный текст этого context pack уже был доставлен раньше в этом thread; этот повторный cache-hit даёт только короткую карту файлов и символов вместо повторной пересылки того же текста."
+            }
         }
     })
 }
 
-fn metadata_only_exact_documents(value: &Value) -> Vec<Value> {
-    let mut seen_paths = HashSet::new();
+fn compact_visible_projects_for_token_budget(value: &Value) -> Vec<Value> {
     value
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|item| {
-            let signature = compact_text_path_signature(
-                item["project_code"]
-                    .as_str()
-                    .or_else(|| item["provenance"]["source_project"].as_str())
-                    .unwrap_or_default(),
-                item["relative_path"].as_str().unwrap_or_default(),
-            )?;
-            if !seen_paths.insert(signature) {
-                return None;
-            }
-            Some(json!({
+        .map(|item| {
+            json!({
                 "project_code": item["project_code"].clone(),
-                "relative_path": item["relative_path"].clone(),
-                "source_kind": item["source_kind"].clone(),
-            }))
+                "repo_root": item["repo_root"].clone(),
+            })
         })
         .collect()
 }
 
-fn metadata_only_chunk_refs(value: &Value) -> Vec<Value> {
+fn compact_retrieval_runtime_for_token_budget(value: &Value) -> Value {
+    if !value.is_object() {
+        return Value::Null;
+    }
+    json!({
+        "cache_hit": value["cache_hit"].clone(),
+        "total_ms": value["total_ms"].clone(),
+    })
+}
+
+fn compact_whole_cycle_observed_for_token_budget(value: &Value) -> Value {
+    if !value.is_object() {
+        return Value::Null;
+    }
+    json!({
+        "client_prompt_tokens": value["client_prompt_tokens"].clone(),
+        "assistant_generation_tokens": value["assistant_generation_tokens"].clone(),
+        "tool_overhead_tokens": value["tool_overhead_tokens"].clone(),
+        "continuity_restore_tokens": value["continuity_restore_tokens"].clone(),
+    })
+}
+
+fn metadata_only_exact_documents(value: &Value, default_project_code: &str) -> Vec<Value> {
     let mut seen_paths = HashSet::new();
     value
         .as_array()
@@ -421,13 +453,37 @@ fn metadata_only_chunk_refs(value: &Value) -> Vec<Value> {
             if !seen_paths.insert(signature) {
                 return None;
             }
-            Some(json!({
-                "project_code": item["project_code"].clone(),
+            let mut compact = json!({
                 "relative_path": item["relative_path"].clone(),
-                "provenance": {
-                    "source_project": item["provenance"]["source_project"].clone(),
-                }
-            }))
+            });
+            insert_compact_project_reference(&mut compact, item, default_project_code);
+            Some(compact)
+        })
+        .collect()
+}
+
+fn metadata_only_chunk_refs(value: &Value, default_project_code: &str) -> Vec<Value> {
+    let mut seen_paths = HashSet::new();
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let signature = compact_text_path_signature(
+                item["project_code"]
+                    .as_str()
+                    .or_else(|| item["provenance"]["source_project"].as_str())
+                    .unwrap_or_default(),
+                item["relative_path"].as_str().unwrap_or_default(),
+            )?;
+            if !seen_paths.insert(signature) {
+                return None;
+            }
+            let mut compact = json!({
+                "relative_path": item["relative_path"].clone(),
+            });
+            insert_compact_project_reference(&mut compact, item, default_project_code);
+            Some(compact)
         })
         .collect()
 }
@@ -540,7 +596,9 @@ pub(crate) fn model_visible_context_pack_payload(payload: &Value) -> Value {
     if is_same_thread_cache_reuse_payload(payload) {
         return model_visible_same_thread_cache_reuse_payload(payload);
     }
-    let (lexical_chunks, semantic_chunks) = compact_retrieval_chunks(&payload["retrieval"]);
+    let default_project_code = payload["project"]["code"].as_str().unwrap_or_default();
+    let (lexical_chunks, semantic_chunks) =
+        compact_retrieval_chunks(&payload["retrieval"], default_project_code);
     let chunk_contents_by_path = compact_chunk_contents_by_path(&lexical_chunks, &semantic_chunks);
     json!({
         "context_pack_id": payload["context_pack_id"].clone(),
@@ -550,16 +608,14 @@ pub(crate) fn model_visible_context_pack_payload(payload: &Value) -> Value {
         "namespace": {
             "code": payload["namespace"]["code"].clone(),
         },
-        "query": payload["query"].clone(),
         "effective_retrieval_mode": payload["effective_retrieval_mode"].clone(),
-        "visible_projects": compact_visible_projects(&payload["visible_projects"]),
-        "decision_trace": compact_decision_trace(&payload["decision_trace"]),
         "retrieval": {
             "exact_documents": compact_exact_documents(
                 &payload["retrieval"]["exact_documents"],
                 &chunk_contents_by_path,
+                default_project_code,
             ),
-            "symbol_hits": compact_symbol_hits(&payload["retrieval"]["symbol_hits"]),
+            "symbol_hits": compact_symbol_hits(&payload["retrieval"]["symbol_hits"], default_project_code),
             "lexical_chunks": lexical_chunks,
             "semantic_chunks": semantic_chunks,
         }
@@ -617,90 +673,46 @@ fn compact_cache_reuse_reference(value: &Value) -> Value {
     compact
 }
 
-fn compact_visible_projects(value: &Value) -> Vec<Value> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|item| {
-            json!({
-                "project_code": item["project_code"].clone(),
-            })
-        })
-        .collect()
-}
-
-fn compact_decision_trace(value: &Value) -> Value {
-    json!({
-        "scope": {
-            "effective_retrieval_mode": value["scope"]["effective_retrieval_mode"].clone(),
-            "project_code": value["scope"]["project_code"].clone(),
-            "namespace_code": value["scope"]["namespace_code"].clone(),
-            "visible_projects_total": value["scope"]["visible_projects_total"].clone(),
-        },
-        "selection_priority": value["selection_priority"].clone(),
-        "included": compact_decision_trace_items(&value["included"]),
-        "not_included": compact_decision_trace_items(&value["not_included"]),
-        "semantic_guard": compact_semantic_guard(&value["semantic_guard"]),
-    })
-}
-
-fn compact_decision_trace_items(value: &Value) -> Vec<Value> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|item| {
-            json!({
-                "strategy": item["strategy"].clone(),
-                "count": item["count"].clone(),
-            })
-        })
-        .collect()
-}
-
-fn compact_semantic_guard(value: &Value) -> Value {
-    if !value.is_object() {
-        return Value::Null;
-    }
-    json!({
-        "abstained": value["abstained"].clone(),
-        "accepted_hits": value["accepted_hits"].clone(),
-        "rejected_hits": value["rejected_hits"].clone(),
-        "lexical_signal_count": value["lexical_signal_count"].clone(),
-        "query_terms": value["query_terms"].clone(),
-        "reason": value["reason"].clone(),
-    })
-}
-
 fn compact_exact_documents(
     value: &Value,
     chunk_contents_by_path: &HashMap<String, Vec<String>>,
+    default_project_code: &str,
 ) -> Vec<Value> {
     value
         .as_array()
         .into_iter()
         .flatten()
-        .map(|item| {
-            let mut compact = json!({
-                "project_code": item["project_code"].clone(),
-                "relative_path": item["relative_path"].clone(),
-                "source_kind": item["source_kind"].clone(),
-            });
+        .filter_map(|item| {
             let duplicate_snippet =
                 exact_document_snippet_covered_by_chunks(item, chunk_contents_by_path);
-            if !duplicate_snippet {
-                compact["snippet"] = item["snippet"].clone();
+            if duplicate_snippet {
+                return None;
             }
-            compact
+            let mut compact = json!({
+                "relative_path": item["relative_path"].clone(),
+                "snippet": item["snippet"].clone(),
+            });
+            insert_compact_project_reference(&mut compact, item, default_project_code);
+            Some(compact)
         })
         .collect()
 }
 
-fn compact_retrieval_chunks(retrieval: &Value) -> (Vec<Value>, Vec<Value>) {
+fn compact_retrieval_chunks(
+    retrieval: &Value,
+    default_project_code: &str,
+) -> (Vec<Value>, Vec<Value>) {
     let mut seen_signatures = HashSet::new();
-    let lexical_chunks = compact_chunks(&retrieval["lexical_chunks"], &mut seen_signatures);
-    let semantic_chunks = compact_chunks(&retrieval["semantic_chunks"], &mut seen_signatures);
+    let lexical_chunks = compact_chunks(
+        &retrieval["lexical_chunks"],
+        &mut seen_signatures,
+        default_project_code,
+    );
+    let semantic_chunks = compact_chunks(
+        &retrieval["semantic_chunks"],
+        &mut seen_signatures,
+        default_project_code,
+    );
     (lexical_chunks, semantic_chunks)
 }
 
@@ -709,10 +721,7 @@ fn compact_chunk_contents_by_path(
     semantic_chunks: &[Value],
 ) -> HashMap<String, Vec<String>> {
     let mut contents_by_path = HashMap::new();
-    for item in lexical_chunks
-        .iter()
-        .chain(semantic_chunks.iter())
-    {
+    for item in lexical_chunks.iter().chain(semantic_chunks.iter()) {
         let Some(path_signature) = compact_text_path_signature(
             item["project_code"]
                 .as_str()
@@ -725,7 +734,9 @@ fn compact_chunk_contents_by_path(
         let Some(content) = item["content"].as_str() else {
             continue;
         };
-        let entry = contents_by_path.entry(path_signature).or_insert_with(Vec::new);
+        let entry = contents_by_path
+            .entry(path_signature)
+            .or_insert_with(Vec::new);
         if !entry.iter().any(|existing| existing == content) {
             entry.push(content.to_string());
         }
@@ -733,21 +744,19 @@ fn compact_chunk_contents_by_path(
     contents_by_path
 }
 
-fn compact_symbol_hits(value: &Value) -> Vec<Value> {
+fn compact_symbol_hits(value: &Value, default_project_code: &str) -> Vec<Value> {
     value
         .as_array()
         .into_iter()
         .flatten()
         .map(|item| {
-            json!({
-                "project_code": item["project_code"].clone(),
+            let mut compact = json!({
                 "relative_path": item["relative_path"].clone(),
                 "name": item["name"].clone(),
                 "kind": item["kind"].clone(),
-                "provenance": {
-                    "source_project": item["provenance"]["source_project"].clone(),
-                }
-            })
+            });
+            insert_compact_project_reference(&mut compact, item, default_project_code);
+            compact
         })
         .collect()
 }
@@ -755,6 +764,7 @@ fn compact_symbol_hits(value: &Value) -> Vec<Value> {
 fn compact_chunks(
     value: &Value,
     seen_signatures: &mut HashSet<String>,
+    default_project_code: &str,
 ) -> Vec<Value> {
     value
         .as_array()
@@ -768,16 +778,30 @@ fn compact_chunks(
             Some(item)
         })
         .map(|item| {
-            json!({
-                "project_code": item["project_code"].clone(),
+            let mut compact = json!({
                 "relative_path": item["relative_path"].clone(),
                 "content": item["content"].clone(),
-                "provenance": {
-                    "source_project": item["provenance"]["source_project"].clone(),
-                }
-            })
+            });
+            insert_compact_project_reference(&mut compact, item, default_project_code);
+            compact
         })
         .collect()
+}
+
+fn compact_item_project_code<'a>(item: &'a Value, default_project_code: &str) -> Option<&'a str> {
+    item["project_code"]
+        .as_str()
+        .or_else(|| item["provenance"]["source_project"].as_str())
+        .filter(|value| !value.is_empty() && *value != default_project_code)
+}
+
+fn insert_compact_project_reference(compact: &mut Value, item: &Value, default_project_code: &str) {
+    let Some(project_code) = compact_item_project_code(item, default_project_code) else {
+        return;
+    };
+    if let Some(object) = compact.as_object_mut() {
+        object.insert("project_code".to_string(), json!(project_code));
+    }
 }
 
 fn compact_chunk_signature(item: &Value) -> Option<String> {
@@ -794,24 +818,29 @@ fn exact_document_snippet_covered_by_chunks(
     item: &Value,
     chunk_contents_by_path: &HashMap<String, Vec<String>>,
 ) -> bool {
-    let Some(path_signature) = compact_text_path_signature(
-        item["project_code"]
-            .as_str()
-            .or_else(|| item["provenance"]["source_project"].as_str())
-            .unwrap_or_default(),
-        item["relative_path"].as_str().unwrap_or_default(),
-    ) else {
+    let relative_path = item["relative_path"].as_str().unwrap_or_default();
+    let project_code = item["project_code"]
+        .as_str()
+        .or_else(|| item["provenance"]["source_project"].as_str())
+        .unwrap_or_default();
+    let candidate_signatures = [
+        compact_text_path_signature(project_code, relative_path),
+        compact_text_path_signature("", relative_path),
+    ];
+    if candidate_signatures.iter().all(Option::is_none) {
         return false;
-    };
+    }
     let Some(snippet) = item["snippet"].as_str() else {
         return false;
     };
     if snippet.is_empty() {
         return false;
     }
-    chunk_contents_by_path
-        .get(&path_signature)
-        .is_some_and(|contents| contents.iter().any(|content| content.contains(snippet)))
+    candidate_signatures.iter().flatten().any(|path_signature| {
+        chunk_contents_by_path
+            .get(path_signature)
+            .is_some_and(|contents| contents.iter().any(|content| content.contains(snippet)))
+    })
 }
 
 fn compact_text_path_signature(project_code: &str, relative_path: &str) -> Option<String> {
@@ -2779,12 +2808,11 @@ fn synthetic_chunk_hit(relative_path: &str, content: &str) -> ChunkHit {
 mod tests {
     use super::{
         SemanticTimings, apply_semantic_relevance_guard, build_context_pack_decision_trace,
-        build_same_thread_cache_reuse_payload,
-        degradation_probe_stale_fast_cache, degradation_proof_scenarios,
-        model_visible_context_pack_payload, query_terms, semantic_fallback_result,
-        semantic_hit_has_query_overlap, should_use_minimal_document_workspace_graph,
-        should_use_minimal_symbol_workspace_graph, synthetic_chunk_hit,
-        with_whole_cycle_observed_overrides,
+        build_same_thread_cache_reuse_payload, degradation_probe_stale_fast_cache,
+        degradation_proof_scenarios, model_visible_context_pack_payload, query_terms,
+        semantic_fallback_result, semantic_hit_has_query_overlap,
+        should_use_minimal_document_workspace_graph, should_use_minimal_symbol_workspace_graph,
+        synthetic_chunk_hit, with_whole_cycle_observed_overrides,
     };
     use crate::cli::ContextPackArgs;
     use crate::postgres::{DocumentHit, SymbolHit};
@@ -2985,11 +3013,9 @@ mod tests {
         assert_eq!(compact["namespace"]["code"].as_str(), Some("continuity"));
         assert!(compact["project"].get("display_name").is_none());
         assert!(compact["namespace"].get("display_name").is_none());
-        assert_eq!(
-            compact["visible_projects"][0]["project_code"].as_str(),
-            Some("art")
-        );
-        assert!(compact["visible_projects"][0].get("repo_root").is_none());
+        assert!(compact.get("query").is_none());
+        assert!(compact.get("visible_projects").is_none());
+        assert!(compact.get("decision_trace").is_none());
         assert_eq!(
             compact["retrieval"]["exact_documents"][0]["relative_path"].as_str(),
             Some(".amai-continuity/live-handoff.md")
@@ -3010,24 +3036,38 @@ mod tests {
             compact["retrieval"]["symbol_hits"][0]["name"].as_str(),
             Some("build_context_pack")
         );
-        assert!(compact["decision_trace"]["included"][0].get("reason").is_none());
-        assert!(compact["decision_trace"]["semantic_guard"].get("detail").is_none());
+        assert!(
+            compact["decision_trace"]["included"][0]
+                .get("reason")
+                .is_none()
+        );
+        assert!(
+            compact["decision_trace"]["semantic_guard"]
+                .get("detail")
+                .is_none()
+        );
         assert!(compact.get("workspace_graph").is_none());
         assert!(compact.get("retrieval_runtime").is_none());
-        assert!(compact["retrieval"]["exact_documents"][0].get("score").is_none());
-        assert!(compact["retrieval"]["lexical_chunks"][0].get("chunk").is_none());
+        assert!(
+            compact["retrieval"]["exact_documents"][0]
+                .get("score")
+                .is_none()
+        );
+        assert!(
+            compact["retrieval"]["lexical_chunks"][0]
+                .get("chunk")
+                .is_none()
+        );
         assert!(
             compact["retrieval"]["symbol_hits"][0]
                 .get("metadata")
                 .is_none()
         );
-        assert_eq!(
-            compact["retrieval"]["lexical_chunks"][0]["provenance"]["source_project"].as_str(),
-            Some("art")
-        );
+        assert!(compact["retrieval"]["lexical_chunks"][0].get("project_code").is_none());
+        assert!(compact["retrieval"]["lexical_chunks"][0].get("provenance").is_none());
         assert!(
-            compact["retrieval"]["lexical_chunks"][0]["provenance"]
-                .get("repo_root")
+            compact["retrieval"]["exact_documents"][0]
+                .get("project_code")
                 .is_none()
         );
         assert!(
@@ -3105,15 +3145,30 @@ mod tests {
 
         let compact = model_visible_context_pack_payload(&payload);
 
-        assert_eq!(compact["retrieval"]["exact_documents"].as_array().unwrap().len(), 1);
-        assert_eq!(compact["retrieval"]["lexical_chunks"].as_array().unwrap().len(), 1);
-        assert_eq!(compact["retrieval"]["semantic_chunks"].as_array().unwrap().len(), 0);
-        assert!(compact["retrieval"]["exact_documents"][0]
-            .get("snippet")
-            .is_none());
-        assert!(compact["decision_trace"]["included"][0].get("reason").is_none());
-        assert!(compact["decision_trace"]["not_included"][0].get("reason").is_none());
-        assert!(compact["decision_trace"]["semantic_guard"].get("detail").is_none());
+        assert_eq!(
+            compact["retrieval"]["exact_documents"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            compact["retrieval"]["lexical_chunks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            compact["retrieval"]["semantic_chunks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(compact.get("query").is_none());
+        assert!(compact.get("visible_projects").is_none());
+        assert!(compact.get("decision_trace").is_none());
     }
 
     #[test]
@@ -3170,10 +3225,34 @@ mod tests {
 
         let compact = model_visible_context_pack_payload(&payload);
 
-        assert_eq!(compact["retrieval"]["exact_documents"].as_array().unwrap().len(), 0);
-        assert_eq!(compact["retrieval"]["lexical_chunks"].as_array().unwrap().len(), 0);
-        assert_eq!(compact["retrieval"]["semantic_chunks"].as_array().unwrap().len(), 0);
-        assert_eq!(compact["retrieval"]["symbol_hits"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            compact["retrieval"]["exact_documents"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            compact["retrieval"]["lexical_chunks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            compact["retrieval"]["semantic_chunks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            compact["retrieval"]["symbol_hits"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(
             compact["retrieval"]["symbol_hits"][0]["name"].as_str(),
             Some("symbol_only_navigation_runtime_checkpoint")
@@ -3183,13 +3262,11 @@ mod tests {
                 .get("metadata")
                 .is_none()
         );
-        assert!(
-            compact["retrieval"]["symbol_hits"][0]["provenance"]
-                .get("repo_root")
-                .is_none()
-        );
-        assert!(compact["decision_trace"]["included"][0].get("reason").is_none());
-        assert!(compact["decision_trace"]["semantic_guard"].get("detail").is_none());
+        assert!(compact["retrieval"]["symbol_hits"][0].get("project_code").is_none());
+        assert!(compact["retrieval"]["symbol_hits"][0].get("provenance").is_none());
+        assert!(compact.get("query").is_none());
+        assert!(compact.get("visible_projects").is_none());
+        assert!(compact.get("decision_trace").is_none());
     }
 
     #[test]
@@ -3258,23 +3335,42 @@ mod tests {
 
         let compact = model_visible_context_pack_payload(&payload);
 
-        assert_eq!(compact["retrieval"]["exact_documents"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            compact["retrieval"]["exact_documents"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(
             compact["retrieval"]["exact_documents"][0]["snippet"].as_str(),
             Some("unique exact note only")
         );
-        assert_eq!(compact["retrieval"]["lexical_chunks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            compact["retrieval"]["lexical_chunks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(
             compact["retrieval"]["lexical_chunks"][0]["content"].as_str(),
             Some("covered chunk text without the exact-only note")
         );
-        assert_eq!(compact["retrieval"]["semantic_chunks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            compact["retrieval"]["semantic_chunks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(
             compact["retrieval"]["semantic_chunks"][0]["relative_path"].as_str(),
             Some("docs/related.md")
         );
-        assert!(compact["decision_trace"]["included"][0].get("reason").is_none());
-        assert!(compact["decision_trace"]["semantic_guard"].get("detail").is_none());
+        assert!(compact.get("query").is_none());
+        assert!(compact.get("visible_projects").is_none());
+        assert!(compact.get("decision_trace").is_none());
     }
 
     #[test]
@@ -3350,6 +3446,16 @@ mod tests {
             compact["cache_reuse_reference"]["source_context_pack_id"].as_str(),
             Some("ctx-reuse")
         );
+        assert!(
+            compact["cache_reuse_reference"]
+                .get("thread_id")
+                .is_none()
+        );
+        assert!(
+            compact["cache_reuse_reference"]
+                .get("note")
+                .is_none()
+        );
         assert_eq!(
             compact["cache_reuse_reference"]["active_files"]
                 .as_array()
@@ -3357,6 +3463,19 @@ mod tests {
                 .len(),
             3
         );
+        assert_eq!(compact["project"]["code"].as_str(), Some("art"));
+        assert!(compact["project"].get("display_name").is_none());
+        assert_eq!(compact["namespace"]["code"].as_str(), Some("continuity"));
+        assert!(compact["namespace"].get("display_name").is_none());
+        assert!(compact["decision_trace"].is_null());
+        assert!(compact["workspace_graph"].is_null());
+        assert!(compact["visible_projects"][0].get("display_name").is_none());
+        assert!(compact["visible_projects"][0].get("relation_type").is_none());
+        assert_eq!(
+            compact["retrieval_runtime"]["cache_hit"].as_bool(),
+            Some(true)
+        );
+        assert!(compact["retrieval_runtime"].get("resolve_scope_ms").is_none());
         assert!(
             compact["retrieval"]["exact_documents"][0]
                 .get("snippet")
@@ -3370,6 +3489,21 @@ mod tests {
         assert!(
             compact["retrieval"]["semantic_chunks"][0]
                 .get("content")
+                .is_none()
+        );
+        assert!(
+            compact["retrieval"]["exact_documents"][0]
+                .get("project_code")
+                .is_none()
+        );
+        assert!(
+            compact["retrieval"]["lexical_chunks"][0]
+                .get("project_code")
+                .is_none()
+        );
+        assert!(
+            compact["retrieval"]["lexical_chunks"][0]
+                .get("provenance")
                 .is_none()
         );
         assert_eq!(
@@ -3435,6 +3569,68 @@ mod tests {
         assert!(compact.get("retrieval").is_none());
         assert!(compact.get("decision_trace").is_none());
         assert!(compact.get("query").is_none());
+    }
+
+    #[test]
+    fn model_visible_context_pack_payload_keeps_cross_project_reference_only_when_needed() {
+        let payload = json!({
+            "context_pack_id": "ctx-cross-project",
+            "project": {
+                "code": "amai",
+            },
+            "namespace": {
+                "code": "continuity",
+            },
+            "effective_retrieval_mode": "local_plus_related",
+            "retrieval": {
+                "exact_documents": [{
+                    "project_code": "bug_bounty",
+                    "relative_path": "docs/report.md",
+                    "snippet": "cross project snippet",
+                    "source_kind": "docs",
+                    "provenance": {
+                        "source_project": "bug_bounty"
+                    }
+                }],
+                "symbol_hits": [{
+                    "project_code": "bug_bounty",
+                    "relative_path": "src/lib.rs",
+                    "name": "run_report",
+                    "kind": "function_item",
+                    "provenance": {
+                        "source_project": "bug_bounty"
+                    }
+                }],
+                "lexical_chunks": [{
+                    "project_code": "bug_bounty",
+                    "relative_path": "docs/report.md",
+                    "content": "cross project lexical",
+                    "provenance": {
+                        "source_project": "bug_bounty"
+                    }
+                }],
+                "semantic_chunks": []
+            }
+        });
+
+        let compact = model_visible_context_pack_payload(&payload);
+
+        assert_eq!(
+            compact["retrieval"]["exact_documents"][0]["project_code"].as_str(),
+            Some("bug_bounty")
+        );
+        assert!(compact["retrieval"]["exact_documents"][0].get("provenance").is_none());
+        assert!(compact["retrieval"]["exact_documents"][0].get("source_kind").is_none());
+        assert_eq!(
+            compact["retrieval"]["symbol_hits"][0]["project_code"].as_str(),
+            Some("bug_bounty")
+        );
+        assert!(compact["retrieval"]["symbol_hits"][0].get("provenance").is_none());
+        assert_eq!(
+            compact["retrieval"]["lexical_chunks"][0]["project_code"].as_str(),
+            Some("bug_bounty")
+        );
+        assert!(compact["retrieval"]["lexical_chunks"][0].get("provenance").is_none());
     }
 
     #[test]

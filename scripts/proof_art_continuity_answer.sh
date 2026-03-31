@@ -42,7 +42,7 @@ printf '%s\n' "$missing_time_output" | jq -e '.continuity_answer.chat_lookup.fou
 printf '%s\n' "$missing_time_output" | jq -e '.continuity_answer.canonical_eval.verdict_counts.hit_correct_target == 1' >/dev/null
 printf '%s\n' "$missing_time_output" | jq -e '.continuity_answer.canonical_eval.probes[0].name == "exact_time_answer_fail_closed"' >/dev/null
 
-question_output="$(./scripts/chat_lookup.sh \
+question_output="$(AMAI_ALLOW_EXPENSIVE_TOOL_TURN=1 ./scripts/chat_lookup.sh \
   --project art \
   --namespace continuity \
   --question "что было в прошлом чате, какие последние два сообщения?" \

@@ -16,9 +16,9 @@ root = json.loads(Path("/tmp/amai-proof-token-meter-alignment.json").read_text()
 contract = root["contract"]
 agent_cycle = root["agent_cycle_economics"]
 
-assert contract["client_limit_meter_alignment_version"] == "client-limit-meter-alignment-v6", contract
+assert contract["client_limit_meter_alignment_version"] == "client-limit-meter-alignment-v12", contract
 assert agent_cycle["model_version"] == "agent-cycle-lower-bound-v4", agent_cycle
-assert agent_cycle["contract"]["client_limit_meter_alignment"]["model_version"] == "client-limit-meter-alignment-v6", agent_cycle
+assert agent_cycle["contract"]["client_limit_meter_alignment"]["model_version"] == "client-limit-meter-alignment-v12", agent_cycle
 assert agent_cycle["contract"]["client_limit_meter_alignment"]["same_meter_as_client_limit"] is False, agent_cycle
 assert "client_prompt_unmeasured" in agent_cycle["contract"]["client_limit_meter_alignment"]["blocking_reasons"], agent_cycle
 assert "observable_components" in agent_cycle["contract"]["client_limit_meter_alignment"], agent_cycle
@@ -28,7 +28,7 @@ for scope in ("current_session", "rolling_window", "lifetime"):
     if preview is None:
         continue
     alignment = preview["client_limit_meter_alignment"]
-    assert alignment["model_version"] == "client-limit-meter-alignment-v6", preview
+    assert alignment["model_version"] == "client-limit-meter-alignment-v12", preview
     assert "assistant_generation_observation_source" in alignment, alignment
     assert "not_applicable_components" in alignment, alignment
     assert alignment["surface_kind"] == "statement_preview", preview
@@ -51,7 +51,7 @@ for scope in ("current_session", "rolling_window", "lifetime"):
     if scope_payload is None:
         continue
     alignment = scope_payload["client_limit_meter_alignment"]
-    assert alignment["model_version"] == "client-limit-meter-alignment-v6", scope_payload
+    assert alignment["model_version"] == "client-limit-meter-alignment-v12", scope_payload
     assert "assistant_generation_observation_source" in alignment, alignment
     assert "not_applicable_components" in alignment, alignment
     assert alignment["surface_kind"] == "agent_cycle_scope", scope_payload

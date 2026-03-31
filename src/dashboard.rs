@@ -1,4 +1,6 @@
+use crate::codex_threads;
 use crate::config::{self, AppConfig};
+use crate::continuity;
 use crate::hardware_telemetry::{AcceleratorSummary, MachineSummary, collect_machine_summary};
 use crate::working_state;
 use anyhow::{Context, Result};
@@ -37,6 +39,7 @@ struct HistoricalStartupDrag {
 struct ClientTurnPressureGuard {
     severity: &'static str,
     status_label: &'static str,
+    client_budget_target_percent: u64,
     turn_total_tokens: u64,
     model_context_window: u64,
     context_used_percent: f64,
@@ -56,12 +59,911 @@ struct GlobalClientLimitGuard {
     secondary_remaining_percent: f64,
 }
 
+const HOST_CONTEXT_COMPACTION_PRESERVE_TRIGGER_TOKENS: u64 = 10_000;
+const HOST_CONTEXT_COMPACTION_CRITICAL_TRIGGER_TOKENS: u64 = 50_000;
+const HOST_CONTEXT_COMPACTION_CRITICAL_REBOUND_RATIO: f64 = 0.25;
+const HOST_CURRENT_THREAD_EFFECT_ROTATE_FALLBACK_TURN_TOKEN_DELTA: i64 = 50_000;
+const HOST_CURRENT_THREAD_EFFECT_ROTATE_FALLBACK_CONTEXT_PERCENT_POINTS: f64 = 10.0;
+const HOST_CURRENT_THREAD_EFFECT_ROTATE_FALLBACK_REGROWTH_TOKENS: i64 = 25_000;
+const HOST_CURRENT_THREAD_EFFECT_ROTATE_FALLBACK_PRIMARY_LIMIT_OVERRUN_PERCENT_POINTS: f64 = 5.0;
+const HOST_CURRENT_THREAD_EFFECT_OVERLAY_TRIAL_TURN_TOKEN_DELTA: i64 = 5_000;
+const HOST_CURRENT_THREAD_EFFECT_OVERLAY_TRIAL_CONTEXT_PERCENT_POINTS: f64 = 2.5;
+const HOST_CURRENT_THREAD_EFFECT_OVERLAY_TRIAL_REGROWTH_TOKENS: i64 = 5_000;
+const HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_ELAPSED_MS: u64 = 120_000;
+const HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_TURN_TOKEN_DELTA: u64 = 3_000;
+const HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_CONTEXT_PERCENT_POINTS: f64 = 1.0;
+const HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_REGROWTH_TOKENS: u64 = 3_000;
+const SAME_THREAD_COMPACTION_MAX_CURRENT_TURN_TOKENS: u64 = 180_000;
+const SAME_THREAD_COMPACTION_MAX_CONTEXT_USED_PERCENT: f64 = 80.0;
+const SAME_THREAD_COMPACTION_MAX_CRITICAL_REGROWTH_RATIO: f64 = 0.75;
+const CLIENT_PRIMARY_LIMIT_WINDOW_MS: f64 = 5.0 * 60.0 * 60.0 * 1000.0;
+
 #[derive(Debug, Default)]
 struct AgentHierarchyProjectBucket {
     label: String,
     project_code: Option<String>,
     spaces: Vec<Value>,
     pending_threads: Vec<Value>,
+}
+
+fn client_budget_target_percent_from_inputs(report: &Value, restore_context: &Value) -> u64 {
+    restore_context["client_budget_target_percent"]
+        .as_u64()
+        .and_then(working_state::normalize_client_budget_target_percent)
+        .or_else(|| {
+            report["client_budget_target_percent"]
+                .as_u64()
+                .and_then(working_state::normalize_client_budget_target_percent)
+        })
+        .unwrap_or_else(working_state::default_client_budget_target_percent)
+}
+
+fn latest_host_current_thread_control_feedback_action_for_command<'a>(
+    restore_context: &'a Value,
+    command_id: Option<&str>,
+) -> Option<&'a Value> {
+    let command_id = command_id
+        .map(|value| working_state::normalize_host_current_thread_control_command_id(Some(value)));
+    restore_context["recent_actions"]
+        .as_array()?
+        .iter()
+        .find(|action| {
+            action["source_kind"].as_str()
+                == Some(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_SOURCE_KIND)
+                && action["host_current_thread_control_feedback"].is_object()
+                && command_id.is_none_or(|expected| {
+                    action["host_current_thread_control_feedback"]["command_id"]
+                        .as_str()
+                        .map(|value| {
+                            working_state::normalize_host_current_thread_control_command_id(Some(
+                                value,
+                            ))
+                        })
+                        == Some(expected)
+                })
+        })
+}
+
+fn latest_host_current_thread_control_feedback_kind_for_command<'a>(
+    restore_context: &'a Value,
+    command_id: Option<&str>,
+) -> Option<&'a str> {
+    latest_host_current_thread_control_feedback_action_for_command(restore_context, command_id)?[
+        "host_current_thread_control_feedback"
+    ]["feedback_kind"]
+        .as_str()
+}
+
+fn latest_host_current_thread_control_feedback_summary_for_command(
+    restore_context: &Value,
+    command_id: Option<&str>,
+) -> Option<String> {
+    let action = latest_host_current_thread_control_feedback_action_for_command(
+        restore_context,
+        command_id,
+    )?;
+    let summary = action["summary"].as_str()?.trim();
+    if summary.is_empty() {
+        return None;
+    }
+    let recorded_at = action["recorded_at_epoch_ms"]
+        .as_u64()
+        .filter(|value| *value > 0)
+        .map(human_timestamp_clock);
+    Some(match recorded_at {
+        Some(stamp) => format!("{summary} ({stamp})"),
+        None => summary.to_string(),
+    })
+}
+
+fn latest_host_current_thread_control_feedback_recorded_at_for_command(
+    restore_context: &Value,
+    command_id: Option<&str>,
+) -> Option<u64> {
+    latest_host_current_thread_control_feedback_action_for_command(restore_context, command_id)?
+        ["recorded_at_epoch_ms"]
+        .as_u64()
+}
+
+fn latest_host_current_thread_control_effect_action_for_command<'a>(
+    restore_context: &'a Value,
+    command_id: Option<&str>,
+) -> Option<&'a Value> {
+    let command_id = command_id
+        .map(|value| working_state::normalize_host_current_thread_control_command_id(Some(value)));
+    restore_context["recent_actions"]
+        .as_array()?
+        .iter()
+        .find(|action| {
+            action["source_kind"].as_str()
+                == Some(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_SOURCE_KIND)
+                && matches!(
+                    action["host_current_thread_control_feedback"]["feedback_kind"].as_str(),
+                    Some(
+                        working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_REQUESTED
+                            | working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED
+                    )
+                )
+                && action["host_current_thread_control_feedback"]["feedback_snapshot"].is_object()
+                && command_id.is_none_or(|expected| {
+                    action["host_current_thread_control_feedback"]["command_id"]
+                        .as_str()
+                        .map(|value| {
+                            working_state::normalize_host_current_thread_control_command_id(Some(
+                                value,
+                            ))
+                        })
+                        == Some(expected)
+                })
+        })
+}
+
+fn host_current_thread_control_surface_label(command_id: &str) -> &'static str {
+    if command_id.trim() == working_state::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID {
+        "compact window"
+    } else {
+        "thread overlay"
+    }
+}
+
+fn format_signed_token_delta(value: i64) -> String {
+    if value > 0 {
+        format!("+{}", format_u64(Some(value.unsigned_abs())))
+    } else if value < 0 {
+        format!("-{}", format_u64(Some(value.unsigned_abs())))
+    } else {
+        "0".to_string()
+    }
+}
+
+fn format_signed_percent_points(value: f64) -> String {
+    if value >= 0.0 {
+        format!("+{value:.2} п.п.")
+    } else {
+        format!("{value:.2} п.п.")
+    }
+}
+
+fn per_minute_rate(value: f64, elapsed_ms: u64) -> Option<f64> {
+    (elapsed_ms > 0).then_some(value * 60_000.0 / elapsed_ms as f64)
+}
+
+fn ideal_primary_limit_used_percent_point_delta(elapsed_ms: u64) -> f64 {
+    if elapsed_ms == 0 {
+        0.0
+    } else {
+        (elapsed_ms as f64 * 100.0 / CLIENT_PRIMARY_LIMIT_WINDOW_MS).clamp(0.0, 100.0)
+    }
+}
+
+fn host_current_thread_control_effect_measurement_sufficient(
+    same_thread: bool,
+    elapsed_ms: Option<u64>,
+    turn_token_delta: Option<i64>,
+    context_used_percent_point_delta: Option<f64>,
+    regrowth_since_feedback_tokens: Option<i64>,
+) -> bool {
+    if !same_thread {
+        return false;
+    }
+    elapsed_ms.is_some_and(|value| value >= HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_ELAPSED_MS)
+        || turn_token_delta.is_some_and(|value| {
+            value.unsigned_abs() >= HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_TURN_TOKEN_DELTA
+        })
+        || context_used_percent_point_delta.is_some_and(|value| {
+            value.abs() >= HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_CONTEXT_PERCENT_POINTS
+        })
+        || regrowth_since_feedback_tokens.is_some_and(|value| {
+            value.unsigned_abs() >= HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_REGROWTH_TOKENS
+        })
+}
+
+fn host_current_thread_control_effect_payload_for_command(
+    restore_context: &Value,
+    client_live_meter: &Value,
+    host_context_compaction: &Value,
+    command_id: Option<&str>,
+) -> Value {
+    let Some(action) =
+        latest_host_current_thread_control_effect_action_for_command(restore_context, command_id)
+    else {
+        return Value::Null;
+    };
+    let feedback = &action["host_current_thread_control_feedback"];
+    let snapshot = &feedback["feedback_snapshot"];
+    let feedback_kind = feedback["feedback_kind"]
+        .as_str()
+        .unwrap_or(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_REQUESTED);
+    let command_id = feedback["command_id"]
+        .as_str()
+        .unwrap_or(working_state::HOST_CURRENT_THREAD_CONTROL_COMMAND_ID);
+    let surface_label = host_current_thread_control_surface_label(command_id);
+    let compact_window_surface =
+        command_id.trim() == working_state::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID;
+    let recorded_at_epoch_ms = action["recorded_at_epoch_ms"].as_u64();
+    let recorded_at_label = recorded_at_epoch_ms.map(human_timestamp_clock);
+    let current_observed_at_epoch_ms =
+        preferred_client_limit_observed_at_epoch_ms(client_live_meter).or_else(|| {
+            client_live_meter["ended_at_epoch_ms"]
+                .as_i64()
+                .and_then(|value| (value > 0).then_some(value as u64))
+        });
+    let elapsed_label =
+        recorded_at_epoch_ms
+            .zip(current_observed_at_epoch_ms)
+            .map(|(recorded_at, observed_at)| {
+                human_elapsed_ms(observed_at.saturating_sub(recorded_at))
+            });
+    let elapsed_ms = recorded_at_epoch_ms
+        .zip(current_observed_at_epoch_ms)
+        .map(|(recorded_at, observed_at)| observed_at.saturating_sub(recorded_at));
+    let snapshot_thread_id = snapshot["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value: &&str| !value.is_empty());
+    let current_thread_id = client_live_meter["thread_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value: &&str| !value.is_empty());
+    let same_thread = snapshot_thread_id.is_some() && snapshot_thread_id == current_thread_id;
+    let turn_token_delta = client_live_meter["client_turn_total_tokens"]
+        .as_u64()
+        .zip(snapshot["client_live_meter"]["client_turn_total_tokens"].as_u64())
+        .map(|(current, previous)| current as i64 - previous as i64);
+    let context_used_percent_point_delta = client_live_meter["context_used_percent"]
+        .as_f64()
+        .zip(snapshot["client_live_meter"]["context_used_percent"].as_f64())
+        .map(|(current, previous)| current - previous);
+    let primary_limit_used_percent_point_delta = client_live_meter["primary_limit_used_percent"]
+        .as_u64()
+        .zip(snapshot["client_live_meter"]["primary_limit_used_percent"].as_u64())
+        .map(|(current, previous)| current as i64 - previous as i64);
+    let primary_limit_ideal_percent_point_delta =
+        elapsed_ms.map(ideal_primary_limit_used_percent_point_delta);
+    let primary_limit_used_overrun_percent_points = primary_limit_used_percent_point_delta
+        .map(|value| value as f64)
+        .zip(primary_limit_ideal_percent_point_delta)
+        .map(|(actual, ideal)| actual - ideal);
+    let current_compaction_count = host_context_compaction["compaction_count"].as_u64();
+    let snapshot_compaction_count =
+        snapshot["host_context_compaction"]["compaction_count"].as_u64();
+    let current_compacted_at_epoch_ms = host_context_compaction["compacted_at_epoch_ms"].as_u64();
+    let snapshot_compacted_at_epoch_ms =
+        snapshot["host_context_compaction"]["compacted_at_epoch_ms"].as_u64();
+    let compaction_count_delta = current_compaction_count
+        .zip(snapshot_compaction_count)
+        .map(|(current, previous)| current as i64 - previous as i64);
+    let verified_host_compaction_observed_after_feedback = same_thread
+        && (compaction_count_delta.is_some_and(|value| value > 0)
+            || current_compacted_at_epoch_ms
+                .zip(recorded_at_epoch_ms)
+                .is_some_and(|(compacted_at, recorded_at)| compacted_at > recorded_at)
+            || current_compacted_at_epoch_ms
+                .zip(snapshot_compacted_at_epoch_ms)
+                .is_some_and(|(current, previous)| current > previous));
+    let regrowth_since_feedback_tokens = host_context_compaction["growth_since_compaction_tokens"]
+        .as_u64()
+        .zip(snapshot["host_context_compaction"]["growth_since_compaction_tokens"].as_u64())
+        .map(|(current, previous)| current as i64 - previous as i64);
+    let current_stage = host_context_compaction["stage"]
+        .as_str()
+        .filter(|value: &&str| !value.is_empty());
+    let snapshot_stage = snapshot["host_context_compaction"]["stage"]
+        .as_str()
+        .filter(|value: &&str| !value.is_empty());
+    let measurement_sufficient = host_current_thread_control_effect_measurement_sufficient(
+        same_thread,
+        elapsed_ms,
+        turn_token_delta,
+        context_used_percent_point_delta,
+        regrowth_since_feedback_tokens,
+    );
+    let measurement_pending = same_thread && !measurement_sufficient;
+    let summary = if same_thread {
+        let feedback_label =
+            if feedback_kind == working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED {
+                "opened feedback"
+            } else {
+                "requested baseline"
+            };
+        let when = elapsed_label
+            .clone()
+            .map(|value| format!("{value} назад"))
+            .or_else(|| recorded_at_label.clone())
+            .unwrap_or_else(|| "недавно".to_string());
+        let turn_delta_text = turn_token_delta
+            .map(format_signed_token_delta)
+            .unwrap_or_else(|| "н/д".to_string());
+        let context_delta_text = context_used_percent_point_delta
+            .map(format_signed_percent_points)
+            .unwrap_or_else(|| "н/д".to_string());
+        let primary_delta_text = primary_limit_used_percent_point_delta
+            .map(|value| format_signed_percent_points(value as f64))
+            .unwrap_or_else(|| "н/д".to_string());
+        let mut summary = format!(
+            "Последний {feedback_label} по {surface_label} был {when}: с тех пор giant thread изменился на {turn_delta_text} токенов, context {context_delta_text}, 5ч used {primary_delta_text}."
+        );
+        if let Some(overrun) = primary_limit_used_overrun_percent_points {
+            summary.push_str(&format!(
+                " Это {} против идеального темпа.",
+                format_signed_percent_points(overrun)
+            ));
+        }
+        if let Some(delta) = regrowth_since_feedback_tokens {
+            summary.push_str(&format!(
+                " Regrowth since compaction: {} токенов.",
+                format_signed_token_delta(delta)
+            ));
+        }
+        if verified_host_compaction_observed_after_feedback {
+            if let Some(delta) = compaction_count_delta {
+                summary.push_str(&format!(
+                    " После baseline уже прошло {} реальных host compaction.",
+                    format_signed_token_delta(delta)
+                ));
+            } else {
+                summary.push_str(" После baseline уже был реальный host compaction.");
+            }
+        }
+        if current_stage != snapshot_stage
+            && let Some(stage) = current_stage
+        {
+            summary.push_str(&format!(" Текущая host stage: {stage}."));
+        }
+        summary
+    } else {
+        let snapshot_thread = snapshot_thread_id.unwrap_or("unknown-thread");
+        format!(
+            "Последний opened feedback по {surface_label} относится к другому thread ({snapshot_thread}), поэтому effect для текущего giant thread не применим."
+        )
+    };
+    let full_scale_client_burn_worsened = measurement_sufficient
+        && primary_limit_used_overrun_percent_points.is_some_and(|value| {
+            value >= HOST_CURRENT_THREAD_EFFECT_ROTATE_FALLBACK_PRIMARY_LIMIT_OVERRUN_PERCENT_POINTS
+        });
+    let rotate_fallback_recommended = measurement_sufficient
+        && (full_scale_client_burn_worsened
+            || turn_token_delta.unwrap_or_default()
+                >= HOST_CURRENT_THREAD_EFFECT_ROTATE_FALLBACK_TURN_TOKEN_DELTA
+            || context_used_percent_point_delta.unwrap_or_default()
+                >= HOST_CURRENT_THREAD_EFFECT_ROTATE_FALLBACK_CONTEXT_PERCENT_POINTS
+            || (current_stage == Some("critical_regrowth")
+                && regrowth_since_feedback_tokens.unwrap_or_default()
+                    >= HOST_CURRENT_THREAD_EFFECT_ROTATE_FALLBACK_REGROWTH_TOKENS));
+    let overlay_trial_recommended = measurement_sufficient
+        && compact_window_surface
+        && current_stage == Some("critical_regrowth")
+        && !rotate_fallback_recommended
+        && (turn_token_delta.unwrap_or_default()
+            >= HOST_CURRENT_THREAD_EFFECT_OVERLAY_TRIAL_TURN_TOKEN_DELTA
+            || context_used_percent_point_delta.unwrap_or_default()
+                >= HOST_CURRENT_THREAD_EFFECT_OVERLAY_TRIAL_CONTEXT_PERCENT_POINTS
+            || regrowth_since_feedback_tokens.unwrap_or_default()
+                >= HOST_CURRENT_THREAD_EFFECT_OVERLAY_TRIAL_REGROWTH_TOKENS);
+    let effect_verdict = if !same_thread {
+        "other_thread"
+    } else if measurement_pending {
+        "measurement_pending"
+    } else if full_scale_client_burn_worsened {
+        "full_scale_client_burn_worsened_rotate_fallback_recommended"
+    } else if rotate_fallback_recommended {
+        "ineffective_rotate_fallback_recommended"
+    } else if overlay_trial_recommended {
+        "critical_regrowth_overlay_trial_recommended"
+    } else if compact_window_surface
+        && feedback_kind == working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED
+    {
+        "opened_compact_surface_observed"
+    } else if !compact_window_surface
+        && feedback_kind == working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED
+    {
+        "opened_overlay_surface_observed"
+    } else if compact_window_surface {
+        "requested_compact_surface_observed"
+    } else {
+        "requested_overlay_surface_observed"
+    };
+    let verdict_summary = if measurement_pending {
+        format!(
+            "Same-thread {surface_label} уже запущен для этого giant thread; сначала дождись измеримого effect before retry."
+        )
+    } else if full_scale_client_burn_worsened {
+        format!(
+            "Same-thread {surface_label} локально меняет thread, но полный 5ч burn всё ещё идёт хуже идеального темпа на {}; rotate fallback should become primary.",
+            format_signed_percent_points(
+                primary_limit_used_overrun_percent_points.unwrap_or_default()
+            )
+        )
+    } else if rotate_fallback_recommended {
+        format!(
+            "Последний same-thread {surface_label} не остановил regrowth giant thread; rotate fallback should become primary."
+        )
+    } else if overlay_trial_recommended {
+        "Compact window частично удержал giant thread, но critical regrowth уже вернулся; перед rotate попробуй overlay.".to_string()
+    } else if same_thread {
+        format!(
+            "Same-thread {surface_label} ещё стоит держать primary path, пока effect не доказал обратное."
+        )
+    } else {
+        "Этот effect verdict не переключает primary path giant-thread control.".to_string()
+    };
+    json!({
+        "feedback_kind": feedback_kind,
+        "command_id": command_id,
+        "surface_label": surface_label,
+        "recorded_at_epoch_ms": recorded_at_epoch_ms,
+        "recorded_at_label": recorded_at_label,
+        "elapsed_label": elapsed_label,
+        "elapsed_ms": elapsed_ms,
+        "same_thread": same_thread,
+        "thread_id": snapshot_thread_id,
+        "current_thread_id": current_thread_id,
+        "turn_token_delta": turn_token_delta,
+        "turn_token_delta_per_minute":
+            turn_token_delta.and_then(|value| elapsed_ms.and_then(|elapsed| {
+                per_minute_rate(value as f64, elapsed)
+            })),
+        "context_used_percent_point_delta": context_used_percent_point_delta,
+        "context_used_percent_point_delta_per_minute":
+            context_used_percent_point_delta.and_then(|value| elapsed_ms.and_then(|elapsed| {
+                per_minute_rate(value, elapsed)
+            })),
+        "primary_limit_used_percent_point_delta": primary_limit_used_percent_point_delta,
+        "primary_limit_ideal_percent_point_delta": primary_limit_ideal_percent_point_delta,
+        "primary_limit_used_overrun_percent_points": primary_limit_used_overrun_percent_points,
+        "current_compaction_count": current_compaction_count,
+        "snapshot_compaction_count": snapshot_compaction_count,
+        "compaction_count_delta": compaction_count_delta,
+        "verified_host_compaction_observed_after_feedback":
+            verified_host_compaction_observed_after_feedback,
+        "regrowth_since_feedback_tokens": regrowth_since_feedback_tokens,
+        "regrowth_since_feedback_tokens_per_minute":
+            regrowth_since_feedback_tokens.and_then(|value| elapsed_ms.and_then(|elapsed| {
+                per_minute_rate(value as f64, elapsed)
+            })),
+        "snapshot_stage": snapshot_stage,
+        "current_stage": current_stage,
+        "measurement_pending": measurement_pending,
+        "measurement_sufficient": measurement_sufficient,
+        "measurement_min_elapsed_ms": HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_ELAPSED_MS,
+        "measurement_min_turn_token_delta": HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_TURN_TOKEN_DELTA,
+        "measurement_min_context_percent_points": HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_CONTEXT_PERCENT_POINTS,
+        "measurement_min_regrowth_tokens": HOST_CURRENT_THREAD_EFFECT_MEASUREMENT_MIN_REGROWTH_TOKENS,
+        "retry_allowed": !measurement_pending && !rotate_fallback_recommended,
+        "effect_verdict": effect_verdict,
+        "full_scale_client_burn_worsened": full_scale_client_burn_worsened,
+        "rotate_fallback_recommended": rotate_fallback_recommended,
+        "overlay_trial_recommended": overlay_trial_recommended,
+        "verdict_summary": verdict_summary,
+        "summary": summary,
+        "note": if feedback_kind == working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_OPENED {
+            "Это observational delta после operator-confirmed open. Он не доказывает причинность, но показывает, насколько giant thread продолжил расти после выбранного same-thread surface."
+        } else if full_scale_client_burn_worsened {
+            "Это observational delta от request-side baseline. Даже если thread локально уменьшился, для giant-thread product path surface считается честно неуспешным, если полный 5ч burn после него идёт заметно хуже идеального темпа."
+        } else if measurement_pending {
+            "Это ещё слишком свежий same-thread baseline. Не гоняй повторный host-control retry, пока не накопится измеримый effect или хотя бы минимальное окно наблюдения."
+        } else {
+            "Это observational delta от момента request-side baseline. Он не доказывает, что surface действительно открылся, но уже показывает, как giant thread менялся после запуска same-thread control."
+        },
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn host_current_thread_control_effect_payload(
+    restore_context: &Value,
+    client_live_meter: &Value,
+    host_context_compaction: &Value,
+) -> Value {
+    host_current_thread_control_effect_payload_for_command(
+        restore_context,
+        client_live_meter,
+        host_context_compaction,
+        None,
+    )
+}
+
+fn host_current_thread_control_effect_rotate_fallback_recommended(effect: &Value) -> bool {
+    effect["rotate_fallback_recommended"].as_bool() == Some(true)
+}
+
+fn host_current_thread_control_feedback_pending_from_effect(
+    feedback_kind: Option<&str>,
+    effect: &Value,
+) -> bool {
+    feedback_kind == Some(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_REQUESTED)
+        && effect["verified_host_compaction_observed_after_feedback"].as_bool() != Some(true)
+}
+
+fn host_current_thread_control_effect_same_thread(effect: &Value) -> bool {
+    effect["same_thread"].as_bool() == Some(true)
+}
+
+fn preferred_command_id_by_critical_regrowth_rate(
+    compact_effect: &Value,
+    overlay_effect: &Value,
+) -> Option<&'static str> {
+    if !host_current_thread_control_effect_same_thread(compact_effect)
+        || !host_current_thread_control_effect_same_thread(overlay_effect)
+    {
+        return None;
+    }
+    let compact_turn_rate = compact_effect["turn_token_delta_per_minute"].as_f64()?;
+    let overlay_turn_rate = overlay_effect["turn_token_delta_per_minute"].as_f64()?;
+    let compact_context_rate = compact_effect["context_used_percent_point_delta_per_minute"]
+        .as_f64()
+        .unwrap_or(f64::INFINITY);
+    let overlay_context_rate = overlay_effect["context_used_percent_point_delta_per_minute"]
+        .as_f64()
+        .unwrap_or(f64::INFINITY);
+    if overlay_turn_rate < compact_turn_rate
+        || ((overlay_turn_rate - compact_turn_rate).abs() < f64::EPSILON
+            && overlay_context_rate < compact_context_rate)
+    {
+        Some(working_state::HOST_CURRENT_THREAD_CONTROL_COMMAND_ID)
+    } else {
+        Some(working_state::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID)
+    }
+}
+
+fn selected_host_current_thread_control_state(
+    report: &Value,
+    restore_context: &Value,
+    client_live_meter: &Value,
+    host_context_compaction: &Value,
+) -> (Value, Value, bool) {
+    let host_context_compaction_stage =
+        host_context_compaction_stage_from_payload(host_context_compaction);
+    let thread_id = preferred_budget_guard_thread_id(report, restore_context);
+    let compact_command_id = working_state::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID;
+    let overlay_command_id = working_state::HOST_CURRENT_THREAD_CONTROL_COMMAND_ID;
+    let compact_effect = host_current_thread_control_effect_payload_for_command(
+        restore_context,
+        client_live_meter,
+        host_context_compaction,
+        Some(compact_command_id),
+    );
+    let overlay_effect = host_current_thread_control_effect_payload_for_command(
+        restore_context,
+        client_live_meter,
+        host_context_compaction,
+        Some(overlay_command_id),
+    );
+    let compact_failed =
+        host_current_thread_control_effect_rotate_fallback_recommended(&compact_effect)
+            || latest_host_current_thread_control_feedback_kind_for_command(
+                restore_context,
+                Some(compact_command_id),
+            ) == Some(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_FAILED);
+    let compact_feedback_pending = host_current_thread_control_feedback_pending_from_effect(
+        latest_host_current_thread_control_feedback_kind_for_command(
+            restore_context,
+            Some(compact_command_id),
+        ),
+        &compact_effect,
+    ) && !compact_failed;
+    let compact_overlay_trial_recommended =
+        compact_effect["overlay_trial_recommended"].as_bool() == Some(true);
+    let compact_measurement_pending =
+        compact_effect["measurement_pending"].as_bool() == Some(true) && !compact_failed;
+    let overlay_failed =
+        host_current_thread_control_effect_rotate_fallback_recommended(&overlay_effect)
+            || latest_host_current_thread_control_feedback_kind_for_command(
+                restore_context,
+                Some(overlay_command_id),
+            ) == Some(working_state::HOST_CURRENT_THREAD_CONTROL_FEEDBACK_FAILED);
+    let overlay_feedback_pending = host_current_thread_control_feedback_pending_from_effect(
+        latest_host_current_thread_control_feedback_kind_for_command(
+            restore_context,
+            Some(overlay_command_id),
+        ),
+        &overlay_effect,
+    ) && !overlay_failed;
+    let overlay_measurement_pending =
+        overlay_effect["measurement_pending"].as_bool() == Some(true) && !overlay_failed;
+    let current_turn_total_tokens = client_live_meter["client_turn_total_tokens"]
+        .as_u64()
+        .unwrap_or_default();
+    let context_used_percent = client_live_meter["context_used_percent"]
+        .as_f64()
+        .unwrap_or_default();
+    let critical_regrowth_ratio = host_context_compaction["regrowth_of_recovered_surface_ratio"]
+        .as_f64()
+        .unwrap_or_default();
+    let oversized_critical_regrowth_same_thread_exhausted = host_context_compaction_stage
+        .critical_regrowth_active()
+        && (current_turn_total_tokens >= SAME_THREAD_COMPACTION_MAX_CURRENT_TURN_TOKENS
+            || context_used_percent >= SAME_THREAD_COMPACTION_MAX_CONTEXT_USED_PERCENT
+            || critical_regrowth_ratio >= SAME_THREAD_COMPACTION_MAX_CRITICAL_REGROWTH_RATIO);
+    let rate_selected_command_id = if host_context_compaction_stage.critical_regrowth_active()
+        && !compact_measurement_pending
+        && !overlay_measurement_pending
+        && !compact_failed
+        && !overlay_failed
+    {
+        preferred_command_id_by_critical_regrowth_rate(&compact_effect, &overlay_effect)
+    } else {
+        None
+    };
+    let pending_feedback_selected_command_id = match (
+        compact_feedback_pending,
+        overlay_feedback_pending,
+    ) {
+        (true, false) => Some(compact_command_id),
+        (false, true) => Some(overlay_command_id),
+        (true, true) => {
+            let compact_recorded_at =
+                latest_host_current_thread_control_feedback_recorded_at_for_command(
+                    restore_context,
+                    Some(compact_command_id),
+                )
+                .unwrap_or_default();
+            let overlay_recorded_at =
+                latest_host_current_thread_control_feedback_recorded_at_for_command(
+                    restore_context,
+                    Some(overlay_command_id),
+                )
+                .unwrap_or_default();
+            if overlay_recorded_at > compact_recorded_at {
+                Some(overlay_command_id)
+            } else {
+                Some(compact_command_id)
+            }
+        }
+        (false, false) => None,
+    };
+    let primary_command_id = if let Some(command_id) = pending_feedback_selected_command_id {
+        command_id
+    } else if let Some(command_id) = rate_selected_command_id {
+        command_id
+    } else if compact_measurement_pending {
+        compact_command_id
+    } else if overlay_measurement_pending {
+        overlay_command_id
+    } else if host_context_compaction_stage.preserve_active() {
+        if (compact_failed || compact_overlay_trial_recommended) && !overlay_failed {
+            overlay_command_id
+        } else {
+            compact_command_id
+        }
+    } else {
+        overlay_command_id
+    };
+    let surface =
+        working_state::build_host_current_thread_control_surface_for_thread_and_stage_with_primary_command(
+            thread_id.as_deref(),
+            host_context_compaction_stage,
+            Some(primary_command_id),
+        );
+    let effect = if primary_command_id == compact_command_id {
+        compact_effect
+    } else {
+        overlay_effect
+    };
+    let same_thread_compaction_preferred = host_context_compaction_stage.preserve_active()
+        && !(compact_failed && overlay_failed)
+        && !oversized_critical_regrowth_same_thread_exhausted;
+    (surface, effect, same_thread_compaction_preferred)
+}
+
+fn decorate_host_current_thread_control_surface(
+    surface: &Value,
+    effect: &Value,
+    feedback_pending: bool,
+    feedback_summary: Option<&str>,
+) -> Value {
+    let mut surface = surface.clone();
+    let measurement_pending = effect["measurement_pending"].as_bool() == Some(true);
+    let verified_host_compaction_observed_after_feedback =
+        effect["verified_host_compaction_observed_after_feedback"].as_bool() == Some(true);
+    let rotate_fallback_recommended = effect["rotate_fallback_recommended"].as_bool() == Some(true);
+    let surface_exhausted_after_verified_failure =
+        verified_host_compaction_observed_after_feedback && rotate_fallback_recommended;
+    let retry_allowed = effect["retry_allowed"].as_bool().unwrap_or(true)
+        && !feedback_pending
+        && !surface_exhausted_after_verified_failure;
+    let retry_blocked_reason = if retry_allowed {
+        None
+    } else if let Some(summary) = feedback_summary.filter(|value| !value.trim().is_empty()) {
+        Some(summary.to_string())
+    } else if surface_exhausted_after_verified_failure {
+        effect["verdict_summary"].as_str().map(str::to_string)
+    } else if measurement_pending {
+        effect["verdict_summary"].as_str().map(str::to_string)
+    } else {
+        Some("Same-thread control уже запрошен для этого giant thread. Сначала дождись измеримого effect.".to_string())
+    };
+    if let Some(object) = surface.as_object_mut() {
+        object.insert("feedback_pending".to_string(), json!(feedback_pending));
+        object.insert(
+            "measurement_pending".to_string(),
+            json!(measurement_pending),
+        );
+        object.insert("retry_allowed".to_string(), json!(retry_allowed));
+        object.insert(
+            "retry_blocked_reason".to_string(),
+            retry_blocked_reason.map_or(Value::Null, Value::String),
+        );
+        object.insert(
+            "effect_verdict".to_string(),
+            effect["effect_verdict"].clone(),
+        );
+        object.insert("effect_summary".to_string(), effect["summary"].clone());
+        object.insert(
+            "surface_exhausted_after_verified_failure".to_string(),
+            json!(surface_exhausted_after_verified_failure),
+        );
+        object.insert(
+            "availability_state".to_string(),
+            if surface_exhausted_after_verified_failure {
+                json!("exhausted_after_verified_failure")
+            } else {
+                json!("available")
+            },
+        );
+        if surface_exhausted_after_verified_failure {
+            object.insert("available".to_string(), json!(false));
+            object.insert("automation_ready".to_string(), json!(false));
+        }
+    }
+    surface
+}
+
+fn plausible_codex_thread_id(value: &str) -> bool {
+    value.len() == 36 && value.chars().filter(|ch| *ch == '-').count() == 4
+}
+
+fn preferred_budget_guard_thread_id(report: &Value, restore_context: &Value) -> Option<String> {
+    [
+        report["client_live_meter"]["thread_id"].as_str(),
+        restore_context["thread_id"].as_str(),
+        codex_threads::current_thread_id().as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|value| !value.is_empty() && plausible_codex_thread_id(value))
+    .map(str::to_string)
+}
+
+fn latest_host_context_compaction_payload(report: &Value, restore_context: &Value) -> Value {
+    let Some(thread_id) = preferred_budget_guard_thread_id(report, restore_context) else {
+        return Value::Null;
+    };
+    let Some(observation) =
+        codex_threads::latest_rollout_context_compaction_observation_for_thread(&thread_id)
+            .ok()
+            .flatten()
+    else {
+        return Value::Null;
+    };
+    let current_turn_total_tokens = report["client_live_meter"]["client_turn_total_tokens"]
+        .as_u64()
+        .unwrap_or_default();
+    let current_thread_bound = report["client_live_meter"]["current_thread_bound"]
+        .as_bool()
+        .unwrap_or(false);
+    let growth_tokens =
+        current_turn_total_tokens.saturating_sub(observation.post_compaction_turn_total_tokens);
+    let recovered_surface_tokens = observation
+        .pre_compaction_turn_total_tokens
+        .saturating_sub(observation.post_compaction_turn_total_tokens);
+    let rebound_ratio = if recovered_surface_tokens > 0 {
+        growth_tokens as f64 / recovered_surface_tokens as f64
+    } else {
+        0.0
+    };
+    let preserve_active = current_thread_bound
+        && current_turn_total_tokens > 0
+        && observation.post_compaction_turn_total_tokens > 0
+        && growth_tokens >= HOST_CONTEXT_COMPACTION_PRESERVE_TRIGGER_TOKENS;
+    let critical_regrowth_active = preserve_active
+        && (growth_tokens >= HOST_CONTEXT_COMPACTION_CRITICAL_TRIGGER_TOKENS
+            || rebound_ratio >= HOST_CONTEXT_COMPACTION_CRITICAL_REBOUND_RATIO);
+    let stage = if critical_regrowth_active {
+        "critical_regrowth"
+    } else if preserve_active {
+        "preserve"
+    } else {
+        "inactive"
+    };
+    json!({
+        "thread_id": observation.thread_id,
+        "rollout_path": observation.rollout_path,
+        "compacted_at_epoch_ms": observation.compacted_at_epoch_ms,
+        "pre_compaction_turn_total_tokens": observation.pre_compaction_turn_total_tokens,
+        "post_compaction_turn_total_tokens": observation.post_compaction_turn_total_tokens,
+        "post_compaction_turn_id": observation.post_compaction_turn_id,
+        "current_turn_total_tokens": current_turn_total_tokens,
+        "recovered_surface_tokens": recovered_surface_tokens,
+        "growth_since_compaction_tokens": growth_tokens,
+        "regrowth_of_recovered_surface_ratio": rebound_ratio,
+        "preserve_trigger_tokens": HOST_CONTEXT_COMPACTION_PRESERVE_TRIGGER_TOKENS,
+        "critical_trigger_tokens": HOST_CONTEXT_COMPACTION_CRITICAL_TRIGGER_TOKENS,
+        "critical_rebound_ratio": HOST_CONTEXT_COMPACTION_CRITICAL_REBOUND_RATIO,
+        "stage": stage,
+        "preserve_active": preserve_active,
+        "critical_regrowth_active": critical_regrowth_active,
+        "current_thread_bound": current_thread_bound,
+        "compaction_count": observation.compaction_count,
+        "observation_source": observation.observation_source,
+    })
+}
+
+fn host_context_compaction_stage_from_payload(
+    host_context_compaction: &Value,
+) -> working_state::HostContextCompactionStage {
+    match host_context_compaction["stage"]
+        .as_str()
+        .unwrap_or("inactive")
+    {
+        "critical_regrowth" => working_state::HostContextCompactionStage::CriticalRegrowth,
+        "preserve" => working_state::HostContextCompactionStage::Preserve,
+        _ => working_state::HostContextCompactionStage::Inactive,
+    }
+}
+
+fn compact_host_context_compaction_payload(value: &Value) -> Value {
+    let Some(node) = value.as_object() else {
+        return Value::Null;
+    };
+    let mut compact = serde_json::Map::new();
+    for field in [
+        "stage",
+        "preserve_active",
+        "critical_regrowth_active",
+        "current_thread_bound",
+        "post_compaction_turn_total_tokens",
+        "current_turn_total_tokens",
+        "growth_since_compaction_tokens",
+        "recovered_surface_tokens",
+        "regrowth_of_recovered_surface_ratio",
+    ] {
+        if node.get(field).is_some_and(|item| !item.is_null()) {
+            compact.insert(field.to_string(), value[field].clone());
+        }
+    }
+    Value::Object(compact)
+}
+
+fn client_budget_target_active(target_percent: u64) -> bool {
+    target_percent > 0
+}
+
+fn client_budget_target_percent_f64(target_percent: u64) -> f64 {
+    target_percent as f64
+}
+
+fn client_budget_target_alert_label(target_percent: u64) -> String {
+    format!("цель {target_percent}% не достигнута")
+}
+
+fn client_budget_target_sentence(target_percent: u64) -> String {
+    format!("Целевая реальная экономия для Amai сейчас задана как не ниже {target_percent}%.")
+}
+
+fn client_budget_target_shortfall_sentence(
+    target_percent: u64,
+    kpi_percent: Option<f64>,
+) -> String {
+    format!(
+        "точный 5ч KPI пока даёт только экономию {} вместо целевых {}%",
+        format_percent(kpi_percent),
+        target_percent
+    )
+}
+
+fn allowed_client_budget_target_values() -> Vec<u64> {
+    (0..=working_state::MAX_CLIENT_BUDGET_TARGET_PERCENT)
+        .step_by(working_state::CLIENT_BUDGET_TARGET_STEP_PERCENT as usize)
+        .collect()
+}
+
+fn client_budget_target_chat_command(target_percent: u64) -> String {
+    format!("экономия_{target_percent}%")
+}
+
+fn client_budget_compact_chat_command() -> &'static str {
+    continuity::CLIENT_BUDGET_COMPACT_CHAT_COMMAND
 }
 
 pub fn browser_base_url(bind: &str) -> String {
@@ -558,6 +1460,119 @@ pub fn render_html(refresh_ms: u64) -> String {
       line-height: 1.35;
       font-weight: 700;
       text-align: right;
+    }
+
+    .metric-row-value.interactive-client-budget-value {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 0;
+      text-align: right;
+    }
+
+    .client-budget-target-trigger {
+      appearance: none;
+      border: none;
+      background: none;
+      margin: 0;
+      padding: 0;
+      color: var(--accent);
+      font: inherit;
+      font-weight: 800;
+      line-height: inherit;
+      cursor: pointer;
+      text-decoration: underline dotted rgba(13, 107, 111, 0.45);
+      text-underline-offset: 3px;
+    }
+
+    .client-budget-target-trigger:hover,
+    .client-budget-target-trigger:focus-visible {
+      color: var(--accent-strong);
+      outline: none;
+    }
+
+    .tooltip-target-picker {
+      display: grid;
+      gap: 10px;
+    }
+
+    .tooltip-target-picker-note {
+      color: rgba(247, 250, 252, 0.84);
+    }
+
+    .tooltip-target-picker-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .tooltip-target-picker-option {
+      appearance: none;
+      border: 1px solid rgba(154, 231, 220, 0.26);
+      border-radius: 999px;
+      background: rgba(121, 210, 197, 0.08);
+      color: #dff8f4;
+      padding: 5px 10px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.1;
+      cursor: pointer;
+      transition: background 0.14s ease, border-color 0.14s ease, transform 0.14s ease;
+    }
+
+    .tooltip-target-picker-option:hover,
+    .tooltip-target-picker-option:focus-visible {
+      background: rgba(121, 210, 197, 0.18);
+      border-color: rgba(154, 231, 220, 0.42);
+      outline: none;
+      transform: translateY(-1px);
+    }
+
+    .tooltip-target-picker-option.active {
+      background: rgba(121, 210, 197, 0.28);
+      border-color: rgba(154, 231, 220, 0.68);
+      color: #ffffff;
+    }
+
+    .tooltip-target-picker-option:disabled {
+      opacity: 0.6;
+      cursor: progress;
+      transform: none;
+    }
+
+    .tooltip-target-picker-command {
+      color: #9ae7dc;
+      font-weight: 700;
+    }
+
+    .dashboard-toast {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      z-index: 10020;
+      max-width: min(420px, calc(100vw - 32px));
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(8, 13, 17, 0.96);
+      color: #f7fafc;
+      font-size: 13px;
+      line-height: 1.45;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: opacity 0.16s ease, transform 0.16s ease;
+    }
+
+    .dashboard-toast.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .dashboard-toast.error {
+      background: rgba(103, 20, 16, 0.96);
     }
 
     .has-tooltip {
@@ -1458,10 +2473,12 @@ pub fn render_html(refresh_ms: u64) -> String {
     >⧉</button>
     <div id="tooltip-layer-content" class="tooltip-layer-content"></div>
   </div>
+  <div id="dashboard-toast" class="dashboard-toast" hidden></div>
 
   <script>
     const REFRESH_MS = __REFRESH_MS__;
     const CLIENT_BUDGET_LIVE_REFRESH_MS = Math.min(Math.max(Math.floor(REFRESH_MS / 2), 3000), 10000);
+    const TOOLTIP_HIDE_GRACE_MS = 220;
     const CLIENT_BUDGET_ROW_ALIASES = {
       client_live_full_turn_savings: ["client_live_full_turn_savings", "Amai в полном live-turn"],
       client_live_context: ["client_live_context", "Последний запрос клиента"],
@@ -1472,10 +2489,14 @@ pub fn render_html(refresh_ms: u64) -> String {
     const tooltipLayer = document.getElementById("tooltip-layer");
     const tooltipLayerContent = document.getElementById("tooltip-layer-content");
     const tooltipCopyBtn = document.getElementById("tooltip-copy-btn");
+    const dashboardToast = document.getElementById("dashboard-toast");
     let refreshInFlight = false;
     let interactionHoldUntil = 0;
     let activeTooltipTarget = null;
+    let activeTooltipKind = null;
     let tooltipSelectionValue = "";
+    let dashboardToastTimer = null;
+    let tooltipHideTimer = null;
 
     function statusClass(status) {
       return ["pass", "alert", "critical", "waiting", "unknown"].includes(status) ? status : "unknown";
@@ -1506,6 +2527,66 @@ pub fn render_html(refresh_ms: u64) -> String {
       return "";
     }
 
+    function safeJsonParse(value) {
+      if (typeof value !== "string" || !value.trim()) {
+        return null;
+      }
+      try {
+        return JSON.parse(value);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function buildMetricRowValue(row) {
+      const key = metricRowKey(row);
+      if (key === "client_limit_hourly_burn" && row && row.target_selector) {
+        return buildClientBudgetTargetMetricValue(row);
+      }
+      return textNode("span", "metric-row-value", row.value);
+    }
+
+    function buildClientBudgetTargetMetricValue(row) {
+      const selector = row && typeof row.target_selector === "object" ? row.target_selector : null;
+      if (!selector || typeof selector.kpi_value_text !== "string" || !selector.kpi_value_text.trim()) {
+        return textNode("span", "metric-row-value", row.value);
+      }
+      const wrap = document.createElement("span");
+      wrap.className = "metric-row-value interactive-client-budget-value";
+      if (selector.value_prefix) {
+        wrap.appendChild(textNode("span", "", selector.value_prefix));
+      }
+      const trigger = document.createElement("button");
+      trigger.type = "button";
+      trigger.className = "client-budget-target-trigger has-tooltip";
+      trigger.textContent = selector.kpi_value_text;
+      trigger.tabIndex = 0;
+      trigger.dataset.tooltipKind = "client-budget-target-selector";
+      trigger.dataset.clientBudgetTargetSelector = JSON.stringify(selector);
+      trigger.setAttribute("data-tip", selector.tooltip_intro || row.tooltip || "");
+      trigger.setAttribute("aria-haspopup", "dialog");
+      trigger.setAttribute("aria-expanded", "false");
+      trigger.setAttribute(
+        "aria-label",
+        `5ч KPI ${selector.kpi_value_text}. Нажмите, чтобы выбрать целевой режим экономии.`
+      );
+      trigger.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        extendInteractionHold(4);
+        if (activeTooltipTarget === trigger && tooltipLayer && !tooltipLayer.hidden) {
+          hideTooltip(trigger);
+          return;
+        }
+        showTooltip(trigger);
+      });
+      wrap.appendChild(trigger);
+      if (selector.value_suffix) {
+        wrap.appendChild(textNode("span", "", selector.value_suffix));
+      }
+      return wrap;
+    }
+
     function createMetricRow(row) {
       const item = document.createElement("li");
       item.className = "metric-row";
@@ -1517,7 +2598,7 @@ pub fn render_html(refresh_ms: u64) -> String {
         item.dataset.metricRowLabel = row.label.trim();
       }
       item.appendChild(labelWithTooltip(row.label, row.tooltip));
-      item.appendChild(textNode("span", "metric-row-value", row.value));
+      item.appendChild(buildMetricRowValue(row));
       return item;
     }
 
@@ -1807,6 +2888,28 @@ pub fn render_html(refresh_ms: u64) -> String {
       return Boolean(tooltipLayer && node && tooltipLayer.contains(node));
     }
 
+    function cancelTooltipHide() {
+      if (!tooltipHideTimer) {
+        return;
+      }
+      window.clearTimeout(tooltipHideTimer);
+      tooltipHideTimer = null;
+    }
+
+    function scheduleHideTooltip(target = null, delayMs = TOOLTIP_HIDE_GRACE_MS) {
+      if (!tooltipLayer) {
+        return;
+      }
+      if (target && activeTooltipTarget && target !== activeTooltipTarget) {
+        return;
+      }
+      cancelTooltipHide();
+      tooltipHideTimer = window.setTimeout(() => {
+        tooltipHideTimer = null;
+        hideTooltip(target);
+      }, Math.max(0, delayMs));
+    }
+
     function selectionTextWithin(node) {
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !node) {
@@ -1860,9 +2963,672 @@ pub fn render_html(refresh_ms: u64) -> String {
       positionTooltip();
     }
 
+    function showDashboardToast(message, isError = false) {
+      if (!dashboardToast || typeof message !== "string" || !message.trim()) {
+        return;
+      }
+      dashboardToast.hidden = false;
+      dashboardToast.textContent = message.trim();
+      dashboardToast.classList.toggle("error", Boolean(isError));
+      dashboardToast.classList.add("visible");
+      if (dashboardToastTimer) {
+        window.clearTimeout(dashboardToastTimer);
+      }
+      dashboardToastTimer = window.setTimeout(() => {
+        if (!dashboardToast) {
+          return;
+        }
+        dashboardToast.classList.remove("visible");
+        window.setTimeout(() => {
+          if (dashboardToast && !dashboardToast.classList.contains("visible")) {
+            dashboardToast.hidden = true;
+            dashboardToast.textContent = "";
+            dashboardToast.classList.remove("error");
+          }
+        }, 180);
+      }, isError ? 4200 : 3000);
+    }
+
+    function emitClientBudgetChatNotice(notice) {
+      if (!notice || typeof notice.message_text !== "string" || !notice.message_text.trim()) {
+        return;
+      }
+      const detail = {
+        ...notice,
+        source: "dashboard_client_budget_target",
+      };
+      window.dispatchEvent(new CustomEvent("amai:chat-notice", { detail }));
+      try {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: "amai:chat-notice", detail }, "*");
+        }
+      } catch (_) {}
+      try {
+        if (window.opener && window.opener !== window && !window.opener.closed) {
+          window.opener.postMessage({ type: "amai:chat-notice", detail }, "*");
+        }
+      } catch (_) {}
+    }
+
+    function launchExternalUri(uri) {
+      if (typeof uri !== "string" || !uri.trim()) {
+        throw new Error("external launch uri unavailable");
+      }
+      const anchor = document.createElement("a");
+      anchor.href = uri.trim();
+      anchor.rel = "noreferrer";
+      anchor.style.display = "none";
+      document.body.appendChild(anchor);
+      try {
+        anchor.click();
+      } finally {
+        anchor.remove();
+      }
+    }
+
+    function tooltipIsInteractiveSelector(target = activeTooltipTarget) {
+      return Boolean(
+        target &&
+        target.dataset &&
+        target.dataset.tooltipKind === "client-budget-target-selector"
+      );
+    }
+
+    async function applyClientBudgetTargetSwitch(percent, selectorState, target) {
+      const parsedPercent = Number(percent);
+      if (!Number.isFinite(parsedPercent)) {
+        throw new Error("invalid target percent");
+      }
+      const response = await fetch(apiPathWithThreadHint("/api/client-budget-target"), {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          percent: parsedPercent,
+          namespace: selectorState?.namespace || "continuity",
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const errorText =
+          payload && typeof payload.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : `HTTP ${response.status}`;
+        throw new Error(errorText);
+      }
+      if (payload?.client_budget_live) {
+        applyClientBudgetLiveRows(payload.client_budget_live);
+      }
+      const notice = payload?.chat_notice || payload?.client_budget_target_update?.operator_notice;
+      if (notice) {
+        emitClientBudgetChatNotice(notice);
+        showDashboardToast(notice.message_text || `Целевая экономия переключена на ${parsedPercent}%.`);
+      } else {
+        showDashboardToast(`Целевая экономия переключена на ${parsedPercent}%.`);
+      }
+      hideTooltip(target);
+      await loadDashboard(true);
+      return payload;
+    }
+
+    async function applyClientBudgetCompactChat(selectorState, target) {
+      const response = await fetch(apiPathWithThreadHint("/api/client-budget-compact-chat"), {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          namespace: selectorState?.namespace || "continuity",
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const errorText =
+          payload && typeof payload.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : `HTTP ${response.status}`;
+        throw new Error(errorText);
+      }
+      if (payload?.client_budget_live) {
+        applyClientBudgetLiveRows(payload.client_budget_live);
+      }
+      const notice = payload?.chat_notice || payload?.continuity_compact_chat?.operator_notice;
+      if (notice) {
+        emitClientBudgetChatNotice(notice);
+        showDashboardToast(
+          notice.message_text || "Подготовлен fresh CHAT_START_RESTORE для compact chat."
+        );
+      } else {
+        showDashboardToast("Подготовлен fresh CHAT_START_RESTORE для compact chat.");
+      }
+      hideTooltip(target);
+      await loadDashboard(true);
+      return payload;
+    }
+
+    async function applyCurrentThreadHostControlFeedback(
+      feedbackKind,
+      selectorState,
+      target,
+      options = {}
+    ) {
+      const response = await fetch(
+        apiPathWithThreadHint("/api/client-budget-host-control-feedback"),
+        {
+          method: "POST",
+          cache: "no-store",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            feedback_kind: feedbackKind,
+            command_id:
+              options.commandId ||
+              selectorState?.host_current_thread_control_last_command_id ||
+              selectorState?.host_current_thread_control?.command_id ||
+              null,
+            namespace: selectorState?.namespace || "continuity",
+          }),
+        }
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const errorText =
+          payload && typeof payload.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : `HTTP ${response.status}`;
+        throw new Error(errorText);
+      }
+      if (payload?.client_budget_live) {
+        applyClientBudgetLiveRows(payload.client_budget_live);
+      }
+      const notice =
+        payload?.chat_notice || payload?.client_budget_host_control_feedback?.operator_notice;
+      if (notice && options.emitNotice !== false) {
+        emitClientBudgetChatNotice(notice);
+      }
+      const subject =
+        options.subjectLabel ||
+        selectorState?.host_current_thread_control_last_button_label ||
+        "same-thread host control";
+      const defaultMessage =
+        feedbackKind === "requested"
+          ? `Попытка открыть ${subject} зафиксирована.`
+          : feedbackKind === "opened"
+            ? `Подтверждено: ${subject} открылся.`
+            : `Зафиксировано: ${subject} не открылся.`;
+      if (options.showToast !== false) {
+        showDashboardToast((notice && notice.message_text) || defaultMessage);
+      }
+      if (options.hideTooltip !== false) {
+        hideTooltip(target);
+      }
+      if (options.refresh !== false) {
+        await loadDashboard(true);
+      }
+      return payload;
+    }
+
+    async function requestCurrentThreadHostControlLaunch(selectorState, surface) {
+      const response = await fetch(
+        apiPathWithThreadHint("/api/client-budget-host-control-launch"),
+        {
+          method: "POST",
+          cache: "no-store",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            command_id: surface?.command_id || selectorState?.host_current_thread_control?.command_id || null,
+            namespace: selectorState?.namespace || "continuity",
+          }),
+        }
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const errorText =
+          payload && typeof payload.error === "string" && payload.error.trim()
+            ? payload.error.trim()
+            : `HTTP ${response.status}`;
+        throw new Error(errorText);
+      }
+      if (payload?.client_budget_live) {
+        applyClientBudgetLiveRows(payload.client_budget_live);
+      }
+      return payload;
+    }
+
+    async function applyCurrentThreadHostControl(selectorState, target, surfaceOverride = null) {
+      const surface =
+        surfaceOverride && typeof surfaceOverride === "object"
+          ? surfaceOverride
+          : selectorState && typeof selectorState.host_current_thread_control === "object"
+            ? selectorState.host_current_thread_control
+            : null;
+      if (!surface || typeof surface.command_id !== "string" || !surface.command_id.trim()) {
+        throw new Error("same-thread host control unavailable");
+      }
+      if (
+        selectorState?.host_current_thread_control_retry_allowed === false ||
+        surface?.retry_allowed === false
+      ) {
+        throw new Error(
+          (typeof surface?.retry_blocked_reason === "string" && surface.retry_blocked_reason.trim()
+            ? surface.retry_blocked_reason.trim()
+            : typeof selectorState?.host_current_thread_control_retry_blocked_reason === "string" &&
+                selectorState.host_current_thread_control_retry_blocked_reason.trim()
+              ? selectorState.host_current_thread_control_retry_blocked_reason.trim()
+              : "Same-thread control уже запущен; сначала дождись измеримого effect.")
+        );
+      }
+      const messageText =
+        typeof surface?.requested_message_text === "string" && surface.requested_message_text.trim()
+          ? surface.requested_message_text.trim()
+          : typeof selectorState?.host_current_thread_control_notice_message === "string" &&
+              selectorState.host_current_thread_control_notice_message.trim()
+            ? selectorState.host_current_thread_control_notice_message.trim()
+            : surface.summary || `Запрошен host current-thread control: ${surface.command_id}.`;
+      const externalLaunch =
+        surface && typeof surface.external_uri_launch === "object"
+          ? surface.external_uri_launch
+          : null;
+      const launchUri =
+        typeof externalLaunch?.uri === "string" && externalLaunch.uri.trim()
+          ? externalLaunch.uri.trim()
+          : null;
+      const observeApiLaunchAvailable = Boolean(externalLaunch?.observe_api_launch_available);
+      const requestedNotice = {
+        kind: launchUri
+          ? "host_current_thread_control_external_launch_requested"
+          : "host_current_thread_control_requested",
+        message_text: messageText,
+        reply_prefix: selectorState?.reply_prefix || null,
+        host_current_thread_control: surface,
+      };
+      if (launchUri) {
+        let launchSummary =
+          typeof surface.summary === "string" && surface.summary.trim()
+            ? `Requested: ${surface.summary.trim()}`
+            : `Requested host current-thread control: ${surface.command_id}.`;
+        if (observeApiLaunchAvailable) {
+          try {
+            const payload = await requestCurrentThreadHostControlLaunch(selectorState, surface);
+            const notice =
+              payload?.chat_notice || payload?.client_budget_host_control_launch?.operator_notice;
+            if (notice) {
+              emitClientBudgetChatNotice(notice);
+            }
+            launchSummary = (notice && notice.message_text) || messageText;
+            selectorState.host_current_thread_control_feedback_pending = true;
+            selectorState.host_current_thread_control_last_command_id = surface.command_id;
+            selectorState.host_current_thread_control_last_button_label =
+              surface.button_label || surface.command_id;
+            selectorState.host_current_thread_control_last_feedback_kind = "requested";
+            selectorState.host_current_thread_control_last_feedback_summary = launchSummary;
+            renderClientBudgetTargetSelectorTooltip(target, selectorState);
+            activeTooltipTarget = target;
+            activeTooltipKind = target.dataset.tooltipKind || null;
+            tooltipLayer.hidden = false;
+            tooltipLayer.classList.add("visible");
+            positionTooltip(target);
+            showDashboardToast(
+              `${(notice && notice.message_text) || messageText} Подтверди исход в tooltip.`
+            );
+            return surface;
+          } catch (_) {}
+        }
+        emitClientBudgetChatNotice(requestedNotice);
+        try {
+          await applyCurrentThreadHostControlFeedback("requested", selectorState, target, {
+            commandId: surface.command_id,
+            subjectLabel: surface.button_label || surface.command_id,
+            emitNotice: false,
+            hideTooltip: false,
+            refresh: false,
+            showToast: false,
+          });
+        } catch (_) {}
+        launchExternalUri(launchUri);
+        selectorState.host_current_thread_control_feedback_pending = true;
+        selectorState.host_current_thread_control_last_command_id = surface.command_id;
+        selectorState.host_current_thread_control_last_button_label =
+          surface.button_label || surface.command_id;
+        selectorState.host_current_thread_control_last_feedback_kind = "requested";
+        selectorState.host_current_thread_control_last_feedback_summary = launchSummary;
+        renderClientBudgetTargetSelectorTooltip(target, selectorState);
+        activeTooltipTarget = target;
+        activeTooltipKind = target.dataset.tooltipKind || null;
+        tooltipLayer.hidden = false;
+        tooltipLayer.classList.add("visible");
+        positionTooltip(target);
+        showDashboardToast(`${messageText} Подтверди исход в tooltip.`);
+        return surface;
+      }
+      emitClientBudgetChatNotice(requestedNotice);
+      showDashboardToast(messageText);
+      hideTooltip(target);
+      return surface;
+    }
+
+    function renderClientBudgetTargetSelectorTooltip(target, selectorState) {
+      if (!tooltipLayerContent) {
+        return false;
+      }
+      const allowedPercents = Array.isArray(selectorState?.allowed_target_percents)
+        ? selectorState.allowed_target_percents
+        : [];
+      if (allowedPercents.length === 0) {
+        return false;
+      }
+      const currentTargetPercent = Number(selectorState?.current_target_percent);
+      const shell = document.createElement("div");
+      shell.className = "tooltip-target-picker";
+      if (selectorState.tooltip_intro) {
+        shell.appendChild(textNode("div", "tooltip-target-picker-note", selectorState.tooltip_intro));
+      }
+      const grid = document.createElement("div");
+      grid.className = "tooltip-target-picker-grid";
+      allowedPercents.forEach((value) => {
+        const option = document.createElement("button");
+        option.type = "button";
+        option.className = "tooltip-target-picker-option";
+        option.textContent = `${value}%`;
+        if (Number(value) === currentTargetPercent) {
+          option.classList.add("active");
+          option.setAttribute("aria-pressed", "true");
+        } else {
+          option.setAttribute("aria-pressed", "false");
+        }
+        option.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          extendInteractionHold(4);
+          const optionButtons = Array.from(grid.querySelectorAll("button"));
+          optionButtons.forEach((button) => {
+            button.disabled = true;
+          });
+          try {
+            await applyClientBudgetTargetSwitch(value, selectorState, target);
+          } catch (error) {
+            optionButtons.forEach((button) => {
+              button.disabled = false;
+            });
+            showDashboardToast(
+              `Не удалось переключить режим экономии: ${error.message || "unknown error"}`,
+              true
+            );
+          }
+        });
+        grid.appendChild(option);
+      });
+      shell.appendChild(grid);
+      if (selectorState.selected_chat_command) {
+        const command = document.createElement("div");
+        command.className = "tooltip-target-picker-note";
+        command.appendChild(document.createTextNode("Exact chat-команда: "));
+        command.appendChild(
+          textNode("span", "tooltip-target-picker-command", selectorState.selected_chat_command)
+        );
+        shell.appendChild(command);
+      }
+      if (selectorState.compact_chat_command) {
+        if (selectorState.compact_chat_intro) {
+          shell.appendChild(
+            textNode("div", "tooltip-target-picker-note", selectorState.compact_chat_intro)
+          );
+        }
+        const compactButton = document.createElement("button");
+        compactButton.type = "button";
+        compactButton.className = "tooltip-target-picker-option";
+        compactButton.textContent = selectorState.compact_chat_button_label || "Compact chat";
+        compactButton.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          extendInteractionHold(4);
+          compactButton.disabled = true;
+          try {
+            await applyClientBudgetCompactChat(selectorState, target);
+          } catch (error) {
+            compactButton.disabled = false;
+            showDashboardToast(
+              `Не удалось подготовить compact chat: ${error.message || "unknown error"}`,
+              true
+            );
+          }
+        });
+        shell.appendChild(compactButton);
+        const compactCommand = document.createElement("div");
+        compactCommand.className = "tooltip-target-picker-note";
+        compactCommand.appendChild(document.createTextNode("Exact chat-команда: "));
+        compactCommand.appendChild(
+          textNode("span", "tooltip-target-picker-command", selectorState.compact_chat_command)
+        );
+        shell.appendChild(compactCommand);
+      }
+      if (
+        selectorState.host_current_thread_control &&
+        typeof selectorState.host_current_thread_control === "object"
+      ) {
+        const hostControlRetryAllowed =
+          selectorState.host_current_thread_control_retry_allowed !== false;
+        const hostControlSurfaces = [selectorState.host_current_thread_control];
+        const alternateHostControls = Array.isArray(
+          selectorState.host_current_thread_control.alternate_controls
+        )
+          ? selectorState.host_current_thread_control.alternate_controls
+          : [];
+        alternateHostControls.forEach((surface) => {
+          if (surface && typeof surface === "object") {
+            hostControlSurfaces.push(surface);
+          }
+        });
+        hostControlSurfaces.forEach((surface, index) => {
+          const introMessage =
+            typeof surface?.intro_message === "string" && surface.intro_message.trim()
+              ? surface.intro_message.trim()
+              : index === 0 &&
+                  typeof selectorState.host_current_thread_control_intro === "string" &&
+                  selectorState.host_current_thread_control_intro.trim()
+                ? selectorState.host_current_thread_control_intro.trim()
+                : null;
+          if (introMessage) {
+            shell.appendChild(textNode("div", "tooltip-target-picker-note", introMessage));
+          }
+          const hostControlButton = document.createElement("button");
+          hostControlButton.type = "button";
+          hostControlButton.className = "tooltip-target-picker-option";
+          hostControlButton.textContent =
+            surface.button_label ||
+            (index === 0
+              ? selectorState.host_current_thread_control_button_label || "Same-thread control"
+              : "Host control");
+          if (!hostControlRetryAllowed || surface.retry_allowed === false) {
+            hostControlButton.disabled = true;
+          }
+          hostControlButton.addEventListener("click", async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            extendInteractionHold(2);
+            hostControlButton.disabled = true;
+            try {
+              await applyCurrentThreadHostControl(selectorState, target, surface);
+            } catch (error) {
+              hostControlButton.disabled = false;
+              showDashboardToast(
+                `Не удалось запросить same-thread host control: ${error.message || "unknown error"}`,
+                true
+              );
+              return;
+            }
+            hostControlButton.disabled = false;
+          });
+          shell.appendChild(hostControlButton);
+          if (surface.command_id) {
+            const hostControlCommand = document.createElement("div");
+            hostControlCommand.className = "tooltip-target-picker-note";
+            hostControlCommand.appendChild(document.createTextNode("Host internal command id: "));
+            hostControlCommand.appendChild(
+              textNode("span", "tooltip-target-picker-command", surface.command_id)
+            );
+            shell.appendChild(hostControlCommand);
+          }
+          const externalLaunch =
+            typeof surface.external_uri_launch === "object" ? surface.external_uri_launch : null;
+          if (externalLaunch && typeof externalLaunch.uri === "string" && externalLaunch.uri.trim()) {
+            const hostControlUri = document.createElement("div");
+            hostControlUri.className = "tooltip-target-picker-note";
+            hostControlUri.appendChild(document.createTextNode("VS Code URI launch: "));
+            hostControlUri.appendChild(
+              textNode("span", "tooltip-target-picker-command", externalLaunch.uri)
+            );
+            shell.appendChild(hostControlUri);
+          }
+          if (
+            externalLaunch &&
+            typeof externalLaunch.platform_launch_command === "string" &&
+            externalLaunch.platform_launch_command.trim()
+          ) {
+            const hostControlLaunch = document.createElement("div");
+            hostControlLaunch.className = "tooltip-target-picker-note";
+            hostControlLaunch.appendChild(document.createTextNode("Shell launch: "));
+            hostControlLaunch.appendChild(
+              textNode(
+                "span",
+                "tooltip-target-picker-command",
+                externalLaunch.platform_launch_command
+              )
+            );
+            shell.appendChild(hostControlLaunch);
+          }
+        });
+        if (
+          typeof selectorState.host_current_thread_control_retry_blocked_reason === "string" &&
+          selectorState.host_current_thread_control_retry_blocked_reason.trim()
+        ) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              selectorState.host_current_thread_control_retry_blocked_reason.trim()
+            )
+          );
+        }
+        if (selectorState.host_current_thread_control_last_feedback_summary) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              `Последний feedback: ${selectorState.host_current_thread_control_last_feedback_summary}`
+            )
+          );
+        }
+        if (
+          typeof selectorState.host_current_thread_control_effect_summary === "string" &&
+          selectorState.host_current_thread_control_effect_summary.trim()
+        ) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              selectorState.host_current_thread_control_effect_summary.trim()
+            )
+          );
+        }
+        if (
+          typeof selectorState.host_current_thread_control_effect_note === "string" &&
+          selectorState.host_current_thread_control_effect_note.trim()
+        ) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              selectorState.host_current_thread_control_effect_note.trim()
+            )
+          );
+        }
+        if (selectorState.host_current_thread_control_feedback_pending) {
+          shell.appendChild(
+            textNode(
+              "div",
+              "tooltip-target-picker-note",
+              selectorState.host_current_thread_control_ack_intro ||
+                selectorState.host_current_thread_control?.feedback_ack_intro ||
+                "После попытки запуска отметь исход same-thread host control."
+            )
+          );
+          const feedbackGrid = document.createElement("div");
+          feedbackGrid.className = "tooltip-target-picker-grid";
+          [
+            { kind: "opened", label: "Открылся" },
+            { kind: "failed", label: "Не открылся" },
+          ].forEach(({ kind, label }) => {
+            const feedbackButton = document.createElement("button");
+            feedbackButton.type = "button";
+            feedbackButton.className = "tooltip-target-picker-option";
+            feedbackButton.textContent = label;
+            feedbackButton.addEventListener("click", async (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              extendInteractionHold(4);
+              const buttons = Array.from(feedbackGrid.querySelectorAll("button"));
+              buttons.forEach((button) => {
+                button.disabled = true;
+              });
+              try {
+                await applyCurrentThreadHostControlFeedback(kind, selectorState, target, {
+                  commandId: selectorState.host_current_thread_control_last_command_id,
+                  subjectLabel:
+                    selectorState.host_current_thread_control_last_button_label ||
+                    selectorState.host_current_thread_control?.button_label ||
+                    "same-thread host control",
+                });
+              } catch (error) {
+                buttons.forEach((button) => {
+                  button.disabled = false;
+                });
+                showDashboardToast(
+                  `Не удалось записать feedback по same-thread host control: ${error.message || "unknown error"}`,
+                  true
+                );
+              }
+            });
+            feedbackGrid.appendChild(feedbackButton);
+          });
+          shell.appendChild(feedbackGrid);
+        }
+      }
+      if (selectorState.reply_prefix) {
+        shell.appendChild(
+          textNode("div", "tooltip-target-picker-note", `Текущий reply prefix: ${selectorState.reply_prefix}`)
+        );
+      }
+      clearNode(tooltipLayerContent);
+      tooltipLayerContent.appendChild(shell);
+      return true;
+    }
+
     function showTooltip(target) {
       if (!tooltipLayer || !tooltipLayerContent || !target) {
         return;
+      }
+      cancelTooltipHide();
+      extendInteractionHold(2);
+      if (target.dataset.tooltipKind === "client-budget-target-selector") {
+        const selectorState = safeJsonParse(target.dataset.clientBudgetTargetSelector);
+        if (selectorState && renderClientBudgetTargetSelectorTooltip(target, selectorState)) {
+          activeTooltipTarget = target;
+          activeTooltipKind = target.dataset.tooltipKind || null;
+          resetTooltipCopyButton();
+          tooltipLayer.hidden = false;
+          tooltipLayer.classList.add("visible");
+          target.setAttribute("aria-describedby", "tooltip-layer");
+          target.setAttribute("aria-expanded", "true");
+          positionTooltip(target);
+          return;
+        }
       }
       const tip = target.getAttribute("data-tip");
       if (!tip) {
@@ -1870,12 +3636,14 @@ pub fn render_html(refresh_ms: u64) -> String {
         return;
       }
       activeTooltipTarget = target;
+      activeTooltipKind = target.dataset.tooltipKind || null;
       clearNode(tooltipLayerContent);
       appendRichText(tooltipLayerContent, tip, { inlineCopyButtons: false });
       resetTooltipCopyButton();
       tooltipLayer.hidden = false;
       tooltipLayer.classList.add("visible");
       target.setAttribute("aria-describedby", "tooltip-layer");
+      target.setAttribute("aria-expanded", "true");
       positionTooltip(target);
     }
 
@@ -1883,13 +3651,18 @@ pub fn render_html(refresh_ms: u64) -> String {
       if (!tooltipLayer) {
         return;
       }
+      cancelTooltipHide();
       if (target && activeTooltipTarget && target !== activeTooltipTarget) {
         return;
       }
       if (activeTooltipTarget) {
         activeTooltipTarget.removeAttribute("aria-describedby");
+        if (activeTooltipTarget.hasAttribute("aria-expanded")) {
+          activeTooltipTarget.setAttribute("aria-expanded", "false");
+        }
       }
       activeTooltipTarget = null;
+      activeTooltipKind = null;
       tooltipLayer.classList.remove("visible");
       tooltipLayer.hidden = true;
       if (tooltipLayerContent) {
@@ -2758,7 +4531,21 @@ pub fn render_html(refresh_ms: u64) -> String {
       }
     }
 
-    document.addEventListener("pointerdown", () => extendInteractionHold(2), true);
+    document.addEventListener("pointerdown", (event) => {
+      extendInteractionHold(2);
+      if (!activeTooltipTarget || !tooltipIsInteractiveSelector()) {
+        return;
+      }
+      const insideTooltip = tooltipContainsNode(event.target);
+      const insideActiveTrigger =
+        activeTooltipTarget &&
+        event.target &&
+        activeTooltipTarget.contains &&
+        activeTooltipTarget.contains(event.target);
+      if (!insideTooltip && !insideActiveTrigger) {
+        hideTooltip();
+      }
+    }, true);
     document.addEventListener("selectionchange", () => {
       updateTooltipCopyButton();
       if (hasActiveSelection()) {
@@ -2776,8 +4563,11 @@ pub fn render_html(refresh_ms: u64) -> String {
       const tooltipTarget =
         event.target && event.target.closest ? event.target.closest(".has-tooltip") : null;
       const relatedInsideTooltip = tooltipContainsNode(event.relatedTarget);
+      if (tooltipTarget && activeTooltipTarget === tooltipTarget && tooltipIsInteractiveSelector()) {
+        return;
+      }
       if (tooltipTarget && !relatedInsideTooltip) {
-        hideTooltip(tooltipTarget);
+        scheduleHideTooltip(tooltipTarget);
       }
     }, true);
     document.addEventListener("mouseover", (event) => {
@@ -2798,14 +4588,38 @@ pub fn render_html(refresh_ms: u64) -> String {
           ? event.relatedTarget.closest(".has-tooltip")
           : null;
       const relatedInsideTooltip = tooltipContainsNode(event.relatedTarget);
+      if (tooltipTarget && activeTooltipTarget === tooltipTarget && tooltipIsInteractiveSelector()) {
+        return;
+      }
       if (tooltipTarget && relatedTooltip !== tooltipTarget && !relatedInsideTooltip) {
-        hideTooltip(tooltipTarget);
+        scheduleHideTooltip(tooltipTarget);
       }
     }, true);
     document.addEventListener("scroll", () => positionTooltip(), true);
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !activeTooltipTarget || !tooltipIsInteractiveSelector()) {
+        return;
+      }
+      const target = activeTooltipTarget;
+      hideTooltip();
+      if (target && typeof target.focus === "function") {
+        target.focus();
+      }
+    }, true);
 
     if (tooltipLayer) {
+      tooltipLayer.addEventListener("mouseenter", () => {
+        cancelTooltipHide();
+        extendInteractionHold(2);
+      }, true);
+      tooltipLayer.addEventListener("focusin", () => {
+        cancelTooltipHide();
+        extendInteractionHold(2);
+      }, true);
       tooltipLayer.addEventListener("mouseleave", (event) => {
+        if (tooltipIsInteractiveSelector()) {
+          return;
+        }
         if (
           tooltipContainsNode(event.relatedTarget) ||
           (activeTooltipTarget &&
@@ -2814,7 +4628,7 @@ pub fn render_html(refresh_ms: u64) -> String {
         ) {
           return;
         }
-        hideTooltip();
+        scheduleHideTooltip();
       }, true);
     }
 
@@ -2923,13 +4737,24 @@ fn current_session_budget_guard_with_restore_context(
     report: &Value,
     restore_context: &Value,
 ) -> Value {
+    let client_budget_target_percent =
+        client_budget_target_percent_from_inputs(report, restore_context);
+    let client_budget_target_active = client_budget_target_active(client_budget_target_percent);
+    let client_budget_target_percent_f64 =
+        client_budget_target_percent_f64(client_budget_target_percent);
     let client_live_meter = &report["client_live_meter"];
     let current_thread_bound = current_session_client_live_meter_available(client_live_meter);
     let current_session_summary = &report["current_session"];
     let current_session_statement = &report["statement_previews"]["current_session"];
     let current_session_alignment = &current_session_statement["client_limit_meter_alignment"];
     let current_session_exact_pair =
-        exact_model_token_pair(current_session_statement, current_session_alignment);
+        exact_model_token_pair(current_session_summary, current_session_alignment);
+    let session_events_total = current_session_summary["events_total"].as_u64().unwrap_or(0);
+    let session_events = current_session_summary["counted_events"].as_u64().unwrap_or(0);
+    let session_saved = current_session_exact_pair
+        .as_ref()
+        .map(|(_, _, saved, _)| *saved)
+        .or_else(|| current_session_summary["verified_effective_saved_tokens"].as_i64());
     let session_live_turn_exact_pair = live_turn_exact_pair(
         current_session_summary,
         client_live_meter,
@@ -2939,84 +4764,17 @@ fn current_session_budget_guard_with_restore_context(
         current_live_turn_exact_pair(&report["current_live_turn"]).or(session_live_turn_exact_pair);
     let session_full_turn_savings_pct =
         full_turn_savings_pct_from_live_meter(client_live_meter, session_live_turn_exact_pair);
-    let snapshot = json!({
-        "token_budget_report": {
-            "token_budget_report": report.clone()
-        }
-    });
-    let cards = build_hero_cards(&snapshot);
-    let Some(session_card) = cards.into_iter().next() else {
-        return json!({
-            "source": "dashboard_current_session_budget_guard_v2",
-            "status": "unknown",
-            "status_label": "нет данных",
-            "full_turn_savings_proven": false,
-            "should_rotate_chat_now": false,
-            "should_rotate_chat_soon": false,
-            "next_action": null,
-            "observed_at_epoch_ms": null,
-            "max_guard_age_seconds": 10,
-            "reply_execution_gate": {
-                "gate_version": "client-reply-budget-gate-v1",
-                "status": "unknown",
-                "status_label": "нет данных",
-                "action_kind": "continue_current_chat",
-                "reason": "client_budget_guard_unavailable",
-                "blocking": false,
-                "must_rotate_before_reply": false,
-                "unrelated_reply_allowed": true,
-                "reply_budget_mode": working_state::CLIENT_REPLY_BUDGET_MODE_NORMAL,
-                "reply_budget_contract": working_state::build_client_reply_budget_contract(
-                    working_state::ClientReplyBudgetMode::Normal,
-                ),
-                "save_handoff_before_rotate": false,
-                "fresh_chat_requires_continuity_startup": false,
-                "full_scale_client_truth_required": true,
-                "guard_observed_at_epoch_ms": null,
-                "max_guard_age_seconds": 10,
-                "guard_fresh_until_epoch_ms": null,
-                "rotate_now": false,
-                "rotate_soon": false,
-                "must_wait_for_budget_recovery_before_reply": false,
-                "blocking_reply_contract": working_state::build_client_budget_blocking_reply_contract(
-                    working_state::ClientBudgetBlockingReplyMode::Inactive,
-                ),
-                "action_bundle": working_state::build_rotate_chat_action_bundle(
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    None,
-                )
-            },
-            "reason": "current_session hero card is unavailable",
-            "note": "current_session hero card is unavailable"
-        });
-    };
-    let compact = compact_token_hero_card(session_card);
-    let compact_status = compact["status"].as_str().unwrap_or("unknown");
-    let compact_status_label = compact["status_label"].as_str().unwrap_or(compact_status);
-    let value = compact["value"].as_str().unwrap_or_default();
-    let rows = compact["rows"].as_array().cloned().unwrap_or_default();
-    let last_request = client_live_context_metric_row(client_live_meter)
+    let last_request_row = client_live_context_metric_row(client_live_meter);
+    let client_limits_row = client_live_limit_metric_row(client_live_meter);
+    let last_request = last_request_row
+        .as_ref()
         .and_then(|row| row["value"].as_str().map(str::to_string));
-    let client_limits = client_live_limit_metric_row(client_live_meter)
+    let client_limits = client_limits_row
+        .as_ref()
         .and_then(|row| row["value"].as_str().map(str::to_string));
     let global_limit_source = global_client_limit_source(client_live_meter);
     let global_limit_guard = global_client_limit_guard(client_live_meter);
-    let row_value = |label: &str| {
-        rows.iter()
-            .find(|row| row["label"].as_str() == Some(label))
-            .and_then(|row| row["value"].as_str())
-            .map(str::to_string)
-    };
-    let row_tooltip = |label: &str| {
-        rows.iter()
-            .find(|row| row["label"].as_str() == Some(label))
-            .and_then(|row| row["tooltip"].as_str())
-            .map(str::to_string)
-    };
+    let reply_prefix = report["client_limit_hourly_burn"]["reply_prefix"].as_str();
     let observed_at_epoch_ms = if current_session_client_live_meter_available(client_live_meter)
         || global_limit_guard.is_some()
     {
@@ -3025,39 +4783,50 @@ fn current_session_budget_guard_with_restore_context(
         None
     };
     let max_guard_age_seconds = 10_u64;
-    let should_rotate_chat_now = compact_status_label == "новый чат нужен сейчас";
-    let should_rotate_chat_soon =
-        compact_status_label == "новый чат рекомендован" || should_rotate_chat_now;
     let hourly_burn = &report["client_limit_hourly_burn"];
-    let hourly_burn_kpi_percent = hourly_burn["kpi_percent"].as_f64();
-    let hourly_burn_below_target = hourly_burn["status"].as_str() == Some("observed")
-        && hourly_burn_kpi_percent.unwrap_or(0.0) < 90.0;
-    let live_turn_below_target =
-        session_full_turn_savings_pct.is_some_and(|value| value < 90.0);
-    let compact_reply_required = !should_rotate_chat_now
-        && (should_rotate_chat_soon || hourly_burn_below_target || live_turn_below_target);
-    let requires_global_budget_recovery_before_reply =
-        global_limit_guard.is_some_and(|guard| guard.severity == "critical");
-    let status = global_limit_guard
-        .map(|guard| guard.severity)
-        .unwrap_or(compact_status);
-    let status_label = global_limit_guard
-        .map(|guard| guard.status_label)
-        .unwrap_or(compact_status_label);
-    let global_limit_note = global_limit_guard.map(|guard| {
-        global_client_limit_guard_note(
-            guard,
-            client_limits.as_deref(),
-            preferred_client_limit_meter_is_exact(client_live_meter),
-        )
-    });
-    let status_tooltip = global_limit_note
-        .clone()
-        .or_else(|| compact["status_tooltip"].as_str().map(str::to_string));
-    let note = global_limit_note
-        .clone()
-        .or_else(|| compact["note"].as_str().map(str::to_string))
-        .unwrap_or_default();
+    let host_context_compaction = latest_host_context_compaction_payload(report, restore_context);
+    let host_context_compaction_stage =
+        host_context_compaction_stage_from_payload(&host_context_compaction);
+    let (
+        host_current_thread_control,
+        host_current_thread_control_effect,
+        same_thread_compaction_preferred,
+    ) = selected_host_current_thread_control_state(
+        report,
+        restore_context,
+        client_live_meter,
+        &host_context_compaction,
+    );
+    let selected_host_current_thread_control_command_id =
+        host_current_thread_control["command_id"].as_str();
+    let selected_host_current_thread_control_feedback_kind =
+        latest_host_current_thread_control_feedback_kind_for_command(
+            restore_context,
+            selected_host_current_thread_control_command_id,
+        );
+    let selected_host_current_thread_control_feedback_summary =
+        latest_host_current_thread_control_feedback_summary_for_command(
+            restore_context,
+            selected_host_current_thread_control_command_id,
+        );
+    let selected_host_current_thread_control_feedback_pending =
+        host_current_thread_control_feedback_pending_from_effect(
+            selected_host_current_thread_control_feedback_kind,
+            &host_current_thread_control_effect,
+        );
+    let selected_host_current_thread_control_measurement_pending =
+        host_current_thread_control_effect["measurement_pending"].as_bool() == Some(true);
+    let selected_host_current_thread_control_retry_allowed =
+        host_current_thread_control_effect["retry_allowed"]
+            .as_bool()
+            .unwrap_or(true)
+            && !selected_host_current_thread_control_feedback_pending;
+    let host_current_thread_control = decorate_host_current_thread_control_surface(
+        &host_current_thread_control,
+        &host_current_thread_control_effect,
+        selected_host_current_thread_control_feedback_pending,
+        selected_host_current_thread_control_feedback_summary.as_deref(),
+    );
     let recommended_headline = restore_context["current_goal"]
         .as_str()
         .filter(|value| !value.is_empty());
@@ -3067,9 +4836,195 @@ fn current_session_budget_guard_with_restore_context(
     let preserves_return_obligation = restore_context["execctl_resume_state"]
         .as_str()
         .is_some_and(|value| value != "clear");
-    let reply_execution_gate = build_client_budget_reply_execution_gate(
+    let session_rotate_bundle = restore_context.is_object().then(|| {
+        working_state::build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
+            restore_context["project"]["code"].as_str(),
+            restore_context["namespace"]["code"].as_str(),
+            restore_context["project"]["repo_root"].as_str(),
+            preserves_return_obligation,
+            recommended_headline,
+            recommended_next_step,
+            host_context_compaction_stage,
+            same_thread_compaction_preferred,
+            host_current_thread_control["thread_id"].as_str(),
+            host_current_thread_control["command_id"].as_str(),
+        )
+    });
+    let session_client_turn_pressure = client_turn_pressure_guard_with_target(
+        client_live_meter,
+        session_live_turn_exact_pair,
+        hourly_burn,
+        &report["current_live_turn"],
+        client_budget_target_percent,
+    );
+    let session_boundary_pressure =
+        continuity_boundary_pressure(current_session_summary, current_session_alignment);
+    let tracked_slice_row =
+        model_token_savings_metric_row(current_session_summary, current_session_alignment);
+    let tracked_slice = tracked_slice_row["value"]
+        .as_str()
+        .map(humanize_tracked_slice_savings_value);
+    let tracked_slice_truth = exact_pair_status_metric_row(current_session_alignment).and_then(
+        |row| row["value"].as_str().map(humanize_tracked_slice_exactness_value),
+    );
+    let tracked_slice_tooltip = tracked_slice_row["tooltip"].as_str().map(str::to_string);
+    let next_action = client_turn_pressure_metric_row(
+        session_client_turn_pressure,
+        session_rotate_bundle.as_ref(),
+        same_thread_compaction_preferred,
+    )
+    .and_then(|row| row["value"].as_str().map(str::to_string));
+    let mut compact_status = if let Some(guard) = session_client_turn_pressure {
+        guard.severity.to_string()
+    } else if session_boundary_pressure.is_some_and(|(boundary_tokens, strict_tokens)| {
+        continuity_boundary_pressure_is_alert(session_saved, boundary_tokens, strict_tokens)
+    }) {
+        "alert".to_string()
+    } else if client_budget_target_active
+        && session_full_turn_savings_pct
+            .is_some_and(|value| value < client_budget_target_percent_f64)
+    {
+        "alert".to_string()
+    } else {
+        savings_status(session_saved, session_events, session_events_total).to_string()
+    };
+    let mut compact_status_label = if let Some(guard) = session_client_turn_pressure {
+        Some(guard.status_label.to_string())
+    } else if session_full_turn_savings_pct.is_none()
+        && current_session_client_live_meter_available(client_live_meter)
+    {
+        Some("реальная экономия не доказана".to_string())
+    } else if session_full_turn_savings_pct
+        .is_some_and(|value| client_budget_target_active && value < client_budget_target_percent_f64)
+    {
+        Some(client_budget_target_alert_label(client_budget_target_percent))
+    } else if session_boundary_pressure.is_some_and(|(boundary_tokens, strict_tokens)| {
+        continuity_boundary_pressure_is_alert(session_saved, boundary_tokens, strict_tokens)
+    }) {
+        Some("burn в continuity startup".to_string())
+    } else {
+        None
+    };
+    let mut compact_status_tooltip = if let Some(guard) = session_client_turn_pressure {
+        Some(client_turn_pressure_tooltip(
+            guard,
+            session_rotate_bundle.as_ref(),
+            same_thread_compaction_preferred,
+        ))
+    } else if session_full_turn_savings_pct.is_none()
+        && current_session_client_live_meter_available(client_live_meter)
+    {
+        Some(
+            "Статус требует внимания по следующим причинам:\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно раньше переводить работу в свежий чат и собирать exact pair именно на коротком live turn."
+                .to_string(),
+        )
+    } else if let Some(full_turn_savings_pct) = session_full_turn_savings_pct
+        .filter(|value| client_budget_target_active && *value < client_budget_target_percent_f64)
+    {
+        Some(format!(
+            "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и раньше переводить работу в новый чат через continuity startup.",
+            format_percent(Some(full_turn_savings_pct)),
+            client_budget_target_sentence(client_budget_target_percent)
+        ))
+    } else if let Some((boundary_tokens, strict_tokens)) =
+        session_boundary_pressure.filter(|(boundary_tokens, strict_tokens)| {
+            continuity_boundary_pressure_is_alert(session_saved, *boundary_tokens, *strict_tokens)
+        })
+    {
+        Some(format!(
+            "Статус требует внимания по следующим причинам:\n- В этой сессии savings-KPI пока не показывает положительную подтверждённую экономию.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит лимит сейчас уходит главным образом в continuity restore, а не в retrieval/workflow effect.",
+            format_u64(Some(boundary_tokens)),
+            format_u64(Some(strict_tokens))
+        ))
+    } else if session_events_total > 0 && session_events == 0 {
+        Some(
+            "Статус пока не может считаться нормальным по следующим причинам:\n- В этой сессии уже были живые запросы.\n- Но пока ни один из них ещё не подтвердился как полезный без потери качества.\n- Как только появится первый такой случай, главный итог этой карточки начнёт считаться."
+                .to_string(),
+        )
+    } else if session_events > 0 && session_saved.unwrap_or_default() < 0 {
+        Some(format!(
+            "Статус требует внимания по следующим причинам:\n- В подтверждённой части текущей сессии экономия сейчас отрицательная: {}.\n- Это значит, что в уже проверенных случаях контекст от Amai вышел тяжелее обычного пути без Amai.\n- Нижние строки со всем живым потоком показаны отдельно и не отменяют этот итог.",
+            format_signed_count(session_saved)
+        ))
+    } else {
+        None
+    };
+    if compact_status == "pass" {
+        if let Some((status, label, tooltip)) =
+            exact_pair_card_status_override(current_session_alignment)
+        {
+            compact_status = status.to_string();
+            compact_status_label = Some(label.to_string());
+            compact_status_tooltip = Some(tooltip);
+        }
+    }
+    let full_turn_savings_percent =
+        session_full_turn_savings_pct.map(|value| format_percent(Some(value)));
+    let compact_note = if let Some(guard) = session_client_turn_pressure {
+        client_turn_pressure_note_sentence_for_preference(
+            Some(guard),
+            same_thread_compaction_preferred,
+        )
+        .unwrap_or_default()
+    } else if let Some(value) = full_turn_savings_percent.as_deref() {
+        format!("Полная шкала клиента сейчас даёт {value}.")
+    } else {
+        "Реальная экономия на полной шкале клиента пока не доказана для текущего turn.".to_string()
+    };
+    let compact_status_label = compact_status_label.unwrap_or_else(|| compact_status.clone());
+    let should_rotate_chat_now = compact_status_label == "новый чат нужен сейчас";
+    let should_rotate_chat_soon =
+        compact_status_label == "новый чат рекомендован" || should_rotate_chat_now;
+    let hourly_burn_kpi_percent = hourly_burn["kpi_percent"].as_f64();
+    let hourly_burn_below_target = client_budget_target_active
+        && hourly_burn["status"].as_str() == Some("observed")
+        && hourly_burn_kpi_percent.unwrap_or(0.0) < client_budget_target_percent_f64;
+    let live_turn_below_target = client_budget_target_active
+        && session_full_turn_savings_pct
+            .is_some_and(|value| value < client_budget_target_percent_f64);
+    let target_pressure_active =
+        should_rotate_chat_soon || hourly_burn_below_target || live_turn_below_target;
+    let same_thread_compaction_advisory =
+        should_rotate_chat_soon && same_thread_compaction_preferred;
+    let host_context_compaction_preserve_active =
+        host_context_compaction["preserve_active"].as_bool() == Some(true);
+    let compact_reply_required = !should_rotate_chat_now
+        && (target_pressure_active || host_context_compaction_preserve_active);
+    let requires_global_budget_recovery_before_reply =
+        global_limit_guard.is_some_and(|guard| guard.severity == "critical");
+    let status = global_limit_guard
+        .map(|guard| guard.severity)
+        .unwrap_or(compact_status.as_str());
+    let status_label = global_limit_guard
+        .map(|guard| guard.status_label)
+        .unwrap_or_else(|| {
+            if same_thread_compaction_advisory {
+                if compact_status_label == "новый чат нужен сейчас" {
+                    "сожми текущий чат сейчас"
+                } else {
+                    "сожми текущий чат"
+                }
+            } else {
+                compact_status_label.as_str()
+            }
+        });
+    let global_limit_note = global_limit_guard.map(|guard| {
+        global_client_limit_guard_note(
+            guard,
+            client_limits.as_deref(),
+            preferred_client_limit_meter_is_exact(client_live_meter),
+        )
+    });
+    let status_tooltip = global_limit_note
+        .clone()
+        .or(compact_status_tooltip.clone());
+    let note = global_limit_note
+        .clone()
+        .unwrap_or_else(|| compact_note.clone());
+    let reply_execution_gate = build_client_budget_reply_execution_gate_with_primary_command(
         status,
         status_label,
+        reply_prefix,
         observed_at_epoch_ms,
         max_guard_age_seconds,
         should_rotate_chat_now,
@@ -3082,34 +5037,30 @@ fn current_session_budget_guard_with_restore_context(
         restore_context["project"]["repo_root"].as_str(),
         recommended_headline,
         recommended_next_step,
+        client_budget_target_percent,
+        host_context_compaction_stage,
+        same_thread_compaction_preferred,
+        target_pressure_active,
+        report["current_live_turn"]["status"].as_str()
+            == Some("no_amai_activity_in_current_live_turn"),
+        host_current_thread_control["thread_id"].as_str(),
+        selected_host_current_thread_control_command_id,
+        &host_current_thread_control_effect,
+        selected_host_current_thread_control_feedback_pending,
+        selected_host_current_thread_control_feedback_summary.as_deref(),
     );
-    let tracked_slice =
-        row_value("Экономия на учтённой части").or_else(|| {
-            Some(humanize_tracked_slice_savings_value(
-                model_token_savings_metric_row(current_session_summary, current_session_alignment)
-                    ["value"]
-                    .as_str()
-                    .unwrap_or_default(),
-            ))
-        });
-    let tracked_slice_truth = row_value("Точность учтённой части").or_else(|| {
-        exact_pair_status_metric_row(current_session_alignment).and_then(|row| {
-            row["value"]
-                .as_str()
-                .map(humanize_tracked_slice_exactness_value)
-        })
-    });
     json!({
         "source": "dashboard_current_session_budget_guard_v2",
         "status": status,
         "status_label": status_label,
+        "reply_prefix": reply_prefix,
         "status_tooltip": status_tooltip,
-        "full_turn_savings_proven": value != "не доказано",
-        "full_turn_savings_percent": if value == "не доказано" { None } else { Some(value.to_string()) },
+        "full_turn_savings_proven": session_full_turn_savings_pct.is_some(),
+        "full_turn_savings_percent": full_turn_savings_percent,
         "should_rotate_chat_now": should_rotate_chat_now,
         "should_rotate_chat_soon": should_rotate_chat_soon,
         "requires_global_budget_recovery_before_reply": requires_global_budget_recovery_before_reply,
-        "next_action": row_value("Следующее действие"),
+        "next_action": next_action,
         "last_request": last_request,
         "client_limits": client_limits,
         "global_client_limit_source": global_limit_source.unwrap_or(Value::Null),
@@ -3122,19 +5073,35 @@ fn current_session_budget_guard_with_restore_context(
             } else {
                 "missing_rollout_client_meter"
             }),
+        "client_budget_target_percent": client_budget_target_percent,
         "max_guard_age_seconds": max_guard_age_seconds,
         "reply_execution_gate": reply_execution_gate,
+        "host_context_compaction": host_context_compaction,
+        "host_current_thread_control_effect": host_current_thread_control_effect,
+        "same_thread_compaction_preferred": same_thread_compaction_preferred,
+        "selected_host_current_thread_control_feedback_kind":
+            selected_host_current_thread_control_feedback_kind,
+        "selected_host_current_thread_control_feedback_summary":
+            selected_host_current_thread_control_feedback_summary,
+        "selected_host_current_thread_control_feedback_pending":
+            selected_host_current_thread_control_feedback_pending,
+        "selected_host_current_thread_control_measurement_pending":
+            selected_host_current_thread_control_measurement_pending,
+        "selected_host_current_thread_control_retry_allowed":
+            selected_host_current_thread_control_retry_allowed,
+        "host_current_thread_control": host_current_thread_control,
         "tracked_slice": tracked_slice,
         "tracked_slice_truth": tracked_slice_truth,
-        "tracked_slice_tooltip": row_tooltip("Экономия на учтённой части"),
+        "tracked_slice_tooltip": tracked_slice_tooltip,
         "reason": note.clone(),
         "note": note,
     })
 }
 
-fn build_client_budget_reply_execution_gate(
+fn build_client_budget_reply_execution_gate_with_primary_command(
     status: &str,
     status_label: &str,
+    reply_prefix: Option<&str>,
     observed_at_epoch_ms: Option<u64>,
     max_guard_age_seconds: u64,
     should_rotate_chat_now: bool,
@@ -3147,12 +5114,23 @@ fn build_client_budget_reply_execution_gate(
     repo_root: Option<&str>,
     recommended_headline: Option<&str>,
     recommended_next_step: Option<&str>,
+    client_budget_target_percent: u64,
+    host_context_compaction_stage: working_state::HostContextCompactionStage,
+    same_thread_compaction_preferred: bool,
+    target_pressure_active: bool,
+    current_live_turn_no_amai_activity: bool,
+    same_thread_thread_id: Option<&str>,
+    same_thread_primary_command_id: Option<&str>,
+    host_current_thread_control_effect: &Value,
+    selected_host_current_thread_control_feedback_pending: bool,
+    selected_host_current_thread_control_feedback_summary: Option<&str>,
 ) -> Value {
-    let rotate_blocking = should_rotate_chat_now;
-    let blocking = rotate_blocking || requires_global_budget_recovery_before_reply;
+    let rotate_advisory = should_rotate_chat_soon;
+    let same_thread_compaction_advisory = rotate_advisory && same_thread_compaction_preferred;
+    let blocking = requires_global_budget_recovery_before_reply;
     let reply_budget_mode = if blocking {
         working_state::ClientReplyBudgetMode::CompactHighSignal
-    } else if compact_reply_required {
+    } else if compact_reply_required || rotate_advisory {
         working_state::ClientReplyBudgetMode::CompactHighSignal
     } else {
         working_state::ClientReplyBudgetMode::Normal
@@ -3184,21 +5162,47 @@ fn build_client_budget_reply_execution_gate(
             ),
             preserves_return_obligation,
         )
-    } else if rotate_blocking {
+    } else if same_thread_compaction_advisory {
         (
-            "rotate_chat_for_client_budget",
-            "client_budget_guard_pressure",
-            true,
-            true,
-            true,
-            working_state::ClientBudgetBlockingReplyMode::RotateChatOnly,
-            working_state::build_rotate_chat_action_bundle(
+            "compact_current_thread_for_client_budget",
+            "client_budget_guard_same_thread_compaction",
+            false,
+            false,
+            false,
+            working_state::ClientBudgetBlockingReplyMode::Inactive,
+            working_state::build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
                 project_code,
                 namespace_code,
                 repo_root,
                 preserves_return_obligation,
                 recommended_headline,
                 recommended_next_step,
+                host_context_compaction_stage,
+                same_thread_compaction_preferred,
+                same_thread_thread_id,
+                same_thread_primary_command_id,
+            ),
+            preserves_return_obligation,
+        )
+    } else if rotate_advisory {
+        (
+            "rotate_chat_for_client_budget",
+            "client_budget_guard_pressure",
+            false,
+            true,
+            true,
+            working_state::ClientBudgetBlockingReplyMode::Inactive,
+            working_state::build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
+                project_code,
+                namespace_code,
+                repo_root,
+                preserves_return_obligation,
+                recommended_headline,
+                recommended_next_step,
+                host_context_compaction_stage,
+                same_thread_compaction_preferred,
+                same_thread_thread_id,
+                same_thread_primary_command_id,
             ),
             preserves_return_obligation,
         )
@@ -3216,10 +5220,14 @@ fn build_client_budget_reply_execution_gate(
     };
     let gate_fresh_until_epoch_ms =
         observed_at_epoch_ms.map(|value| value.saturating_add(max_guard_age_seconds * 1000));
-    json!({
+    let reply_prefix = reply_prefix
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut gate = json!({
         "gate_version": "client-reply-budget-gate-v1",
         "status": status,
         "status_label": status_label,
+        "reply_prefix": reply_prefix,
         "action_kind": action_kind,
         "reason": reason,
         "blocking": blocking,
@@ -3230,9 +5238,18 @@ fn build_client_budget_reply_execution_gate(
             working_state::ClientReplyBudgetMode::Normal => working_state::CLIENT_REPLY_BUDGET_MODE_NORMAL,
             working_state::ClientReplyBudgetMode::CompactHighSignal => working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL,
         },
-        "reply_budget_contract": working_state::build_client_reply_budget_contract(
+        "client_budget_target_percent": client_budget_target_percent,
+        "reply_budget_contract": working_state::build_client_reply_budget_contract_with_target(
             reply_budget_mode,
+            client_budget_target_percent,
+            host_context_compaction_stage,
+            target_pressure_active,
+            current_live_turn_no_amai_activity,
         ),
+        "host_context_compaction_stage": host_context_compaction_stage.as_str(),
+        "host_context_compaction_preserve_active": host_context_compaction_stage.preserve_active(),
+        "host_context_compaction_critical_regrowth_active":
+            host_context_compaction_stage.critical_regrowth_active(),
         "save_handoff_before_rotate": save_handoff_before_rotate,
         "fresh_chat_requires_continuity_startup": fresh_chat_requires_continuity_startup,
         "full_scale_client_truth_required": true,
@@ -3246,7 +5263,192 @@ fn build_client_budget_reply_execution_gate(
             blocking_reply_mode,
         ),
         "action_bundle": action_bundle,
-    })
+    });
+    let mut gate_action_kind_override: Option<&'static str> = None;
+    let mut gate_reason_override: Option<&'static str> = None;
+    let mut gate_requires_feedback_confirmation = false;
+    let mut gate_requires_effect_measurement = false;
+    let mut gate_unrelated_reply_allowed_override: Option<bool> = None;
+    if let Some(action_bundle) = gate["action_bundle"].as_object_mut()
+        && let Some(surface) = action_bundle.get("host_current_thread_control").cloned()
+    {
+        let decorated_surface = decorate_host_current_thread_control_surface(
+            &surface,
+            host_current_thread_control_effect,
+            selected_host_current_thread_control_feedback_pending,
+            selected_host_current_thread_control_feedback_summary,
+        );
+        let retry_allowed = decorated_surface["retry_allowed"].as_bool().unwrap_or(true);
+        let retry_blocked_reason = decorated_surface["retry_blocked_reason"]
+            .as_str()
+            .map(str::to_string);
+        action_bundle.insert("host_current_thread_control".to_string(), decorated_surface);
+        if !retry_allowed {
+            let primary_command_kind = action_bundle
+                .get("operator_flow")
+                .and_then(Value::as_object)
+                .and_then(|operator_flow| operator_flow["primary_command_kind"].as_str());
+            let same_thread_primary_selected =
+                primary_command_kind == Some("same_thread_host_control_launch_command");
+            let feedback_pending = selected_host_current_thread_control_feedback_pending;
+            if same_thread_primary_selected {
+                if feedback_pending {
+                    action_bundle.insert(
+                        "feedback_confirmation_before_retry_required".to_string(),
+                        json!(true),
+                    );
+                    action_bundle.insert(
+                        "order".to_string(),
+                        json!([
+                            "confirm_same_thread_host_control_feedback",
+                            "measure_existing_same_thread_effect",
+                            "fallback_rotate_chat"
+                        ]),
+                    );
+                } else {
+                    action_bundle
+                        .insert("measurement_before_retry_required".to_string(), json!(true));
+                    action_bundle.insert(
+                        "order".to_string(),
+                        json!([
+                            "measure_existing_same_thread_effect",
+                            "reuse_latest_live_diagnostics",
+                            "fallback_rotate_chat"
+                        ]),
+                    );
+                }
+            }
+            if let Some(operator_flow) = action_bundle
+                .get_mut("operator_flow")
+                .and_then(Value::as_object_mut)
+                && operator_flow["primary_command_kind"].as_str()
+                    == Some("same_thread_host_control_launch_command")
+            {
+                if feedback_pending {
+                    gate_action_kind_override = Some("confirm_same_thread_host_control_feedback");
+                    gate_reason_override = Some("same_thread_host_control_feedback_pending");
+                    gate_unrelated_reply_allowed_override = Some(false);
+                    gate_requires_feedback_confirmation = true;
+                } else {
+                    gate_action_kind_override = Some("wait_for_same_thread_effect_measurement");
+                    gate_reason_override = Some("same_thread_effect_measurement_pending");
+                    gate_unrelated_reply_allowed_override = Some(false);
+                    gate_requires_effect_measurement = true;
+                }
+                operator_flow.insert(
+                    "primary_command_kind".to_string(),
+                    if feedback_pending {
+                        json!("confirm_same_thread_host_control_feedback")
+                    } else {
+                        json!("wait_for_same_thread_effect_measurement")
+                    },
+                );
+                operator_flow.insert("primary_command".to_string(), Value::Null);
+                if feedback_pending {
+                    operator_flow.insert(
+                        "same_thread_feedback_confirmation_required".to_string(),
+                        json!(true),
+                    );
+                    operator_flow.insert(
+                        "same_thread_feedback_confirmation_summary".to_string(),
+                        retry_blocked_reason
+                            .clone()
+                            .map_or(Value::Null, Value::String),
+                    );
+                } else {
+                    operator_flow.insert(
+                        "same_thread_effect_measurement_required".to_string(),
+                        json!(true),
+                    );
+                    operator_flow.insert(
+                        "same_thread_effect_measurement_summary".to_string(),
+                        retry_blocked_reason
+                            .clone()
+                            .map_or(Value::Null, Value::String),
+                    );
+                }
+            }
+            if feedback_pending {
+                action_bundle.insert(
+                    "feedback_confirmation_before_retry_required".to_string(),
+                    json!(true),
+                );
+                action_bundle.insert(
+                    "order".to_string(),
+                    json!([
+                        "confirm_same_thread_host_control_feedback",
+                        "run_rotate_helper",
+                        "open_fresh_chat",
+                        "run_continuity_startup"
+                    ]),
+                );
+            }
+            if feedback_pending
+                && let Some(operator_flow) = action_bundle
+                    .get_mut("operator_flow")
+                    .and_then(Value::as_object_mut)
+                && operator_flow["primary_command_kind"].as_str()
+                    == Some("rotate_helper_command")
+            {
+                gate_action_kind_override = Some("confirm_same_thread_host_control_feedback");
+                gate_reason_override = Some("same_thread_host_control_feedback_pending");
+                gate_unrelated_reply_allowed_override = Some(false);
+                gate_requires_feedback_confirmation = true;
+                operator_flow.insert(
+                    "primary_command_kind".to_string(),
+                    json!("confirm_same_thread_host_control_feedback"),
+                );
+                operator_flow.insert("primary_command".to_string(), Value::Null);
+                operator_flow.insert(
+                    "same_thread_feedback_confirmation_required".to_string(),
+                    json!(true),
+                );
+                operator_flow.insert(
+                    "same_thread_feedback_confirmation_summary".to_string(),
+                    retry_blocked_reason
+                        .clone()
+                        .map_or(Value::Null, Value::String),
+                );
+            }
+            if let Some(run_same_thread_host_control) = action_bundle
+                .get_mut("run_same_thread_host_control")
+                .and_then(Value::as_object_mut)
+            {
+                run_same_thread_host_control
+                    .insert("preferred_before_rotate".to_string(), json!(false));
+            }
+        }
+        if action_bundle["operator_flow"]["primary_command_kind"].as_str()
+            == Some("rotate_helper_command")
+        {
+            action_bundle.remove("measurement_before_retry_required");
+            action_bundle.remove("feedback_confirmation_before_retry_required");
+            action_bundle.insert(
+                "order".to_string(),
+                json!([
+                    "run_rotate_helper",
+                    "open_fresh_chat",
+                    "run_continuity_startup"
+                ]),
+            );
+        }
+    }
+    if let Some(action_kind) = gate_action_kind_override {
+        gate["action_kind"] = json!(action_kind);
+    }
+    if let Some(reason) = gate_reason_override {
+        gate["reason"] = json!(reason);
+    }
+    if let Some(unrelated_reply_allowed) = gate_unrelated_reply_allowed_override {
+        gate["unrelated_reply_allowed"] = json!(unrelated_reply_allowed);
+    }
+    if gate_requires_feedback_confirmation {
+        gate["must_confirm_same_thread_host_control_feedback_before_reply"] = json!(true);
+    }
+    if gate_requires_effect_measurement {
+        gate["must_wait_for_same_thread_effect_measurement_before_reply"] = json!(true);
+    }
+    gate
 }
 
 fn slowest_observe_refresh_stage(snapshot: &Value) -> (Option<String>, Option<u64>) {
@@ -4917,6 +7119,306 @@ fn live_latency_compare_status_tooltip(
     )
 }
 
+#[allow(dead_code)]
+fn build_current_session_hero_card(snapshot: &Value) -> Value {
+    let report = &snapshot["token_budget_report"]["token_budget_report"];
+    let current_session = &report["current_session"];
+    let current_session_statement = &report["statement_previews"]["current_session"];
+    let client_live_meter = &report["client_live_meter"];
+    let current_session_alignment = &current_session_statement["client_limit_meter_alignment"];
+    let current_session_exact_pair =
+        exact_model_token_pair(current_session_statement, current_session_alignment);
+    let session_events_total = current_session["events_total"].as_u64().unwrap_or(0);
+    let session_events = current_session["counted_events"].as_u64().unwrap_or(0);
+    let session_saved = current_session_exact_pair
+        .as_ref()
+        .map(|(_, _, saved, _)| *saved)
+        .or_else(|| current_session["verified_effective_saved_tokens"].as_i64());
+    let session_percent = current_session_exact_pair
+        .as_ref()
+        .map(|(_, _, _, pct)| *pct)
+        .or_else(|| current_session["verified_effective_savings_pct"].as_f64());
+    let session_started = current_session["started_at_epoch_ms"].as_u64();
+    let session_ended = current_session["ended_at_epoch_ms"].as_u64();
+    let session_raw_baseline = current_session["total_naive_tokens"]
+        .as_u64()
+        .or_else(|| current_session["baseline_tokens"].as_u64());
+    let session_raw_delivered = current_session["total_context_tokens"]
+        .as_u64()
+        .or_else(|| current_session["delivered_tokens"].as_u64());
+    let session_raw_percent = current_session["effective_savings_pct"].as_f64();
+    let session_recovery = current_session["median_recovery_tokens"].as_f64();
+    let session_answer_rate = current_session["answer_like_rate"].as_f64();
+    let session_answer_count = current_session["answer_like_counted_events"]
+        .as_u64()
+        .unwrap_or(0);
+    let session_answer_percent = current_session["verified_answer_like_savings_pct"].as_f64();
+
+    let mut session_note = if session_events > 0 {
+        format!(
+            "Текущая сессия — это непрерывная работа без паузы дольше 30 минут. Длительность: {}. В главный итог уже вошли {} из {} живых запросов. Проверенная экономия по ним: {}. {}",
+            elapsed_since_epoch_label(session_started, session_ended),
+            format_u64(Some(session_events)),
+            format_u64(Some(session_events_total)),
+            format_percent(session_percent),
+            recovery_sentence(session_recovery)
+        ) + &format!(
+            " Уже есть {}, где Amai дошёл до более полного ответа без лишнего уточнения. Это {} от всей выборки, экономия по ним: {}.",
+            format_count_with_word(session_answer_count, "случай", "случая", "случаев"),
+            format_percent(session_answer_rate),
+            format_percent(session_answer_percent)
+        ) + if current_session_exact_pair.is_some() {
+            " Нижние строки ниже разделяют внутренний retrieval-KPI Amai и exact model-meter breakdown."
+        } else {
+            " Подробные цифры по главному итогу, всему живому потоку и тому, что пока вне главного итога, вынесены в нижние строки."
+        }
+    } else if session_events_total > 0 {
+        format!(
+            "В этой сессии уже есть Amai-запросы: {}. Но пока ни один случай ещё не подтвердился как полезный без потери качества. Поэтому главный итог по сессии ещё не накоплен.",
+            format_u64(Some(session_events_total)),
+        ) + &format!(
+            " {} {}",
+            raw_savings_sentence(
+                session_raw_baseline,
+                session_raw_delivered,
+                session_raw_percent
+            ),
+            client_budget_disclaimer()
+        )
+    } else {
+        "В текущей непрерывной сессии Amai ещё не накопил ни одного учтённого запроса, поэтому реальную экономию пока рано показывать.".to_string()
+    };
+    if let Some(sentence) = client_limit_alignment_note_sentence(current_session_alignment) {
+        session_note.push(' ');
+        session_note.push_str(&sentence);
+    }
+    if let Some(sentence) =
+        model_token_savings_note_sentence(current_session_statement, current_session_alignment)
+    {
+        session_note.push(' ');
+        session_note.push_str(&sentence);
+    }
+    if let Some(sentence) = exact_model_component_delta_note_sentence(current_session_alignment) {
+        session_note.push(' ');
+        session_note.push_str(&sentence);
+    }
+    let session_live_turn_exact_pair = live_turn_exact_pair(
+        current_session,
+        client_live_meter,
+        current_session_exact_pair,
+    );
+    let session_live_turn_exact_pair =
+        current_live_turn_exact_pair(&report["current_live_turn"]).or(session_live_turn_exact_pair);
+    let restore_context = &snapshot["latest_repo_working_state_restore"]["working_state_restore"];
+    let client_budget_target_percent =
+        client_budget_target_percent_from_inputs(report, restore_context);
+    let client_budget_target_active = client_budget_target_active(client_budget_target_percent);
+    let client_budget_target_percent_f64 =
+        client_budget_target_percent_f64(client_budget_target_percent);
+    let host_context_compaction = latest_host_context_compaction_payload(report, restore_context);
+    let host_context_compaction_stage =
+        host_context_compaction_stage_from_payload(&host_context_compaction);
+    let (
+        host_current_thread_control,
+        _host_current_thread_control_effect,
+        same_thread_compaction_preferred,
+    ) = selected_host_current_thread_control_state(
+        report,
+        restore_context,
+        client_live_meter,
+        &host_context_compaction,
+    );
+    let session_rotate_bundle = restore_context.is_object().then(|| {
+        working_state::build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
+            restore_context["project"]["code"].as_str(),
+            restore_context["namespace"]["code"].as_str(),
+            restore_context["project"]["repo_root"].as_str(),
+            restore_context["execctl_resume_state"]
+                .as_str()
+                .is_some_and(|value| value != "clear"),
+            restore_context["current_goal"].as_str(),
+            restore_context["next_step"].as_str(),
+            host_context_compaction_stage,
+            same_thread_compaction_preferred,
+            host_current_thread_control["thread_id"].as_str(),
+            host_current_thread_control["command_id"].as_str(),
+        )
+    });
+    if let Some(sentence) =
+        client_live_meter_note_sentence(client_live_meter, session_live_turn_exact_pair)
+    {
+        session_note.push(' ');
+        session_note.push_str(&sentence);
+    }
+    let session_full_turn_savings_pct =
+        full_turn_savings_pct_from_live_meter(client_live_meter, session_live_turn_exact_pair);
+    let session_client_turn_pressure = client_turn_pressure_guard_with_target(
+        client_live_meter,
+        session_live_turn_exact_pair,
+        &report["client_limit_hourly_burn"],
+        &report["current_live_turn"],
+        client_budget_target_percent,
+    );
+    if let Some(sentence) = client_turn_pressure_note_sentence_for_preference(
+        session_client_turn_pressure,
+        same_thread_compaction_preferred,
+    ) {
+        session_note.push(' ');
+        session_note.push_str(&sentence);
+    }
+    let session_boundary_pressure =
+        continuity_boundary_pressure(current_session, current_session_alignment);
+    if let Some((boundary_tokens, strict_tokens)) = session_boundary_pressure {
+        session_note.push(' ');
+        session_note.push_str(&continuity_boundary_pressure_sentence(
+            boundary_tokens,
+            strict_tokens,
+        ));
+    }
+    let mut session_rows =
+        current_session_lane_rows(current_session, current_session_exact_pair.is_some());
+    if let Some(row) =
+        client_full_turn_savings_metric_row(client_live_meter, session_live_turn_exact_pair)
+    {
+        session_rows.push(row);
+    }
+    session_rows.push(model_token_savings_metric_row(
+        current_session_statement,
+        current_session_alignment,
+    ));
+    if let Some(row) = exact_pair_status_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
+    if let Some(row) = exact_pair_frozen_debt_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
+    if let Some(row) = exact_model_component_delta_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
+    if let Some(row) = client_live_context_metric_row(client_live_meter) {
+        session_rows.push(row);
+    }
+    if let Some(row) = client_live_limit_metric_row(client_live_meter) {
+        session_rows.push(row);
+    }
+    if let Some(row) = client_turn_pressure_metric_row(
+        session_client_turn_pressure,
+        session_rotate_bundle.as_ref(),
+        same_thread_compaction_preferred,
+    ) {
+        session_rows.push(row);
+    }
+    if let Some(row) = client_limit_alignment_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
+    if let Some(row) = client_limit_strict_slice_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
+    if let Some(row) = client_limit_explicit_boundary_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
+    if let Some(row) = client_limit_boundary_tokens_metric_row(current_session_alignment) {
+        session_rows.push(row);
+    }
+    let session_status = if let Some(guard) = session_client_turn_pressure {
+        guard.severity
+    } else if session_boundary_pressure.is_some_and(|(boundary_tokens, strict_tokens)| {
+        continuity_boundary_pressure_is_alert(session_saved, boundary_tokens, strict_tokens)
+    }) {
+        "alert"
+    } else if client_budget_target_active
+        && session_full_turn_savings_pct
+            .is_some_and(|value| value < client_budget_target_percent_f64)
+    {
+        "alert"
+    } else {
+        savings_status(session_saved, session_events, session_events_total)
+    };
+    let mut session_card = card_with_rows(
+        "Экономия токенов за текущую сессию",
+        session_full_turn_savings_pct
+            .map(|value| format_percent(Some(value)))
+            .unwrap_or_else(|| "не доказано".to_string()),
+        session_note,
+        session_status,
+        None,
+        Some("Эта карточка показывает, сколько токенов Amai сэкономил в текущем непрерывном заходе работы. Новый заход начинается после паузы дольше 30 минут. В главный итог попадают только те живые запросы, которые уже подтвердились как полезные без потери качества. Нижние строки нужны, чтобы показать разницу между главным итогом и всем живым потоком.".to_string()),
+        session_rows,
+    );
+    if let Some(guard) = session_client_turn_pressure {
+        session_card = with_status_label(session_card, guard.status_label);
+        session_card = with_status_tooltip(
+            session_card,
+            &client_turn_pressure_tooltip(
+                guard,
+                session_rotate_bundle.as_ref(),
+                same_thread_compaction_preferred,
+            ),
+        );
+    } else if session_full_turn_savings_pct.is_none()
+        && current_session_client_live_meter_available(client_live_meter)
+    {
+        session_card = with_status(session_card, "alert");
+        session_card = with_status_label(session_card, "реальная экономия не доказана");
+        session_card = with_status_tooltip(
+            session_card,
+            "Статус требует внимания по следующим причинам:\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно раньше переводить работу в свежий чат и собирать exact pair именно на коротком live turn.",
+        );
+    } else if let Some(full_turn_savings_pct) = session_full_turn_savings_pct
+        .filter(|value| client_budget_target_active && *value < client_budget_target_percent_f64)
+    {
+        session_card = with_status_label(
+            session_card,
+            &client_budget_target_alert_label(client_budget_target_percent),
+        );
+        session_card = with_status_tooltip(
+            session_card,
+            &format!(
+                "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и раньше переводить работу в новый чат через continuity startup.",
+                format_percent(Some(full_turn_savings_pct)),
+                client_budget_target_sentence(client_budget_target_percent)
+            ),
+        );
+    } else if let Some((boundary_tokens, strict_tokens)) =
+        session_boundary_pressure.filter(|(boundary_tokens, strict_tokens)| {
+            continuity_boundary_pressure_is_alert(session_saved, *boundary_tokens, *strict_tokens)
+        })
+    {
+        session_card = with_status_label(session_card, "burn в continuity startup");
+        session_card = with_status_tooltip(
+            session_card,
+            &format!(
+                "Статус требует внимания по следующим причинам:\n- В этой сессии savings-KPI пока не показывает положительную подтверждённую экономию.\n- При этом observed continuity startup уже сжёг {} токенов.\n- Strict same-meter slice по клиентскому запросу пока даёт только {} токенов.\n- Значит лимит сейчас уходит главным образом в continuity restore, а не в retrieval/workflow effect.",
+                format_u64(Some(boundary_tokens)),
+                format_u64(Some(strict_tokens))
+            ),
+        );
+    } else if session_events_total > 0 && session_events == 0 {
+        session_card = with_status_tooltip(
+            session_card,
+            "Статус пока не может считаться нормальным по следующим причинам:\n- В этой сессии уже были живые запросы.\n- Но пока ни один из них ещё не подтвердился как полезный без потери качества.\n- Как только появится первый такой случай, главный итог этой карточки начнёт считаться.",
+        );
+    } else if session_events > 0 && session_saved.unwrap_or_default() < 0 {
+        session_card = with_status_tooltip(
+            session_card,
+            &format!(
+                "Статус требует внимания по следующим причинам:\n- В подтверждённой части текущей сессии экономия сейчас отрицательная: {}.\n- Это значит, что в уже проверенных случаях контекст от Amai вышел тяжелее обычного пути без Amai.\n- Нижние строки со всем живым потоком показаны отдельно и не отменяют этот итог.",
+                format_signed_count(session_saved)
+            ),
+        );
+    }
+    if session_card["status"].as_str() == Some("pass") {
+        if let Some((status, label, tooltip)) =
+            exact_pair_card_status_override(current_session_alignment)
+        {
+            session_card = with_status(session_card, status);
+            session_card = with_status_label(session_card, label);
+            session_card = with_status_tooltip(session_card, &tooltip);
+        }
+    }
+    session_card
+}
+
 fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let report = &snapshot["token_budget_report"]["token_budget_report"];
     let current_session = &report["current_session"];
@@ -5054,8 +7556,26 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     let session_live_turn_exact_pair =
         current_live_turn_exact_pair(&report["current_live_turn"]).or(session_live_turn_exact_pair);
     let restore_context = &snapshot["latest_repo_working_state_restore"]["working_state_restore"];
+    let client_budget_target_percent =
+        client_budget_target_percent_from_inputs(report, restore_context);
+    let client_budget_target_active = client_budget_target_active(client_budget_target_percent);
+    let client_budget_target_percent_f64 =
+        client_budget_target_percent_f64(client_budget_target_percent);
+    let host_context_compaction = latest_host_context_compaction_payload(report, restore_context);
+    let host_context_compaction_stage =
+        host_context_compaction_stage_from_payload(&host_context_compaction);
+    let (
+        host_current_thread_control,
+        _host_current_thread_control_effect,
+        same_thread_compaction_preferred,
+    ) = selected_host_current_thread_control_state(
+        report,
+        restore_context,
+        client_live_meter,
+        &host_context_compaction,
+    );
     let session_rotate_bundle = restore_context.is_object().then(|| {
-        working_state::build_rotate_chat_action_bundle(
+        working_state::build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
             restore_context["project"]["code"].as_str(),
             restore_context["namespace"]["code"].as_str(),
             restore_context["project"]["repo_root"].as_str(),
@@ -5064,6 +7584,10 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
                 .is_some_and(|value| value != "clear"),
             restore_context["current_goal"].as_str(),
             restore_context["next_step"].as_str(),
+            host_context_compaction_stage,
+            same_thread_compaction_preferred,
+            host_current_thread_control["thread_id"].as_str(),
+            host_current_thread_control["command_id"].as_str(),
         )
     });
     if let Some(sentence) =
@@ -5074,13 +7598,17 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     }
     let session_full_turn_savings_pct =
         full_turn_savings_pct_from_live_meter(client_live_meter, session_live_turn_exact_pair);
-    let session_client_turn_pressure = client_turn_pressure_guard(
+    let session_client_turn_pressure = client_turn_pressure_guard_with_target(
         client_live_meter,
         session_live_turn_exact_pair,
         &report["client_limit_hourly_burn"],
         &report["current_live_turn"],
+        client_budget_target_percent,
     );
-    if let Some(sentence) = client_turn_pressure_note_sentence(session_client_turn_pressure) {
+    if let Some(sentence) = client_turn_pressure_note_sentence_for_preference(
+        session_client_turn_pressure,
+        same_thread_compaction_preferred,
+    ) {
         session_note.push(' ');
         session_note.push_str(&sentence);
     }
@@ -5122,6 +7650,7 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
     if let Some(row) = client_turn_pressure_metric_row(
         session_client_turn_pressure,
         session_rotate_bundle.as_ref(),
+        same_thread_compaction_preferred,
     ) {
         session_rows.push(row);
     }
@@ -5143,7 +7672,10 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         continuity_boundary_pressure_is_alert(session_saved, boundary_tokens, strict_tokens)
     }) {
         "alert"
-    } else if session_full_turn_savings_pct.is_some_and(|value| value < 90.0) {
+    } else if client_budget_target_active
+        && session_full_turn_savings_pct
+            .is_some_and(|value| value < client_budget_target_percent_f64)
+    {
         "alert"
     } else {
         savings_status(session_saved, session_events, session_events_total)
@@ -5163,7 +7695,11 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
         session_card = with_status_label(session_card, guard.status_label);
         session_card = with_status_tooltip(
             session_card,
-            &client_turn_pressure_tooltip(guard, session_rotate_bundle.as_ref()),
+            &client_turn_pressure_tooltip(
+                guard,
+                session_rotate_bundle.as_ref(),
+                same_thread_compaction_preferred,
+            ),
         );
     } else if session_full_turn_savings_pct.is_none()
         && current_session_client_live_meter_available(client_live_meter)
@@ -5174,15 +7710,19 @@ fn build_hero_cards(snapshot: &Value) -> Vec<Value> {
             session_card,
             "Статус требует внимания по следующим причинам:\n- Для текущего живого turn ещё нет доказанной same-turn пары `без Amai / с Amai`.\n- Значит реальную экономию на полной шкале клиента пока нельзя честно показать числом.\n- Пока эта пара не materialized, нижняя строка про учтённую часть остаётся внутренним Amai-срезом, а не полным client spend.\n- Чтобы получить реальную экономию, нужно раньше переводить работу в свежий чат и собирать exact pair именно на коротком live turn.",
         );
-    } else if let Some(full_turn_savings_pct) =
-        session_full_turn_savings_pct.filter(|value| *value < 90.0)
+    } else if let Some(full_turn_savings_pct) = session_full_turn_savings_pct
+        .filter(|value| client_budget_target_active && *value < client_budget_target_percent_f64)
     {
-        session_card = with_status_label(session_card, "цель >90% не достигнута");
+        session_card = with_status_label(
+            session_card,
+            &client_budget_target_alert_label(client_budget_target_percent),
+        );
         session_card = with_status_tooltip(
             session_card,
             &format!(
-                "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- Целевая реальная экономия для Amai задана как более 90%.\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и раньше переводить работу в новый чат через continuity startup.",
-                format_percent(Some(full_turn_savings_pct))
+                "Статус требует внимания по следующим причинам:\n- Реальная экономия на полной шкале клиента сейчас всего {}.\n- {}\n- Значит текущий thread пока жжёт почти весь полный client turn/context, а Amai экономит только малую долю.\n- Чтобы реально улучшить картину без потери точности, нужно дальше уменьшать полный размер turn и раньше переводить работу в новый чат через continuity startup.",
+                format_percent(Some(full_turn_savings_pct)),
+                client_budget_target_sentence(client_budget_target_percent)
             ),
         );
     } else if let Some((boundary_tokens, strict_tokens)) =
@@ -8817,15 +11357,35 @@ fn global_client_limit_guard_note(
     }
 }
 
+#[cfg(test)]
 fn client_turn_pressure_guard(
     client_live_meter: &Value,
     exact_pair: Option<(u64, u64, i64, f64)>,
     client_limit_hourly_burn: &Value,
     current_live_turn: &Value,
 ) -> Option<ClientTurnPressureGuard> {
+    client_turn_pressure_guard_with_target(
+        client_live_meter,
+        exact_pair,
+        client_limit_hourly_burn,
+        current_live_turn,
+        working_state::default_client_budget_target_percent(),
+    )
+}
+
+fn client_turn_pressure_guard_with_target(
+    client_live_meter: &Value,
+    exact_pair: Option<(u64, u64, i64, f64)>,
+    client_limit_hourly_burn: &Value,
+    current_live_turn: &Value,
+    client_budget_target_percent: u64,
+) -> Option<ClientTurnPressureGuard> {
     if !current_session_client_live_meter_available(client_live_meter) {
         return None;
     }
+    let client_budget_target_active = client_budget_target_active(client_budget_target_percent);
+    let client_budget_target_percent_f64 =
+        client_budget_target_percent_f64(client_budget_target_percent);
     let limit_surface =
         preferred_client_limit_meter_surface(client_live_meter).unwrap_or(client_live_meter);
     let turn_total_tokens = client_live_meter["client_turn_total_tokens"]
@@ -8860,10 +11420,12 @@ fn client_turn_pressure_guard(
         None
     };
     let hourly_burn_overspend = hourly_burn_classification == Some("overspend");
-    let hourly_burn_known_good = matches!(
-        hourly_burn_classification,
-        Some("saving") | Some("one_to_one")
-    );
+    let hourly_burn_target_saving = client_budget_target_active
+        && hourly_burn_classification == Some("saving")
+        && hourly_burn_kpi_percent.is_some_and(|value| value >= client_budget_target_percent_f64);
+    let hourly_burn_below_target = client_budget_target_active
+        && client_limit_hourly_burn["status"].as_str() == Some("observed")
+        && !hourly_burn_target_saving;
     let no_amai_activity_in_current_live_turn =
         current_live_turn["status"].as_str() == Some("no_amai_activity_in_current_live_turn");
     let full_turn_savings_pct = exact_pair.and_then(|(_, _, saved_tokens, _)| {
@@ -8887,11 +11449,16 @@ fn client_turn_pressure_guard(
     let negligible_amai_share = full_turn_savings_pct
         .map(|value| value <= 0.5)
         .unwrap_or(false);
+    let below_target_full_turn_savings = client_budget_target_active
+        && full_turn_savings_pct
+            .map(|value| value < client_budget_target_percent_f64)
+            .unwrap_or(false);
     let very_early_context_pressure = context_used_percent >= 18.0;
     let early_context_pressure = context_used_percent >= 25.0;
     let moderate_context_pressure = context_used_percent >= 30.0;
     let extreme_context_pressure = context_used_percent >= 70.0;
     let high_context_pressure = context_used_percent >= 50.0;
+    let small_kpi_thread = turn_total_tokens >= 10_000 || context_used_percent >= 4.0;
     let moderate_kpi_thread = turn_total_tokens >= 18_000 || context_used_percent >= 7.0;
     let early_live_thread = turn_total_tokens >= 45_000 || very_early_context_pressure;
     let early_large_live_thread = turn_total_tokens >= 60_000 || early_context_pressure;
@@ -8906,18 +11473,24 @@ fn client_turn_pressure_guard(
     let early_primary_limit = primary_remaining_percent <= 90.0;
     let generous_primary_limit = primary_remaining_percent <= 95.0;
 
-    if hourly_burn_known_good && !critical_primary_limit {
+    if hourly_burn_target_saving && !critical_primary_limit {
         return None;
     }
 
     let (severity, status_label) = if (no_amai_activity_in_current_live_turn && huge_live_thread)
         || (no_amai_activity_in_current_live_turn && hourly_burn_overspend && moderate_kpi_thread)
+        || (no_amai_activity_in_current_live_turn && hourly_burn_below_target && early_live_thread)
+        || (hourly_burn_below_target && inflation_locking_in_burn && weak_amai_share)
         || (hourly_burn_overspend
             && early_large_live_thread
             && weak_amai_share
             && softened_primary_limit)
         || (hourly_burn_overspend && huge_live_thread && tiny_amai_share)
         || (hourly_burn_overspend && large_live_thread && tiny_amai_share && generous_primary_limit)
+        || (hourly_burn_below_target
+            && large_live_thread
+            && high_context_pressure
+            && below_target_full_turn_savings)
         || (exact_pair_missing && inflation_locking_in_burn && softened_primary_limit)
         || (exact_pair_missing && large_live_thread)
         || (exact_pair_missing && emergency_primary_limit && early_live_thread)
@@ -8930,6 +11503,13 @@ fn client_turn_pressure_guard(
     {
         ("critical", "новый чат нужен сейчас")
     } else if (no_amai_activity_in_current_live_turn && inflation_locking_in_burn)
+        || (no_amai_activity_in_current_live_turn && hourly_burn_below_target && small_kpi_thread)
+        || (no_amai_activity_in_current_live_turn
+            && hourly_burn_below_target
+            && moderate_kpi_thread)
+        || (hourly_burn_below_target && small_kpi_thread && below_target_full_turn_savings)
+        || (hourly_burn_below_target && moderate_kpi_thread && below_target_full_turn_savings)
+        || (hourly_burn_below_target && early_live_thread && below_target_full_turn_savings)
         || (exact_pair_missing && early_live_thread)
         || (early_live_thread && negligible_amai_share && generous_primary_limit)
         || (((high_context_pressure && low_primary_limit) || extreme_context_pressure)
@@ -8944,6 +11524,7 @@ fn client_turn_pressure_guard(
     Some(ClientTurnPressureGuard {
         severity,
         status_label,
+        client_budget_target_percent,
         turn_total_tokens,
         model_context_window,
         context_used_percent,
@@ -8970,7 +11551,10 @@ fn observed_client_limit_hourly_burn_classification(
     }
 }
 
-fn client_turn_pressure_note_sentence(guard: Option<ClientTurnPressureGuard>) -> Option<String> {
+fn client_turn_pressure_note_sentence_for_preference(
+    guard: Option<ClientTurnPressureGuard>,
+    same_thread_compaction_preferred: bool,
+) -> Option<String> {
     let guard = guard?;
     let full_turn_sentence = guard
         .full_turn_savings_pct
@@ -8991,11 +11575,21 @@ fn client_turn_pressure_note_sentence(guard: Option<ClientTurnPressureGuard>) ->
                 "точный 5ч KPI уже показывает переплату {}",
                 format_percent(guard.hourly_burn_kpi_percent)
             ),
+            "saving" if client_budget_target_active(guard.client_budget_target_percent) => {
+                client_budget_target_shortfall_sentence(
+                    guard.client_budget_target_percent,
+                    guard.hourly_burn_kpi_percent,
+                )
+            }
             "saving" => format!(
-                "точный 5ч KPI пока даёт только экономию {} вместо целевых >90%",
+                "точный 5ч KPI показывает экономию {}, но текущий live-turn всё равно раздувается быстрее, чем Amai materialized устойчивый exact pair",
                 format_percent(guard.hourly_burn_kpi_percent)
             ),
-            _ => "точный 5ч KPI идёт только 1:1 к сбросу, а не в режим >90% экономии".to_string(),
+            _ if client_budget_target_active(guard.client_budget_target_percent) => format!(
+                "точный 5ч KPI идёт только 1:1 к сбросу, а не в режим целевой экономии {}%",
+                guard.client_budget_target_percent
+            ),
+            _ => "точный 5ч KPI идёт только 1:1 к сбросу, а не в safe-saving режим".to_string(),
         })
         .unwrap_or_else(|| "точный 5ч KPI пока ещё не materialized".to_string());
     let no_amai_sentence = if guard.no_amai_activity_in_current_live_turn {
@@ -9004,7 +11598,12 @@ fn client_turn_pressure_note_sentence(guard: Option<ClientTurnPressureGuard>) ->
         ""
     };
     Some(format!(
-        "Сейчас выгоднее завершить этот thread и продолжить в новом чате: последний observed запрос уже занимает {} из {} окна, по 5ч лимиту остаётся {}, по 7д — {}, {}, а {}.{}",
+        "{} последний observed запрос уже занимает {} из {} окна, по 5ч лимиту остаётся {}, по 7д — {}, {}, а {}.{}",
+        if same_thread_compaction_preferred {
+            "Сейчас выгоднее сначала сжать текущий giant thread через same-thread compact window:"
+        } else {
+            "Сейчас выгоднее завершить этот thread и продолжить в новом чате:"
+        },
         format_u64(Some(guard.turn_total_tokens)),
         format_u64(Some(guard.model_context_window)),
         format_percent(Some(guard.primary_remaining_percent)),
@@ -9018,22 +11617,32 @@ fn client_turn_pressure_note_sentence(guard: Option<ClientTurnPressureGuard>) ->
 fn client_turn_pressure_metric_row(
     guard: Option<ClientTurnPressureGuard>,
     action_bundle: Option<&Value>,
+    same_thread_compaction_preferred: bool,
 ) -> Option<Value> {
     let guard = guard?;
     Some(metric_row(
         "Следующее действие",
-        if guard.severity == "critical" {
+        if same_thread_compaction_preferred && guard.severity == "critical" {
+            "открой compact window текущего giant thread и только потом решай, нужен ли новый чат"
+                .to_string()
+        } else if same_thread_compaction_preferred {
+            "сначала попробуй compact window текущего giant thread".to_string()
+        } else if guard.severity == "critical" {
             "сохрани handoff и переходи в новый чат через continuity startup".to_string()
         } else {
             "сохрани handoff и продолжай в новом чате через continuity startup".to_string()
         },
-        Some(client_turn_pressure_tooltip(guard, action_bundle).as_str()),
+        Some(
+            client_turn_pressure_tooltip(guard, action_bundle, same_thread_compaction_preferred)
+                .as_str(),
+        ),
     ))
 }
 
 fn client_turn_pressure_tooltip(
     guard: ClientTurnPressureGuard,
     action_bundle: Option<&Value>,
+    same_thread_compaction_preferred: bool,
 ) -> String {
     let mut tooltip = format!(
         "Этот guard показывает, что внешний лимит клиента уже горит быстрее, чем Amai успевает экономить в полном live-turn.\n- Последний observed запрос клиента: {} из {} ({})\n- По лимиту 5ч остаётся {}\n- По лимиту 7д остаётся {}",
@@ -9059,9 +11668,20 @@ fn client_turn_pressure_tooltip(
                 "\n- Exact 5ч KPI из VS Code toolbar уже показывает переплату {}",
                 format_percent(guard.hourly_burn_kpi_percent)
             ),
+            "saving" if client_budget_target_active(guard.client_budget_target_percent) => format!(
+                "\n- {}",
+                client_budget_target_shortfall_sentence(
+                    guard.client_budget_target_percent,
+                    guard.hourly_burn_kpi_percent,
+                )
+            ),
             "saving" => format!(
-                "\n- Exact 5ч KPI пока даёт только экономию {}, а целевой runtime для Amai задан как >90%",
+                "\n- Exact 5ч KPI уже показывает экономию {}, но текущий live-turn всё равно раздувается быстрее, чем Amai materialized устойчивый exact pair",
                 format_percent(guard.hourly_burn_kpi_percent)
+            ),
+            _ if client_budget_target_active(guard.client_budget_target_percent) => format!(
+                "\n- Exact 5ч KPI пока идёт лишь 1:1 к reset, а не в режим целевой экономии {}%",
+                guard.client_budget_target_percent
             ),
             _ => {
                 "\n- Exact 5ч KPI пока идёт лишь 1:1 к reset, а не в safe-saving режиме".to_string()
@@ -9074,10 +11694,49 @@ fn client_turn_pressure_tooltip(
             "\n- В текущем live-turn нет retrieval_context_pack от Amai: расход сейчас создаёт сам раздутый thread/context, поэтому лучший способ спасти 5ч окно — раньше перейти в свежий чат",
         );
     }
-    tooltip.push_str(
-        "\n- При таком соотношении продолжение в том же thread жжёт внешний клиентский лимит в основном размером самого thread/context, а не Amai-delta\n- Следующее действие: сохранить continuity handoff и продолжить в свежем чате через continuity startup",
-    );
+    if same_thread_compaction_preferred {
+        tooltip.push_str(
+            "\n- При таком соотношении продолжение в том же thread жжёт внешний клиентский лимит в основном размером самого thread/context, а не Amai-delta\n- Для этого giant thread Amai уже поднял same-thread compact window как primary action. Новый чат остаётся fallback, если compact surface не уменьшит regrowth/burn.",
+        );
+    } else {
+        tooltip.push_str(
+            "\n- При таком соотношении продолжение в том же thread жжёт внешний клиентский лимит в основном размером самого thread/context, а не Amai-delta\n- Следующее действие: сохранить continuity handoff и продолжить в свежем чате через continuity startup",
+        );
+    }
     if let Some(bundle) = action_bundle {
+        if let Some(summary) = bundle["host_current_thread_control"]["summary"].as_str() {
+            tooltip.push_str(&format!(
+                "\n- Ближайший same-thread host surface: {summary}"
+            ));
+        }
+        if let Some(summary) =
+            bundle["host_current_thread_control"]["external_uri_launch"]["summary"]
+                .as_str()
+                .filter(|_| {
+                    bundle["host_current_thread_control"]["external_uri_launch"]["available"]
+                        .as_bool()
+                        == Some(true)
+                })
+        {
+            tooltip.push_str(&format!("\n- Best-effort external launch: {summary}"));
+        }
+        if let Some(command_id) = bundle["host_current_thread_control"]["command_id"].as_str() {
+            tooltip.push_str(&format!("\n- Host internal command id: {command_id}"));
+        }
+        if let Some(uri) =
+            bundle["host_current_thread_control"]["external_uri_launch"]["uri"].as_str()
+        {
+            tooltip.push_str(&format!("\n- VS Code URI launch: {uri}"));
+        }
+        if let Some(command) =
+            bundle["host_current_thread_control"]["external_uri_launch"]["platform_launch_command"]
+                .as_str()
+        {
+            tooltip.push_str(&format!("\n- Shell launch: {command}"));
+        }
+        if let Some(note) = bundle["host_current_thread_control"]["note"].as_str() {
+            tooltip.push_str(&format!("\n- Ограничение: {note}"));
+        }
         if let Some(command) = bundle["operator_flow"]["rotate_helper_command"].as_str() {
             tooltip.push_str(&format!("\n- One-shot rotate helper: {command}"));
         }
@@ -9307,7 +11966,14 @@ fn client_live_limit_metric_row(client_live_meter: &Value) -> Option<Value> {
     ))
 }
 
-fn client_limit_hourly_burn_metric_row(hourly_burn: &Value) -> Option<Value> {
+fn client_limit_hourly_burn_metric_row(
+    hourly_burn: &Value,
+    client_budget_target_percent: u64,
+    restore_context: &Value,
+    client_live_meter: &Value,
+    host_context_compaction: &Value,
+    host_current_thread_control: &Value,
+) -> Option<Value> {
     let status = hourly_burn["status"].as_str().unwrap_or("missing");
     let label = "KPI 5ч лимита";
     match status {
@@ -9318,6 +11984,31 @@ fn client_limit_hourly_burn_metric_row(hourly_burn: &Value) -> Option<Value> {
             let reply_prefix = hourly_burn["reply_prefix"]
                 .as_str()
                 .unwrap_or("5ч KPI: н/д");
+            let kpi_value_text = if classification == "aligned" {
+                reply_prefix
+                    .strip_prefix("5ч KPI: ")
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("1:1")
+                    .to_string()
+            } else {
+                format_percent(kpi_percent)
+            };
+            let selector_value_parts = match classification {
+                "saving" => Some((
+                    "5ч KPI: экономия ".to_string(),
+                    format!(" · tempo {}", format_percent(projected)),
+                )),
+                "overspend" => Some((
+                    "5ч KPI: переплата ".to_string(),
+                    format!(" · tempo {}", format_percent(projected)),
+                )),
+                "aligned" => Some((
+                    "5ч KPI: ".to_string(),
+                    format!(" · tempo {}", format_percent(projected)),
+                )),
+                _ => None,
+            };
             let remaining_window_minutes = hourly_burn["remaining_window_minutes"]
                 .as_f64()
                 .unwrap_or(0.0);
@@ -9326,6 +12017,52 @@ fn client_limit_hourly_burn_metric_row(hourly_burn: &Value) -> Option<Value> {
                 .filter(|value| *value > 0)
                 .map(human_timestamp_clock)
                 .unwrap_or_else(|| "ещё нет данных".to_string());
+            let selected_host_current_thread_control_command_id =
+                host_current_thread_control["command_id"].as_str();
+            let last_host_feedback_kind =
+                latest_host_current_thread_control_feedback_kind_for_command(
+                    restore_context,
+                    selected_host_current_thread_control_command_id,
+                );
+            let last_host_feedback_summary =
+                latest_host_current_thread_control_feedback_summary_for_command(
+                    restore_context,
+                    selected_host_current_thread_control_command_id,
+                );
+            let host_current_thread_control_effect =
+                host_current_thread_control_effect_payload_for_command(
+                    restore_context,
+                    client_live_meter,
+                    host_context_compaction,
+                    selected_host_current_thread_control_command_id,
+                );
+            let host_feedback_pending = host_current_thread_control_feedback_pending_from_effect(
+                last_host_feedback_kind,
+                &host_current_thread_control_effect,
+            );
+            let host_current_thread_control = decorate_host_current_thread_control_surface(
+                host_current_thread_control,
+                &host_current_thread_control_effect,
+                host_feedback_pending,
+                last_host_feedback_summary.as_deref(),
+            );
+            let host_current_thread_control_button_label =
+                host_current_thread_control["button_label"]
+                    .as_str()
+                    .unwrap_or("Same-thread control");
+            let host_current_thread_control_intro = host_current_thread_control["intro_message"]
+                .as_str()
+                .unwrap_or("Открыть ближайший same-thread control surface текущего giant thread.");
+            let host_current_thread_control_notice_message =
+                host_current_thread_control["requested_message_text"]
+                    .as_str()
+                    .unwrap_or(
+                        "Запрошен ближайший same-thread host control текущего giant thread.",
+                    );
+            let host_current_thread_control_ack_intro =
+                host_current_thread_control["feedback_ack_intro"]
+                    .as_str()
+                    .unwrap_or("После попытки запуска отметь исход same-thread host control.");
             let actual_remaining_percent = hourly_burn["actual_remaining_percent"].as_f64();
             let ideal_remaining_percent = hourly_burn["ideal_remaining_percent"].as_f64();
             let projected_reset_delta_minutes =
@@ -9371,12 +12108,59 @@ fn client_limit_hourly_burn_metric_row(hourly_burn: &Value) -> Option<Value> {
                 reset_delta,
                 reply_prefix,
             );
-            Some(metric_row_with_key(
+            let mut row = metric_row_with_key(
                 CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
                 label,
                 format!("{} · tempo {}", reply_prefix, format_percent(projected)),
                 Some(tooltip.as_str()),
-            ))
+            );
+            if let Some(root) = row.as_object_mut() {
+                if let Some((value_prefix, value_suffix)) = selector_value_parts {
+                    root.insert(
+                        "target_selector".to_string(),
+                        json!({
+                            "current_target_percent": client_budget_target_percent,
+                            "allowed_target_percents": allowed_client_budget_target_values(),
+                            "selected_chat_command": client_budget_target_chat_command(client_budget_target_percent),
+                            "chat_command_prefix": "экономия_",
+                            "reply_prefix": reply_prefix,
+                            "kpi_value_text": kpi_value_text,
+                            "value_prefix": value_prefix,
+                            "value_suffix": value_suffix,
+                            "tooltip_intro": format!(
+                                "Целевой режим клиентской экономии сейчас = {}%. Можно переключить его прямо отсюда.",
+                                client_budget_target_percent
+                            ),
+                            "compact_chat_command": client_budget_compact_chat_command(),
+                            "compact_chat_button_label": "Compact chat",
+                            "compact_chat_intro": "Подготовить fresh CHAT_START_RESTORE для huge-chat rebase через clean context surface.",
+                            "host_current_thread_control": host_current_thread_control.clone(),
+                            "host_current_thread_control_button_label":
+                                host_current_thread_control_button_label,
+                            "host_current_thread_control_intro": host_current_thread_control_intro,
+                            "host_current_thread_control_notice_message":
+                                host_current_thread_control_notice_message,
+                            "host_current_thread_control_feedback_pending": host_feedback_pending,
+                            "host_current_thread_control_measurement_pending":
+                                host_current_thread_control["measurement_pending"].clone(),
+                            "host_current_thread_control_retry_allowed":
+                                host_current_thread_control["retry_allowed"].clone(),
+                            "host_current_thread_control_retry_blocked_reason":
+                                host_current_thread_control["retry_blocked_reason"].clone(),
+                            "host_current_thread_control_last_feedback_kind": last_host_feedback_kind,
+                            "host_current_thread_control_last_feedback_summary": last_host_feedback_summary,
+                            "host_current_thread_control_effect": host_current_thread_control_effect.clone(),
+                            "host_current_thread_control_effect_summary":
+                                host_current_thread_control_effect["summary"].clone(),
+                            "host_current_thread_control_effect_note":
+                                host_current_thread_control_effect["note"].clone(),
+                            "host_current_thread_control_ack_intro":
+                                host_current_thread_control_ack_intro,
+                        }),
+                    );
+                }
+            }
+            Some(row)
         }
         "stale" => Some(metric_row_with_key(
             CLIENT_LIMIT_HOURLY_BURN_ROW_KEY,
@@ -9402,27 +12186,60 @@ fn client_limit_hourly_burn_metric_row(hourly_burn: &Value) -> Option<Value> {
 }
 
 pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
-    let nested_client_live_meter =
-        &snapshot["token_budget_report"]["token_budget_report"]["client_live_meter"];
+    let report = if snapshot["token_budget_report"]["token_budget_report"].is_object() {
+        &snapshot["token_budget_report"]["token_budget_report"]
+    } else {
+        &snapshot["token_budget_report"]
+    };
+    let restore_context = &snapshot["latest_repo_working_state_restore"]["working_state_restore"];
+    let client_budget_target_percent =
+        client_budget_target_percent_from_inputs(report, restore_context);
+    let nested_client_live_meter = &report["client_live_meter"];
     let client_live_meter = if nested_client_live_meter.is_object() {
         nested_client_live_meter
     } else {
         &snapshot["token_budget_report"]["client_live_meter"]
     };
-    let nested_current_live_turn =
-        &snapshot["token_budget_report"]["token_budget_report"]["current_live_turn"];
+    let nested_current_live_turn = &report["current_live_turn"];
     let current_live_turn = if nested_current_live_turn.is_object() {
         nested_current_live_turn
     } else {
         &snapshot["token_budget_report"]["current_live_turn"]
     };
-    let nested_hourly_burn =
-        &snapshot["token_budget_report"]["token_budget_report"]["client_limit_hourly_burn"];
+    let nested_hourly_burn = &report["client_limit_hourly_burn"];
     let client_limit_hourly_burn = if nested_hourly_burn.is_object() {
         nested_hourly_burn
     } else {
         &snapshot["token_budget_report"]["client_limit_hourly_burn"]
     };
+    let host_context_compaction = latest_host_context_compaction_payload(report, restore_context);
+    let (host_current_thread_control, host_current_thread_control_effect, _) =
+        selected_host_current_thread_control_state(
+            report,
+            restore_context,
+            client_live_meter,
+            &host_context_compaction,
+        );
+    let selected_host_current_thread_control_command_id =
+        host_current_thread_control["command_id"].as_str();
+    let host_feedback_kind = latest_host_current_thread_control_feedback_kind_for_command(
+        restore_context,
+        selected_host_current_thread_control_command_id,
+    );
+    let host_feedback_summary = latest_host_current_thread_control_feedback_summary_for_command(
+        restore_context,
+        selected_host_current_thread_control_command_id,
+    );
+    let host_feedback_pending = host_current_thread_control_feedback_pending_from_effect(
+        host_feedback_kind,
+        &host_current_thread_control_effect,
+    );
+    let host_current_thread_control = decorate_host_current_thread_control_surface(
+        &host_current_thread_control,
+        &host_current_thread_control_effect,
+        host_feedback_pending,
+        host_feedback_summary.as_deref(),
+    );
     let mut rows = Vec::new();
     if let Some(row) = client_full_turn_savings_metric_row(
         client_live_meter,
@@ -9436,7 +12253,14 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
     if let Some(row) = client_live_limit_metric_row(client_live_meter) {
         rows.push(row);
     }
-    if let Some(row) = client_limit_hourly_burn_metric_row(client_limit_hourly_burn) {
+    if let Some(row) = client_limit_hourly_burn_metric_row(
+        client_limit_hourly_burn,
+        client_budget_target_percent,
+        restore_context,
+        client_live_meter,
+        &host_context_compaction,
+        &host_current_thread_control,
+    ) {
         rows.push(row);
     }
     let live_status = if current_session_client_live_meter_available(client_live_meter)
@@ -9448,6 +12272,7 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
     };
     json!({
         "status": live_status,
+        "client_budget_target_percent": client_budget_target_percent,
         "thread_binding_state": client_live_meter["thread_binding_state"].clone(),
         "current_thread_bound": client_live_meter["current_thread_bound"].clone(),
         "ended_at_epoch_ms": preferred_client_limit_observed_at_epoch_ms(client_live_meter)
@@ -9458,14 +12283,21 @@ pub(crate) fn client_budget_live_payload(snapshot: &Value) -> Value {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn client_budget_root_cause_payload(snapshot: &Value) -> Value {
+    let guard = current_session_budget_guard(snapshot);
+    client_budget_root_cause_payload_with_guard(snapshot, &guard)
+}
+
+pub(crate) fn client_budget_root_cause_payload_with_guard(snapshot: &Value, guard: &Value) -> Value {
     let report = &snapshot["token_budget_report"]["token_budget_report"];
     let client_live_meter = &report["client_live_meter"];
     let current_live_turn = &report["current_live_turn"];
     let current_session_statement = &report["statement_previews"]["current_session"];
     let alignment = &current_session_statement["client_limit_meter_alignment"];
     let hourly_burn = &report["client_limit_hourly_burn"];
-    let guard = current_session_budget_guard(snapshot);
+    let selected_host_current_thread_control_effect =
+        guard["host_current_thread_control_effect"].clone();
     let primary_blocker = alignment["exact_pair_status"]["blockers"]
         .as_array()
         .and_then(|items| items.first())
@@ -9518,56 +12350,70 @@ pub(crate) fn client_budget_root_cause_payload(snapshot: &Value) -> Value {
     }
 
     let mut exact_pair_status_payload = serde_json::Map::new();
-    exact_pair_status_payload.insert(
-        "state".to_string(),
-        alignment["exact_pair_status"]["state"].clone(),
-    );
-    exact_pair_status_payload.insert(
-        "exact_pair_available".to_string(),
-        alignment["exact_pair_status"]["exact_pair_available"].clone(),
-    );
-    for (field, value) in [
-        (
-            "primary_blocking_reason",
-            alignment["exact_pair_status"]["primary_blocking_reason"].clone(),
-        ),
-        ("primary_blocker_code", primary_blocker["code"].clone()),
-        (
-            "primary_blocker_kind",
-            primary_blocker["blocker_kind"].clone(),
-        ),
-        (
-            "blocking_reason",
-            primary_blocker["blocking_reason"].clone(),
-        ),
-        (
-            "note",
-            exact_pair_primary_blocker_note_sentence(alignment)
-                .map(Value::from)
-                .unwrap_or(Value::Null),
-        ),
-    ] {
-        if !value.is_null() {
-            exact_pair_status_payload.insert(field.to_string(), value);
+    if current_live_turn["status"].as_str() == Some("no_amai_activity_in_current_live_turn") {
+        exact_pair_status_payload.insert(
+            "state".to_string(),
+            Value::from("not_applicable_current_live_turn_has_no_amai_activity"),
+        );
+        exact_pair_status_payload.insert("exact_pair_available".to_string(), Value::from(true));
+        exact_pair_status_payload.insert(
+            "note".to_string(),
+            Value::from(
+                "В текущем live-turn у Amai нет активности, поэтому exact-pair blocker surface здесь не про missing measurement, а про нулевой вклад: для этого turn Amai честно даёт 0.00% same-meter savings.",
+            ),
+        );
+    } else {
+        exact_pair_status_payload.insert(
+            "state".to_string(),
+            alignment["exact_pair_status"]["state"].clone(),
+        );
+        exact_pair_status_payload.insert(
+            "exact_pair_available".to_string(),
+            alignment["exact_pair_status"]["exact_pair_available"].clone(),
+        );
+        for (field, value) in [
+            (
+                "primary_blocking_reason",
+                alignment["exact_pair_status"]["primary_blocking_reason"].clone(),
+            ),
+            ("primary_blocker_code", primary_blocker["code"].clone()),
+            (
+                "primary_blocker_kind",
+                primary_blocker["blocker_kind"].clone(),
+            ),
+            (
+                "blocking_reason",
+                primary_blocker["blocking_reason"].clone(),
+            ),
+            (
+                "note",
+                exact_pair_primary_blocker_note_sentence(alignment)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+            ),
+        ] {
+            if !value.is_null() {
+                exact_pair_status_payload.insert(field.to_string(), value);
+            }
         }
-    }
-    if missing_live_events > 0 {
-        exact_pair_status_payload.insert(
-            "missing_live_events".to_string(),
-            Value::from(missing_live_events),
-        );
-    }
-    if irrecoverable_missing_live_events > 0 {
-        exact_pair_status_payload.insert(
-            "irrecoverable_missing_live_events".to_string(),
-            Value::from(irrecoverable_missing_live_events),
-        );
-    }
-    if recoverable_missing_live_events > 0 {
-        exact_pair_status_payload.insert(
-            "recoverable_missing_live_events".to_string(),
-            Value::from(recoverable_missing_live_events),
-        );
+        if missing_live_events > 0 {
+            exact_pair_status_payload.insert(
+                "missing_live_events".to_string(),
+                Value::from(missing_live_events),
+            );
+        }
+        if irrecoverable_missing_live_events > 0 {
+            exact_pair_status_payload.insert(
+                "irrecoverable_missing_live_events".to_string(),
+                Value::from(irrecoverable_missing_live_events),
+            );
+        }
+        if recoverable_missing_live_events > 0 {
+            exact_pair_status_payload.insert(
+                "recoverable_missing_live_events".to_string(),
+                Value::from(recoverable_missing_live_events),
+            );
+        }
     }
 
     let mut payload = serde_json::Map::new();
@@ -9604,6 +12450,14 @@ pub(crate) fn client_budget_root_cause_payload(snapshot: &Value) -> Value {
             "reply_budget_mode": guard["reply_execution_gate"]["reply_budget_mode"].clone(),
             "must_rotate_before_reply": guard["reply_execution_gate"]["must_rotate_before_reply"].clone(),
         }),
+    );
+    payload.insert(
+        "host_context_compaction".to_string(),
+        compact_host_context_compaction_payload(&guard["host_context_compaction"]),
+    );
+    payload.insert(
+        "host_current_thread_control_effect".to_string(),
+        selected_host_current_thread_control_effect,
     );
     payload.insert(
         "current_live_turn".to_string(),
@@ -11543,12 +14397,21 @@ mod tests {
     #[test]
     fn dashboard_html_refresh_contract_is_live_on_focus_and_visibility() {
         let html = render_html(1000);
+        assert!(html.contains("const TOOLTIP_HIDE_GRACE_MS = 220;"));
+        assert!(html.contains(
+            "function scheduleHideTooltip(target = null, delayMs = TOOLTIP_HIDE_GRACE_MS) {"
+        ));
         assert!(html.contains("document.addEventListener(\"visibilitychange\""));
         assert!(html.contains("window.addEventListener(\"focus\", () => loadDashboard(true));"));
         assert!(html.contains("window.addEventListener(\"pageshow\", () => loadDashboard(true));"));
         assert!(html.contains("const dashboardThreadId = new URLSearchParams(window.location.search).get(\"thread_id\");"));
         assert!(html.contains("fetch(apiPathWithThreadHint(\"/api/client-budget-live\")"));
+        assert!(html.contains("fetch(apiPathWithThreadHint(\"/api/client-budget-target\")"));
+        assert!(html.contains("/api/client-budget-host-control-launch"));
+        assert!(html.contains("/api/client-budget-host-control-feedback"));
         assert!(html.contains("fetch(apiPathWithThreadHint(\"/api/dashboard\")"));
+        assert!(html.contains("id=\"dashboard-toast\""));
+        assert!(html.contains("tooltipLayer.addEventListener(\"mouseenter\", () => {"));
         assert!(html.contains(
             "setInterval(() => syncClientBudgetLiveRows(false), CLIENT_BUDGET_LIVE_REFRESH_MS);"
         ));
@@ -13834,6 +16697,16 @@ mod tests {
         assert_eq!(payload["current_live_turn"]["saved_pct"], json!(0.0));
         assert!(payload["current_live_turn"]["exact_pair"].is_null());
         assert!(payload["current_live_turn"]["observed_client_prompt_tokens"].is_null());
+        assert_eq!(
+            payload["exact_pair_status"]["state"].as_str(),
+            Some("not_applicable_current_live_turn_has_no_amai_activity")
+        );
+        assert_eq!(
+            payload["exact_pair_status"]["note"].as_str(),
+            Some(
+                "В текущем live-turn у Amai нет активности, поэтому exact-pair blocker surface здесь не про missing measurement, а про нулевой вклад: для этого turn Amai честно даёт 0.00% same-meter savings."
+            )
+        );
         assert!(payload["exact_pair_status"]["primary_blocker_code"].is_null());
         assert!(payload["exact_pair_status"]["missing_live_events"].is_null());
         assert!(payload["missing_components"].is_null());
@@ -14019,7 +16892,32 @@ mod tests {
                 .expect("pressure guard");
         assert_eq!(guard.severity, "critical");
         assert_eq!(guard.status_label, "новый чат нужен сейчас");
-        assert!(super::client_turn_pressure_tooltip(guard, None).contains("слишком раздут"));
+        assert!(
+            super::client_turn_pressure_tooltip(guard, None, false,).contains("слишком раздут")
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_tooltip_surfaces_same_thread_host_control_when_present() {
+        let hourly_burn = json!({});
+        let current_live_turn = json!({});
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 118116,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 45.71,
+            "primary_limit_remaining_percent": 61.0,
+            "secondary_limit_remaining_percent": 88.0
+        });
+        let guard =
+            super::client_turn_pressure_guard(&meter, None, &hourly_burn, &current_live_turn)
+                .expect("pressure guard");
+        let bundle = json!({
+            "host_current_thread_control": working_state::build_host_current_thread_control_surface()
+        });
+        let tooltip = super::client_turn_pressure_tooltip(guard, Some(&bundle), false);
+        assert!(tooltip.contains("same-thread host surface"));
+        assert!(tooltip.contains("thread-overlay-open-current"));
     }
 
     #[test]
@@ -14219,8 +17117,8 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_rotates_now_for_huge_overspend_thread_before_primary_limit_softens(
-    ) {
+    fn client_turn_pressure_guard_rotates_now_for_huge_overspend_thread_before_primary_limit_softens()
+     {
         let hourly_burn = json!({
             "status": "observed",
             "classification": "overspend",
@@ -14316,11 +17214,390 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_stays_off_for_huge_no_amai_thread_when_exact_5h_kpi_is_saving() {
+    fn client_turn_pressure_guard_rotates_for_huge_no_amai_thread_when_exact_5h_kpi_is_below_target_saving()
+     {
         let hourly_burn = json!({
             "status": "observed",
             "classification": "saving",
             "kpi_percent": 14.07
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn",
+            "retrieval_context_pack_count": 0
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 196009,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 75.85487616099071,
+            "primary_limit_remaining_percent": 85.0,
+            "secondary_limit_remaining_percent": 5.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((196009, 196009, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_for_large_weak_exact_pair_thread_when_5h_kpi_is_below_target_saving()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 42.89
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 87076,
+                "with_amai_tokens": 85435,
+                "saved_tokens": 1641,
+                "saved_pct": 1.8845606137167532
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 85435,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 33.06308049535604,
+            "primary_limit_remaining_percent": 82.0,
+            "secondary_limit_remaining_percent": 91.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((87076, 85435, 1641, 1.8845606137167532)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+        assert_eq!(guard.hourly_burn_classification, Some("saving"));
+        assert!(!guard.no_amai_activity_in_current_live_turn);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_for_large_high_context_thread_when_exact_pair_is_far_below_target()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "overspend",
+            "kpi_percent": 20.19
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 507742,
+                "with_amai_tokens": 177981,
+                "saved_tokens": 329761,
+                "saved_pct": 64.94656735113503
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 177981,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 68.8780959752322,
+            "primary_limit_remaining_percent": 96.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((507742, 177981, 329761, 64.94656735113503)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+        assert_eq!(guard.hourly_burn_classification, Some("overspend"));
+        assert!(!guard.no_amai_activity_in_current_live_turn);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_for_large_high_context_thread_when_exact_pair_is_below_90_target()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 88.4
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 180000,
+                "with_amai_tokens": 25000,
+                "saved_tokens": 155000,
+                "saved_pct": 86.11111111111111
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 25000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 55.0,
+            "primary_limit_remaining_percent": 92.0,
+            "secondary_limit_remaining_percent": 98.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((180000, 25000, 155000, 86.11111111111111)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+        assert_eq!(guard.hourly_burn_classification, Some("saving"));
+        assert!(!guard.no_amai_activity_in_current_live_turn);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_early_when_exact_pair_is_below_90_target() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 82.5
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 90000,
+                "with_amai_tokens": 18000,
+                "saved_tokens": 72000,
+                "saved_pct": 80.0
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 45000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 18.2,
+            "primary_limit_remaining_percent": 94.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((90000, 18000, 72000, 80.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "alert");
+        assert_eq!(guard.status_label, "новый чат рекомендован");
+        assert_eq!(guard.hourly_burn_classification, Some("saving"));
+        assert!(!guard.no_amai_activity_in_current_live_turn);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_on_small_thread_when_exact_pair_and_5h_kpi_are_below_target()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 87.1
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 62000,
+                "with_amai_tokens": 10200,
+                "saved_tokens": 51800,
+                "saved_pct": 83.54838709677419
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 10200,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 4.05,
+            "primary_limit_remaining_percent": 97.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((62000, 10200, 51800, 83.54838709677419)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "alert");
+        assert_eq!(guard.status_label, "новый чат рекомендован");
+        assert_eq!(guard.hourly_burn_classification, Some("saving"));
+        assert!(!guard.no_amai_activity_in_current_live_turn);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_on_moderate_thread_when_exact_pair_and_5h_kpi_are_below_target()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 84.0
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 110000,
+                "with_amai_tokens": 19000,
+                "saved_tokens": 91000,
+                "saved_pct": 82.72727272727273
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 19000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 7.35,
+            "primary_limit_remaining_percent": 96.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((110000, 19000, 91000, 82.72727272727273)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "alert");
+        assert_eq!(guard.status_label, "новый чат рекомендован");
+        assert_eq!(guard.hourly_burn_classification, Some("saving"));
+        assert!(!guard.no_amai_activity_in_current_live_turn);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_respects_custom_50_percent_target() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 62.0
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 30000,
+                "with_amai_tokens": 12000,
+                "saved_tokens": 18000,
+                "saved_pct": 60.0
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 12000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 4.65,
+            "primary_limit_remaining_percent": 96.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        assert!(
+            super::client_turn_pressure_guard_with_target(
+                &meter,
+                Some((30000, 12000, 18000, 60.0)),
+                &hourly_burn,
+                &current_live_turn,
+                50,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_zero_target_disables_target_only_pressure() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 87.1
+        });
+        let current_live_turn = json!({
+            "status": "exact_pair_materialized",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 62000,
+                "with_amai_tokens": 10200,
+                "saved_tokens": 51800,
+                "saved_pct": 83.54838709677419
+            }
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 10200,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 4.05,
+            "primary_limit_remaining_percent": 97.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        assert!(
+            super::client_turn_pressure_guard_with_target(
+                &meter,
+                Some((62000, 10200, 51800, 83.54838709677419)),
+                &hourly_burn,
+                &current_live_turn,
+                0,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_recommends_rotate_for_small_no_amai_thread_when_5h_kpi_is_below_target()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 88.2
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 0,
+                "with_amai_tokens": 0,
+                "saved_tokens": 0,
+                "saved_pct": 0.0
+            },
+            "retrieval_context_pack_count": 0
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 10500,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 4.1,
+            "primary_limit_remaining_percent": 97.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((10500, 10500, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "alert");
+        assert_eq!(guard.status_label, "новый чат рекомендован");
+        assert_eq!(guard.hourly_burn_classification, Some("saving"));
+        assert!(guard.no_amai_activity_in_current_live_turn);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_stays_off_for_huge_no_amai_thread_when_exact_5h_kpi_is_target_saving()
+     {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 94.07
         });
         let current_live_turn = json!({
             "status": "no_amai_activity_in_current_live_turn",
@@ -14346,8 +17623,87 @@ mod tests {
     }
 
     #[test]
-    fn client_turn_pressure_guard_stays_off_for_huge_no_amai_thread_when_exact_5h_kpi_is_one_to_one()
+    fn client_turn_pressure_guard_recommends_rotate_for_moderate_no_amai_thread_when_5h_kpi_is_below_target()
      {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 84.0
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 0,
+                "with_amai_tokens": 0,
+                "saved_tokens": 0,
+                "saved_pct": 0.0
+            },
+            "retrieval_context_pack_count": 0
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 19000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 7.4,
+            "primary_limit_remaining_percent": 96.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((19000, 19000, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "alert");
+        assert_eq!(guard.status_label, "новый чат рекомендован");
+        assert_eq!(guard.hourly_burn_classification, Some("saving"));
+        assert!(guard.no_amai_activity_in_current_live_turn);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_for_early_no_amai_thread_when_5h_kpi_is_below_target() {
+        let hourly_burn = json!({
+            "status": "observed",
+            "classification": "saving",
+            "kpi_percent": 86.2
+        });
+        let current_live_turn = json!({
+            "status": "no_amai_activity_in_current_live_turn",
+            "exact_pair_available": true,
+            "exact_pair": {
+                "without_amai_tokens": 0,
+                "with_amai_tokens": 0,
+                "saved_tokens": 0,
+                "saved_pct": 0.0
+            },
+            "retrieval_context_pack_count": 0
+        });
+        let meter = json!({
+            "status": "observed",
+            "client_turn_total_tokens": 47000,
+            "latest_model_context_window": 258400,
+            "context_used_percent": 18.6,
+            "primary_limit_remaining_percent": 94.0,
+            "secondary_limit_remaining_percent": 99.0
+        });
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((47000, 47000, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
+        assert_eq!(guard.hourly_burn_classification, Some("saving"));
+        assert!(guard.no_amai_activity_in_current_live_turn);
+    }
+
+    #[test]
+    fn client_turn_pressure_guard_rotates_for_huge_no_amai_thread_when_exact_5h_kpi_is_one_to_one()
+    {
         let hourly_burn = json!({
             "status": "observed",
             "classification": "one_to_one",
@@ -14365,15 +17721,15 @@ mod tests {
             "primary_limit_remaining_percent": 85.0,
             "secondary_limit_remaining_percent": 5.0
         });
-        assert!(
-            super::client_turn_pressure_guard(
-                &meter,
-                Some((196009, 196009, 0, 0.0)),
-                &hourly_burn,
-                &current_live_turn,
-            )
-            .is_none()
-        );
+        let guard = super::client_turn_pressure_guard(
+            &meter,
+            Some((196009, 196009, 0, 0.0)),
+            &hourly_burn,
+            &current_live_turn,
+        )
+        .expect("pressure guard");
+        assert_eq!(guard.severity, "critical");
+        assert_eq!(guard.status_label, "новый чат нужен сейчас");
     }
 
     #[test]
@@ -14575,19 +17931,19 @@ mod tests {
         assert_eq!(guard["full_turn_savings_proven"], json!(false));
         assert_eq!(guard["should_rotate_chat_now"], json!(true));
         assert_eq!(guard["should_rotate_chat_soon"], json!(true));
-        assert_eq!(guard["status_label"], json!("новый чат нужен сейчас"));
+        assert_eq!(guard["status_label"], json!("сожми текущий чат сейчас"));
         assert_eq!(
             guard["reply_execution_gate"]["gate_version"],
             json!("client-reply-budget-gate-v1")
         );
-        assert_eq!(guard["reply_execution_gate"]["blocking"], json!(true));
+        assert_eq!(guard["reply_execution_gate"]["blocking"], json!(false));
         assert_eq!(
             guard["reply_execution_gate"]["must_rotate_before_reply"],
-            json!(true)
+            json!(false)
         );
         assert_eq!(
             guard["reply_execution_gate"]["action_kind"],
-            json!("rotate_chat_for_client_budget")
+            json!("compact_current_thread_for_client_budget")
         );
         assert_eq!(
             guard["reply_execution_gate"]["reply_budget_mode"],
@@ -14599,7 +17955,7 @@ mod tests {
         );
         assert_eq!(
             guard["reply_execution_gate"]["blocking_reply_contract"]["active"],
-            json!(true)
+            json!(false)
         );
         assert_eq!(
             guard["reply_execution_gate"]["blocking_reply_contract"]["response_kind"],
@@ -14624,6 +17980,28 @@ mod tests {
         assert_eq!(
             guard["reply_execution_gate"]["action_bundle"]["operator_flow"]["copy_paste_ready"],
             json!(true)
+        );
+        assert_eq!(
+            guard["reply_execution_gate"]["action_bundle"]["operator_flow"]["primary_command_kind"],
+            json!("same_thread_host_control_launch_command")
+        );
+        assert!(
+            guard["reply_execution_gate"]["action_bundle"]["operator_flow"]["primary_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ctl-launch")
+        );
+        assert!(
+            guard["reply_execution_gate"]["action_bundle"]["operator_flow"]["host_current_thread_control_launch_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("--compact-window")
+        );
+        assert!(
+            guard["reply_execution_gate"]["action_bundle"]["operator_flow"]["rotate_helper_command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("rotate-chat")
         );
         assert_eq!(guard["max_guard_age_seconds"], json!(10));
         assert_eq!(guard["observed_at_epoch_ms"], json!(1774622949000u64));
@@ -14661,7 +18039,7 @@ mod tests {
             guard["next_action"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("continuity startup")
+                .contains("compact window")
         );
         assert_eq!(guard["client_live_meter_current_thread_bound"], json!(true));
         assert_eq!(
@@ -14747,7 +18125,7 @@ mod tests {
         );
         assert_eq!(
             guard["reply_execution_gate"]["action_kind"],
-            json!("continue_current_chat")
+            json!("rotate_chat_for_client_budget")
         );
         assert_eq!(
             guard["reply_execution_gate"]["reply_budget_mode"],
@@ -14769,7 +18147,10 @@ mod tests {
             guard["reply_execution_gate"]["preserves_return_obligation"],
             json!(true)
         );
-        assert!(guard["reply_execution_gate"]["action_bundle"].is_null());
+        assert_eq!(
+            guard["reply_execution_gate"]["action_bundle"]["bundle_version"],
+            json!("rotate-chat-action-bundle-v1")
+        );
     }
 
     #[test]
@@ -14821,7 +18202,8 @@ mod tests {
                 "client_limit_hourly_burn": {
                     "status": "observed",
                     "classification": "one_to_one",
-                    "kpi_percent": 0.41
+                    "kpi_percent": 0.41,
+                    "reply_prefix": "5ч KPI: 1:1"
                 },
                     "profile": {"display_name": "Обычная рабочая машина"}
                 }
@@ -14854,6 +18236,11 @@ mod tests {
         assert_eq!(
             guard["reply_execution_gate"]["reply_budget_mode"],
             json!(working_state::CLIENT_REPLY_BUDGET_MODE_COMPACT_HIGH_SIGNAL)
+        );
+        assert_eq!(guard["reply_prefix"], json!("5ч KPI: 1:1"));
+        assert_eq!(
+            guard["reply_execution_gate"]["reply_prefix"],
+            json!("5ч KPI: 1:1")
         );
         assert_eq!(
             guard["reply_execution_gate"]["reply_budget_contract"]["must_avoid_unrequested_recaps"],
@@ -14965,8 +18352,8 @@ mod tests {
     }
 
     #[test]
-    fn current_session_budget_guard_uses_compact_mode_for_live_turn_below_target_even_when_hourly_kpi_is_healthy(
-    ) {
+    fn current_session_budget_guard_uses_compact_mode_for_live_turn_below_target_even_when_hourly_kpi_is_healthy()
+     {
         let snapshot = json!({
         "token_budget_report": {
             "token_budget_report": {
@@ -15431,8 +18818,8 @@ mod tests {
                     "settlement_report_preview",
                     "contractual_evidence_pack"
                 ],
-                "review_bundle_command": "cargo run --release -- observe token-statement-export --scope lifetime",
-                "evidence_pack_command": "cargo run --release -- observe token-evidence-pack --scope lifetime"
+                "review_bundle_command": "./scripts/amai_exec.sh observe token-statement-export --scope lifetime",
+                "evidence_pack_command": "./scripts/amai_exec.sh observe token-evidence-pack --scope lifetime"
             }
         });
 
@@ -16393,6 +19780,11 @@ mod tests {
     #[test]
     fn client_budget_live_payload_surfaces_hourly_burn_reply_prefix() {
         let snapshot = json!({
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "client_budget_target_percent": 50
+                }
+            },
             "token_budget_report": {
                 "token_budget_report": {
                     "client_live_meter": {
@@ -16447,5 +19839,1112 @@ mod tests {
                 row["key"].as_str() == Some(super::CLIENT_LIMIT_HOURLY_BURN_ROW_KEY)
             })
         );
+        let hourly_row = rows
+            .iter()
+            .find(|row| row["key"].as_str() == Some(super::CLIENT_LIMIT_HOURLY_BURN_ROW_KEY))
+            .expect("hourly burn row");
+        assert_eq!(
+            hourly_row["target_selector"]["current_target_percent"],
+            json!(50)
+        );
+        assert_eq!(
+            hourly_row["target_selector"]["selected_chat_command"],
+            json!("экономия_50%")
+        );
+    }
+
+    #[test]
+    fn client_limit_hourly_burn_row_embeds_same_thread_host_control_in_selector() {
+        let row = super::client_limit_hourly_burn_metric_row(
+            &json!({
+                "status": "observed",
+                "classification": "saving",
+                "reply_prefix": "5ч KPI: экономия 50.00%",
+                "projected_primary_used_per_hour_percent": 10.0,
+                "kpi_percent": 50.0,
+                "remaining_window_minutes": 30.0,
+                "actual_remaining_percent": 75.0,
+                "ideal_remaining_percent": 50.0,
+                "latest_observed_at_epoch_ms": 2000,
+                "projected_reset_delta_minutes": 30.0
+            }),
+            50,
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "summary": "Operator confirmed same-thread overlay opened.",
+                    "recorded_at_epoch_ms": 3000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "opened",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 12000,
+                                "context_used_percent": 4.65,
+                                "primary_limit_used_percent": 21
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 2000
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 6000,
+                "client_turn_total_tokens": 14500,
+                "context_used_percent": 5.61,
+                "primary_limit_used_percent": 23
+            }),
+            &json!({
+                "stage": "preserve",
+                "growth_since_compaction_tokens": 4500
+            }),
+            &working_state::build_host_current_thread_control_surface_for_thread(Some(
+                "thread-current",
+            )),
+        )
+        .expect("hourly burn row");
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control"]["command_id"],
+            json!("thread-overlay-open-current")
+        );
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control_button_label"],
+            json!("Open thread overlay")
+        );
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control"]["external_uri_launch"]["uri"],
+            json!("vscode://openai.chatgpt/thread-overlay/thread-current")
+        );
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control_last_feedback_kind"],
+            json!("opened")
+        );
+        assert!(
+            row["target_selector"]["host_current_thread_control_last_feedback_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Operator confirmed same-thread overlay opened.")
+        );
+        assert!(
+            row["target_selector"]["host_current_thread_control_effect_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("thread overlay")
+        );
+    }
+
+    #[test]
+    fn client_limit_hourly_burn_row_uses_surface_driven_compact_window_text() {
+        let row = super::client_limit_hourly_burn_metric_row(
+            &json!({
+                "status": "observed",
+                "classification": "saving",
+                "reply_prefix": "5ч KPI: экономия 50.00%",
+                "projected_primary_used_per_hour_percent": 10.0,
+                "kpi_percent": 50.0,
+                "remaining_window_minutes": 30.0,
+                "actual_remaining_percent": 75.0,
+                "ideal_remaining_percent": 50.0,
+                "latest_observed_at_epoch_ms": 2000,
+                "projected_reset_delta_minutes": 30.0
+            }),
+            50,
+            &json!({}),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 6000,
+                "client_turn_total_tokens": 15000,
+                "context_used_percent": 5.8,
+                "primary_limit_used_percent": 24
+            }),
+            &json!({
+                "stage": "preserve",
+                "growth_since_compaction_tokens": 4800
+            }),
+            &working_state::build_host_current_thread_control_surface_for_thread_and_stage(
+                Some("thread-current"),
+                working_state::HostContextCompactionStage::Preserve,
+            ),
+        )
+        .expect("hourly burn row");
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control"]["command_id"],
+            json!("hotkey-window-open-current")
+        );
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control_button_label"],
+            json!("Open compact window")
+        );
+        assert!(
+            row["target_selector"]["host_current_thread_control_intro"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("compact-window")
+        );
+        assert!(
+            row["target_selector"]["host_current_thread_control_notice_message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("compact window")
+        );
+        assert!(
+            row["target_selector"]["host_current_thread_control_ack_intro"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("compact window")
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_effect_recommends_rotate_fallback_after_failed_compact_window() {
+        let effect = super::host_current_thread_control_effect_payload(
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 3000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "preserve"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 9000,
+                "client_turn_total_tokens": 160500,
+                "context_used_percent": 53.5,
+                "primary_limit_used_percent": 66
+            }),
+            &json!({
+                "stage": "critical_regrowth",
+                "growth_since_compaction_tokens": 52000
+            }),
+        );
+        assert_eq!(
+            effect["effect_verdict"],
+            json!("full_scale_client_burn_worsened_rotate_fallback_recommended")
+        );
+        assert_eq!(effect["rotate_fallback_recommended"], json!(true));
+        assert_eq!(effect["full_scale_client_burn_worsened"], json!(true));
+        assert_eq!(effect["retry_allowed"], json!(false));
+        assert!(
+            effect["verdict_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("полный 5ч burn")
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_effect_recommends_overlay_trial_during_critical_regrowth() {
+        let effect = super::host_current_thread_control_effect_payload_for_command(
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 3000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "critical_regrowth"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 9000,
+                "client_turn_total_tokens": 106500,
+                "context_used_percent": 42.6,
+                "primary_limit_used_percent": 60
+            }),
+            &json!({
+                "stage": "critical_regrowth",
+                "growth_since_compaction_tokens": 26530
+            }),
+            Some("hotkey-window-open-current"),
+        );
+        assert_eq!(
+            effect["effect_verdict"],
+            json!("critical_regrowth_overlay_trial_recommended")
+        );
+        assert_eq!(effect["overlay_trial_recommended"], json!(true));
+        assert!(
+            effect["verdict_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("overlay")
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_effect_marks_recent_baseline_as_measurement_pending() {
+        let effect = super::host_current_thread_control_effect_payload_for_command(
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 8_500,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "preserve"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 9_000,
+                "client_turn_total_tokens": 101000,
+                "context_used_percent": 40.2,
+                "primary_limit_used_percent": 60
+            }),
+            &json!({
+                "stage": "preserve",
+                "growth_since_compaction_tokens": 20800
+            }),
+            Some("hotkey-window-open-current"),
+        );
+        assert_eq!(effect["measurement_pending"], json!(true));
+        assert_eq!(effect["retry_allowed"], json!(false));
+        assert_eq!(effect["effect_verdict"], json!("measurement_pending"));
+        assert!(
+            effect["verdict_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("дождись измеримого effect")
+        );
+    }
+
+    #[test]
+    fn host_current_thread_control_effect_marks_verified_compaction_after_requested_feedback() {
+        let effect = super::host_current_thread_control_effect_payload_for_command(
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "compaction_count": 2,
+                                "compacted_at_epoch_ms": 900,
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "preserve"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 300_000,
+                "client_turn_total_tokens": 101000,
+                "context_used_percent": 40.2,
+                "primary_limit_used_percent": 61
+            }),
+            &json!({
+                "stage": "preserve",
+                "compaction_count": 3,
+                "compacted_at_epoch_ms": 200_000,
+                "growth_since_compaction_tokens": 20800
+            }),
+            Some("thread-overlay-open-current"),
+        );
+        assert_eq!(
+            effect["verified_host_compaction_observed_after_feedback"],
+            json!(true)
+        );
+        assert_eq!(effect["compaction_count_delta"], json!(1));
+    }
+
+    #[test]
+    fn host_current_thread_control_effect_recommends_rotate_when_full_scale_burn_worsens() {
+        let effect = super::host_current_thread_control_effect_payload_for_command(
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 165_000,
+                                "context_used_percent": 63.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 60_000,
+                                "stage": "critical_regrowth"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 601_000,
+                "client_turn_total_tokens": 93_000,
+                "context_used_percent": 36.0,
+                "primary_limit_used_percent": 40
+            }),
+            &json!({
+                "stage": "critical_regrowth",
+                "growth_since_compaction_tokens": 0
+            }),
+            Some("thread-overlay-open-current"),
+        );
+        assert_eq!(
+            effect["effect_verdict"],
+            json!("full_scale_client_burn_worsened_rotate_fallback_recommended")
+        );
+        assert_eq!(effect["full_scale_client_burn_worsened"], json!(true));
+        assert_eq!(effect["rotate_fallback_recommended"], json!(true));
+        assert!(
+            effect["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("против идеального темпа")
+        );
+        assert!(
+            effect["verdict_summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("полный 5ч burn")
+        );
+    }
+
+    #[test]
+    fn client_limit_hourly_burn_row_blocks_same_thread_retry_while_measurement_pending() {
+        let row = super::client_limit_hourly_burn_metric_row(
+            &json!({
+                "status": "observed",
+                "classification": "overspend",
+                "reply_prefix": "5ч KPI: переплата 10.00%",
+                "projected_primary_used_per_hour_percent": 12.0,
+                "kpi_percent": 10.0,
+                "remaining_window_minutes": 30.0,
+                "actual_remaining_percent": 40.0,
+                "ideal_remaining_percent": 50.0,
+                "latest_observed_at_epoch_ms": 9_000,
+                "projected_reset_delta_minutes": -10.0
+            }),
+            90,
+            &json!({
+                "recent_actions": [{
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 8_500,
+                    "summary": "Requested compact window launch via host current-thread control.",
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "preserve"
+                            }
+                        }
+                    }
+                }]
+            }),
+            &json!({
+                "thread_id": "thread-current",
+                "ended_at_epoch_ms": 9_000,
+                "client_turn_total_tokens": 101000,
+                "context_used_percent": 40.2,
+                "primary_limit_used_percent": 60
+            }),
+            &json!({
+                "stage": "preserve",
+                "growth_since_compaction_tokens": 20800
+            }),
+            &working_state::build_host_current_thread_control_surface_for_thread_and_stage(
+                Some("thread-current"),
+                working_state::HostContextCompactionStage::Preserve,
+            ),
+        )
+        .expect("hourly burn row");
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control_retry_allowed"],
+            json!(false)
+        );
+        assert_eq!(
+            row["target_selector"]["host_current_thread_control_measurement_pending"],
+            json!(true)
+        );
+        assert!(
+            row["target_selector"]["host_current_thread_control_retry_blocked_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Requested compact window launch")
+        );
+    }
+
+    #[test]
+    fn reply_execution_gate_waits_for_same_thread_effect_when_retry_is_blocked() {
+        let gate = super::build_client_budget_reply_execution_gate_with_primary_command(
+            "critical",
+            "сожми текущий чат сейчас",
+            Some("5ч KPI: переплата 10.00%"),
+            Some(9_000),
+            10,
+            false,
+            true,
+            true,
+            false,
+            true,
+            Some("amai"),
+            Some("continuity"),
+            Some("/home/art/agent-memory-index"),
+            Some("headline"),
+            Some("next step"),
+            90,
+            working_state::HostContextCompactionStage::CriticalRegrowth,
+            true,
+            true,
+            false,
+            Some("thread-current"),
+            Some("thread-overlay-open-current"),
+            &json!({
+                "retry_allowed": false,
+                "retry_blocked_reason": "Requested same-thread overlay launch via host current-thread control.",
+                "measurement_pending": false,
+                "effect_verdict": "requested_overlay_surface_observed",
+                "summary": "Overlay request is still active."
+            }),
+            false,
+            Some("Requested same-thread overlay launch via host current-thread control."),
+        );
+        assert_eq!(
+            gate["action_bundle"]["host_current_thread_control"]["retry_allowed"],
+            json!(false)
+        );
+        assert_eq!(
+            gate["action_kind"],
+            json!("wait_for_same_thread_effect_measurement")
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["primary_command_kind"],
+            json!("wait_for_same_thread_effect_measurement")
+        );
+        assert_eq!(
+            gate["must_wait_for_same_thread_effect_measurement_before_reply"],
+            json!(true)
+        );
+        assert!(gate["action_bundle"]["operator_flow"]["primary_command"].is_null());
+        assert_eq!(
+            gate["action_bundle"]["measurement_before_retry_required"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn reply_execution_gate_requests_feedback_confirmation_when_retry_is_blocked_by_pending_feedback()
+     {
+        let gate = super::build_client_budget_reply_execution_gate_with_primary_command(
+            "critical",
+            "сожми текущий чат сейчас",
+            Some("5ч KPI: переплата 10.00%"),
+            Some(9_000),
+            10,
+            false,
+            true,
+            true,
+            false,
+            true,
+            Some("amai"),
+            Some("continuity"),
+            Some("/home/art/agent-memory-index"),
+            Some("headline"),
+            Some("next step"),
+            90,
+            working_state::HostContextCompactionStage::CriticalRegrowth,
+            true,
+            true,
+            false,
+            Some("thread-current"),
+            Some("thread-overlay-open-current"),
+            &json!({
+                "retry_allowed": false,
+                "retry_blocked_reason": "Requested same-thread overlay launch via host current-thread control.",
+                "measurement_pending": false,
+                "effect_verdict": "requested_overlay_surface_observed",
+                "summary": "Overlay request is still active."
+            }),
+            true,
+            Some("Requested same-thread overlay launch via host current-thread control."),
+        );
+        assert_eq!(
+            gate["action_kind"],
+            json!("confirm_same_thread_host_control_feedback")
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["primary_command_kind"],
+            json!("confirm_same_thread_host_control_feedback")
+        );
+        assert_eq!(
+            gate["must_confirm_same_thread_host_control_feedback_before_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            gate["action_bundle"]["feedback_confirmation_before_retry_required"],
+            json!(true)
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["same_thread_feedback_confirmation_required"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn reply_execution_gate_skips_feedback_confirmation_after_verified_host_compaction() {
+        let gate = super::build_client_budget_reply_execution_gate_with_primary_command(
+            "critical",
+            "сожми текущий чат сейчас",
+            Some("5ч KPI: переплата 10.00%"),
+            Some(9_000),
+            10,
+            false,
+            true,
+            true,
+            false,
+            true,
+            Some("amai"),
+            Some("continuity"),
+            Some("/home/art/agent-memory-index"),
+            Some("headline"),
+            Some("next step"),
+            90,
+            working_state::HostContextCompactionStage::CriticalRegrowth,
+            true,
+            true,
+            false,
+            Some("thread-current"),
+            Some("thread-overlay-open-current"),
+            &json!({
+                "retry_allowed": false,
+                "measurement_pending": false,
+                "effect_verdict": "full_scale_client_burn_worsened_rotate_fallback_recommended",
+                "verified_host_compaction_observed_after_feedback": true,
+                "summary": "Real host compaction already observed after baseline."
+            }),
+            false,
+            Some("Requested same-thread overlay launch via host current-thread control."),
+        );
+        assert_eq!(
+            gate["action_bundle"]["feedback_confirmation_before_retry_required"],
+            Value::Null
+        );
+        assert_eq!(
+            gate["action_bundle"]["measurement_before_retry_required"],
+            json!(true)
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["primary_command_kind"],
+            json!("wait_for_same_thread_effect_measurement")
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["same_thread_feedback_confirmation_required"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn reply_execution_gate_keeps_rotate_order_when_same_thread_retry_is_disallowed_after_rotate_selection()
+     {
+        let gate = super::build_client_budget_reply_execution_gate_with_primary_command(
+            "critical",
+            "новый чат нужен сейчас",
+            Some("5ч KPI: переплата 10.00%"),
+            Some(9_000),
+            10,
+            false,
+            true,
+            true,
+            false,
+            true,
+            Some("amai"),
+            Some("continuity"),
+            Some("/home/art/agent-memory-index"),
+            Some("headline"),
+            Some("next step"),
+            90,
+            working_state::HostContextCompactionStage::CriticalRegrowth,
+            false,
+            true,
+            false,
+            Some("thread-current"),
+            Some("hotkey-window-open-current"),
+            &json!({
+                "retry_allowed": false,
+                "measurement_pending": false,
+                "effect_verdict": "full_scale_client_burn_worsened_rotate_fallback_recommended",
+                "verified_host_compaction_observed_after_feedback": true,
+                "summary": "Surface already failed; rotate is primary."
+            }),
+            false,
+            Some("Requested same-thread compact window launch via host current-thread control."),
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["primary_command_kind"],
+            json!("rotate_helper_command")
+        );
+        assert_eq!(
+            gate["action_bundle"]["measurement_before_retry_required"],
+            Value::Null
+        );
+        assert_eq!(
+            gate["action_bundle"]["order"],
+            json!([
+                "run_rotate_helper",
+                "open_fresh_chat",
+                "run_continuity_startup"
+            ])
+        );
+    }
+
+    #[test]
+    fn reply_execution_gate_requests_feedback_confirmation_before_rotate_when_same_thread_feedback_is_pending()
+     {
+        let gate = super::build_client_budget_reply_execution_gate_with_primary_command(
+            "critical",
+            "новый чат нужен сейчас",
+            Some("5ч KPI: переплата 10.00%"),
+            Some(9_000),
+            10,
+            false,
+            true,
+            true,
+            false,
+            true,
+            Some("amai"),
+            Some("continuity"),
+            Some("/home/art/agent-memory-index"),
+            Some("headline"),
+            Some("next step"),
+            90,
+            working_state::HostContextCompactionStage::CriticalRegrowth,
+            false,
+            true,
+            false,
+            Some("thread-current"),
+            Some("hotkey-window-open-current"),
+            &json!({
+                "retry_allowed": false,
+                "measurement_pending": false,
+                "effect_verdict": "requested_compact_surface_observed",
+                "summary": "Requested compact window launch via host current-thread control."
+            }),
+            true,
+            Some("Requested same-thread compact window launch via host current-thread control."),
+        );
+        assert_eq!(
+            gate["action_kind"],
+            json!("confirm_same_thread_host_control_feedback")
+        );
+        assert_eq!(
+            gate["action_bundle"]["operator_flow"]["primary_command_kind"],
+            json!("confirm_same_thread_host_control_feedback")
+        );
+        assert_eq!(
+            gate["must_confirm_same_thread_host_control_feedback_before_reply"],
+            json!(true)
+        );
+        assert_eq!(
+            gate["action_bundle"]["feedback_confirmation_before_retry_required"],
+            json!(true)
+        );
+        assert_eq!(
+            gate["action_bundle"]["order"],
+            json!([
+                "confirm_same_thread_host_control_feedback",
+                "run_rotate_helper",
+                "open_fresh_chat",
+                "run_continuity_startup"
+            ])
+        );
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_prefers_lower_regrowth_rate_in_critical_stage() {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 100000,
+                                "context_used_percent": 40.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 20000,
+                                "stage": "critical_regrowth"
+                            }
+                        }
+                    }
+                },
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 5000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 120000,
+                                "context_used_percent": 48.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 32000,
+                                "stage": "critical_regrowth"
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 9000,
+            "client_turn_total_tokens": 124000,
+            "context_used_percent": 49.2,
+            "primary_limit_used_percent": 60
+        });
+        let host_context_compaction = json!({
+            "stage": "critical_regrowth",
+            "growth_since_compaction_tokens": 36000
+        });
+        let (surface, effect, same_thread_preferred) =
+            super::selected_host_current_thread_control_state(
+                &report,
+                &restore,
+                &client_live_meter,
+                &host_context_compaction,
+            );
+        assert_eq!(surface["command_id"], json!("thread-overlay-open-current"));
+        assert_eq!(
+            surface["selection_reason"],
+            json!("critical_regrowth_try_overlay")
+        );
+        assert_eq!(effect["command_id"], json!("thread-overlay-open-current"));
+        assert_eq!(same_thread_preferred, true);
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_drops_same_thread_preference_when_both_surfaces_worsen_full_scale_burn()
+     {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 1_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 170_000,
+                                "context_used_percent": 65.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 80_000,
+                                "stage": "critical_regrowth"
+                            }
+                        }
+                    }
+                },
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 2_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 160_000,
+                                "context_used_percent": 62.0,
+                                "primary_limit_used_percent": 20
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 60_000,
+                                "stage": "critical_regrowth"
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 602_000,
+            "client_turn_total_tokens": 92_000,
+            "context_used_percent": 35.5,
+            "primary_limit_used_percent": 40
+        });
+        let host_context_compaction = json!({
+            "stage": "critical_regrowth",
+            "growth_since_compaction_tokens": 0
+        });
+        let (_surface, effect, same_thread_preferred) =
+            super::selected_host_current_thread_control_state(
+                &report,
+                &restore,
+                &client_live_meter,
+                &host_context_compaction,
+            );
+        assert_eq!(same_thread_preferred, false);
+        assert_eq!(effect["rotate_fallback_recommended"], json!(true));
+        assert_eq!(effect["full_scale_client_burn_worsened"], json!(true));
+        assert_eq!(effect["retry_allowed"], json!(false));
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_drops_same_thread_preference_for_oversized_critical_regrowth()
+     {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": []
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 9_000,
+            "client_turn_total_tokens": 190_000,
+            "context_used_percent": 81.0,
+            "primary_limit_used_percent": 60
+        });
+        let host_context_compaction = json!({
+            "stage": "critical_regrowth",
+            "growth_since_compaction_tokens": 80_000,
+            "regrowth_of_recovered_surface_ratio": 0.8
+        });
+        let (_surface, _effect, same_thread_preferred) =
+            super::selected_host_current_thread_control_state(
+                &report,
+                &restore,
+                &client_live_meter,
+                &host_context_compaction,
+            );
+        assert_eq!(same_thread_preferred, false);
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_keeps_pending_feedback_command_selected() {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 5_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 110000,
+                                "context_used_percent": 46.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 26000,
+                                "stage": "inactive"
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 9_000,
+            "client_turn_total_tokens": 111000,
+            "context_used_percent": 46.2,
+            "primary_limit_used_percent": 60
+        });
+        let host_context_compaction = json!({
+            "stage": "inactive",
+            "growth_since_compaction_tokens": 26200
+        });
+
+        let (surface, effect, _) = super::selected_host_current_thread_control_state(
+            &report,
+            &restore,
+            &client_live_meter,
+            &host_context_compaction,
+        );
+
+        assert_eq!(
+            surface["command_id"],
+            json!(working_state::HOST_CURRENT_THREAD_COMPACT_WINDOW_COMMAND_ID)
+        );
+        assert_eq!(effect["command_id"], json!("hotkey-window-open-current"));
+        assert_eq!(effect["effect_verdict"], json!("measurement_pending"));
+    }
+
+    #[test]
+    fn selected_host_current_thread_control_state_prefers_newer_pending_feedback_command() {
+        let report = json!({
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            }
+        });
+        let restore = json!({
+            "thread_id": "thread-current",
+            "recent_actions": [
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 9_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "thread-overlay-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 120000,
+                                "context_used_percent": 48.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 30000,
+                                "stage": "inactive"
+                            }
+                        }
+                    }
+                },
+                {
+                    "source_kind": "host_current_thread_control_feedback",
+                    "recorded_at_epoch_ms": 5_000,
+                    "host_current_thread_control_feedback": {
+                        "feedback_kind": "requested",
+                        "command_id": "hotkey-window-open-current",
+                        "feedback_snapshot": {
+                            "thread_id": "thread-current",
+                            "client_live_meter": {
+                                "client_turn_total_tokens": 110000,
+                                "context_used_percent": 46.0,
+                                "primary_limit_used_percent": 60
+                            },
+                            "host_context_compaction": {
+                                "growth_since_compaction_tokens": 26000,
+                                "stage": "inactive"
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let client_live_meter = json!({
+            "thread_id": "thread-current",
+            "ended_at_epoch_ms": 10_000,
+            "client_turn_total_tokens": 120400,
+            "context_used_percent": 48.1,
+            "primary_limit_used_percent": 60
+        });
+        let host_context_compaction = json!({
+            "stage": "inactive",
+            "growth_since_compaction_tokens": 30100
+        });
+
+        let (surface, effect, _) = super::selected_host_current_thread_control_state(
+            &report,
+            &restore,
+            &client_live_meter,
+            &host_context_compaction,
+        );
+
+        assert_eq!(
+            surface["command_id"],
+            json!(working_state::HOST_CURRENT_THREAD_CONTROL_COMMAND_ID)
+        );
+        assert_eq!(effect["command_id"], json!("thread-overlay-open-current"));
+        assert_eq!(effect["effect_verdict"], json!("measurement_pending"));
     }
 }
