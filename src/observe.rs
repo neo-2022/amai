@@ -4544,6 +4544,21 @@ pub async fn client_budget_host_control_launch_payload(
     .await?;
     let _ = write_shared_thread_bound_snapshot_invalidation(&repo_root, thread_id);
     let restore = working_state::build_restore_bundle(&db, &project, &namespace).await?;
+    if let Ok(snapshot) = collect_client_budget_snapshot_from_db(
+        &db,
+        &repo_root,
+        Some(thread_id),
+        None,
+        restore.as_ref(),
+    )
+    .await
+    {
+        materialize_shared_thread_bound_client_budget_surfaces_from_snapshot(
+            &repo_root,
+            thread_id,
+            &snapshot,
+        );
+    }
     let client_budget_guard =
         token_budget::collect_live_current_session_budget_guard(&db, restore.as_ref()).await?;
     let client_budget_reply_gate =
@@ -4727,6 +4742,50 @@ async fn client_budget_host_control_feedback_api_handler(
         .await?;
         if let Some(thread_id) = query.thread_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
             let _ = write_shared_thread_bound_snapshot_invalidation(&repo_root, thread_id);
+            let restore = working_state::build_restore_bundle(&db, &project, &namespace).await?;
+            if let Ok(snapshot) = collect_client_budget_snapshot_from_db(
+                &db,
+                &repo_root,
+                Some(thread_id),
+                None,
+                restore.as_ref(),
+            )
+            .await
+            {
+                materialize_shared_thread_bound_client_budget_surfaces_from_snapshot(
+                    &repo_root,
+                    thread_id,
+                    &snapshot,
+                );
+            }
+            let client_budget_guard =
+                token_budget::collect_live_current_session_budget_guard(&db, restore.as_ref()).await?;
+            let client_budget_reply_gate =
+                compact_host_control_client_budget_reply_gate(&client_budget_guard);
+            let message_text =
+                working_state::host_current_thread_control_feedback_notice_text_for_command(
+                    feedback_kind,
+                    Some(command_id),
+                );
+            return Ok(json!({
+                "status": "ok",
+                "client_budget_host_control_feedback": {
+                    "project": {
+                        "code": project.code.clone(),
+                        "display_name": project.display_name.clone(),
+                        "repo_root": project.repo_root.clone(),
+                    },
+                    "namespace": {
+                        "code": namespace.code.clone(),
+                        "display_name": namespace.display_name.clone(),
+                    },
+                    "thread_id": thread_id,
+                    "command_id": command_id,
+                    "feedback_kind": feedback_kind,
+                    "message_text": message_text,
+                    "client_budget_reply_gate": client_budget_reply_gate,
+                }
+            }));
         }
         let restore = working_state::build_restore_bundle(&db, &project, &namespace).await?;
         let client_budget_guard =
@@ -5059,15 +5118,14 @@ async fn thread_bound_snapshot_with_meta(state: &ObserveState, thread_id: &str) 
     ))
 }
 
-async fn populate_thread_bound_client_budget_surfaces_from_snapshot(
-    cache: Arc<RwLock<ObserveCache>>,
+fn materialize_shared_thread_bound_client_budget_surfaces_from_snapshot(
     repo_root: &Path,
     thread_id: &str,
-    snapshot: Value,
+    snapshot: &Value,
 ) {
-    let _ = write_shared_thread_bound_budget_snapshot(repo_root, thread_id, &snapshot);
-    let guard = dashboard::current_session_budget_guard(&snapshot);
-    let root_cause_payload = dashboard::client_budget_root_cause_payload_with_guard(&snapshot, &guard);
+    let _ = write_shared_thread_bound_budget_snapshot(repo_root, thread_id, snapshot);
+    let guard = dashboard::current_session_budget_guard(snapshot);
+    let root_cause_payload = dashboard::client_budget_root_cause_payload_with_guard(snapshot, &guard);
     let compact_root_cause =
         compact_client_budget_root_cause_payload(&root_cause_payload, Some(&guard));
     let compact_gate = json!({
@@ -5088,6 +5146,19 @@ async fn populate_thread_bound_client_budget_surfaces_from_snapshot(
     let gate_cache =
         build_compact_client_budget_gate_cache(&compact_gate, &compact_guard, Some(thread_id));
     let _ = write_shared_compact_client_budget_gate(repo_root, Some(thread_id), &gate_cache);
+}
+
+async fn populate_thread_bound_client_budget_surfaces_from_snapshot(
+    cache: Arc<RwLock<ObserveCache>>,
+    repo_root: &Path,
+    thread_id: &str,
+    snapshot: Value,
+) {
+    materialize_shared_thread_bound_client_budget_surfaces_from_snapshot(
+        repo_root,
+        thread_id,
+        &snapshot,
+    );
 
     let completed_epoch_ms = now_epoch_ms();
     let mut state = cache.write().await;
