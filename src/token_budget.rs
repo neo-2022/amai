@@ -8105,6 +8105,12 @@ pub async fn collect_dashboard_current_session_budget_report_with_thread_hint_an
     explicit_thread_id_hint: Option<&str>,
 ) -> Result<Value> {
     let repo_root = config::discover_repo_root(None)?;
+    if let Some(report) = reusable_exact_thread_current_session_budget_report_from_base_report(
+        base_report,
+        explicit_thread_id_hint,
+    ) {
+        return Ok(report);
+    }
     let repo_root_str = repo_root
         .to_str()
         .ok_or_else(|| anyhow!("repo_root must be valid UTF-8"))?;
@@ -8268,6 +8274,40 @@ pub async fn collect_dashboard_current_session_budget_report_with_thread_hint_an
             },
             "client_budget_target_percent": client_budget_target_percent,
             "current_session": current_session_summary,
+            "statement_previews": {
+                "current_session": current_session_statement_preview,
+            },
+            "client_live_meter": client_live_meter,
+            "client_limit_hourly_burn": client_limit_hourly_burn,
+            "current_live_turn": current_live_turn,
+            "note": "Это минимальный current-session budget report для root-cause/gate surfaces: он не строит rolling/lifetime/export контуры и существует только для дешёвого live client-budget enforcement."
+        }
+    }))
+}
+
+fn reusable_exact_thread_current_session_budget_report_from_base_report(
+    base_report: Option<&Value>,
+    explicit_thread_id_hint: Option<&str>,
+) -> Option<Value> {
+    let report = base_report?;
+    let client_budget_target_percent = report["client_budget_target_percent"].clone();
+    let current_session = report["current_session"].clone();
+    let current_session_statement_preview = report["statement_previews"]["current_session"].clone();
+    let client_limit_hourly_burn = report["client_limit_hourly_burn"].clone();
+    let (client_live_meter, current_live_turn) =
+        reusable_exact_thread_budget_live_surfaces_from_base_report(base_report, explicit_thread_id_hint)?;
+    if !current_session.is_object()
+        || !current_session_statement_preview["client_limit_meter_alignment"].is_object()
+        || !client_limit_hourly_burn.is_object()
+    {
+        return None;
+    }
+    Some(json!({
+        "token_budget_report": {
+            "surface": "dashboard_current_session_budget_only",
+            "filters": report["filters"].clone(),
+            "client_budget_target_percent": client_budget_target_percent,
+            "current_session": current_session,
             "statement_previews": {
                 "current_session": current_session_statement_preview,
             },
@@ -26204,6 +26244,64 @@ effective_to_epoch_ms = 2000
                 Some("thread-current"),
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn reusable_exact_thread_current_session_budget_report_from_base_report_keeps_minimal_shape() {
+        let report = json!({
+            "filters": {
+                "include_verify_events": false
+            },
+            "client_budget_target_percent": 50,
+            "current_session": {
+                "same_meter_saved_pct": 12.34
+            },
+            "statement_previews": {
+                "current_session": {
+                    "client_limit_meter_alignment": {
+                        "equivalence_status": "same_meter_equivalent"
+                    }
+                }
+            },
+            "client_limit_hourly_burn": {
+                "status": "observed"
+            },
+            "client_live_meter": {
+                "thread_id": "thread-current",
+                "current_thread_bound": true
+            },
+            "current_live_turn": {
+                "thread_id": "thread-current",
+                "status": "no_amai_activity_in_current_live_turn"
+            }
+        });
+
+        let reused = super::reusable_exact_thread_current_session_budget_report_from_base_report(
+            Some(&report),
+            Some("thread-current"),
+        )
+        .expect("reusable current-session budget report");
+
+        assert_eq!(
+            reused["token_budget_report"]["surface"],
+            json!("dashboard_current_session_budget_only")
+        );
+        assert_eq!(
+            reused["token_budget_report"]["client_budget_target_percent"],
+            json!(50)
+        );
+        assert_eq!(
+            reused["token_budget_report"]["client_live_meter"]["thread_id"],
+            json!("thread-current")
+        );
+        assert_eq!(
+            reused["token_budget_report"]["current_live_turn"]["status"],
+            json!("no_amai_activity_in_current_live_turn")
+        );
+        assert_eq!(
+            reused["token_budget_report"]["statement_previews"]["current_session"]["client_limit_meter_alignment"]["equivalence_status"],
+            json!("same_meter_equivalent")
         );
     }
 
