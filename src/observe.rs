@@ -342,7 +342,7 @@ pub async fn print_budget_snapshot_preview(cfg: &AppConfig) -> Result<()> {
     let snapshot = if let Some(payload) = try_fetch_local_observe_budget_snapshot_preview_via_http().await {
         payload
     } else {
-        collect_budget_snapshot_preview(cfg).await?
+        compact_budget_snapshot_preview_payload(&collect_budget_snapshot_preview(cfg).await?)
     };
     println!("{}", serde_json::to_string(&snapshot)?);
     Ok(())
@@ -614,7 +614,7 @@ async fn try_fetch_local_observe_budget_snapshot_preview_via_http() -> Option<Va
     let thread_id = local_observe_thread_id_from_env();
     let repo_root = discover_repo_root(None).ok()?;
     if let Some(snapshot) = load_shared_budget_snapshot_preview(&repo_root, thread_id.as_deref()) {
-        return Some(snapshot);
+        return Some(compact_budget_snapshot_preview_payload(&snapshot));
     }
     let client = reqwest::Client::builder()
         .timeout(if thread_id.is_some() {
@@ -1240,6 +1240,143 @@ fn compact_working_state_restore_for_budget(restore: &Value) -> Value {
             "code": restore["namespace"]["code"].clone()
         },
         "recent_actions": recent_actions
+    })
+}
+
+fn compact_current_session_for_budget_snapshot_preview(current_session: &Value) -> Value {
+    if !current_session.is_object() {
+        return Value::Null;
+    }
+    json!({
+        "started_at_epoch_ms": current_session["started_at_epoch_ms"].clone(),
+        "ended_at_epoch_ms": current_session["ended_at_epoch_ms"].clone(),
+        "counted_events": current_session["counted_events"].clone(),
+        "live_events_count": current_session["live_events_count"].clone(),
+        "total_saved_tokens": current_session["total_saved_tokens"].clone(),
+        "savings_percent": rounded_json_number(&current_session["savings_percent"], 2),
+        "effective_savings_pct": rounded_json_number(&current_session["effective_savings_pct"], 2),
+        "observed_client_prompt_tokens": current_session["observed_client_prompt_tokens"].clone(),
+        "observed_tool_overhead_tokens": current_session["observed_tool_overhead_tokens"].clone(),
+        "observed_continuity_restore_tokens": current_session["observed_continuity_restore_tokens"].clone(),
+        "observed_assistant_generation_tokens": current_session["observed_assistant_generation_tokens"].clone(),
+        "age_ms_since_latest": current_session["age_ms_since_latest"].clone()
+    })
+}
+
+fn compact_client_live_meter_for_budget_snapshot_preview(client_live_meter: &Value) -> Value {
+    if !client_live_meter.is_object() {
+        return Value::Null;
+    }
+    json!({
+        "status": client_live_meter["status"].clone(),
+        "thread_binding_state": client_live_meter["thread_binding_state"].clone(),
+        "current_thread_bound": client_live_meter["current_thread_bound"].clone(),
+        "thread_id": client_live_meter["thread_id"].clone(),
+        "turn_id": client_live_meter["turn_id"].clone(),
+        "started_at_epoch_ms": client_live_meter["started_at_epoch_ms"].clone(),
+        "ended_at_epoch_ms": client_live_meter["ended_at_epoch_ms"].clone(),
+        "client_turn_total_tokens": client_live_meter["client_turn_total_tokens"].clone(),
+        "context_used_percent": rounded_json_number(&client_live_meter["context_used_percent"], 2),
+        "primary_limit_used_percent": client_live_meter["primary_limit_used_percent"].clone(),
+        "secondary_limit_used_percent": client_live_meter["secondary_limit_used_percent"].clone()
+    })
+}
+
+fn compact_current_live_turn_for_budget_snapshot_preview(current_live_turn: &Value) -> Value {
+    if !current_live_turn.is_object() {
+        return Value::Null;
+    }
+    json!({
+        "status": current_live_turn["status"].clone(),
+        "scope_code": current_live_turn["scope_code"].clone(),
+        "thread_binding_state": current_live_turn["thread_binding_state"].clone(),
+        "current_thread_bound": current_live_turn["current_thread_bound"].clone(),
+        "thread_id": current_live_turn["thread_id"].clone(),
+        "turn_id": current_live_turn["turn_id"].clone(),
+        "started_at_epoch_ms": current_live_turn["started_at_epoch_ms"].clone(),
+        "ended_at_epoch_ms": current_live_turn["ended_at_epoch_ms"].clone(),
+        "exact_pair_available": current_live_turn["exact_pair_available"].clone(),
+        "exact_pair": current_live_turn["exact_pair"].clone(),
+        "matched_events_count": current_live_turn["matched_events_count"].clone(),
+        "matched_context_pack_ids_count": current_live_turn["matched_context_pack_ids_count"].clone(),
+        "retrieval_context_pack_count": current_live_turn["retrieval_context_pack_count"].clone()
+    })
+}
+
+fn compact_client_limit_hourly_burn_for_budget_snapshot_preview(
+    client_limit_hourly_burn: &Value,
+) -> Value {
+    if !client_limit_hourly_burn.is_object() {
+        return Value::Null;
+    }
+    json!({
+        "status": client_limit_hourly_burn["status"].clone(),
+        "reply_prefix": client_limit_hourly_burn["reply_prefix"].clone(),
+        "kpi_percent": rounded_json_number(&client_limit_hourly_burn["kpi_percent"], 2),
+        "actual_used_percent": rounded_json_number(&client_limit_hourly_burn["actual_used_percent"], 2),
+        "actual_remaining_percent":
+            rounded_json_number(&client_limit_hourly_burn["actual_remaining_percent"], 2),
+        "ideal_used_percent": rounded_json_number(&client_limit_hourly_burn["ideal_used_percent"], 2),
+        "ideal_remaining_percent":
+            rounded_json_number(&client_limit_hourly_burn["ideal_remaining_percent"], 2),
+        "projected_primary_used_per_hour_percent": rounded_json_number(
+            &client_limit_hourly_burn["projected_primary_used_per_hour_percent"],
+            2
+        ),
+        "ideal_primary_used_per_hour_percent": rounded_json_number(
+            &client_limit_hourly_burn["ideal_primary_used_per_hour_percent"],
+            2
+        ),
+        "latest_observed_at_epoch_ms": client_limit_hourly_burn["latest_observed_at_epoch_ms"].clone(),
+        "latest_live_age_seconds":
+            rounded_json_number(&client_limit_hourly_burn["latest_live_age_seconds"], 2)
+    })
+}
+
+fn compact_client_limit_meter_alignment_for_budget_snapshot_preview(alignment: &Value) -> Value {
+    if !alignment.is_object() {
+        return Value::Null;
+    }
+    json!({
+        "alignment_state": alignment["alignment_state"].clone(),
+        "same_meter_as_client_limit": alignment["same_meter_as_client_limit"].clone(),
+        "exact_pair_status": alignment["exact_pair_status"].clone(),
+        "blocking_reasons": alignment["blocking_reasons"].clone(),
+        "measured_components": alignment["measured_components"].clone(),
+        "missing_components": alignment["missing_components"].clone(),
+        "not_applicable_components": alignment["not_applicable_components"].clone()
+    })
+}
+
+fn compact_budget_snapshot_preview_payload(snapshot: &Value) -> Value {
+    let report = &snapshot["token_budget_report"]["token_budget_report"];
+    json!({
+        "latest_repo_working_state_restore": compact_latest_repo_working_state_restore_for_budget(
+            &snapshot["latest_repo_working_state_restore"]
+        ),
+        "token_budget_report": {
+            "token_budget_report": {
+                "surface": report["surface"].clone(),
+                "client_budget_target_percent": report["client_budget_target_percent"].clone(),
+                "current_session":
+                    compact_current_session_for_budget_snapshot_preview(&report["current_session"]),
+                "statement_previews": {
+                    "current_session": {
+                        "client_limit_meter_alignment":
+                            compact_client_limit_meter_alignment_for_budget_snapshot_preview(
+                                &report["statement_previews"]["current_session"]["client_limit_meter_alignment"]
+                            )
+                    }
+                },
+                "client_limit_hourly_burn": compact_client_limit_hourly_burn_for_budget_snapshot_preview(
+                    &report["client_limit_hourly_burn"]
+                ),
+                "client_live_meter":
+                    compact_client_live_meter_for_budget_snapshot_preview(&report["client_live_meter"]),
+                "current_live_turn":
+                    compact_current_live_turn_for_budget_snapshot_preview(&report["current_live_turn"])
+            }
+        }
     })
 }
 
@@ -3923,7 +4060,8 @@ async fn client_budget_snapshot_preview_api_handler(
         Ok(snapshot) => (
             StatusCode::OK,
             no_store_headers("application/json; charset=utf-8"),
-            serde_json::to_string(&snapshot).unwrap_or_default(),
+            serde_json::to_string(&compact_budget_snapshot_preview_payload(&snapshot))
+                .unwrap_or_default(),
         )
             .into_response(),
         Err(error) => (
@@ -9229,6 +9367,141 @@ mod tests {
         );
         assert!(compact.get("open_questions").is_none());
         assert!(compact.get("materialized_notes").is_none());
+    }
+
+    #[test]
+    fn compact_budget_snapshot_preview_payload_trims_hourly_burn_and_alignment_to_essential_fields() {
+        let snapshot = json!({
+            "token_budget_report": {
+                "token_budget_report": {
+                    "surface": "dashboard_current_session_budget_only",
+                    "client_budget_target_percent": 50,
+                    "current_session": {
+                        "started_at_epoch_ms": 1,
+                        "ended_at_epoch_ms": 2,
+                        "counted_events": 3,
+                        "live_events_count": 4,
+                        "total_saved_tokens": 5,
+                        "savings_percent": 12.3456,
+                        "effective_savings_pct": 23.4567,
+                        "observed_client_prompt_tokens": 10,
+                        "observed_tool_overhead_tokens": 11,
+                        "observed_continuity_restore_tokens": 12,
+                        "observed_assistant_generation_tokens": 13,
+                        "age_ms_since_latest": 14,
+                        "model_version": "drop me"
+                    },
+                    "statement_previews": {
+                        "current_session": {
+                            "client_limit_meter_alignment": {
+                                "alignment_state": "same_meter_equivalent",
+                                "same_meter_as_client_limit": true,
+                                "exact_pair_status": "exact_pair_materialized",
+                                "blocking_reasons": ["x"],
+                                "measured_components": ["client_prompt"],
+                                "missing_components": ["tool_overhead"],
+                                "not_applicable_components": ["retrieval_quality"],
+                                "note": "drop me",
+                                "model_version": "drop me",
+                                "surface_kind": "drop me"
+                            }
+                        }
+                    },
+                    "client_limit_hourly_burn": {
+                        "status": "overspend",
+                        "reply_prefix": "5ч KPI: переплата 12.34%",
+                        "kpi_percent": 12.3456,
+                        "actual_used_percent": 67.891,
+                        "actual_remaining_percent": 32.109,
+                        "ideal_used_percent": 44.444,
+                        "ideal_remaining_percent": 55.556,
+                        "projected_primary_used_per_hour_percent": 14.789,
+                        "ideal_primary_used_per_hour_percent": 10.111,
+                        "latest_observed_at_epoch_ms": 100,
+                        "latest_live_age_seconds": 1.987,
+                        "summary": "drop me",
+                        "status_bar_correlated": true,
+                        "window_minutes": 123
+                    },
+                    "client_live_meter": {
+                        "status": "live",
+                        "thread_binding_state": "current_thread_bound",
+                        "current_thread_bound": true,
+                        "thread_id": "thread-1",
+                        "turn_id": "turn-1",
+                        "started_at_epoch_ms": 10,
+                        "ended_at_epoch_ms": 11,
+                        "client_turn_total_tokens": 12,
+                        "context_used_percent": 34.567,
+                        "primary_limit_used_percent": 35,
+                        "secondary_limit_used_percent": 36,
+                        "note": "drop me"
+                    },
+                    "current_live_turn": {
+                        "status": "no_amai_activity_in_current_live_turn",
+                        "scope_code": "same_meter",
+                        "thread_binding_state": "current_thread_bound",
+                        "current_thread_bound": true,
+                        "thread_id": "thread-1",
+                        "turn_id": "turn-1",
+                        "started_at_epoch_ms": 20,
+                        "ended_at_epoch_ms": 21,
+                        "exact_pair_available": false,
+                        "exact_pair": null,
+                        "matched_events_count": 0,
+                        "matched_context_pack_ids_count": 0,
+                        "retrieval_context_pack_count": 0,
+                        "note": "drop me"
+                    }
+                }
+            },
+            "latest_repo_working_state_restore": {
+                "working_state_restore": {
+                    "client_budget_target_percent": 50,
+                    "thread_id": "thread-1",
+                    "current_goal": "goal",
+                    "next_step": "next",
+                    "execctl_resume_state": "pending_return_queue_present",
+                    "project": {
+                        "code": "amai",
+                        "repo_root": "/home/art/agent-memory-index"
+                    },
+                    "namespace": {
+                        "code": "continuity"
+                    },
+                    "recent_actions": []
+                }
+            }
+        });
+
+        let compact = super::compact_budget_snapshot_preview_payload(&snapshot);
+        let report = &compact["token_budget_report"]["token_budget_report"];
+        assert_eq!(
+            report["client_limit_hourly_burn"]["reply_prefix"],
+            json!("5ч KPI: переплата 12.34%")
+        );
+        assert_eq!(report["client_limit_hourly_burn"]["kpi_percent"], json!(12.35));
+        assert!(report["client_limit_hourly_burn"].get("summary").is_none());
+        assert!(
+            report["client_limit_hourly_burn"]
+                .get("status_bar_correlated")
+                .is_none()
+        );
+        assert!(
+            report["statement_previews"]["current_session"]["client_limit_meter_alignment"]
+                .get("note")
+                .is_none()
+        );
+        assert!(
+            report["statement_previews"]["current_session"]["client_limit_meter_alignment"]
+                .get("model_version")
+                .is_none()
+        );
+        assert_eq!(
+            report["statement_previews"]["current_session"]["client_limit_meter_alignment"]
+                ["alignment_state"],
+            json!("same_meter_equivalent")
+        );
     }
 
     #[test]
