@@ -1988,9 +1988,6 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
     postgres::bootstrap_schema(&bootstrap_db, cfg).await?;
     let cache = Arc::new(RwLock::new(ObserveCache::default()));
     let refresh_interval_ms = profile.dashboard.refresh_ms.max(250);
-    if let Err(error) = warm_initial_compact_client_budget_surfaces(cache.clone(), cfg).await {
-        eprintln!("initial compact client-budget warmup failed: {error:#}");
-    }
     let refresh_cache = cache.clone();
     let refresh_cfg = cfg.clone();
     let refresh_bind = bind.to_string();
@@ -2134,7 +2131,7 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
             dashboard_refresh_ms: profile.dashboard.refresh_ms,
             cfg: cfg.clone(),
             bind: bind.to_string(),
-            cache,
+            cache: cache.clone(),
         });
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -2146,6 +2143,18 @@ pub async fn serve_metrics(cfg: &AppConfig, bind: &str) -> Result<()> {
     println!("Amai raw snapshot JSON: {base_url}/api/snapshot");
     println!("Amai health JSON: {base_url}/healthz");
     println!("Amai Prometheus metrics: {base_url}/metrics");
+    let initial_compact_budget_cfg = cfg.clone();
+    let initial_compact_budget_cache = cache.clone();
+    tokio::spawn(async move {
+        if let Err(error) = warm_initial_compact_client_budget_surfaces(
+            initial_compact_budget_cache,
+            &initial_compact_budget_cfg,
+        )
+        .await
+        {
+            eprintln!("initial compact client-budget warmup failed: {error:#}");
+        }
+    });
     axum::serve(listener, app)
         .await
         .context("observe exporter stopped unexpectedly")
