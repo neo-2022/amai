@@ -5127,7 +5127,12 @@ fn build_client_budget_reply_execution_gate_with_primary_command(
 ) -> Value {
     let rotate_advisory = should_rotate_chat_soon;
     let same_thread_compaction_advisory = rotate_advisory && same_thread_compaction_preferred;
-    let blocking = requires_global_budget_recovery_before_reply;
+    let pure_burn_rotate_hard_block = !requires_global_budget_recovery_before_reply
+        && should_rotate_chat_now
+        && !same_thread_compaction_advisory
+        && host_context_compaction_stage.critical_regrowth_active()
+        && current_live_turn_no_amai_activity;
+    let blocking = requires_global_budget_recovery_before_reply || pure_burn_rotate_hard_block;
     let reply_budget_mode = if blocking {
         working_state::ClientReplyBudgetMode::CompactHighSignal
     } else if compact_reply_required || rotate_advisory {
@@ -5159,6 +5164,28 @@ fn build_client_budget_reply_execution_gate_with_primary_command(
                 preserves_return_obligation,
                 recommended_headline,
                 recommended_next_step,
+            ),
+            preserves_return_obligation,
+        )
+    } else if pure_burn_rotate_hard_block {
+        (
+            "rotate_chat_for_client_budget",
+            "client_budget_guard_pure_burn_rotate_now",
+            true,
+            true,
+            true,
+            working_state::ClientBudgetBlockingReplyMode::RotateChatOnly,
+            working_state::build_rotate_chat_action_bundle_for_stage_with_preference_and_primary_command(
+                project_code,
+                namespace_code,
+                repo_root,
+                preserves_return_obligation,
+                recommended_headline,
+                recommended_next_step,
+                host_context_compaction_stage,
+                same_thread_compaction_preferred,
+                same_thread_thread_id,
+                same_thread_primary_command_id,
             ),
             preserves_return_obligation,
         )
@@ -20612,6 +20639,54 @@ mod tests {
                 "open_fresh_chat",
                 "run_continuity_startup"
             ])
+        );
+    }
+
+    #[test]
+    fn reply_execution_gate_hard_blocks_rotate_now_for_pure_burn_critical_regrowth() {
+        let gate = super::build_client_budget_reply_execution_gate_with_primary_command(
+            "critical",
+            "новый чат нужен сейчас",
+            Some("5ч KPI: переплата 10.00%"),
+            Some(9_000),
+            10,
+            true,
+            true,
+            true,
+            false,
+            true,
+            Some("amai"),
+            Some("continuity"),
+            Some("/home/art/agent-memory-index"),
+            Some("headline"),
+            Some("next step"),
+            90,
+            working_state::HostContextCompactionStage::CriticalRegrowth,
+            false,
+            true,
+            true,
+            Some("thread-current"),
+            Some("hotkey-window-open-current"),
+            &json!({
+                "retry_allowed": false,
+                "measurement_pending": false,
+                "effect_verdict": "full_scale_client_burn_worsened_rotate_fallback_recommended",
+                "verified_host_compaction_observed_after_feedback": true,
+                "summary": "Surface already failed; rotate is primary."
+            }),
+            false,
+            None,
+        );
+        assert_eq!(gate["action_kind"], json!("rotate_chat_for_client_budget"));
+        assert_eq!(gate["blocking"], json!(true));
+        assert_eq!(gate["must_rotate_before_reply"], json!(true));
+        assert_eq!(
+            gate["blocking_reply_contract"]["response_kind"],
+            json!(working_state::CLIENT_BUDGET_ROTATE_BLOCKING_REPLY_RESPONSE_KIND)
+        );
+        assert_eq!(
+            gate["reason"],
+            json!("client_budget_guard_pure_burn_rotate_now")
         );
     }
 
