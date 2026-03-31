@@ -1243,6 +1243,34 @@ fn compact_client_budget_surfaces_from_snapshot(
     }
 }
 
+fn try_load_fast_thread_bound_materialized_compact_client_budget_surfaces(
+    repo_root: &Path,
+    thread_id: &str,
+) -> Option<MaterializedCompactClientBudgetSurfaces> {
+    let now_epoch_ms = current_epoch_ms_u64();
+    if let Some(cached) =
+        load_shared_compact_client_budget_surfaces(repo_root, now_epoch_ms, Some(thread_id))
+    {
+        return Some(MaterializedCompactClientBudgetSurfaces {
+            surfaces: CompactClientBudgetSurfaces {
+                root_cause_payload: cached.root_cause,
+                guard_payload: cached.guard.clone(),
+                guard: cached.guard.clone(),
+            },
+            gate: CompactClientBudgetGateSurface {
+                gate_payload: cached.gate,
+                guard: cached.guard,
+            },
+        });
+    }
+    let snapshot = load_shared_budget_snapshot_preview(repo_root, Some(thread_id))?;
+    Some(compact_client_budget_surfaces_from_snapshot(
+        repo_root,
+        &snapshot,
+        Some(thread_id),
+    ))
+}
+
 fn compact_current_session_budget_guard_payload(guard: &Value) -> Value {
     json!({
         "status_label": guard["status_label"].clone(),
@@ -3805,6 +3833,20 @@ async fn client_budget_live_api_handler(
     State(state): State<ObserveState>,
     Query(query): Query<ThreadBindingQuery>,
 ) -> impl IntoResponse {
+    if let Some(thread_id) = normalized_thread_id_hint(query.thread_id.as_deref()) {
+        if let Ok(repo_root) = discover_repo_root(None) {
+            if let Some(snapshot) = load_shared_budget_snapshot_preview(&repo_root, Some(thread_id))
+            {
+                return (
+                    StatusCode::OK,
+                    no_store_headers("application/json; charset=utf-8"),
+                    serde_json::to_string_pretty(&dashboard::client_budget_live_payload(&snapshot))
+                        .unwrap_or_default(),
+                )
+                    .into_response();
+            }
+        }
+    }
     refresh_client_live_meter_on_request(&state).await;
     let response =
         compact_client_budget_snapshot_for_request(&state, query.thread_id.as_deref()).await;
@@ -3828,48 +3870,27 @@ async fn client_budget_root_cause_api_handler(
     State(state): State<ObserveState>,
     Query(query): Query<ThreadBindingQuery>,
 ) -> impl IntoResponse {
-    refresh_client_live_meter_on_request(&state).await;
     let response: Result<Value> = async {
         if let Some(thread_id) = normalized_thread_id_hint(query.thread_id.as_deref()) {
             let repo_root = discover_repo_root(None)?;
-            let now_epoch_ms = current_epoch_ms_u64();
-            if let Some(cached) = load_shared_compact_client_budget_surfaces(
+            if let Some(materialized) = try_load_fast_thread_bound_materialized_compact_client_budget_surfaces(
                 &repo_root,
-                now_epoch_ms,
-                Some(thread_id),
+                thread_id,
             ) {
-                return Ok(cached.root_cause);
+                return Ok(materialized.surfaces.root_cause_payload);
             }
+            refresh_client_live_meter_on_request(&state).await;
             let snapshot = thread_bound_snapshot_with_meta(&state, &thread_id).await?;
-            let guard = dashboard::current_session_budget_guard(&snapshot);
-            let payload = dashboard::client_budget_root_cause_payload_with_guard(&snapshot, &guard);
-            let compact_root_cause = compact_client_budget_root_cause_payload(
-                &payload,
-                Some(&guard),
+            return Ok(
+                compact_client_budget_surfaces_from_snapshot(&repo_root, &snapshot, Some(thread_id))
+                    .surfaces
+                    .root_cause_payload,
             );
-            let compact_gate = json!({
-                "client_budget_reply_gate": compact_cli_client_budget_gate_payload(&guard)
-            });
-            let compact_guard = compact_current_session_budget_guard_payload(&guard);
-            let cache = build_compact_client_budget_surfaces_cache(
-                &compact_root_cause,
-                &compact_gate,
-                &compact_guard,
-                Some(thread_id),
-            );
-            let _ = write_shared_compact_client_budget_surfaces(&repo_root, Some(thread_id), &cache);
-            let gate_cache = build_compact_client_budget_gate_cache(
-                &compact_gate,
-                &compact_guard,
-                Some(thread_id),
-            );
-            let _ = write_shared_compact_client_budget_gate(&repo_root, Some(thread_id), &gate_cache);
-            Ok(compact_root_cause)
-        } else {
-            Ok(collect_compact_client_budget_surfaces(&state.cfg)
-                .await?
-                .root_cause_payload)
         }
+        refresh_client_live_meter_on_request(&state).await;
+        Ok(collect_compact_client_budget_surfaces(&state.cfg)
+            .await?
+            .root_cause_payload)
     }
     .await;
     match response {
@@ -3891,7 +3912,6 @@ async fn client_budget_gate_api_handler(
     State(state): State<ObserveState>,
     Query(query): Query<ThreadBindingQuery>,
 ) -> impl IntoResponse {
-    refresh_client_live_meter_on_request(&state).await;
     let response: Result<Value> = async {
         if let Some(thread_id) = normalized_thread_id_hint(query.thread_id.as_deref()) {
             let repo_root = discover_repo_root(None)?;
@@ -3901,41 +3921,24 @@ async fn client_budget_gate_api_handler(
             {
                 return Ok(cached.gate);
             }
-            if let Some(cached) = load_shared_compact_client_budget_surfaces(
+            if let Some(materialized) = try_load_fast_thread_bound_materialized_compact_client_budget_surfaces(
                 &repo_root,
-                now_epoch_ms,
-                Some(thread_id),
+                thread_id,
             ) {
-                return Ok(cached.gate);
+                return Ok(materialized.gate.gate_payload);
             }
+            refresh_client_live_meter_on_request(&state).await;
             let snapshot = thread_bound_snapshot_with_meta(&state, &thread_id).await?;
-            let guard = dashboard::current_session_budget_guard(&snapshot);
-            let compact_gate = json!({
-                "client_budget_reply_gate": compact_cli_client_budget_gate_payload(&guard)
-            });
-            let compact_guard = compact_current_session_budget_guard_payload(&guard);
-            let root_cause_payload = dashboard::client_budget_root_cause_payload_with_guard(&snapshot, &guard);
-            let compact_root_cause =
-                compact_client_budget_root_cause_payload(&root_cause_payload, Some(&guard));
-            let cache = build_compact_client_budget_surfaces_cache(
-                &compact_root_cause,
-                &compact_gate,
-                &compact_guard,
-                Some(thread_id),
+            return Ok(
+                compact_client_budget_surfaces_from_snapshot(&repo_root, &snapshot, Some(thread_id))
+                    .gate
+                    .gate_payload,
             );
-            let _ = write_shared_compact_client_budget_surfaces(&repo_root, Some(thread_id), &cache);
-            let gate_cache = build_compact_client_budget_gate_cache(
-                &compact_gate,
-                &compact_guard,
-                Some(thread_id),
-            );
-            let _ = write_shared_compact_client_budget_gate(&repo_root, Some(thread_id), &gate_cache);
-            Ok(compact_gate)
-        } else {
-            let surfaces = collect_compact_client_budget_surfaces(&state.cfg).await?;
-            compact_cli_client_budget_gate_from_root_cause_payload(&surfaces.root_cause_payload)
-                .ok_or_else(|| anyhow!("compact client-budget root-cause payload missing gate"))
         }
+        refresh_client_live_meter_on_request(&state).await;
+        let surfaces = collect_compact_client_budget_surfaces(&state.cfg).await?;
+        compact_cli_client_budget_gate_from_root_cause_payload(&surfaces.root_cause_payload)
+            .ok_or_else(|| anyhow!("compact client-budget root-cause payload missing gate"))
     }
     .await;
     match response {
@@ -7437,6 +7440,66 @@ mod tests {
         assert_eq!(
             loaded.root_cause["client_budget_reply_gate"]["reply_execution_gate"]["reply_prefix"],
             json!("5ч KPI: переплата 10.00%")
+        );
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn try_load_fast_thread_bound_materialized_compact_client_budget_surfaces_uses_cached_surfaces()
+    {
+        let temp_root = std::env::temp_dir().join(format!(
+            "amai-fast-thread-bound-surfaces-cache-{}",
+            Uuid::new_v4()
+        ));
+        let observed_at_epoch_ms = super::current_epoch_ms_u64();
+        let root_cause = json!({
+            "client_budget_reply_gate": {
+                "observed_at_epoch_ms": observed_at_epoch_ms,
+                "reply_execution_gate": {
+                    "reply_prefix": "5ч KPI: переплата 10.00%"
+                }
+            }
+        });
+        let gate = json!({
+            "client_budget_reply_gate": {
+                "observed_at_epoch_ms": observed_at_epoch_ms,
+                "reply_execution_gate": {
+                    "action_kind": "rotate_chat_for_client_budget"
+                }
+            }
+        });
+        let guard = json!({
+            "observed_at_epoch_ms": observed_at_epoch_ms,
+            "client_budget_reply_gate": {
+                "reply_execution_gate": {
+                    "action_kind": "rotate_chat_for_client_budget"
+                }
+            }
+        });
+        let cache = super::build_compact_client_budget_surfaces_cache(
+            &root_cause,
+            &gate,
+            &guard,
+            Some("thread-current"),
+        );
+        super::write_shared_compact_client_budget_surfaces(
+            &temp_root,
+            Some("thread-current"),
+            &cache,
+        )
+        .expect("write shared cache");
+        let loaded = super::try_load_fast_thread_bound_materialized_compact_client_budget_surfaces(
+            &temp_root,
+            "thread-current",
+        )
+        .expect("fast thread-bound surfaces");
+        assert_eq!(
+            loaded.surfaces.root_cause_payload["client_budget_reply_gate"]["reply_execution_gate"]["reply_prefix"],
+            json!("5ч KPI: переплата 10.00%")
+        );
+        assert_eq!(
+            loaded.gate.gate_payload["client_budget_reply_gate"]["reply_execution_gate"]["action_kind"],
+            json!("rotate_chat_for_client_budget")
         );
         let _ = fs::remove_dir_all(&temp_root);
     }
