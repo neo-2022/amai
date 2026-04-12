@@ -1,0 +1,8 @@
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+
+[env]
+ORT_LIB_LOCATION = { value = "third_party/onnxruntime/x86_64-unknown-linux-gnu/8c57d059aaaee407812a5698d6706c79e090ad69e1a14204309e802dcbbaa35f", relative = true }
